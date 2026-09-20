@@ -114,6 +114,23 @@ def test_legacy_upgrade_preserves_text_and_has_deterministic_identity() -> None:
     assert plan.revision != plan_image_upgrade(API_ID + "-other", source, CANONICAL_PARENT).revision
 
 
+def test_image_upgrade_keeps_subscription_burst_default_independent_of_application_tpm() -> None:
+    source = replace(snapshot(legacy=True), parent_policy=legacy_parent().replace(
+        "__TOKENS_PER_MINUTE__", "25000",
+    ))
+    plan = plan_image_upgrade(API_ID, source, CANONICAL_PARENT)
+    root = parse_policy(plan.parent_policy)
+    image = next(node for node in root.iter("rate-limit-by-key")
+                 if "finops:images:subscription:" in node.attrib["counter-key"])
+    text = next(node for node in root.iter("llm-token-limit")
+                if "finops:subscription:" in node.attrib["counter-key"])
+
+    assert image.attrib["calls"] == "25000"
+    assert text.attrib["tokens-per-minute"] == (
+        '@((long)context.Variables["applicationTokensPerMinute"])'
+    )
+
+
 def test_upgraded_api_is_a_noop_and_existing_image_policy_is_not_overwritten() -> None:
     source = snapshot(image=True)
     source.operation_policies["images-generations"] = (

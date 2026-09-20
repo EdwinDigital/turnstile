@@ -269,7 +269,7 @@ def adopt_cached_tokens_fallback(root: ET.Element) -> None:
 
 
 def compose_image_parent_policy(source: str, profiles: Sequence[ImageGenerationProfile]) -> str:
-    root = parse_policy(source)
+    root = parse_policy(upgrade_application_tpm_policy(source))
     inbound = root.find("inbound")
     if inbound is None or root.findall(".//set-variable[@name='imageGenerationPolicyVersion']"):
         raise PolicyCompilationError("Only the unversioned public source template can be adapted")
@@ -336,11 +336,20 @@ def compose_image_parent_policy(source: str, profiles: Sequence[ImageGenerationP
         for node in list(root.iter(tag)):
             wrapper = _branch(node, None)
             if tag == "llm-token-limit":
+                image_rate = node.attrib["tokens-per-minute"]
+                if image_rate == '@((long)context.Variables["applicationTokensPerMinute"])':
+                    default = re.search(
+                        r"long\s+defaultRate\s*=\s*([0-9]+|__TOKENS_PER_MINUTE__)\s*;",
+                        _variable(root, "applicationTokensPerMinute").get("value", ""),
+                    )
+                    if default is None:
+                        raise PolicyCompilationError("Image burst default is unavailable")
+                    image_rate = default[1]
                 ET.SubElement(
                     ET.SubElement(wrapper, "otherwise"),
                     "rate-limit-by-key",
                     {
-                        "calls": node.attrib["tokens-per-minute"],
+                        "calls": image_rate,
                         "renewal-period": "60",
                         "counter-key": node.attrib["counter-key"].replace(
                             "finops:", "finops:images:"

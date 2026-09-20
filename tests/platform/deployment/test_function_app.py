@@ -13,6 +13,7 @@ import pytest
 from functions.telemetry.function_app import (
     app,
     process_usage_events,
+    reconcile_stream_usage,
     sync_budget_ledger,
     telemetry_health,
 )
@@ -77,8 +78,9 @@ def test_telemetry_health_proves_the_python_worker_is_running() -> None:
 @pytest.mark.parametrize(
     "workspace,enabled", [(None, True), ("workspace", False), ("workspace", True)]
 )
+@pytest.mark.parametrize("fails", (False, True))
 def test_ledger_timer_only_enables_evidence_when_configured(
-    workspace: str | None, enabled: bool
+    workspace: str | None, enabled: bool, fails: bool,
 ) -> None:
     settings = Settings.model_construct(
         ledger_sync_enabled=True,
@@ -98,7 +100,13 @@ def test_ledger_timer_only_enables_evidence_when_configured(
             "turnstile_core.integrations.reconciliation.LogAnalyticsReservationTerminalLog"
         ) as log,
     ):
-        sync_budget_ledger.build().get_user_function()(None)
+        if fails:
+            service.return_value.run.side_effect = RuntimeError("ledger failure")
+            with pytest.raises(RuntimeError, match="ledger failure"):
+                sync_budget_ledger.build().get_user_function()(None)
+        else:
+            sync_budget_ledger.build().get_user_function()(None)
+        repository.close.assert_called_once_with()
         assert log.call_count == (1 if workspace and enabled else 0)
         assert service.call_args.args == (repository, store.return_value.__enter__.return_value)
         assert service.call_args.kwargs["terminal_log"] == (
@@ -106,3 +114,62 @@ def test_ledger_timer_only_enables_evidence_when_configured(
         )
         assert service.call_args.kwargs["recovery_lag"] == timedelta(minutes=10)
         assert service.call_args.kwargs["finalization_lag"] == timedelta(hours=24)
+
+
+@pytest.mark.parametrize("enabled,endpoint", [(False, "https://ledger.example.com"), (True, None)])
+def test_ledger_timer_closes_repository_on_early_return(
+    enabled: bool, endpoint: str | None,
+) -> None:
+    repository = MagicMock()
+    repository.roll_forward_budgets.return_value = None
+    repository.roll_forward_gateway_application_budgets.return_value = 0
+    settings = Settings.model_construct(ledger_sync_enabled=enabled, ledger_table_endpoint=endpoint)
+    with (
+        patch("turnstile_core.config.get_settings", return_value=settings),
+        patch("turnstile_core.persistence.factory.create_repository", return_value=repository),
+    ):
+        sync_budget_ledger.build().get_user_function()(None)
+    repository.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("fails", (False, True))
+def test_event_batch_closes_repository_without_swallowing_processing_failure(fails: bool) -> None:
+    repository = MagicMock()
+    event = MagicMock()
+    event.get_body.return_value = b'{"model":"test"}'
+    with (
+        patch("turnstile_core.config.get_settings", return_value=Settings.model_construct()),
+        patch("turnstile_core.persistence.factory.create_repository", return_value=repository),
+        patch("turnstile_core.ingestion.processor.UsageProcessor") as processor,
+    ):
+        if fails:
+            processor.return_value.process.side_effect = RuntimeError("batch failure")
+            with pytest.raises(RuntimeError, match="batch failure"):
+                process_usage_events.build().get_user_function()([event])
+        else:
+            process_usage_events.build().get_user_function()([event])
+        processor.return_value.process.assert_called_once_with({"model":"test"})
+    repository.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("fails", (False, True))
+def test_reconciliation_closes_repository(fails: bool) -> None:
+    repository = MagicMock()
+    settings = Settings.model_construct(
+        reconciliation_enabled=True, log_analytics_workspace_id="workspace",
+    )
+    with (
+        patch("turnstile_core.config.get_settings", return_value=settings),
+        patch("turnstile_core.persistence.factory.create_repository", return_value=repository),
+        patch("turnstile_core.integrations.reconciliation.ReconciliationService") as service,
+        patch("turnstile_core.integrations.reconciliation.CacheReadSyncService"),
+        patch("turnstile_core.integrations.reconciliation.LogAnalyticsGatewayUsageLog"),
+        patch("turnstile_core.integrations.reconciliation.LogAnalyticsCacheReadLog"),
+    ):
+        if fails:
+            service.return_value.run.side_effect = RuntimeError("reconciliation failure")
+            with pytest.raises(RuntimeError, match="reconciliation failure"):
+                reconcile_stream_usage.build().get_user_function()(None)
+        else:
+            reconcile_stream_usage.build().get_user_function()(None)
+    repository.close.assert_called_once_with()

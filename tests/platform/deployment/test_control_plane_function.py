@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
 
 from functions.control_plane import function_app
+from turnstile_core.config import Settings
+from turnstile_core.persistence import factory
 from turnstile_core.security import CredentialCipher
 
 
@@ -20,14 +24,15 @@ def test_disabled_publication_timer_does_not_build_dependencies(monkeypatch: Any
     def reject_repository(_: object) -> None:
         raise AssertionError("disabled publication timer created a repository")
 
-    monkeypatch.setattr(function_app, "create_repository", reject_repository)
+    monkeypatch.setattr(factory, "create_repository", reject_repository)
 
     function_app.publish_gateway_changes(None)
 
 
 @pytest.mark.parametrize("provisioning_enabled", (False, True))
+@pytest.mark.parametrize("fails", (False, True))
 def test_release_timer_never_constructs_publication_worker(
-    monkeypatch: Any, provisioning_enabled: bool,
+    monkeypatch: Any, provisioning_enabled: bool, fails: bool,
 ) -> None:
     settings = SimpleNamespace(
         control_plane_enabled=True,
@@ -44,7 +49,7 @@ def test_release_timer_never_constructs_publication_worker(
         control_plane_lease_seconds=180,
         control_plane_max_attempts=30,
     )
-    repository = object()
+    repository = MagicMock()
     publisher = object()
     cipher = object()
     calls: list[tuple[str, int, int]] = []
@@ -92,13 +97,15 @@ def test_release_timer_never_constructs_publication_worker(
             self, worker_id: str, lease_seconds: int, max_attempts: int
         ) -> None:
             calls.append((worker_id, lease_seconds, max_attempts))
+            if fails:
+                raise RuntimeError("worker failure")
 
     class PublicationWorker:
         def __init__(self, *_: object, **__: object) -> None:
             raise AssertionError("release timer constructed publication worker")
 
     monkeypatch.setattr(function_app, "get_settings", lambda: settings)
-    monkeypatch.setattr(function_app, "create_repository", lambda _: repository)
+    monkeypatch.setattr(factory, "create_repository", lambda _: repository)
     monkeypatch.setattr(function_app, "AzureApimPublisherClient", lambda _: publisher)
     monkeypatch.setattr(
         CredentialCipher, "from_settings", lambda _: cipher
@@ -109,11 +116,46 @@ def test_release_timer_never_constructs_publication_worker(
     monkeypatch.setattr(function_app, "prepare_application_ledger", prepare)
     monkeypatch.setenv("WEBSITE_INSTANCE_ID", "release-worker-instance")
 
-    function_app.process_gateway_release_operations(None)
+    if fails:
+        with pytest.raises(RuntimeError, match="worker failure"):
+            function_app.process_gateway_release_operations(None)
+    else:
+        function_app.process_gateway_release_operations(None)
 
+    repository.close.assert_called_once_with()
     assert calls == [("release-worker-instance", 180, 30)]
     assert ledger_calls == ([
         ("https://ledger.example.test", "TurnstileLedger"),
         (UUID(int=1), UUID(int=2)),
         ("closed",),
     ] if provisioning_enabled else [])
+
+
+@pytest.mark.parametrize("fails", (False, True))
+def test_publication_timer_closes_its_repository(
+    monkeypatch: Any, tmp_path: Path, fails: bool,
+) -> None:
+    settings = Settings.model_construct(
+        control_plane_enabled=True, gateway_publication_worker_enabled=True,
+    )
+    repository = MagicMock()
+    worker = MagicMock()
+    worker.run_once.return_value = None
+    if fails:
+        worker.run_once.side_effect = RuntimeError("worker failure")
+    policy = tmp_path / "policy.xml"
+    policy.write_text("<policies />")
+    monkeypatch.setenv("CONTROL_PLANE_PARENT_POLICY_PATH", str(policy))
+    monkeypatch.setattr(function_app, "get_settings", lambda: settings)
+    monkeypatch.setattr(factory, "create_repository", lambda _: repository)
+    monkeypatch.setattr(function_app, "AzureApimPublisherClient", lambda _: object())
+    monkeypatch.setattr(CredentialCipher, "from_settings", lambda _: object())
+    monkeypatch.setattr(function_app, "GatewayPublicationWorker", lambda *_, **__: worker)
+
+    if fails:
+        with pytest.raises(RuntimeError, match="worker failure"):
+            function_app.publish_gateway_changes(None)
+    else:
+        function_app.publish_gateway_changes(None)
+
+    repository.close.assert_called_once_with()
