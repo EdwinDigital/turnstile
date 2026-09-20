@@ -703,6 +703,18 @@ test("context pricing coverage uses tier schedules and never reprices aggregates
   assert.equal(pricing.estimateRequestCost({model_id:model.id,estimated_cost:0},[model]),0)
 })
 
+test("recorded request costs survive incomplete pricing coverage and model removal", async () => {
+  const pricing = await import("../../../frontend/src/lib/pricing.ts")
+  const contextModel = savedModel({ input_cost_per_million: null, output_cost_per_million: null, context_price_tiers: [{}, {}] })
+  const unpricedModel = savedModel({ id: "unpriced", model_key: "unpriced", input_cost_per_million: null, output_cost_per_million: null, context_price_tiers: [] })
+  const request = { model_id: contextModel.id, model_name: contextModel.display_name, estimated_cost: 0.0000816 }
+
+  assert.equal(pricing.estimateRequestCost(request, [contextModel, unpricedModel]), 0.0000816)
+  assert.equal(pricing.estimateRequestCost(request, [unpricedModel]), 0.0000816)
+  assert.equal(pricing.estimateRequestCost({ ...request, model_id: unpricedModel.id, model_name: unpricedModel.model_key, estimated_cost: 0 }, [unpricedModel]), null)
+  assert.equal(pricing.priceRequests([request], [unpricedModel])[0].estimated_cost, 0.0000816)
+})
+
 test("context pricing selected region supplies that region's references for every tier", () => {
   const [candidate] = modelEditForm.groupContextPriceModels([contextCatalogModel("ShortCo"), contextCatalogModel("LongCo")])
   const responses = candidate.contextPricing.tiers.map(tier => catalogResponse({model_entry:tier.model,options:[catalogOption({

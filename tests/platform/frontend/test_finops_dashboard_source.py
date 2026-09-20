@@ -88,6 +88,28 @@ def test_request_trace_selects_attempts_without_losing_the_caller_id() -> None:
     assert "item.request_id" in trace_row
 
 
+def test_request_trace_cost_availability_is_per_request() -> None:
+    source = read_apim_dashboard_source()
+    request_trace = source.split("function RequestTrace(", 1)[1].split(
+        "function RequestTraceDetail", 1
+    )[0]
+
+    assert "costAvailable: boolean" not in request_trace
+    assert "costAvailable={estimateRequestCost(item, models) !== null}" in request_trace
+    assert "costAvailable={estimateRequestCost(pricedDetail, models) !== null}" in request_trace
+    assert "costAvailable={costAvailable}" not in request_trace
+
+
+def test_recorded_cost_is_not_hidden_by_incomplete_registry_pricing() -> None:
+    source = read_apim_dashboard_source()
+    overview = source.split("function ExecutiveOverview(", 1)[1].split("function Kpi(", 1)[0]
+
+    assert "const estimatedCost = totals.estimated_cost" in overview
+    assert "const costAvailable = configuredCostAvailable || estimatedCost > 0" in overview
+    assert "currency.format(estimatedCost)" in overview
+    assert "unpricedModels.length > 0" in source
+
+
 def test_model_success_rate_rankings_sort_highest_first() -> None:
     source = read_apim_dashboard_source()
     panels = source.split('title="模型成功率"')[1:]

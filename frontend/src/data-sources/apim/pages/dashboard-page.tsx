@@ -85,7 +85,7 @@ import {
 } from "../../../components/ui/dropdown-menu"
 import { usageWindow } from "../api"
 import { getIntlLocale, useLocale, type LocalePreference } from "../../../locales/index"
-import { hasModelPrices, priceRequests } from "../../../lib/pricing"
+import { estimateRequestCost, hasModelPrices, priceRequests } from "../../../lib/pricing"
 import { finopsKeys, finopsQueries, trendDimensionForFilters } from "../queries"
 import type {
   AnomalyRule,
@@ -205,7 +205,7 @@ export function FinOpsDashboard({
         {entities && registryQuery.data && tab === "analytics" && <ModelUsage filters={filters} costAvailable={costAvailable} />}
         {entities && tab === "trends" && <UsageTrends filters={filters} />}
         {entities && registryQuery.data && tab === "governance" && <Governance filters={filters} entities={entities} models={registryQuery.data.models} onOpenRequest={onOpenRequest} />}
-        {entities && registryQuery.data && tab === "requests" && <RequestTrace filters={filters} costAvailable={costAvailable} models={registryQuery.data.models} />}
+        {entities && registryQuery.data && tab === "requests" && <RequestTrace filters={filters} models={registryQuery.data.models} />}
         {entities && tab === "invoke" && <AgentInvocation entities={entities} />}
       </div>
     </div>
@@ -226,7 +226,7 @@ function PricingCoverageNotice({ modelKeys }: { modelKeys: string[] }) {
   </div>
 }
 
-function ExecutiveOverview({ filters, costAvailable }: { filters: UsageFilters; costAvailable: boolean }) {
+function ExecutiveOverview({ filters, costAvailable: configuredCostAvailable }: { filters: UsageFilters; costAvailable: boolean }) {
   const overview = useQuery(finopsQueries.executiveOverview(filters))
   // The server rule engine evaluates over the complete filtered data set. Evaluating the
   // client-side rules here instead only ever saw the capped request page, so a threshold
@@ -247,6 +247,7 @@ function ExecutiveOverview({ filters, costAvailable }: { filters: UsageFilters; 
   // Missing half the rows is a far larger error than the unpriced rows the client-side
   // registry fallback used to patch, and the pricing warning card already surfaces those.
   const estimatedCost = totals.estimated_cost
+  const costAvailable = configuredCostAvailable || estimatedCost > 0
   const signals = (anomalies.data ?? []).slice(0, 5)
   return <div className="finops-grid">
     <section className="finops-kpis span-3">
@@ -1126,11 +1127,9 @@ function GovernanceSignalDialog({ signal, rule, requests, onClose, onOpenRequest
 
 function RequestTrace({
   filters,
-  costAvailable,
   models,
 }: {
   filters: UsageFilters;
-  costAvailable: boolean;
   models: ManagedModel[];
 }) {
   const initialRequestId = new URLSearchParams(window.location.search).get("request")
@@ -1249,7 +1248,7 @@ function RequestTrace({
               item={item}
               active={selectedCorrelationId === item.correlation_id}
               onClick={() => setSelected(item.correlation_id)}
-              costAvailable={costAvailable}
+              costAvailable={estimateRequestCost(item, models) !== null}
               attempt={attemptPositions.get(item.correlation_id)}
             />
           ))}
@@ -1268,7 +1267,7 @@ function RequestTrace({
             <ErrorState error={detail.error} />
           ) : (
             pricedDetail && (
-              <RequestTraceDetail request={pricedDetail} costAvailable={costAvailable} />
+              <RequestTraceDetail request={pricedDetail} costAvailable={estimateRequestCost(pricedDetail, models) !== null} />
             )
           )}
         </section>
