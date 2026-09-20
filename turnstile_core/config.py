@@ -37,7 +37,6 @@ class Settings(BaseSettings):
     ledger_reservation_finalization_lag_hours: int = Field(default=24, ge=1, le=168)
     management_api_key: SecretStr | None = None
     production: bool = False
-    image_generation_enabled: bool = False
     image_generation_defaults: ImageGenerationLimits = Field(
         default_factory=lambda: ImageGenerationLimits(
             max_request_bytes=24576,

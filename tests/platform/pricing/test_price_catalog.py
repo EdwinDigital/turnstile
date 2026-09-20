@@ -12,13 +12,18 @@ from typing import Any
 import httpx
 import pytest
 
-from turnstile_core.domain.runtime_models import PriceSource
+from turnstile_core.domain.runtime_models import (
+    PriceCatalogContextTier,
+    PriceCatalogInputRange,
+    PriceSource,
+)
 from turnstile_core.pricing.catalog import (
     AzureRetailCatalog,
     CatalogModel,
     CatalogOptions,
     CompositeCatalog,
     _Fetched,
+    parse_context_tier,
     parse_meter_name,
 )
 
@@ -171,6 +176,190 @@ GPT_41_MODEL = CatalogModel(
 
 def options_for(rows: list[dict[str, Any]], model: CatalogModel) -> CatalogOptions:
     return StubAzure(rows).options(model)
+
+
+@pytest.mark.parametrize("name", ["Any Model", "New Vendor 99", "Future Generation", "6 astra"])
+@pytest.mark.parametrize("short_marker,long_marker", [
+    ("ShortCo", "LongCo"), ("short context", "long context"), ("Short-Context", "Long-Context"),
+])
+def test_context_tier_metadata_does_not_depend_on_a_model_or_guessed_threshold(
+    name: str, short_marker: str, long_marker: str,
+) -> None:
+    short = parse_context_tier(f"{name} {short_marker} Std")
+    long = parse_context_tier(f"{name} {long_marker} Std")
+    assert short is not None and long is not None
+    assert short.group_key == long.group_key == f"{name} Std".lower()
+    assert short.key == "short" and long.key == "long"
+    assert short.input_range is None and long.input_range is None
+    priority = parse_context_tier(f"{name} {long_marker} PP")
+    assert priority is not None and priority.group_key != short.group_key
+
+
+@pytest.mark.parametrize("label", ["Any Model", "ShortCo", "Long Model", "Any ShortCo LongCo Std"])
+def test_context_tier_metadata_does_not_guess_ambiguous_names(label: str) -> None:
+    assert parse_context_tier(label) is None
+
+
+@pytest.mark.parametrize("family", ["sol", "terra"])
+@pytest.mark.parametrize("band,minimum,maximum", [
+    ("ShortCo", 0, 272000), ("LongCo", 272001, None),
+])
+def test_context_tier_rules_restore_documented_ranges_with_provenance(
+    family: str, band: str, minimum: int, maximum: int | None,
+) -> None:
+    label = f"5.6 {family} {band} Std"
+    model = CatalogModel(
+        key=f"azure_retail:Azure OpenAI GPT5:{label}", label=label,
+        source=PriceSource.AZURE_RETAIL, product="Azure OpenAI GPT5",
+        context_tier=parse_context_tier(label),
+    )
+    resolved = model.resolved_context_tier
+    assert resolved is not None and resolved.input_range is not None
+    assert resolved.input_range.min_input_tokens == minimum
+    assert resolved.input_range.max_input_tokens == maximum
+    assert resolved.input_range_source is not None
+    assert resolved.input_range_source.url.startswith("https://learn.microsoft.com/")
+    assert resolved.input_range_source.verified_on == "2026-09-20"
+    assert model.context_tier is not None and model.context_tier.input_range is None
+
+
+@pytest.mark.parametrize("source,product,label", [
+    (PriceSource.ANTHROPIC, "Azure OpenAI GPT5", "5.6 sol ShortCo Std"),
+    (PriceSource.AZURE_RETAIL, "Other product", "5.6 sol ShortCo Std"),
+    (PriceSource.AZURE_RETAIL, "Azure OpenAI GPT5", "5.6 sol ShortCo PP"),
+    (PriceSource.AZURE_RETAIL, "Azure OpenAI GPT6", "6 astra ShortCo Std"),
+])
+def test_context_tier_rules_do_not_spread_a_threshold_to_other_scopes(
+    source: PriceSource, product: str, label: str,
+) -> None:
+    descriptor = parse_context_tier(label)
+    model = CatalogModel(
+        key="unit", label=label, source=source, product=product, context_tier=descriptor,
+    )
+    assert model.resolved_context_tier is descriptor
+    assert descriptor is not None and descriptor.input_range is None
+
+
+def test_context_tier_rule_data_has_traceable_sources_and_contiguous_ranges() -> None:
+    import json
+    from datetime import date
+    from importlib.resources import files
+
+    from turnstile_core.domain.runtime_models import PriceCatalogRuleSource
+
+    data = json.loads(files("turnstile_core.pricing").joinpath("context-rules.json").read_text())
+    assert data["schema_version"] == 1
+    seen: set[tuple[str, str, str, str]] = set()
+    for rule in data["rules"]:
+        assert rule["basis"] == "request_input_tokens"
+        PriceCatalogRuleSource(
+            rule_id=rule["id"], url=rule["source_url"],
+            revision=rule["source_revision"], verified_on=rule["verified_on"],
+        )
+        date.fromisoformat(rule["verified_on"])
+        for scope in rule["matches"]:
+            key = (scope["source"], scope["product"], scope["group_key"], scope["service_tier"])
+            assert key not in seen
+            seen.add(key)
+        ranges = [PriceCatalogInputRange.model_validate(tier["input_range"])
+                  for tier in rule["tiers"]]
+        assert len(ranges) >= 2
+        assert len({tier["key"] for tier in rule["tiers"]}) == len(ranges)
+        assert ranges[0].min_input_tokens == 0
+        assert ranges[-1].max_input_tokens is None
+        for previous, current in zip(ranges, ranges[1:], strict=False):
+            assert previous.max_input_tokens is not None
+            assert current.min_input_tokens == previous.max_input_tokens + 1
+
+
+def test_context_tier_rules_do_not_override_explicit_source_ranges() -> None:
+    descriptor = parse_context_tier("5.6 sol ShortCo Std")
+    assert descriptor is not None
+    descriptor.input_range = PriceCatalogInputRange(min_input_tokens=0, max_input_tokens=12345)
+    model = CatalogModel(
+        key="unit", label="5.6 sol ShortCo Std", source=PriceSource.AZURE_RETAIL,
+        product="Azure OpenAI GPT5", context_tier=descriptor,
+    )
+    assert model.resolved_context_tier is descriptor
+    assert model.resolved_context_tier.input_range is not None
+    assert model.resolved_context_tier.input_range.max_input_tokens == 12345
+
+
+def test_context_tier_metadata_survives_the_catalog_index() -> None:
+    catalog = StubAzure([
+        meter(f"Any Model {band} Inp Std Gl 1M Tokens", rate, product="Any Product", unit="1M")
+        for band, rate in [("ShortCo", 3), ("LongCo", 7)]
+    ] + [
+        meter(f"Any Model {band} Opt Std Gl 1M Tokens", rate, product="Any Product", unit="1M")
+        for band, rate in [("ShortCo", 10), ("LongCo", 19)]
+    ])
+    models = catalog.models()
+    assert len(models) == 2
+    assert all(model.context_tier is not None for model in models)
+    assert {model.context_tier.key for model in models if model.context_tier} == {"short", "long"}
+    assert all(model.context_tier.input_range is None for model in models if model.context_tier)
+
+
+def test_context_tier_metadata_can_express_source_defined_ranges() -> None:
+    descriptor = PriceCatalogContextTier(
+        group_key="source-model", model_label="Model", service_tier="flexible",
+        key="medium", label="Medium context", order=1,
+        input_range=PriceCatalogInputRange(min_input_tokens=12346, max_input_tokens=98765),
+    )
+    assert descriptor.input_range is not None
+    assert descriptor.input_range.model_dump() == {
+        "min_input_tokens": 12346, "max_input_tokens": 98765,
+    }
+    for lower, upper in [(10, 9), (-1, 10), (True, 10), (1, 1.5)]:
+        with pytest.raises(ValueError):
+            PriceCatalogInputRange.model_validate({
+                "min_input_tokens": lower, "max_input_tokens": upper,
+            })
+
+
+def test_context_tier_metadata_makes_opaque_skus_searchable_by_model() -> None:
+    model = CatalogModel(
+        key="opaque:sku-42", label="SKU 42", product="Example product",
+        source=PriceSource.ANTHROPIC,
+        context_tier=PriceCatalogContextTier(
+            group_key="example", model_label="A model name", service_tier="Flexible",
+            key="medium", label="Medium input", order=1,
+        ),
+    )
+
+    class MetadataCatalog(StubAzure):
+        def models(self) -> list[CatalogModel]:
+            return [model]
+
+    catalog = CompositeCatalog([MetadataCatalog([])])
+    assert catalog.search_models("A model name Flexible").models == (model,)
+    assert catalog.search_models("SKU 42").models == (model,)
+
+
+def test_context_prices_resolve_authoritatively_and_apply_one_discount_to_all_tiers() -> None:
+    from turnstile_core.pricing.context import model_price_from_tiers, resolve_context_prices
+
+    catalog = CompositeCatalog([StubAzure([
+        meter(f"5.6 sol {band} {bucket} Std Gl 1M Tokens", price,
+              product="Azure OpenAI GPT5", unit="1M")
+        for band, rates in [("ShortCo", [4.0, 20.0, 0.4, 5.0]),
+                            ("LongCo", [8.0, 30.0, 0.8, 10.0])]
+        for bucket, price in zip(["Inp", "Opt", "Cd Inp", "Cd Wr"], rates, strict=True)
+    ])])
+    references = [f"azure_retail:Azure OpenAI GPT5:5.6 sol {band} Std:Global:*"
+                  for band in ["LongCo", "ShortCo"]]
+    tiers = resolve_context_prices(catalog, PriceSource.AZURE_RETAIL, references, 80)
+    assert [tier.key for tier in tiers] == ["short", "long"]
+    assert [tier.input_price_per_million for tier in tiers] == [3.2, 6.4]
+    assert [tier.output_price_per_million for tier in tiers] == [16, 24]
+    assert [tier.list_prices.input for tier in tiers] == [4, 8]
+    price = model_price_from_tiers(tiers)
+    assert price.for_input_tokens(272000).selected_tier == "short"
+    assert price.for_input_tokens(272001).selected_tier == "long"
+    with pytest.raises(ValueError, match="distinct"):
+        resolve_context_prices(catalog, PriceSource.AZURE_RETAIL, [references[0]] * 2, 80)
+    with pytest.raises(ValueError, match="source"):
+        resolve_context_prices(catalog, PriceSource.ANTHROPIC, references, 80)
 
 
 def test_a_shape_priced_the_same_everywhere_asks_for_no_region() -> None:

@@ -45,7 +45,6 @@ def image_fixture(assigned: bool = True) -> tuple[InMemoryRepository, ImageInvoc
     repository = InMemoryRepository()
     publication = GatewayControlPlaneService(
         repository,
-        image_generation_enabled=True,
         apim_principal_id="unit-principal",
     ).publish(image_publication(repository), "owner@example.com")
     row = next(item for item in repository.gateway_publications if item["id"] == publication.id)
@@ -67,7 +66,7 @@ def image_fixture(assigned: bool = True) -> tuple[InMemoryRepository, ImageInvoc
 def test_image_service_records_exact_attempt_without_image_or_prompt() -> None:
     repository, request = image_fixture()
     router = ImageRouter()
-    service = ModelRuntimeService(repository, Settings(image_generation_enabled=True), router)
+    service = ModelRuntimeService(repository, Settings(), router)
     result = service.generate_image(request, role="owner")
     attempt = repository.billable_requests[UUID(result.request_id)]
     assert attempt.state == "exact" and attempt.actual_tokens == 32
@@ -94,7 +93,7 @@ def test_image_failure_retains_uncertainty_or_real_usage(measured: bool) -> None
             usage=usage,
         )
     )
-    service = ModelRuntimeService(repository, Settings(image_generation_enabled=True), router)
+    service = ModelRuntimeService(repository, Settings(), router)
     with pytest.raises(HTTPException) as raised:
         service.generate_image(request, role="owner")
     assert raised.value.headers is not None
@@ -105,19 +104,18 @@ def test_image_failure_retains_uncertainty_or_real_usage(measured: bool) -> None
 
 
 @pytest.mark.parametrize(
-    "enabled,assigned,role,expected",
+    "assigned,role,expected",
     [
-        (False, True, "owner", 503),
-        (True, False, "owner", 403),
-        (True, True, "service", 403),
+        (False, "owner", 403),
+        (True, "service", 403),
     ],
 )
 def test_image_denial_occurs_before_attempt_or_dispatch(
-    enabled: bool, assigned: bool, role: str, expected: int
+    assigned: bool, role: str, expected: int
 ) -> None:
     repository, request = image_fixture(assigned)
     router = ImageRouter()
-    service = ModelRuntimeService(repository, Settings(image_generation_enabled=enabled), router)
+    service = ModelRuntimeService(repository, Settings(), router)
     with pytest.raises(HTTPException) as raised:
         service.generate_image(request, role=role)
     assert raised.value.status_code == expected

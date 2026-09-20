@@ -216,8 +216,19 @@ class UsageProcessor:
         # APIM emits no cost, so it is derived here from the registry and stored with the unit
         # prices used, making the amount reproducible and immune to later price edits.
         price = self._price_for(raw_model_id, event.model)
+        context_snapshot = price.model_dump(mode="json") if price and price.context_tiers else None
+        if context_snapshot is not None:
+            if (estimated or invalid_usage
+                or event.input_tokens is None or event.cached_tokens is None):
+                price = None
+                ingest_error = ingest_error or "context_pricing_input_unavailable"
+            elif price is not None:
+                price = price.for_input_tokens(input_tokens + cached_tokens)
         estimated_cost = (
-            event.estimated_cost
+            price.cost(input_tokens, cached_tokens, output_tokens, cache_write_tokens)
+            if price and context_snapshot is not None
+            else 0.0 if context_snapshot is not None
+            else event.estimated_cost
             if event.estimated_cost
             else price.cost(input_tokens, cached_tokens, output_tokens, cache_write_tokens)
             if price
@@ -273,6 +284,8 @@ class UsageProcessor:
             cached_price_per_million=price.cached_price_per_million if price else None,
             cache_write_price_per_million=price.cache_write_price_per_million if price else None,
             output_price_per_million=price.output_price_per_million if price else None,
+            price_context_tier=price.selected_tier if price else None,
+            price_context_snapshot=context_snapshot,
             error_message=event.error_message,
             estimated=estimated,
             ingest_source=event.ingest_source,

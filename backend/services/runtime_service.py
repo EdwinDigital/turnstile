@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from turnstile_core.config import Settings
 from turnstile_core.domain.billable_requests import BillableBudgetExceeded, BillableRequestPlan
 from turnstile_core.domain.images import ImageInvocationRequest, ImageInvocationResponse
-from turnstile_core.domain.models import ModelPrice, TokenUsageRecord
+from turnstile_core.domain.models import TokenUsageRecord
 from turnstile_core.domain.runtime_models import (
     FOUNDRY_INFERENCE_RESOURCE,
     FOUNDRY_INFERENCE_ROLE_ID,
@@ -62,7 +62,16 @@ from turnstile_core.domain.runtime_models import (
 )
 from turnstile_core.integrations.gateway import GatewayInvocationError, GatewayRouter, elapsed_ms
 from turnstile_core.persistence.repository import QueryRepository
-from turnstile_core.pricing.catalog import CompositeCatalog, build_default_catalog
+from turnstile_core.pricing.catalog import (
+    CompositeCatalog,
+    build_default_catalog,
+    parse_context_tier,
+)
+from turnstile_core.pricing.context import (
+    context_price_reference,
+    model_price_from_values,
+    resolve_context_prices,
+)
 from turnstile_core.pricing.sync import plan_price_sync
 from turnstile_core.security import CredentialCipher, credential_hint
 
@@ -145,6 +154,7 @@ class ModelRuntimeService:
                     label=model.label,
                     product=model.product,
                     source=model.source,
+                    context_tier=model.resolved_context_tier,
                 )
                 for model in found.models
             ],
@@ -166,6 +176,7 @@ class ModelRuntimeService:
                 label=found.model.label,
                 product=found.model.product,
                 source=found.model.source,
+                context_tier=found.model.resolved_context_tier,
             ),
             options=[
                 PriceCatalogOption(
@@ -208,6 +219,9 @@ class ModelRuntimeService:
                         update.list_cache_write_cost_per_million
                     ),
                     "pending_list_price": update.pending_list_price,
+                    "context_price_tiers": update.context_price_tiers,
+                    "pending_context_price_tiers": update.pending_context_price_tiers,
+                    "expected_context_price_tiers": update.expected_context_price_tiers,
                     "expected_source": update.expected_source,
                     "expected_reference": update.expected_reference,
                     "expected_discount_percent": update.expected_discount_percent,
@@ -267,10 +281,11 @@ class ModelRuntimeService:
         ]
         runtime_ids = {row["id"] for row in runtimes}
         return RegistryResponse(
+            context_pricing_supported=True,
             backend_pool_session_affinity_supported=True,
             databricks_connections_supported=True,
             databricks_oauth_supported=self._settings.databricks_oauth_enabled,
-            image_generation_supported=self._settings.image_generation_enabled,
+            image_generation_supported=True,
             image_configuration_defaults=self._settings.image_generation_defaults,
             gateways=[
                 GatewayProfile.model_validate(self._public_secret(row)) for row in rows["gateways"]
@@ -885,15 +900,54 @@ class ModelRuntimeService:
                 status_code=409, detail="Changing model operation requires a publication"
             )
         price_fields = (
-            "runtime_id", "price_source", "price_reference", "price_discount_percent",
+            "runtime_id", "price_source", "price_discount_percent", "context_price_references",
             "input_cost_per_million", "output_cost_per_million",
             "cached_cost_per_million", "cache_write_cost_per_million",
         )
         current_model = ManagedModel.model_validate(current) if current is not None else None
-        if write.price_source is not PriceSource.MANUAL and (
+        pricing_changed = (
             current_model is None
+            or write.context_price_refresh
             or any(getattr(current_model, field) != getattr(write, field) for field in price_fields)
-        ):
+            or (not write.context_price_references
+                and current_model.price_reference != write.price_reference)
+        )
+        values = write.model_dump(mode="python")
+        values.pop("context_price_references", None)
+        values.pop("context_price_refresh", None)
+        if write.context_price_references:
+            runtime = next(
+                (row for row in registry["runtimes"] if row["id"] == write.runtime_id), None,
+            )
+            if runtime is None:
+                raise HTTPException(status_code=422, detail="Unknown pricing connection")
+            discount = write.price_discount_percent
+            if discount is None:
+                discount = runtime.get("price_discount_percent")
+            if discount is not None:
+                discount = float(discount)
+            try:
+                if pricing_changed:
+                    tiers = resolve_context_prices(
+                        self._price_catalog, write.price_source,
+                        write.context_price_references, discount,
+                    )
+                else:
+                    tiers = current_model.context_price_tiers if current_model else []
+            except ValueError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except Exception as error:
+                raise HTTPException(
+                    status_code=503, detail="The selected price source is unavailable",
+                ) from error
+            values["context_price_tiers"] = [tier.model_dump(mode="json") for tier in tiers]
+            values["price_reference"] = context_price_reference(
+                write.price_source, [tier.reference for tier in tiers],
+            )
+            for column in ("input_cost_per_million", "output_cost_per_million",
+                           "cached_cost_per_million", "cache_write_cost_per_million"):
+                values[column] = None
+        elif write.price_source is not PriceSource.MANUAL and pricing_changed:
             try:
                 entry = self._price_catalog.lookup(write.price_reference or "")
             except Exception as error:  # noqa: BLE001
@@ -912,7 +966,14 @@ class ModelRuntimeService:
                         "The selected catalog price is incomplete; existing prices are unchanged"
                     ),
                 )
-        self._save("model", write.model_dump(mode="python"), item_id)
+            if entry.context_tier is not None or parse_context_tier(entry.label) is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Select the complete context price schedule, not one tier",
+                )
+        if not write.context_price_references:
+            values["context_price_tiers"] = []
+        self._save("model", values, item_id)
         return self.registry()
 
     def check_runtime(self, runtime_id: UUID) -> RuntimeHealth:
@@ -1187,8 +1248,6 @@ class ModelRuntimeService:
     def generate_image(
         self, request: ImageInvocationRequest, *, role: str
     ) -> ImageInvocationResponse:
-        if not self._settings.image_generation_enabled:
-            raise HTTPException(status_code=503, detail="Image generation is not enabled")
         request_id = str(uuid4())
         route = self._repository.invocation_route(request.runtime_id, request.model_id)
         if route is None:
@@ -1307,22 +1366,10 @@ class ModelRuntimeService:
     def _estimated_cost(
         route: dict[str, Any], usage: InvocationUsage | None
     ) -> float | None:
-        input_price = route.get("input_cost_per_million")
-        output_price = route.get("output_cost_per_million")
-        if usage is None or input_price is None or output_price is None:
+        price = model_price_from_values(route)
+        if usage is None or price is None or price.context_tiers and usage.estimated:
             return None
-        cached_price = route.get("cached_cost_per_million")
-        if cached_price is None:
-            cached_price = input_price
-        cache_write_price = route.get("cache_write_cost_per_million")
-        if cache_write_price is None:
-            cache_write_price = cached_price
-        return ModelPrice(
-            input_price_per_million=float(input_price),
-            cached_price_per_million=float(cached_price),
-            cache_write_price_per_million=float(cache_write_price),
-            output_price_per_million=float(output_price),
-        ).cost(
+        return price.cost(
             usage.input_tokens,
             usage.cached_tokens,
             usage.output_tokens,

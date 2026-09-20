@@ -1,4 +1,4 @@
-import { createContext, type ReactNode, useContext, useEffect, useState } from "react"
+import { createContext, type Context, type ReactNode, useContext, useEffect, useState } from "react"
 
 export type LocalePreference = "en" | "zh-CN" | "zh-TW" | "ko" | "ja"
 
@@ -17,7 +17,9 @@ type OpenCcElement = HTMLElement & {
   originalAriaLabel?: string
 }
 
-const LocaleContext = createContext<LocaleContextValue | null>(null)
+const LocaleContext: Context<LocaleContextValue | null> =
+  import.meta.hot?.data.localeContext ?? createContext<LocaleContextValue | null>(null)
+if (import.meta.hot) import.meta.hot.data.localeContext = LocaleContext
 const COOKIE_NAME = "finops_locale"
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 

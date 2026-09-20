@@ -85,7 +85,7 @@ import {
 } from "../../../components/ui/dropdown-menu"
 import { usageWindow } from "../api"
 import { getIntlLocale, useLocale, type LocalePreference } from "../../../locales/index"
-import { priceRequests } from "../../../lib/pricing"
+import { hasModelPrices, priceRequests } from "../../../lib/pricing"
 import { finopsKeys, finopsQueries, trendDimensionForFilters } from "../queries"
 import type {
   AnomalyRule,
@@ -158,7 +158,7 @@ export function FinOpsDashboard({
   const registryQuery = useQuery(finopsQueries.registry())
   const filters = useMemo<UsageFilters>(() => ({ ...usageWindow(days), ...scope }), [days, scope])
   const entities = entityQuery.data
-  const unpricedModels = registryQuery.data?.models.filter((model) => model.enabled && (model.input_cost_per_million == null || model.output_cost_per_million == null)) ?? []
+  const unpricedModels = registryQuery.data?.models.filter(model => model.enabled && !hasModelPrices(model)) ?? []
   const costAvailable = registryQuery.data != null && unpricedModels.length === 0
   const agents = entities?.agents ?? []
   const users = entities?.users.filter((item) => !scope.department_id || item.parent_id === scope.department_id) ?? []

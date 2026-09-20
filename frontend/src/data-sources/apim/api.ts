@@ -128,6 +128,7 @@ function normalizeRegistry(registry: ModelRegistry): ModelRegistry {
   )
   const runtimeIds = new Set(runtimes.map((runtime) => runtime.id))
   return {
+    context_pricing_supported: registry.context_pricing_supported === true,
     backend_pool_session_affinity_supported: registry.backend_pool_session_affinity_supported === true,
     databricks_connections_supported: registry.databricks_connections_supported === true,
     databricks_oauth_supported: registry.databricks_oauth_supported === true,

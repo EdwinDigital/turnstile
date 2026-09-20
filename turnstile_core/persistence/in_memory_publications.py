@@ -1215,6 +1215,20 @@ class InMemoryPublicationRepositoryMixin:
                 "output_cost_per_million": model_spec.get("output_cost_per_million"),
                 "cached_cost_per_million": model_spec.get("cached_cost_per_million"),
                 "cache_write_cost_per_million": model_spec.get("cache_write_cost_per_million"),
+                "price_source": model_spec.get("price_source", "manual"),
+                "price_reference": model_spec.get("price_reference"),
+                "price_discount_percent": model_spec.get("price_discount_percent"),
+                "context_price_tiers": model_spec.get("context_price_tiers") or [],
+                "list_input_cost_per_million": model_spec.get("list_input_cost_per_million"),
+                "list_output_cost_per_million": model_spec.get("list_output_cost_per_million"),
+                "list_cached_cost_per_million": model_spec.get("list_cached_cost_per_million"),
+                "list_cache_write_cost_per_million": model_spec.get(
+                    "list_cache_write_cost_per_million"
+                ),
+                "price_synced_at": publication["created_at"]
+                if model_spec.get("price_source", "manual") != "manual" else None,
+                "price_sync_status": "ok"
+                if model_spec.get("price_source", "manual") != "manual" else None,
                 "allowed_roles": model_spec["allowed_roles"],
                 "publication_id": publication_id,
             },
@@ -1284,6 +1298,7 @@ class InMemoryPublicationRepositoryMixin:
             "output_cost_per_million": model["output_cost_per_million"],
             "cached_cost_per_million": model.get("cached_cost_per_million"),
             "cache_write_cost_per_million": model.get("cache_write_cost_per_million"),
+            "context_price_tiers": model.get("context_price_tiers") or [],
             "model_allowed_roles": model["allowed_roles"],
             "runtime_id": runtime["id"],
             "runtime_name": runtime["name"],

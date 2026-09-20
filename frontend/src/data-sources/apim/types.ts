@@ -523,6 +523,9 @@ export type ManagedModel = {
   // leaves the row alone, which is what every model did before this existed.
   price_source: PriceSource
   price_reference: string | null
+  context_price_references?: string[]
+  context_price_tiers?: StoredContextPriceTier[]
+  pending_context_price_tiers?: StoredContextPriceTier[] | null
   // Percent of list price, overriding the connection's own figure. null inherits it.
   price_discount_percent: number | null
   // Resolved server-side from the model's figure or the connection's, so the UI never has to
@@ -542,12 +545,45 @@ export type ManagedModel = {
 export type PriceSource = "manual" | "azure_retail" | "anthropic"
 export type PriceSyncStatus = "ok" | "unmapped" | "stale" | "review_needed"
 
+export type PriceCatalogContextTier = {
+  group_key: string
+  model_label: string
+  service_tier: string
+  key: string
+  label: string
+  order: number
+  input_range: { min_input_tokens: number; max_input_tokens: number | null } | null
+  input_range_source?: { rule_id: string; url: string; revision: string; verified_on: string } | null
+}
+
+export type StoredContextPriceTier = {
+  key: string
+  label: string
+  reference: string
+  min_input_tokens: number
+  max_input_tokens: number | null
+  input_price_per_million: number
+  cached_price_per_million: number
+  cache_write_price_per_million: number
+  output_price_per_million: number
+  list_prices: { input: number | null; output: number | null; cached: number | null; cache_write: number | null }
+  input_range_source?: PriceCatalogContextTier["input_range_source"]
+  model_key: string
+  model_label: string
+  product: string
+  group_key: string
+  service_tier: string
+  deployment: string
+  regions: string[]
+}
+
 /** One priceable model in a vendor's published list, named the way that vendor names it. */
 export type PriceCatalogModel = {
   key: string
   label: string
   product: string
   source: PriceSource
+  context_tier?: PriceCatalogContextTier | null
 }
 
 export type PriceCatalogModelsResponse = {
@@ -600,6 +636,7 @@ export type PriceSyncResponse = {
 }
 
 export type ModelRegistry = {
+  context_pricing_supported?: boolean
   backend_pool_session_affinity_supported?: boolean
   databricks_connections_supported?: boolean
   databricks_oauth_supported?: boolean
@@ -665,6 +702,10 @@ export type GatewayPublicationCreate = {
     output_cost_per_million?: number | null
     cached_cost_per_million?: number | null
     cache_write_cost_per_million?: number | null
+    price_source?: PriceSource
+    price_reference?: string | null
+    price_discount_percent?: number | null
+    context_price_references?: string[]
   }
 }
 

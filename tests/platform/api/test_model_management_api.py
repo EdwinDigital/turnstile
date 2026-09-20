@@ -50,6 +50,7 @@ def publication_api() -> Iterator[InMemoryRepository]:
         repository,
         CredentialCipher(Fernet.generate_key()),
         apim_principal_id="39deeba0-9799-4806-96c4-2f65eb0f22d1",
+        image_generation_defaults=Settings().image_generation_defaults,
     )
     app.dependency_overrides[get_repository] = lambda: repository
     app.dependency_overrides[control_plane_service] = lambda: service
@@ -67,7 +68,7 @@ def test_invalid_image_deployment_returns_conflict_without_publication(
     publication_api: InMemoryRepository, deployment_name: str
 ) -> None:
     service = GatewayControlPlaneService(
-        publication_api, image_generation_enabled=True, apim_principal_id="unit-principal"
+        publication_api, apim_principal_id="unit-principal"
     )
     app.dependency_overrides[control_plane_service] = lambda: service
     payload = image_publication(publication_api).model_dump(mode="json")
@@ -93,6 +94,24 @@ def management_runtime_service(
     app.dependency_overrides[runtime_service] = lambda: service
     yield service
     app.dependency_overrides.pop(runtime_service, None)
+
+
+def test_default_backend_advertises_and_accepts_image_models(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+) -> None:
+    registry = client.get("/api/v1/model-management")
+    assert registry.status_code == 200
+    assert registry.json()["image_generation_supported"] is True
+    assert registry.json()["image_configuration_schema_version"] == 4
+    payload = image_publication(publication_api).model_dump(mode="json")
+    payload["model"].pop("image_configuration")
+    response = client.post("/api/v1/model-management/publications", json=payload)
+    assert response.status_code == 202
+    assert len(publication_api.gateway_publications) == 1
+    profile = publication_api.gateway_publications[0]["desired_spec"]["bindings"][-1][
+        "model"
+    ]["image_profile"]
+    assert profile["version"] == 4
 
 
 def bedrock_publication(gateway_id: str) -> dict[str, object]:

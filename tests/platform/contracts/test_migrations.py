@@ -33,8 +33,19 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "006_versioned_budget_evidence.up.sql",
         "007_model_price_source.up.sql",
         "008_price_review_and_guard.up.sql",
+        "009_context_tier_pricing.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
+
+
+def test_context_tier_upgrade_keeps_rules_in_price_metadata_and_preserves_history() -> None:
+    sql = (MIGRATIONS / "009_context_tier_pricing.up.sql").read_text()
+    assert "ALTER TABLE public.managed_model_price" in sql
+    assert "ADD COLUMN context_price_tiers JSONB" in sql
+    assert "ADD COLUMN pending_context_price_tiers JSONB" in sql
+    assert "ADD COLUMN price_context_snapshot JSONB" in sql
+    assert "ALTER TABLE public.managed_model\n" not in sql
+    assert not re.search(r"^\s*(UPDATE|DELETE|TRUNCATE|DROP)\b", sql, re.MULTILINE)
 
 
 def test_the_review_baseline_and_the_pending_price_are_separate_columns() -> None:

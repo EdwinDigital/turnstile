@@ -22,9 +22,11 @@ from .runtime_models import (
     ModelFamilyKey,
     ModelVendorKey,
     OAuthClientCredentialsConfig,
+    PriceSource,
     ProviderKind,
     ProviderTarget,
     RuntimeKind,
+    StoredContextPriceTier,
     default_capabilities,
 )
 
@@ -173,15 +175,51 @@ class ModelTarget(StrictModel):
     output_cost_per_million: float | None = Field(default=None, ge=0)
     cached_cost_per_million: float | None = Field(default=None, ge=0)
     cache_write_cost_per_million: float | None = Field(default=None, ge=0)
+    price_source: PriceSource = Field(
+        default=PriceSource.MANUAL, exclude_if=lambda value: value is PriceSource.MANUAL,
+    )
+    price_reference: str | None = Field(
+        default=None, max_length=1000, exclude_if=lambda value: value is None,
+    )
+    price_discount_percent: float | None = Field(
+        default=None, gt=0, le=100, exclude_if=lambda value: value is None,
+    )
+    context_price_references: list[str] = Field(
+        default_factory=list, max_length=32, exclude_if=lambda value: not value,
+    )
+    context_price_tiers: list[StoredContextPriceTier] = Field(
+        default_factory=list, max_length=32, exclude_if=lambda value: not value,
+    )
+    list_input_cost_per_million: float | None = Field(
+        default=None, ge=0, exclude_if=lambda value: value is None,
+    )
+    list_output_cost_per_million: float | None = Field(
+        default=None, ge=0, exclude_if=lambda value: value is None,
+    )
+    list_cached_cost_per_million: float | None = Field(
+        default=None, ge=0, exclude_if=lambda value: value is None,
+    )
+    list_cache_write_cost_per_million: float | None = Field(
+        default=None, ge=0, exclude_if=lambda value: value is None,
+    )
     allowed_roles: list[str] = Field(default_factory=lambda: ["owner", "admin", "member"])
     assignment_required: bool = True
     image_profile: ImageGenerationProfile | None = None
 
     @model_validator(mode="after")
     def validate_image_contract(self) -> ModelTarget:
+        if self.price_source is not PriceSource.MANUAL:
+            reference = (self.price_reference or "").strip()
+            if not self.context_price_references and (
+                not reference or not reference.startswith(f"{self.price_source.value}:")
+            ):
+                raise ValueError("Catalog pricing requires a reference from its selected source")
+            self.price_reference = reference or None
         if self.image_profile is not None:
             if self.capabilities != ["image_generation"]:
                 raise ValueError("An image profile belongs only to an image model")
+            if self.price_source is not PriceSource.MANUAL:
+                raise ValueError("Image generation requires explicit manual prices")
             validate_image_profile(self.image_profile)
         return self
 
@@ -203,10 +241,32 @@ class ModelCreateTarget(StrictModel):
     output_cost_per_million: float | None = Field(default=None, ge=0)
     cached_cost_per_million: float | None = Field(default=None, ge=0)
     cache_write_cost_per_million: float | None = Field(default=None, ge=0)
+    price_source: PriceSource = PriceSource.MANUAL
+    price_reference: str | None = Field(default=None, max_length=1000)
+    price_discount_percent: float | None = Field(default=None, gt=0, le=100)
+    context_price_references: list[str] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
     def require_deployment_or_explicit_identity(self) -> ModelCreateTarget:
+        if self.context_price_references:
+            if self.price_source is PriceSource.MANUAL or self.operation == "image_generation":
+                raise ValueError("Context pricing requires a catalog-priced text model")
+            if (len(self.context_price_references) < 2
+                or len(set(self.context_price_references)) != len(self.context_price_references)):
+                raise ValueError("Context pricing requires distinct tier references")
+            if any(not reference.startswith(f"{self.price_source.value}:")
+                   for reference in self.context_price_references):
+                raise ValueError("Context references must use the selected source")
+        if self.price_source is PriceSource.MANUAL:
+            self.price_reference = None
+        elif not self.context_price_references:
+            reference = (self.price_reference or "").strip()
+            if not reference or not reference.startswith(f"{self.price_source.value}:"):
+                raise ValueError("Catalog pricing requires a reference from its selected source")
+            self.price_reference = reference
         if self.operation == "image_generation":
+            if self.price_source is not PriceSource.MANUAL:
+                raise ValueError("Image generation requires explicit manual prices")
             if self.deployment_name is None:
                 raise ValueError("Image generation requires an existing Foundry deployment")
             if self.context_window is not None or self.cache_write_cost_per_million is not None:

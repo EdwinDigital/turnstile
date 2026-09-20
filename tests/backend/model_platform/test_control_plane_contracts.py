@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID
 from xml.etree import ElementTree
@@ -8,7 +9,7 @@ from xml.etree import ElementTree
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
-from pydantic import HttpUrl, SecretStr
+from pydantic import HttpUrl, SecretStr, ValidationError
 
 from backend.http.publication_auth import require_publication_owner
 from backend.services.runtime_service import ModelRuntimeService
@@ -41,6 +42,7 @@ from turnstile_core.domain.control_plane import (
     GatewayRateLimitCircuitBreaker,
     GatewayRateLimitResilience,
     ModelCreateTarget,
+    ModelTarget,
     RuntimeTarget,
     publication_materialized_named_values,
     publication_retry_requires_credential,
@@ -48,6 +50,7 @@ from turnstile_core.domain.control_plane import (
 from turnstile_core.domain.runtime_models import (
     ModelConnectionCreate,
     ModelVendorKey,
+    PriceSource,
     ProviderTarget,
     model_vendor_label,
 )
@@ -57,10 +60,219 @@ from turnstile_core.integrations.apim_control_plane import (
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository_publications import PostgreSqlPublicationRepositoryMixin
+from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.control_plane import (
     ControlPlaneConflictError,
+    ControlPlaneUnavailableError,
 )
+
+
+@pytest.mark.parametrize("identity", [
+    {"deployment_name": "gpt-4.1-845778"},
+    {"model_key": "gpt-4.1", "display_name": "GPT-4.1", "upstream_model_id": "gpt-4.1"},
+])
+def test_new_model_contract_preserves_catalog_pricing(identity: dict[str, str]) -> None:
+    model = ModelCreateTarget.model_validate({
+        **identity,
+        "price_source": "azure_retail",
+        "price_reference": "azure_retail:Azure OpenAI:gpt 4.1:Global:*",
+        "price_discount_percent": 80,
+    })
+
+    assert model.price_source is PriceSource.AZURE_RETAIL
+    assert model.price_reference == "azure_retail:Azure OpenAI:gpt 4.1:Global:*"
+    assert model.price_discount_percent == 80
+    restored = ModelCreateTarget.model_validate(model.model_dump())
+    assert restored.price_reference == model.price_reference
+
+
+@pytest.mark.parametrize("changes", [
+    {"price_source": "azure_retail"},
+    {"price_source": "anthropic", "price_reference": "azure_retail:wrong"},
+    {"price_discount_percent": 0}, {"price_discount_percent": 101},
+    {"price_discount_percent": float("nan")}, {"price_discount_percent": float("inf")},
+    {"operation": "image_generation", "price_source": "azure_retail",
+     "price_reference": "azure_retail:Azure OpenAI:gpt 4.1:Global:*"},
+])
+def test_new_model_contract_rejects_invalid_pricing(changes: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        ModelCreateTarget.model_validate({"deployment_name": "unit-deployment", **changes})
+
+
+def test_context_pricing_publication_and_activation_keep_the_complete_schedule() -> None:
+    from turnstile_core.domain.runtime_models import PriceCatalogContextTier, PriceCatalogInputRange
+    from turnstile_core.pricing.catalog import CatalogModel, CatalogOption, CatalogOptions
+
+    repository = InMemoryRepository()
+    catalog = MagicMock(spec=CompositeCatalog)
+    entries = {}
+    references = []
+    for index in range(2):
+        label = f"Opaque tier {index}"
+        candidate = CatalogModel(
+            key=f"azure_retail:Unit:{label}", label=label, product="Unit",
+            source=PriceSource.AZURE_RETAIL,
+            context_tier=PriceCatalogContextTier(
+                group_key="arbitrary-model", model_label="Arbitrary model", key=str(index),
+                label=label, order=index, input_range=PriceCatalogInputRange(
+                    min_input_tokens=0 if index == 0 else 1201,
+                    max_input_tokens=1200 if index == 0 else None,
+                ),
+            ),
+        )
+        reference = f"{candidate.key}:Global:*"
+        references.append(reference)
+        rate = CatalogEntry(
+            reference=reference, label=label, source=candidate.source,
+            input_per_million=2 + index, output_per_million=8 + index,
+        )
+        entries[candidate.key] = CatalogOptions(model=candidate, options=(CatalogOption(
+            reference=reference, deployment="Global", entry=rate, regions=("eastus",),
+            region_required=False,
+        ),))
+    catalog.options.side_effect = entries.get
+    write = foundry_publication("unit-context-model")
+    write.provider = ProviderTarget(existing_id=next(
+        item["id"] for item in repository.providers if item["brand_key"] == "microsoft_foundry"
+    ))
+    write.model = ModelCreateTarget.model_validate(write.model.model_dump() | {
+        "price_source": "azure_retail", "context_price_references": references,
+        "price_discount_percent": 80, "input_cost_per_million": 999,
+    })
+    service = GatewayControlPlaneService(
+        repository, apim_principal_id=str(UUID(int=99)), price_catalog=catalog,
+    )
+    publication = service.publish(write, "unit-owner")
+    model = publication.desired_spec.bindings[-1].model
+    assert [tier.input_price_per_million for tier in model.context_price_tiers] == [1.6, 2.4]
+    assert model.input_cost_per_million is None
+    assert service.publish(write, "unit-owner").id == publication.id
+    for before, after in zip(
+        ("queued", "validating", "provisioning", "building_revision", "verifying"),
+        ("validating", "provisioning", "building_revision", "verifying", "promoting"), strict=True,
+    ):
+        transition_publication(repository, publication.id, before, after, {}, "context-worker")
+    activate_publication(repository, publication.id, "context-worker")
+    stored = next(
+        row for row in repository.registry()["models"] if row["model_key"] == model.model_key
+    )
+    assert stored["context_price_tiers"] == [
+        tier.model_dump(mode="json") for tier in model.context_price_tiers
+    ]
+    price = repository.model_prices()[str(stored["id"])].for_input_tokens(1201)
+    assert price.input_price_per_million == 2.4
+
+
+def test_manual_publication_model_preserves_legacy_serialization() -> None:
+    model = ModelTarget(
+        model_key="unit", display_name="Unit", upstream_model_id="unit", capabilities=["chat"],
+    )
+    payload = model.model_dump(mode="json")
+    assert not any(key.startswith(("price_", "list_")) for key in payload)
+    assert ModelTarget.model_validate(payload).model_dump(mode="json") == payload
+
+
+@pytest.mark.parametrize("connection_discount,discount,expected", [
+    (None, None, 2), (90, None, 1.8), (90, 80, 1.6),
+])
+def test_publication_uses_catalog_prices_not_submitted_amounts(
+    connection_discount: float | None, discount: float | None, expected: float,
+) -> None:
+    repository = InMemoryRepository()
+    catalog = MagicMock(spec=CompositeCatalog)
+    reference = "azure_retail:Azure OpenAI:gpt 4.1:Global:*"
+    catalog.lookup.return_value = CatalogEntry(
+        reference=reference, label="gpt 4.1", source=PriceSource.AZURE_RETAIL,
+        input_per_million=2, output_per_million=8, cached_per_million=0.5,
+    )
+    write = foundry_publication("gpt-4.1-845778")
+    write.provider = ProviderTarget(existing_id=next(
+        item["id"] for item in repository.providers if item["brand_key"] == "microsoft_foundry"
+    ))
+    if connection_discount is not None:
+        registry = ModelRuntimeService(
+            repository, Settings(apim_principal_id=str(UUID(int=99))),
+        ).save_connection(
+            ModelConnectionCreate.model_validate({
+                "gateway_profile_id": APIM_ID,
+                "provider": write.provider.model_dump(),
+                "auth_mode": "managed_identity",
+                "foundry_project_endpoint": str(write.runtime.foundry_project_endpoint),
+            })
+        )
+        runtime = next(item for item in registry.runtimes if item.config.get("project_endpoint"))
+        repository.update_registry_item("runtime", runtime.id, {
+            "price_discount_percent": connection_discount,
+        })
+        write.runtime = RuntimeTarget(existing_id=runtime.id)
+    write.model = ModelCreateTarget.model_validate({
+        **write.model.model_dump(), "price_source": "azure_retail",
+        "price_reference": reference, "price_discount_percent": discount,
+        "input_cost_per_million": 999, "output_cost_per_million": 999,
+    })
+    service = GatewayControlPlaneService(
+        repository, apim_principal_id=str(UUID(int=99)), price_catalog=catalog,
+    )
+    publication = service.publish(write, "owner@example.com")
+    model = publication.desired_spec.bindings[-1].model
+    assert model.input_cost_per_million == expected
+    assert model.output_cost_per_million == expected * 4
+    assert model.list_input_cost_per_million == 2
+    assert model.price_reference == reference
+    assert model.price_discount_percent == discount
+    catalog.lookup.assert_called_once_with(reference)
+    repeated = service.publish(write, "owner@example.com")
+    assert repeated.id == publication.id
+    assert repeated.desired_spec_sha256 == publication.desired_spec_sha256
+    for before, after in zip(
+        ("queued", "validating", "provisioning", "building_revision", "verifying"),
+        ("validating", "provisioning", "building_revision", "verifying", "promoting"),
+        strict=True,
+    ):
+        transition_publication(repository, publication.id, before, after, {}, "price-worker")
+    activate_publication(repository, publication.id, "price-worker")
+    saved = next(
+        item for item in repository.registry()["models"] if item["model_key"] == model.model_key
+    )
+    assert saved["price_source"] == "azure_retail"
+    assert saved["price_reference"] == reference
+    assert saved["price_discount_percent"] == discount
+    assert saved["effective_discount_percent"] == (discount or connection_discount)
+    assert saved["input_cost_per_million"] == expected
+    assert saved["list_input_cost_per_million"] == 2
+    assert saved["price_sync_status"] == "ok"
+    assert saved["price_synced_at"] == publication.created_at
+
+
+@pytest.mark.parametrize("failure", ["missing", "partial", "no-output", "unavailable"])
+def test_publication_rejects_unusable_catalog_without_queueing(failure: str) -> None:
+    repository = InMemoryRepository()
+    catalog = MagicMock(spec=CompositeCatalog)
+    reference = "azure_retail:Azure OpenAI:gpt 4.1:Global:*"
+    catalog.lookup.return_value = None if failure == "missing" else CatalogEntry(
+        reference=reference, label="gpt 4.1", source=PriceSource.AZURE_RETAIL,
+        input_per_million=2, output_per_million=None if failure == "no-output" else 8,
+        complete=failure != "partial",
+    )
+    if failure == "unavailable":
+        catalog.lookup.side_effect = TimeoutError("catalog read timed out")
+    write = foundry_publication()
+    write.provider = ProviderTarget(existing_id=next(
+        item["id"] for item in repository.providers if item["brand_key"] == "microsoft_foundry"
+    ))
+    write.model = ModelCreateTarget.model_validate({
+        **write.model.model_dump(), "price_source": "azure_retail", "price_reference": reference,
+    })
+    expected = (
+        ControlPlaneUnavailableError if failure == "unavailable" else ControlPlaneConflictError
+    )
+    with pytest.raises(expected, match="catalog price|price source"):
+        GatewayControlPlaneService(
+            repository, apim_principal_id=str(UUID(int=99)), price_catalog=catalog,
+        ).publish(write, "owner@example.com")
+    catalog.lookup.assert_called_once_with(reference)
+    assert repository.gateway_publications == []
 
 
 def test_openai_existing_connection_publishes_with_a_one_time_encrypted_key(tmp_path: Path) -> None:

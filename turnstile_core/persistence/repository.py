@@ -9,6 +9,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from ..domain.anomaly_engine import evaluate_anomaly_rules
@@ -174,6 +175,8 @@ class PostgreSqlOpsDbProxy(
         application: UsageApplicationAttribution | None = None,
     ) -> None:
         values = record.model_dump()
+        values["price_context_tier"] = record.price_context_tier
+        snapshot = record.price_context_snapshot
         values["runtime_authoritative"] = record.runtime_authoritative
         values["user_ref"] = values.pop("user")
         with self._connection() as connection:
@@ -183,7 +186,8 @@ class PostgreSqlOpsDbProxy(
                     (f"apim-attempt:{record.correlation_id}",),
                 )
                 candidates = connection.execute(
-                    """SELECT id, correlation_id, usage_domain, user_id FROM token_usage
+                          """SELECT id, correlation_id, usage_domain, user_id,
+                                        price_context_snapshot FROM token_usage
                        WHERE (usage_domain = 'apim' AND correlation_id = %s) OR id = %s
                        ORDER BY id LIMIT 2 FOR UPDATE""",
                     (record.correlation_id, record.id),
@@ -199,6 +203,14 @@ class PostgreSqlOpsDbProxy(
                     ):
                         raise ValueError("APIM correlation identity conflicts with stored usage")
                     values["id"] = str(existing["id"])
+                    if existing.get("price_context_snapshot") is not None:
+                        snapshot = existing["price_context_snapshot"]
+                        if not record.estimated:
+                            values.update(ModelPrice.model_validate(snapshot).snapshot_prices(
+                                record.input_tokens, record.cached_tokens,
+                                record.output_tokens, record.cache_write_tokens,
+                            ))
+            values["price_context_snapshot"] = Jsonb(snapshot) if snapshot is not None else None
             connection.execute(
                 """
                 INSERT INTO token_usage AS existing (
@@ -211,6 +223,7 @@ class PostgreSqlOpsDbProxy(
                     status_code, estimated_cost, input_price_per_million,
                     cached_price_per_million, cache_write_price_per_million,
                     output_price_per_million,
+                    price_context_tier, price_context_snapshot,
                     error_message, estimated, ingest_source, ingest_error,
                     budget_admission, model_admission
                 ) VALUES (
@@ -226,7 +239,8 @@ class PostgreSqlOpsDbProxy(
                     %(status_code)s, %(estimated_cost)s,
                     %(input_price_per_million)s, %(cached_price_per_million)s,
                     %(cache_write_price_per_million)s,
-                    %(output_price_per_million)s, %(error_message)s,
+                    %(output_price_per_million)s, %(price_context_tier)s,
+                    %(price_context_snapshot)s, %(error_message)s,
                     %(estimated)s, %(ingest_source)s, %(ingest_error)s,
                     %(budget_admission)s, %(model_admission)s
                 ) ON CONFLICT (id) DO UPDATE SET
@@ -268,6 +282,11 @@ class PostgreSqlOpsDbProxy(
                     output_price_per_million = CASE WHEN existing.estimated
                         THEN EXCLUDED.output_price_per_million
                         ELSE existing.output_price_per_million END,
+                    price_context_tier = CASE WHEN existing.estimated
+                        THEN EXCLUDED.price_context_tier ELSE existing.price_context_tier END,
+                    price_context_snapshot = COALESCE(
+                        existing.price_context_snapshot, EXCLUDED.price_context_snapshot
+                    ),
                     error_message = CASE WHEN existing.estimated
                         THEN EXCLUDED.error_message ELSE existing.error_message END,
                     estimated = CASE WHEN existing.estimated
@@ -313,7 +332,7 @@ class PostgreSqlOpsDbProxy(
         with self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id::TEXT AS model_uuid, model_key,
+                SELECT model.id::TEXT AS model_uuid, model_key,
                        input_cost_per_million,
                        COALESCE(cached_cost_per_million, input_cost_per_million) AS cached_cost,
                        COALESCE(
@@ -321,21 +340,24 @@ class PostgreSqlOpsDbProxy(
                            cached_cost_per_million,
                            input_cost_per_million
                        ) AS cache_write_cost,
-                       output_cost_per_million
-                FROM managed_model
-                WHERE input_cost_per_million IS NOT NULL
-                  AND output_cost_per_million IS NOT NULL
-                ORDER BY updated_at ASC
+                      output_cost_per_million,
+                      price.context_price_tiers
+                  FROM managed_model model
+                  LEFT JOIN managed_model_price price ON price.model_id = model.id
+                  WHERE (input_cost_per_million IS NOT NULL
+                      AND output_cost_per_million IS NOT NULL)
+                     OR jsonb_array_length(COALESCE(price.context_price_tiers, '[]'::jsonb)) > 0
+                  ORDER BY model.updated_at ASC
                 """
             ).fetchall()
         prices: dict[str, ModelPrice] = {}
         for row in rows:
-            price = ModelPrice(
-                input_price_per_million=float(row["input_cost_per_million"]),
-                cached_price_per_million=float(row["cached_cost"]),
-                cache_write_price_per_million=float(row["cache_write_cost"]),
-                output_price_per_million=float(row["output_cost_per_million"]),
-            )
+            price = ModelPrice.from_registry({
+                **row, "cached_cost_per_million": row["cached_cost"],
+                "cache_write_cost_per_million": row["cache_write_cost"],
+            })
+            if price is None:
+                continue
             prices[row["model_uuid"]] = price
             prices[row["model_key"]] = price
         return prices
@@ -459,6 +481,46 @@ class PostgreSqlOpsDbProxy(
         with self._connection() as connection:
             cursor = connection.execute(
                 """
+                WITH corrections AS (
+                    SELECT incoming.*, stored.id,
+                        CASE WHEN stored.price_context_snapshot IS NULL
+                            THEN stored.input_price_per_million
+                            ELSE (matched.tier->>'input_price_per_million')::numeric
+                            END AS input_price,
+                        CASE WHEN stored.price_context_snapshot IS NULL
+                            THEN stored.cached_price_per_million
+                            ELSE (matched.tier->>'cached_price_per_million')::numeric
+                            END AS cached_price,
+                        CASE WHEN stored.price_context_snapshot IS NULL
+                            THEN COALESCE(stored.cache_write_price_per_million,
+                                          stored.cached_price_per_million)
+                            ELSE (matched.tier->>'cache_write_price_per_million')::numeric
+                            END AS write_price,
+                        CASE WHEN stored.price_context_snapshot IS NULL
+                            THEN stored.output_price_per_million
+                            ELSE (matched.tier->>'output_price_per_million')::numeric
+                            END AS output_price,
+                        matched.tier->>'key' AS tier_key
+                    FROM UNNEST(
+                        %(correlation_ids)s::text[], %(input_tokens)s::bigint[],
+                        %(output_tokens)s::bigint[], %(cached_tokens)s::bigint[]
+                    ) AS incoming(correlation_id, input_tokens, output_tokens, cached_tokens)
+                    JOIN token_usage stored ON stored.correlation_id = incoming.correlation_id
+                    LEFT JOIN LATERAL (
+                        SELECT CASE WHEN COUNT(*) = 1 THEN jsonb_agg(tier)->0 END AS tier
+                        FROM jsonb_array_elements(COALESCE(
+                            stored.price_context_snapshot->'context_tiers', '[]'::jsonb
+                        )) tier
+                        WHERE incoming.cached_tokens IS NOT NULL
+                          AND incoming.input_tokens + incoming.cached_tokens
+                              >= (tier->>'min_input_tokens')::bigint
+                          AND ((tier->>'max_input_tokens') IS NULL
+                               OR incoming.input_tokens + incoming.cached_tokens
+                                  <= (tier->>'max_input_tokens')::bigint)
+                    ) matched ON TRUE
+                    WHERE stored.estimated AND stored.reconciled_at IS NULL
+                      AND stored.status_code < 400
+                )
                 UPDATE token_usage AS u
                 SET input_tokens = v.input_tokens,
                     output_tokens = v.output_tokens,
@@ -476,38 +538,40 @@ class PostgreSqlOpsDbProxy(
                     -- Streamed cache usage is unavailable, so the write subset stays 0 here.
                     estimated_cost = COALESCE(
                         ROUND(
-                            (v.input_tokens * u.input_price_per_million
+                            (v.input_tokens * v.input_price
                                 + GREATEST(
                                     COALESCE(v.cached_tokens, u.cached_tokens)
                                     - u.cache_write_tokens,
                                     0
                                   )
-                                    * u.cached_price_per_million
-                                + u.cache_write_tokens * COALESCE(
-                                    u.cache_write_price_per_million, u.cached_price_per_million
-                                  )
-                                + v.output_tokens * u.output_price_per_million) / 1000000,
+                                    * v.cached_price
+                                + u.cache_write_tokens * v.write_price
+                                + v.output_tokens * v.output_price) / 1000000,
                             8
                         ),
                         u.estimated_cost
                     ),
-                    estimated = v.cached_tokens IS NULL,
+                    input_price_per_million = v.input_price,
+                    cached_price_per_million = v.cached_price,
+                    cache_write_price_per_million = v.write_price,
+                    output_price_per_million = v.output_price,
+                    price_context_tier = CASE WHEN u.price_context_snapshot IS NULL
+                        THEN u.price_context_tier ELSE v.tier_key END,
+                    estimated = v.cached_tokens IS NULL OR (
+                        u.price_context_snapshot IS NOT NULL AND v.tier_key IS NULL
+                    ),
                     ingest_error = CASE
                         WHEN v.cached_tokens IS NULL
                         THEN 'stream_cache_usage_unavailable'
+                        WHEN u.price_context_snapshot IS NOT NULL AND v.tier_key IS NULL
+                        THEN 'context_pricing_input_unavailable'
                         ELSE NULL
                     END,
-                    reconciled_at = NOW()
-                FROM (
-                    SELECT *
-                    FROM UNNEST(
-                        %(correlation_ids)s::text[],
-                        %(input_tokens)s::bigint[],
-                        %(output_tokens)s::bigint[],
-                        %(cached_tokens)s::bigint[]
-                    )
-                ) AS v(correlation_id, input_tokens, output_tokens, cached_tokens)
-                WHERE u.correlation_id = v.correlation_id
+                    reconciled_at = CASE
+                        WHEN u.price_context_snapshot IS NOT NULL AND v.tier_key IS NULL
+                        THEN NULL ELSE NOW() END
+                FROM corrections v
+                WHERE u.id = v.id
                   AND u.estimated
                   AND u.reconciled_at IS NULL
                   AND u.status_code < 400

@@ -55,4 +55,7 @@ def test_image_editor_requires_prices_and_preserves_operation() -> None:
     assert 'operation: imageGeneration ? "image_generation" : undefined' in publication
     assert "[inputPrice, cacheReadPrice, outputPrice]" in publication
     assert "context_window: imageGeneration ? null" in publication
-    assert "cache_write_cost_per_million: imageGeneration ? null" in publication
+    assert (
+        "cache_write_cost_per_million: imageGeneration || pricing.contextPricingPreview ? null"
+        in publication
+    )

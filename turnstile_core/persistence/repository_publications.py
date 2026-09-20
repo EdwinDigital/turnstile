@@ -1329,6 +1329,28 @@ class PostgreSqlPublicationRepositoryMixin:
                         publication_id,
                     ),
                 )
+                connection.execute(
+                    """INSERT INTO managed_model_price (
+                           model_id, price_source, price_reference, price_discount_percent,
+                           list_input_cost_per_million, list_output_cost_per_million,
+                           list_cached_cost_per_million, list_cache_write_cost_per_million,
+                           price_synced_at, price_sync_status, context_price_tiers
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        model["id"],
+                        model_spec.get("price_source", "manual"),
+                        model_spec.get("price_reference"),
+                        model_spec.get("price_discount_percent"),
+                        model_spec.get("list_input_cost_per_million"),
+                        model_spec.get("list_output_cost_per_million"),
+                        model_spec.get("list_cached_cost_per_million"),
+                        model_spec.get("list_cache_write_cost_per_million"),
+                        publication["created_at"]
+                        if model_spec.get("price_source", "manual") != "manual" else None,
+                        "ok" if model_spec.get("price_source", "manual") != "manual" else None,
+                        Jsonb(model_spec.get("context_price_tiers") or []),
+                    ),
+                )
             row = self._complete_gateway_activation(
                 connection, publication, publication_id, actor
             )
@@ -1415,6 +1437,7 @@ class PostgreSqlPublicationRepositoryMixin:
                                             AS assignment_required,
                     model.input_cost_per_million, model.output_cost_per_million,
                     model.cached_cost_per_million, model.cache_write_cost_per_million,
+                    price.context_price_tiers,
                     model.allowed_roles AS model_allowed_roles,
                     runtime.id AS runtime_id, runtime.name AS runtime_name,
                     runtime.runtime_kind, runtime.config AS runtime_config,
@@ -1433,6 +1456,7 @@ class PostgreSqlPublicationRepositoryMixin:
                 FROM managed_model model
                 JOIN model_runtime runtime ON runtime.id = model.runtime_id
                 JOIN model_provider provider ON provider.id = model.provider_id
+                LEFT JOIN managed_model_price price ON price.model_id = model.id
                                 LEFT JOIN managed_model_metadata model_metadata
                                     ON model_metadata.model_id = model.id
                 LEFT JOIN gateway_profile gateway ON gateway.id = runtime.gateway_profile_id

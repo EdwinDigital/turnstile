@@ -37,6 +37,8 @@ const VALIDATION_MESSAGES: Record<ModelEditError, string> = {
   prices: "单价须为非负有限数字，或留空。",
   default_disabled: "默认模型必须启用。",
   price_reference: "跟随官方价时，必须先选定一个官方价基准。",
+  context_pricing_preview: "当前后端尚不支持分档计费，暂不可保存或发布。",
+  context_pricing_incomplete: "分档价格或阈值不完整，不能保存。",
   discount: "折扣须为 0–100 之间的数字，或留空以继承连接折扣。",
 }
 
@@ -71,7 +73,7 @@ export function ModelEditDialog({ registry, model, busy, error, onClose, onSave 
   onSave: (value: ReturnType<typeof modelEditPayload>) => void
 }) {
   const id = useId()
-  const [initial] = useState(() => createModelEditDraft(model))
+  const [initial] = useState(() => createModelEditDraft(model, registry.context_pricing_supported === true))
   const [draft, setDraft] = useState<ModelEditDraft>(initial)
   const [submitted, setSubmitted] = useState(false)
   const runtime = registry.runtimes.find((item) => item.id === model.runtime_id)
@@ -91,7 +93,7 @@ export function ModelEditDialog({ registry, model, busy, error, onClose, onSave 
   const followingListPrice = draft.priceSource !== "manual"
   const imagePriceMissing = imageGeneration && [draft.inputPrice, draft.cacheReadPrice, draft.outputPrice].some(value => !value.trim())
   const message = (dirty || submitted) && imagePriceMissing ? "请填写文字输入、缓存文字和图像输出单价。"
-    : validation && (dirty || submitted) ? VALIDATION_MESSAGES[validation] : error
+    : validation && validation !== "context_pricing_preview" && (dirty || submitted) ? VALIDATION_MESSAGES[validation] : error
   const update = <Key extends keyof ModelEditDraft>(key: Key, value: ModelEditDraft[Key]) => {
     setDraft((current) => ({ ...current, [key]: value }))
   }
@@ -146,20 +148,20 @@ export function ModelEditDialog({ registry, model, busy, error, onClose, onSave 
             </div>
             {!imageGeneration && <ModelPriceSourceFields model={model} draft={draft} setDraft={setDraft}
               busy={busy} connectionDiscount={runtime?.price_discount_percent ?? null} />}
-            <div className={imageGeneration ? "form-grid" : "form-grid three"}>
+            <div className={imageGeneration || draft.contextPricingPreview ? "form-grid" : "form-grid three"}>
               {!imageGeneration && <ModelEditNumberField id={`${id}-context`} label="上下文窗口" unit="Tokens" integer value={draft.contextWindow} onChange={(value) => update("contextWindow", value)} busy={busy} />}
-              <ModelEditNumberField id={`${id}-input`} label={imageGeneration ? "文字输入单价" : "输入单价"} value={draft.inputPrice} onChange={(value) => update("inputPrice", value)} busy={busy || followingListPrice} />
-              <ModelEditNumberField id={`${id}-output`} label={imageGeneration ? "图像输出单价" : "输出单价"} value={draft.outputPrice} onChange={(value) => update("outputPrice", value)} busy={busy || followingListPrice} />
+              {!draft.contextPricingPreview && <ModelEditNumberField id={`${id}-input`} label={imageGeneration ? "文字输入单价" : "输入单价"} value={draft.inputPrice} onChange={(value) => update("inputPrice", value)} busy={busy || followingListPrice} />}
+              {!draft.contextPricingPreview && <ModelEditNumberField id={`${id}-output`} label={imageGeneration ? "图像输出单价" : "输出单价"} value={draft.outputPrice} onChange={(value) => update("outputPrice", value)} busy={busy || followingListPrice} />}
             </div>
-            <div className="form-grid">
+            {!draft.contextPricingPreview && <div className="form-grid">
               <ModelEditNumberField id={`${id}-cache-read`} label={imageGeneration ? "缓存文字单价" : "缓存读取单价"} value={draft.cacheReadPrice} onChange={(value) => update("cacheReadPrice", value)} busy={busy || followingListPrice} help={imageGeneration ? undefined : "留空按输入单价计费；填写 0 表示免费。"} />
               {!imageGeneration && <ModelEditNumberField id={`${id}-cache-write`} label="缓存写入单价" value={draft.cacheWritePrice} onChange={(value) => update("cacheWritePrice", value)} busy={busy || followingListPrice} help="留空按缓存读取单价计费；读取单价也未填写时按输入单价。填写 0 表示免费。" />}
-            </div>
-            <p className="publication-form-note">
+            </div>}
+            {!draft.contextPricingPreview && <p className="publication-form-note">
               {followingListPrice
                 ? "跟随官方价时，这四个值由 官方价 × 折扣 自动算出，改折扣或换基准即可调整。"
                 : "留空表示未配置，不等于 0。"}
-            </p>
+            </p>}
           </section>
           <section className="simple-model-section simple-connection-section" aria-labelledby={`${id}-access`}>
             <div className="simple-section-title"><b id={`${id}-access`}>状态与访问</b></div>

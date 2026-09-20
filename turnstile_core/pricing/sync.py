@@ -22,6 +22,7 @@ from uuid import UUID
 
 from turnstile_core.domain.runtime_models import ManagedModel, PriceSource, PriceSyncStatus
 from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
+from turnstile_core.pricing.context import resolve_context_prices
 
 # A published rate rarely moves more than a few percent. Twenty is generous enough that ordinary
 # repricing passes unattended, and tight enough that a parser reading the wrong column stops.
@@ -57,6 +58,9 @@ class ModelPriceUpdate:
     # The published price a person still has to accept. Kept apart from the list_* baseline on
     # purpose: writing it there would make the next run compare the figure against itself.
     pending_list_price: dict[str, float | None] | None = None
+    context_price_tiers: list[dict[str, Any]] | None = None
+    pending_context_price_tiers: list[dict[str, Any]] | None = None
+    expected_context_price_tiers: list[dict[str, Any]] | None = None
     # What the model's pricing looked like when this was planned. The write refuses if any of it
     # has moved since -- otherwise a sync that started before someone switched the model back to
     # manual finishes afterwards and puts its rate on a row that no longer follows a list.
@@ -114,6 +118,9 @@ def _planned_against(model: ManagedModel, **fields: Any) -> ModelPriceUpdate:
         expected_source=str(model.price_source),
         expected_reference=model.price_reference,
         expected_discount_percent=model.effective_discount_percent,
+        expected_context_price_tiers=[
+            tier.model_dump(mode="json") for tier in model.context_price_tiers
+        ],
         **fields,
     )
 
@@ -121,6 +128,8 @@ def _planned_against(model: ManagedModel, **fields: Any) -> ModelPriceUpdate:
 def _plan_one(
     model: ManagedModel, catalog: CompositeCatalog, review_threshold: float
 ) -> ModelPriceUpdate:
+    if model.context_price_tiers:
+        return _plan_context(model, catalog, review_threshold)
     reference = model.price_reference or ""
     try:
         entry = catalog.lookup(reference)
@@ -183,6 +192,51 @@ def _plan_one(
         list_output_cost_per_million=entry.output_per_million,
         list_cached_cost_per_million=entry.cached_per_million,
         list_cache_write_cost_per_million=entry.cache_write_per_million,
+    )
+
+
+def _plan_context(
+    model: ManagedModel, catalog: CompositeCatalog, review_threshold: float,
+) -> ModelPriceUpdate:
+    try:
+        updated = resolve_context_prices(
+            catalog, model.price_source, model.context_price_references,
+            model.effective_discount_percent,
+        )
+    except Exception as error:
+        return _planned_against(
+            model, status=PriceSyncStatus.STALE,
+            message=f"分档价目读取失败，保留已接受的完整规则：{type(error).__name__}",
+        )
+    previous = {tier.key: tier for tier in model.context_price_tiers}
+    changed_rules = {tier.key for tier in updated} != set(previous) or any(
+        tier.key not in previous
+        or (tier.min_input_tokens, tier.max_input_tokens, tier.reference) != (
+            previous[tier.key].min_input_tokens, previous[tier.key].max_input_tokens,
+            previous[tier.key].reference,
+        ) for tier in updated
+    )
+    drift = 0.0
+    for tier in updated:
+        old = previous.get(tier.key)
+        if old is None:
+            continue
+        for bucket in ("input", "output", "cached", "cache_write"):
+            baseline = getattr(old.list_prices, bucket)
+            current = getattr(tier.list_prices, bucket)
+            if baseline != current and (baseline is None or current is None or baseline == 0):
+                drift = float("inf")
+            elif baseline is not None and current is not None and baseline > 0:
+                drift = max(drift, abs(current - baseline) / baseline)
+    payload = [tier.model_dump(mode="json") for tier in updated]
+    if changed_rules or drift > review_threshold:
+        return _planned_against(
+            model, status=PriceSyncStatus.REVIEW_NEEDED,
+            message="分档计价规则或官方价格发生较大变化，需确认后才能采用。",
+            pending_context_price_tiers=payload,
+        )
+    return _planned_against(
+        model, status=PriceSyncStatus.OK, writes=True, context_price_tiers=payload,
     )
 
 

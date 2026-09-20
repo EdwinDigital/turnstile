@@ -37,6 +37,7 @@ from turnstile_core.integrations.apim_control_plane_contract import (
     OperationResource,
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
+from turnstile_core.pricing.catalog import CompositeCatalog
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.control_plane import (
     GatewayControlPlaneService as BaseGatewayControlPlaneService,
@@ -103,6 +104,7 @@ class GatewayControlPlaneService(BaseGatewayControlPlaneService):
         application_default_tokens_per_minute: int = 100_000,
         application_product_id: str = "finops-ai-consumers",
         databricks_oauth_enabled: bool = False,
+        price_catalog: CompositeCatalog | None = None,
     ) -> None:
         super().__init__(
             repository,
@@ -115,6 +117,7 @@ class GatewayControlPlaneService(BaseGatewayControlPlaneService):
             application_default_tokens_per_minute=application_default_tokens_per_minute,
             application_product_id=application_product_id,
             databricks_oauth_enabled=databricks_oauth_enabled,
+            price_catalog=price_catalog,
         )
 
 class GatewayPublicationWorker(BaseGatewayPublicationWorker):

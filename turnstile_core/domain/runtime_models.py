@@ -10,7 +10,7 @@ from uuid import UUID
 from pydantic import Field, HttpUrl, SecretStr, model_validator
 
 from .image_profiles import ImageGenerationLimits, ImageGenerationProfile
-from .models import StrictModel
+from .models import ModelPriceTier, StrictModel
 
 ModelCapability = Literal[
     "chat", "tools", "vision", "reasoning", "streaming", "embeddings", "image_generation"
@@ -463,6 +463,10 @@ class ManagedModelWrite(StrictModel):
     # rates above stay whatever someone typed, and the price sync leaves the row alone.
     price_source: PriceSource = PriceSource.MANUAL
     price_reference: str | None = Field(default=None, min_length=1, max_length=255)
+    context_price_references: list[str] = Field(
+        default_factory=list, max_length=32, exclude_if=lambda value: not value,
+    )
+    context_price_refresh: bool = Field(default=False, exclude_if=lambda value: not value)
     # Percent of list price this model is charged at, overriding the connection's own figure.
     # None inherits it. This is a commercial term, so nothing derives it -- a person types it.
     price_discount_percent: float | None = Field(default=None, gt=0, le=100)
@@ -474,11 +478,24 @@ class ManagedModelWrite(StrictModel):
                 raise ValueError("Image generation cannot declare text or streaming capabilities")
             if self.is_default:
                 raise ValueError("An image model cannot be the default chat model")
+            if self.context_price_references:
+                raise ValueError("Image models cannot use context-tier prices")
         return self
 
     @model_validator(mode="after")
     def validate_price_source(self) -> ManagedModelWrite:
-        if self.price_source is not PriceSource.MANUAL and not self.price_reference:
+        if self.context_price_refresh and not self.context_price_references:
+            raise ValueError("Refreshing context prices requires the complete tier selection")
+        if self.context_price_references:
+            if self.price_source is PriceSource.MANUAL:
+                raise ValueError("Context-tier references require a catalog price source")
+            if (len(self.context_price_references) < 2
+                or len(set(self.context_price_references)) != len(self.context_price_references)):
+                raise ValueError("Context pricing requires distinct tier references")
+            if any(not reference.startswith(f"{self.price_source.value}:")
+                   for reference in self.context_price_references):
+                raise ValueError("Context references must use the selected price source")
+        elif self.price_source is not PriceSource.MANUAL and not self.price_reference:
             raise ValueError("Following a list price requires the catalog entry to follow")
         return self
 
@@ -512,11 +529,69 @@ class ManagedModel(ManagedModelWrite):
     # from, and the one the next run measures drift against. Letting an unapproved figure land
     # there makes the second run compare it with itself and accept it unasked.
     pending_list_price: PendingListPrice | None = None
+    context_price_tiers: list[StoredContextPriceTier] = Field(default_factory=list, max_length=32)
+    pending_context_price_tiers: list[StoredContextPriceTier] | None = None
     # Resolved from the model's own figure or the connection's, so the caller does not have to
     # know which one applied.
     effective_discount_percent: float | None = None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def restore_context_references(cls, values: Any) -> Any:
+        if isinstance(values, dict) and values.get("context_price_tiers"):
+            values = dict(values)
+            values["context_price_references"] = [
+                tier.reference if isinstance(tier, StoredContextPriceTier) else tier["reference"]
+                for tier in values["context_price_tiers"]
+            ]
+        return values
+
+
+class PriceCatalogInputRange(StrictModel):
+    min_input_tokens: int = Field(ge=0, strict=True)
+    max_input_tokens: int | None = Field(default=None, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def require_ordered_bounds(self) -> PriceCatalogInputRange:
+        if self.max_input_tokens is not None and self.max_input_tokens < self.min_input_tokens:
+            raise ValueError("Context pricing bounds must be ordered")
+        return self
+
+
+class PriceCatalogRuleSource(StrictModel):
+    rule_id: str = Field(min_length=1)
+    url: str = Field(pattern=r"^https://")
+    revision: str = Field(min_length=1)
+    verified_on: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class StoredContextPriceTier(ModelPriceTier):
+    reference: str = Field(min_length=1, max_length=1000)
+    label: str = Field(min_length=1)
+    list_prices: PendingListPrice
+    input_range_source: PriceCatalogRuleSource | None = None
+    model_key: str = ""
+    model_label: str = ""
+    product: str = ""
+    group_key: str = ""
+    service_tier: str = ""
+    deployment: str = ""
+    regions: list[str] = Field(default_factory=list)
+
+
+class PriceCatalogContextTier(StrictModel):
+    group_key: str = Field(min_length=1)
+    model_label: str = Field(min_length=1)
+    service_tier: str = ""
+    key: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    order: int = Field(ge=0, strict=True)
+    input_range: PriceCatalogInputRange | None = None
+    input_range_source: PriceCatalogRuleSource | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
 
 class PriceCatalogModel(StrictModel):
@@ -526,6 +601,7 @@ class PriceCatalogModel(StrictModel):
     label: str
     product: str
     source: PriceSource
+    context_tier: PriceCatalogContextTier | None = None
 
 
 class PriceCatalogModelsResponse(StrictModel):
@@ -589,6 +665,7 @@ class RegistryResponse(StrictModel):
     gateways: list[GatewayProfile]
     runtimes: list[Runtime]
     models: list[ManagedModel]
+    context_pricing_supported: bool = False
     backend_pool_session_affinity_supported: bool = False
     databricks_connections_supported: bool = False
     databricks_oauth_supported: bool = False

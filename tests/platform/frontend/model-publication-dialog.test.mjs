@@ -7,6 +7,7 @@ import { runInNewContext } from "node:vm"
 
 import * as connections from "../../../frontend/src/components/model-management/model-publication-connections.ts"
 import * as compatible from "../../../frontend/src/components/model-management/openai-compatible.ts"
+import * as pricing from "../../../frontend/src/components/model-management/model-edit-form.ts"
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
@@ -33,16 +34,16 @@ function registry(overrides = {}) {
 function nodes(value) {
   if (Array.isArray(value)) return value.flatMap(nodes)
   if (!value || typeof value !== "object") return []
-  return [value, ...nodes(value.props?.children)]
+  return [value, ...nodes(typeof value.type === "function" ? value.type(value.props) : value.props?.children)]
 }
 
 function text(value) {
   if (Array.isArray(value)) return value.map(text).join("")
-  if (value && typeof value === "object") return text(value.props?.children)
+  if (value && typeof value === "object") return text(typeof value.type === "function" ? value.type(value.props) : value.props?.children)
   return value == null || typeof value === "boolean" ? "" : String(value)
 }
 
-function harness(rawRegistry = registry(), publication) {
+function harness(rawRegistry = registry(), publication, publishFailure) {
   const slots = []
   let cursor = 0
   const writes = []
@@ -65,11 +66,13 @@ function harness(rawRegistry = registry(), publication) {
     react: hooks, "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
     "@tanstack/react-query": { useQuery: () => ({ data: publication }), useQueryClient: () => queryClient },
     "../../data-sources/apim/api": { dataSource: {
-      publishModel: async request => { writes.push(request); return { publication: { id: "accepted" } } },
+      publishModel: async request => { writes.push(request); if (publishFailure) throw publishFailure; return { publication: { id: "accepted" } } },
       retryGatewayPublication: async (...args) => { writes.push(args); return { id: publication.id } },
     } },
     "../../data-sources/apim/queries": { finopsKeys: { gatewayPublication: id => [id] }, finopsQueries: { gatewayPublication: () => ({}) } },
+    "../../locales/index": { useLocale: () => ({ locale: "zh-CN" }), translateForLocale: async value => value },
     "./model-publication-connections": connections, "./openai-compatible": compatible,
+    "./model-edit-form": pricing,
     "../brand-logos": { GatewayBrandLogo: "GatewayBrandLogo", ProviderBrandLogo: "ProviderBrandLogo", gatewayBrandFromIdentity: () => "generic", providerBrandFromMetadata: () => "generic" },
   }
   runInNewContext(compiled, { exports, require: name => imports[name] ?? primitives })
@@ -91,6 +94,81 @@ function harness(rawRegistry = registry(), publication) {
   }
   return { props, writes, queued, render, find, input, select, submit }
 }
+
+test("publication errors use the existing notice layout without shrinking long messages", async () => {
+  const failure = new Error(`API 422: ${"price_source is not supported. ".repeat(30)}`)
+  const view = harness(registry(), undefined, failure)
+  view.input("foundry-deployment", "gpt-5.6-sol")
+  await view.submit()
+  await new Promise(resolve => setImmediate(resolve))
+  const alert = view.find(node => node.props?.role === "alert")
+  assert.equal(alert.props.className, "registry-error publication-form-error")
+  assert.equal(alert.props.children[0].type, "TriangleAlert")
+  assert.equal(alert.props.children[1].type, "div")
+  assert.equal(alert.props.children[1].props["data-no-localize"], true)
+  assert.equal(text(alert.props.children[1]), String(failure))
+  assert.equal(view.queued.length, 0)
+  const form = view.find(node => node.type === "form")
+  assert.equal(form.props.children.at(-2).type.name, "PublicationErrorNotice")
+  assert.equal(form.props.children.at(-1).props.className, "registry-editor-footer")
+  assert.equal(form.props.children.at(-3).props.className, "registry-editor-body simple-model-body")
+  const stylesheet = frontendRequire("postcss").parse(readFileSync(new URL("../../../frontend/src/styles/model-platform.css", import.meta.url), "utf8"))
+  const styles = new Map()
+  stylesheet.walkRules(rule => styles.set(rule.selector, Object.fromEntries(rule.nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value]))))
+  const notice = styles.get(".registry-error.publication-form-error")
+  assert.equal(notice["flex-shrink"], "0")
+  assert.equal(notice.display, "grid")
+  assert.equal(notice.margin, "12px 16px 16px")
+  assert.equal(notice["max-height"], "min(180px, 25dvh)")
+  assert.equal(notice["overflow-y"], "auto")
+  for (const property of ["color", "background", "border-color"]) assert.equal(notice[property], undefined)
+  assert.equal(styles.get(".publication-form-error > div")["overflow-wrap"], "anywhere")
+  assert.equal(styles.get(".publication-form-error > div")["white-space"], "pre-wrap")
+})
+
+test("unsupported publication pricing fields explain the backend version mismatch without retrying", async () => {
+  const failure = new Error(`API 422: ${JSON.stringify({ detail: ["price_source", "price_reference", "price_discount_percent"].map(field => ({
+    type: "extra_forbidden", loc: ["body", "model", field], msg: "Extra inputs are not permitted", input: "do-not-display-input",
+  })) })}`)
+  const view = harness(registry(), undefined, failure)
+  view.input("foundry-deployment", "gpt-5.6-sol")
+  const picker = view.find(node => node.type === "ModelPriceSourceFields")
+  picker.props.setDraft(current => ({ ...current, priceSource: "azure_retail", priceReference: "azure_retail:Azure OpenAI GPT5:5.6 sol ShortCo Std:Global:*" }))
+  await view.submit()
+  await new Promise(resolve => setImmediate(resolve))
+  const alert = view.find(node => node.props?.role === "alert")
+  assert.equal(text(alert), "前后端计价接口版本不一致，请更新后端后再发布。")
+  assert.equal(view.writes.length, 1)
+  assert.equal(view.writes[0].model.price_source, "azure_retail")
+  assert.equal(view.queued.length, 0)
+  assert.equal(text(view.render()).includes("do-not-display-input"), false)
+})
+
+test("publication validation errors show fields and messages instead of raw response input", async () => {
+  const failure = new Error(`API 422: ${JSON.stringify({ detail: [{
+    type: "greater_than_equal", loc: ["body", "model", "context_window"], msg: "Input should be greater than or equal to 1", input: "do-not-display-input",
+  }] })}`)
+  const view = harness(registry(), undefined, failure)
+  view.input("foundry-deployment", "gpt-5.6-sol")
+  await view.submit()
+  await new Promise(resolve => setImmediate(resolve))
+  const alert = view.find(node => node.props?.role === "alert")
+  assert.equal(text(alert), "model.context_window: Input should be greater than or equal to 1")
+  assert.equal(text(view.render()).includes("do-not-display-input"), false)
+})
+
+test("manual chat prices remain optional and do not send unused catalog fields", async () => {
+  const view = harness()
+  view.input("foundry-deployment", "gpt-5.6-sol")
+  for (const id of ["publication-input-price", "publication-output-price", "publication-cache-read-price", "publication-cache-write-price"]) {
+    assert.equal(view.find(node => node.props?.id === id).props.required === true, false)
+  }
+  await view.submit()
+  assert.equal(view.writes.length, 1)
+  const model = view.writes[0].model
+  for (const field of ["price_source", "price_reference", "price_discount_percent"]) assert.equal(Object.hasOwn(model, field), false)
+  for (const field of ["input_cost_per_million", "output_cost_per_million", "cached_cost_per_million", "cache_write_cost_per_million"]) assert.equal(model[field], null)
+})
 
 test("normalized backend image capability controls the real component option", () => {
   for (const [enabled, version, disabled] of [[true, 4, false], [false, 4, true], [undefined, 4, true], [true, 3, true]]) {
@@ -183,6 +261,112 @@ test("connection changes clear credentials, model operation, prices and deployme
   for (const id of ["existing-provider-api-key", "foundry-deployment", "publication-input-price"]) assert.equal(view.find(node => node.type === "Input" && node.props.id === id).props.value, "")
   assert.ok(view.find(node => node.type === "Select" && node.props.value === "chat"))
   assert.ok(text(view.render()).includes("价格未填写"))
+})
+
+test("new text models expose the shared pricing picker without a fabricated saved model", () => {
+  const data = registry()
+  data.runtimes[0].price_discount_percent = 90
+  const view = harness(data)
+  const section = view.find(node => node.props?.["aria-labelledby"] === "publication-pricing-heading")
+  assert.equal(section.type, "section")
+  const picker = view.find(node => node.type === "ModelPriceSourceFields")
+  assert.equal(picker.props.model, undefined)
+  assert.equal(picker.props.draft.priceSource, "manual")
+  assert.equal(picker.props.connectionDiscount, 90)
+})
+
+test("publication submits the selected regional reference, effective rates and model discount", async () => {
+  const data = registry()
+  data.runtimes[0].price_discount_percent = 90
+  for (const override of ["", "80"]) {
+    const view = harness(data)
+    view.input("foundry-deployment", "gpt-4.1-deployment")
+    const picker = view.find(node => node.type === "ModelPriceSourceFields")
+    assert.equal(picker.props.modelName, "gpt-4.1-deployment")
+    picker.props.setDraft(current => {
+      const draft = { ...current, discountPercent: override }
+      return pricing.applyCatalogOption(draft, "azure_retail", {
+        reference: "azure_retail:Azure OpenAI:gpt 4.1:Regional:westus",
+        input_per_million: 2, output_per_million: 8,
+        cached_per_million: 0.5, cache_write_per_million: null,
+      }, pricing.resolveDiscount(draft, picker.props.connectionDiscount).percent)
+    })
+    assert.equal(view.find(node => node.props?.id === "publication-input-price"), undefined)
+    await view.submit()
+    assert.equal(view.writes.length, 1)
+    const sent = view.writes[0].model
+    assert.equal(sent.price_source, "azure_retail")
+    assert.equal(sent.price_reference, "azure_retail:Azure OpenAI:gpt 4.1:Regional:westus")
+    assert.equal(sent.price_discount_percent, override ? 80 : null)
+    assert.equal(sent.input_cost_per_million, override ? 1.6 : 1.8)
+    assert.equal(sent.cached_cost_per_million, override ? 0.4 : 0.45)
+    assert.equal(sent.cache_write_cost_per_million, null)
+  }
+})
+
+test("context pricing publishes complete references when the backend supports it", async () => {
+  const view = harness(registry({ context_pricing_supported:true }))
+  view.input("foundry-deployment", "unit-model")
+  const references = ["azure_retail:Unit:short:Global:eastus", "azure_retail:Unit:long:Global:eastus"]
+  view.find(node => node.type === "ModelPriceSourceFields").props.setDraft(current => ({
+    ...current, priceSource:"azure_retail", contextPricingPreview:true, contextPriceReferences:references,
+    contextPriceTiers:references.map((reference,index)=>({
+      key:String(index),label:`Tier ${index}`,order:index,inputRange:{min_input_tokens:index?1001:0,max_input_tokens:index?null:1000},
+      option:{reference,input_per_million:2,output_per_million:8,cached_per_million:0.5,cache_write_per_million:1},
+    })),
+  }))
+  assert.equal(view.find(node => node.type === "Button" && node.props.type === "submit").props.disabled, false)
+  await view.submit()
+  assert.equal(view.writes.length,1)
+  assert.deepEqual(view.writes[0].model.context_price_references,references)
+  assert.equal(view.writes[0].model.price_reference,null)
+  assert.equal(view.writes[0].model.input_cost_per_million,null)
+  assert.equal(Object.hasOwn(view.writes[0].model,"context_price_tiers"),false)
+})
+
+test("context pricing preview cannot publish a single-price payload", async () => {
+  const view = harness()
+  view.input("foundry-deployment", "gpt-5.6-sol")
+  view.find(node => node.type === "ModelPriceSourceFields").props.setDraft(current => ({
+    ...current, priceSource: "azure_retail", contextPricingPreview: true, priceReference: "",
+  }))
+  assert.equal(view.find(node => node.type === "Button" && node.props.type === "submit").props.disabled, true)
+  await view.submit()
+  assert.equal(view.writes.length, 0)
+  assert.ok(text(view.render()).includes("当前后端尚不支持分档计费，暂不可保存或发布。"))
+})
+
+test("new-model pricing rejects missing or mismatched references and invalid discounts", async () => {
+  for (const changes of [
+    { priceSource: "azure_retail" },
+    { priceSource: "anthropic", priceReference: "azure_retail:Azure OpenAI:gpt 4.1:Global:*" },
+    { discountPercent: "0" }, { discountPercent: "101" }, { discountPercent: "NaN" },
+  ]) {
+    const view = harness()
+    view.input("foundry-deployment", "gpt-4.1-deployment")
+    view.find(node => node.type === "ModelPriceSourceFields").props.setDraft(current => ({ ...current, ...changes }))
+    await view.submit()
+    assert.equal(view.writes.length, 0)
+    assert.ok(view.find(node => node.props?.role === "alert"))
+  }
+})
+
+test("switching connection or operation clears catalog references and discounts", () => {
+  const data = registry()
+  data.runtimes.push({ ...data.runtimes[0], id: "second", name: "Second connection" })
+  for (const change of [view => view.select("connection", "second"), view => {
+    view.select("chat", "image_generation")
+    assert.equal(view.find(node => node.type === "ModelPriceSourceFields"), undefined)
+    view.select("image_generation", "chat")
+  }]) {
+    const view = harness(data)
+    view.find(node => node.type === "ModelPriceSourceFields").props.setDraft(current => ({
+      ...current, priceSource: "azure_retail", priceReference: "azure_retail:Azure OpenAI:gpt 4.1:Global:*",
+      discountPercent: "80", inputPrice: "1.6",
+    }))
+    change(view)
+    assert.deepEqual(view.find(node => node.type === "ModelPriceSourceFields").props.draft, pricing.createModelPriceDraft())
+  }
 })
 
 test("paid image retry consent is opt-in, publication-bound and consumed by each retry", async () => {

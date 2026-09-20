@@ -13,7 +13,7 @@ from turnstile_core.domain.application_access import (
     GatewayApplicationDiscoveryItem,
     UsageApplicationAttribution,
 )
-from turnstile_core.domain.models import ModelIdentity, ModelPrice, TokenUsageRecord
+from turnstile_core.domain.models import ModelIdentity, ModelPrice, ModelPriceTier, TokenUsageRecord
 from turnstile_core.ingestion.processor import (
     CoefficientResolver,
     UsageProcessor,
@@ -617,6 +617,127 @@ def sonnet_prices() -> dict[str, ModelPrice]:
             output_price_per_million=15.0,
         )
     }
+
+
+def context_price() -> ModelPrice:
+    return ModelPrice(
+        input_price_per_million=0, cached_price_per_million=0,
+        cache_write_price_per_million=0, output_price_per_million=0,
+        context_tiers=[
+            ModelPriceTier(
+                key="short", min_input_tokens=0, max_input_tokens=1200,
+                input_price_per_million=3, cached_price_per_million=0.3,
+                cache_write_price_per_million=3.75, output_price_per_million=15,
+            ),
+            ModelPriceTier(
+                key="long", min_input_tokens=1201,
+                input_price_per_million=6, cached_price_per_million=0.6,
+                cache_write_price_per_million=7.5, output_price_per_million=22.5,
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize("input_tokens,cached_tokens,key", [
+    (0, 0, "short"), (1000, 200, "short"), (1001, 200, "long"),
+    (0, 1201, "long"), (1201, 0, "long"),
+])
+def test_context_price_selects_by_total_input_and_prices_the_whole_request(
+    input_tokens: int, cached_tokens: int, key: str,
+) -> None:
+    price = context_price()
+    selected = price.for_input_tokens(input_tokens + cached_tokens)
+    assert selected.selected_tier == key
+    writes = min(100, cached_tokens)
+    output_tokens = 9999
+    expected = (
+        input_tokens * selected.input_price_per_million
+        + (cached_tokens - writes) * selected.cached_price_per_million
+        + writes * selected.cache_write_price_per_million
+        + output_tokens * selected.output_price_per_million
+    ) / 1_000_000
+    assert price.cost(input_tokens, cached_tokens, output_tokens, writes) == round(expected, 8)
+    assert price.selected_tier is None
+
+
+@pytest.mark.parametrize("minimum,maximum", [(1200, None), (1202, None), (1201, 9000)])
+def test_context_price_rejects_overlapping_missing_or_unbounded_ranges(
+    minimum: int, maximum: int | None,
+) -> None:
+    data = context_price().model_dump()
+    data["context_tiers"][1].update(min_input_tokens=minimum, max_input_tokens=maximum)
+    with pytest.raises(ValueError):
+        ModelPrice.model_validate(data)
+
+
+@pytest.mark.parametrize("input_tokens,key,rate", [(1000, "short", 3), (1001, "long", 6)])
+def test_context_price_ingestion_snapshots_selected_rates_and_complete_schedule(
+    input_tokens: int, key: str, rate: float,
+) -> None:
+    price = context_price()
+    repository = RecordingRepository({"gpt-4.1-mini": price})
+    processor = UsageProcessor(repository, CoefficientResolver({"default": 1.0}))
+    assert processor.process(event(input_tokens=input_tokens, cache_write_tokens=150)) is True
+    record = repository.records[0]
+    assert record.price_context_tier == key
+    assert record.input_price_per_million == rate
+    assert record.price_context_snapshot == price.model_dump(mode="json")
+    assert record.estimated_cost == price.cost(input_tokens, 200, 100, 150)
+    price.context_tiers[0].input_price_per_million = 999
+    assert record.price_context_snapshot["context_tiers"][0]["input_price_per_million"] == 3
+
+
+def test_context_price_ingestion_does_not_guess_a_tier_for_missing_input_usage() -> None:
+    price = context_price()
+    repository = RecordingRepository({"gpt-4.1-mini": price})
+    processor = UsageProcessor(repository, CoefficientResolver({"default": 1.0}))
+    assert processor.process(event(input_tokens=None, cached_tokens=None, output_tokens=None))
+    record = repository.records[0]
+    assert record.price_context_tier is None
+    assert record.input_price_per_million is None
+    assert record.estimated_cost == 0
+    assert record.price_context_snapshot == price.model_dump(mode="json")
+    assert record.estimated is True
+
+
+def test_context_price_reconciliation_uses_original_rules_after_registry_price_changes() -> None:
+    from turnstile_core.domain.models import ReconciledUsage
+
+    repository = InMemoryRepository()
+    prices = context_price()
+    recording = RecordingRepository({"gpt-4.1-mini": prices})
+    processor = UsageProcessor(recording, CoefficientResolver({"default": 1.0}))
+    processor.process(event(input_tokens=None, cached_tokens=None, output_tokens=None))
+    original = recording.records[0]
+    repository.write_token_usage(original)
+    prices.context_tiers[1].input_price_per_million = 999
+    item = ReconciledUsage(
+        correlation_id=original.correlation_id, input_tokens=1001, cached_tokens=200,
+        output_tokens=100,
+    )
+    assert repository.apply_reconciled_usage([item]) == 1
+    saved = repository.usage_records[-1]
+    assert saved.price_context_tier == "long"
+    assert saved.input_price_per_million == 6
+    assert saved.estimated_cost == context_price().cost(1001, 200, 100)
+    assert saved.price_context_snapshot == original.price_context_snapshot
+    assert repository.apply_reconciled_usage([item]) == 0
+
+
+def test_context_price_late_formal_usage_preserves_first_price_schedule() -> None:
+    repository = InMemoryRepository()
+    recording = RecordingRepository({"gpt-4.1-mini": context_price()})
+    processor = UsageProcessor(recording, CoefficientResolver({"default": 1.0}))
+    processor.process(event(input_tokens=None, cached_tokens=None, output_tokens=None))
+    original = recording.records[0]
+    repository.write_token_usage(original)
+    recording.prices["gpt-4.1-mini"].context_tiers[1].input_price_per_million = 999
+    processor.process(event(input_tokens=1001, cached_tokens=200, output_tokens=100))
+    repository.write_token_usage(recording.records[-1])
+    saved = repository.usage_records[-1]
+    assert saved.price_context_tier == "long"
+    assert saved.input_price_per_million == 6
+    assert saved.price_context_snapshot == original.price_context_snapshot
 
 
 def test_cost_is_priced_at_ingestion_with_the_cached_rate() -> None:

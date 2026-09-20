@@ -4,6 +4,7 @@ import { Check, Circle, Copy, Eye, EyeOff, LoaderCircle, Plug, Rocket, ShieldChe
 
 import { dataSource } from "../../data-sources/apim/api"
 import { finopsKeys, finopsQueries } from "../../data-sources/apim/queries"
+import { translateForLocale, useLocale } from "../../locales/index"
 import type {
   GatewayPublication,
   GatewayPublicationCreate,
@@ -45,6 +46,8 @@ import {
   publicationConnectionTarget,
 } from "./model-publication-connections"
 import { FieldHelp } from "./field-help"
+import { createModelPriceDraft, validateModelPricing } from "./model-edit-form"
+import { ModelPriceSourceFields, ModelPriceText } from "./model-price-source"
 import { ModelVendorLogo } from "./model-vendor-select"
 import {
   displayNameFromProviderId,
@@ -137,6 +140,53 @@ function optionalNumberError(values: string[]) {
   return numeric.some((value) => !Number.isFinite(value) || value < 0)
     ? "上下文窗口和价格必须是非负数字。"
     : null
+}
+
+function publicationErrorMessage(message: string): string {
+  const response = message.match(/^(?:(?:ApiError|Error):\s*)?API (\d{3}):\s*([\s\S]*)$/)
+  if (!response) return message
+  let payload: { detail?: unknown }
+  try {
+    const parsed: unknown = JSON.parse(response[2])
+    if (typeof parsed !== "object" || parsed === null) return message
+    payload = parsed
+  } catch {
+    return message
+  }
+  if (typeof payload.detail === "string") return payload.detail
+  if (!Array.isArray(payload.detail)) return message
+  const issues = payload.detail.filter((issue): issue is { type?: unknown; loc?: unknown; msg?: unknown } =>
+    typeof issue === "object" && issue !== null)
+  const pricingFields = ["price_source", "price_reference", "price_discount_percent"]
+  if (response[1] === "422" && issues.length > 0 && issues.every(issue =>
+    issue.type === "extra_forbidden" && Array.isArray(issue.loc) && issue.loc.length === 3
+    && issue.loc[0] === "body" && issue.loc[1] === "model" && pricingFields.includes(issue.loc[2]))) {
+    return "前后端计价接口版本不一致，请更新后端后再发布。"
+  }
+  return issues.map(issue => {
+    if (typeof issue.msg !== "string") return ""
+    const location = Array.isArray(issue.loc)
+      ? issue.loc.filter(part => (typeof part === "string" || typeof part === "number") && part !== "body").join(".")
+      : ""
+    return location ? `${location}: ${issue.msg}` : issue.msg
+  }).filter(Boolean).join("\n") || message
+}
+
+function PublicationErrorNotice({ message }: { message: string }) {
+  const { locale } = useLocale()
+  const source = publicationErrorMessage(message)
+  const [translated, setTranslated] = useState<{ source: string; locale: string; text: string } | null>(null)
+  useEffect(() => {
+    let active = true
+    void translateForLocale(source, locale).then(text => {
+      if (active) setTranslated({ source, locale, text })
+    }).catch(() => undefined)
+    return () => { active = false }
+  }, [source, locale])
+  return <div className="registry-error publication-form-error" role="alert">
+    <TriangleAlert size={15} aria-hidden="true" />
+    <div data-no-localize>{translated?.source === source && translated.locale === locale ? translated.text : source}</div>
+  </div>
 }
 
 function runtimeRegion(runtime: ModelRuntime) {
@@ -232,10 +282,8 @@ export function ModelPublicationDialog({
   const [displayName, setDisplayName] = useState("")
   const [upstreamModelId, setUpstreamModelId] = useState("")
   const [contextWindow, setContextWindow] = useState("")
-  const [inputPrice, setInputPrice] = useState("")
-  const [outputPrice, setOutputPrice] = useState("")
-  const [cacheReadPrice, setCacheReadPrice] = useState("")
-  const [cacheWritePrice, setCacheWritePrice] = useState("")
+  const [pricing, setPricing] = useState(() => createModelPriceDraft(registry.context_pricing_supported === true))
+  const { inputPrice, outputPrice, cacheReadPrice, cacheWritePrice } = pricing
   const [formError, setFormError] = useState<string | null>(null)
   const [publishError, setPublishError] = useState<string | null>(null)
   const [publishing, setPublishing] = useState(false)
@@ -244,7 +292,9 @@ export function ModelPublicationDialog({
   const effectiveModelKey = openaiCompatible ? publicModelKeyFromProviderId(upstreamModelId) : modelKey.trim()
   const effectiveDisplayName = openaiCompatible ? displayNameFromProviderId(upstreamModelId) : displayName.trim()
   const priceValues = imageGeneration ? [inputPrice, outputPrice, cacheReadPrice] : [inputPrice, outputPrice, cacheReadPrice, cacheWritePrice]
-  const pricingStatus = priceValues.every(value => value.trim()) ? "价格已填写"
+  const pricingStatus = pricing.contextPricingPreview ? pricing.contextPricingSupported ? "分档价格" : "分档价格预览" : pricing.priceSource !== "manual"
+    ? pricing.priceReference ? "官方价已选择" : "请选择官方价"
+    : priceValues.every(value => value.trim()) ? "价格已填写"
     : priceValues.some(value => value.trim()) ? "价格部分填写" : "价格未填写"
   const connectionLogo = (runtime: ModelRuntime) => registry.providers.find(provider => provider.id === runtime.provider_id)?.provider_kind === "openai_compatible"
     ? <ModelVendorLogo value={modelVendorFromMetadata(runtime.config, `${runtime.name} ${runtime.provider_name}`)} size={15} />
@@ -271,10 +321,7 @@ export function ModelPublicationDialog({
     setDisplayName("")
     setUpstreamModelId("")
     setContextWindow("")
-    setInputPrice("")
-    setOutputPrice("")
-    setCacheReadPrice("")
-    setCacheWritePrice("")
+    setPricing(createModelPriceDraft(registry.context_pricing_supported === true))
     setFormError(null)
     setPublishError(null)
   }
@@ -298,6 +345,14 @@ export function ModelPublicationDialog({
     if (!selectedRuntime || !selectedProvider) return "请选择当前网关下的可用连接。"
     if (requiredCredentialMissing) return selectedRuntimeUsesOAuth
       ? "请输入该连接首次发布所需的 OAuth Secret。" : "请输入该连接首次发布所需的一次性 API Key。"
+    const priceError = validateModelPricing(pricing)
+    if (priceError) return {
+      prices: "价格必须是非负数字。",
+      price_reference: "请选择官方价目中的模型与计价方式。",
+      context_pricing_preview: "当前后端尚不支持分档计费，暂不可保存或发布。",
+      context_pricing_incomplete: "分档价格或阈值不完整，不能保存。",
+      discount: "折扣必须大于 0 且不超过 100%。",
+    }[priceError]
     if (foundry) {
       if (!foundryDeployment.trim()) return "请输入已有的 Foundry Deployment Name。"
       if (imageGeneration && registry.image_generation_supported !== true) return "后端尚未启用图像生成"
@@ -334,10 +389,16 @@ export function ModelPublicationDialog({
           display_name: foundry ? undefined : effectiveDisplayName,
           upstream_model_id: foundry ? undefined : upstreamModelId.trim(),
           context_window: imageGeneration ? null : numberOrNull(contextWindow),
-          input_cost_per_million: numberOrNull(inputPrice),
-          output_cost_per_million: numberOrNull(outputPrice),
-          cached_cost_per_million: numberOrNull(cacheReadPrice),
-          cache_write_cost_per_million: imageGeneration ? null : numberOrNull(cacheWritePrice),
+          input_cost_per_million: pricing.contextPricingPreview ? null : numberOrNull(inputPrice),
+          output_cost_per_million: pricing.contextPricingPreview ? null : numberOrNull(outputPrice),
+          cached_cost_per_million: pricing.contextPricingPreview ? null : numberOrNull(cacheReadPrice),
+          cache_write_cost_per_million: imageGeneration || pricing.contextPricingPreview ? null : numberOrNull(cacheWritePrice),
+          ...(pricing.contextPricingPreview ? { context_price_references: pricing.contextPriceReferences } : {}),
+          ...(pricing.priceSource !== "manual" || pricing.discountPercent.trim() ? {
+            price_source: pricing.priceSource,
+            price_reference: pricing.priceSource === "manual" || pricing.contextPricingPreview ? null : pricing.priceReference.trim(),
+            price_discount_percent: numberOrNull(pricing.discountPercent),
+          } : {}),
         },
       }
       const accepted = await dataSource.publishModel(request)
@@ -543,10 +604,7 @@ export function ModelPublicationDialog({
                   if (operation !== "chat" && operation !== "image_generation") return
                   setModelOperation(operation)
                   setContextWindow("")
-                  setInputPrice("")
-                  setOutputPrice("")
-                  setCacheReadPrice("")
-                  setCacheWritePrice("")
+                  setPricing(createModelPriceDraft(registry.context_pricing_supported === true))
                 }}>
                   <SelectTrigger className="registry-select-trigger" aria-label="模型用途"><SelectValue>{imageGeneration ? "文生图" : "对话"}</SelectValue></SelectTrigger>
                   <SelectContent align="start" alignItemWithTrigger={false}>
@@ -574,20 +632,29 @@ export function ModelPublicationDialog({
               </>}
             </section>
             {imageGeneration && !imageConfigurationSupported && <div className="registry-error" role="alert">后端尚未支持图像参数透传</div>}
-            <details className="simple-pricing" open={imageGeneration || undefined}>
-              <summary><span>价格与限制</span><span className="publication-pricing-status">{pricingStatus}</span></summary>
+            <section className="simple-model-section simple-pricing" aria-labelledby="publication-pricing-heading">
+              <div className="publication-section-heading"><span className="simple-section-title"><b id="publication-pricing-heading">价格与限制</b></span><span className="publication-pricing-status"><ModelPriceText>{pricingStatus}</ModelPriceText></span></div>
               <div className="simple-pricing-fields">
-                <div className={imageGeneration ? "form-grid" : "form-grid three"}>
-                  {!imageGeneration && <label className="registry-field"><span className="registry-field-label">上下文窗口</span><Input id="publication-context-window" type="number" min="1" value={contextWindow} onChange={(event) => setContextWindow(event.target.value)} disabled={publishing} /></label>}
-                  <label className="registry-field"><span className="registry-field-label">{imageGeneration ? "文字输入 $/M" : "输入 $/M"}</span><Input id="publication-input-price" type="number" min="0" step="0.000001" value={inputPrice} onChange={(event) => setInputPrice(event.target.value)} disabled={publishing} required={imageGeneration} /></label>
-                  <label className="registry-field"><span className="registry-field-label">{imageGeneration ? "图像输出 $/M" : "输出 $/M"}</span><Input id="publication-output-price" type="number" min="0" step="0.000001" value={outputPrice} onChange={(event) => setOutputPrice(event.target.value)} disabled={publishing} required={imageGeneration} /></label>
+                {!imageGeneration && <ModelPriceSourceFields
+                  key={`${gatewayId}:${runtimeId}:${modelOperation}`}
+                  modelName={foundry ? foundryDeployment : effectiveDisplayName || upstreamModelId}
+                  draft={pricing} setDraft={setPricing} busy={publishing}
+                  connectionDiscount={selectedRuntime.price_discount_percent ?? null} />}
+                {!imageGeneration && <div className="form-grid">
+                  <label className="registry-field"><span className="registry-field-label">上下文窗口</span><Input id="publication-context-window" type="number" min="1" value={contextWindow} onChange={(event) => setContextWindow(event.target.value)} disabled={publishing} /></label>
+                </div>}
+                {pricing.priceSource === "manual" && <>
+                <div className="form-grid">
+                  <label className="registry-field"><span className="registry-field-label">{imageGeneration ? "文字输入 $/M" : "输入 $/M"}</span><Input id="publication-input-price" type="number" min="0" step="0.000001" value={inputPrice} onChange={(event) => setPricing(current => ({ ...current, inputPrice: event.target.value }))} disabled={publishing} required={imageGeneration} /></label>
+                  <label className="registry-field"><span className="registry-field-label">{imageGeneration ? "图像输出 $/M" : "输出 $/M"}</span><Input id="publication-output-price" type="number" min="0" step="0.000001" value={outputPrice} onChange={(event) => setPricing(current => ({ ...current, outputPrice: event.target.value }))} disabled={publishing} required={imageGeneration} /></label>
                 </div>
                 <div className="form-grid">
-                  <label className="registry-field"><span className="registry-field-label">{imageGeneration ? "缓存文字输入 $/M" : "缓存读取 $/M"}</span><Input id="publication-cache-read-price" type="number" min="0" step="0.000001" value={cacheReadPrice} onChange={(event) => setCacheReadPrice(event.target.value)} disabled={publishing} required={imageGeneration} /></label>
-                  {!imageGeneration && <label className="registry-field"><span className="registry-field-label">缓存写入 $/M</span><Input id="publication-cache-write-price" type="number" min="0" step="0.000001" value={cacheWritePrice} onChange={(event) => setCacheWritePrice(event.target.value)} disabled={publishing} /></label>}
+                  <label className="registry-field"><span className="registry-field-label">{imageGeneration ? "缓存文字输入 $/M" : "缓存读取 $/M"}</span><Input id="publication-cache-read-price" type="number" min="0" step="0.000001" value={cacheReadPrice} onChange={(event) => setPricing(current => ({ ...current, cacheReadPrice: event.target.value }))} disabled={publishing} required={imageGeneration} /></label>
+                  {!imageGeneration && <label className="registry-field"><span className="registry-field-label">缓存写入 $/M</span><Input id="publication-cache-write-price" type="number" min="0" step="0.000001" value={cacheWritePrice} onChange={(event) => setPricing(current => ({ ...current, cacheWritePrice: event.target.value }))} disabled={publishing} /></label>}
                 </div>
+                </>}
               </div>
-            </details>
+            </section>
             {selectedRuntimeNeedsCredential && <section className="simple-model-section simple-connection-section" aria-labelledby="publication-credential-heading">
               <div className="simple-section-title"><b id="publication-credential-heading">首次发布凭据</b></div>
               <p className="publication-form-note">{selectedRuntimeUsesOAuth ? "仅补充已有连接首次发布所需的 Databricks OAuth Secret。" : "仅补充已有连接首次发布所需的 API Key，不会创建新连接。"}</p>
@@ -606,14 +673,15 @@ export function ModelPublicationDialog({
           </>}
           </>}
 
-          {(formError || publishError) && <div className="registry-error" role="alert">{formError ?? publishError}</div>}
         </div>
+
+        {(formError || publishError) && <PublicationErrorNotice message={formError ?? publishError ?? ""} />}
 
         <DialogFooter className="registry-editor-footer">
           <Button type="button" variant="outline" className="publication-dismiss" onClick={close} disabled={publishing}>{publicationId ? "关闭" : "取消"}</Button>
           {failed && <Button type="button" onClick={() => void retry()} disabled={publishing || Boolean(publication.data?.retry_requires_credential && !providerApiKey.trim())}><Rocket size={14} />重新发布</Button>}
           {awaitingAuthorization && <Button type="button" onClick={() => void resumeAuthorization()} disabled={publishing}><ShieldCheck size={14} />我已授权，重新验证</Button>}
-          {!publicationId && <Button type="submit" disabled={publishing || !selectedRuntime || !selectedProvider || requiredCredentialMissing}><Rocket size={14} />{publishing ? "正在提交" : "发布模型"}</Button>}
+          {!publicationId && <Button type="submit" disabled={publishing || !selectedRuntime || !selectedProvider || requiredCredentialMissing || (pricing.contextPricingPreview === true && !!validateModelPricing(pricing))}><Rocket size={14} />{publishing ? "正在提交" : "发布模型"}</Button>}
         </DialogFooter>
       </form>
     </DialogContent>

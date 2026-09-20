@@ -8,7 +8,13 @@ type PricedModel = Pick<
   | "input_cost_per_million"
   | "output_cost_per_million"
   | "cached_cost_per_million"
+  | "context_price_tiers"
 >
+
+export function hasModelPrices(model: PricedModel): boolean {
+  return (model.context_price_tiers?.length ?? 0) >= 2
+    || (model.input_cost_per_million != null && model.output_cost_per_million != null)
+}
 
 // Telemetry identifies a model by whichever space the caller used: the registry UUID from the
 // dashboard BFF, the model key from a desktop client, or the canonical display name written by
@@ -31,6 +37,7 @@ export function estimateBucketCost(
   models: PricedModel[],
 ): number | null {
   const model = findPricedModel(models, bucket.key, bucket.label)
+  if (model?.context_price_tiers?.length) return null
   if (model?.input_cost_per_million == null || model.output_cost_per_million == null) return null
   const cachedRate = model.cached_cost_per_million ?? model.input_cost_per_million
   return (
@@ -47,6 +54,7 @@ export function estimateRequestCost(
   if (request.estimated_cost > 0) return request.estimated_cost
   const model = models.find((item) => item.id === request.model_id)
     ?? models.find((item) => item.model_key === request.model_name)
+  if (model?.context_price_tiers?.length) return request.estimated_cost
   if (model?.input_cost_per_million == null || model.output_cost_per_million == null) return null
   const cachedTokens = Math.max(0, request.total_tokens - request.prompt_tokens - request.completion_tokens)
   // Providers bill cached input far below the base rate. Without a configured rate the input rate

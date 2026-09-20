@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react"
+import { createContext, type Context, useCallback, useContext, useEffect, useMemo, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   PublicClientApplication,
@@ -29,7 +29,9 @@ type AuthContextValue = {
   signOut: () => Promise<void>
 }
 
-const AuthContext = createContext<AuthContextValue | null>(null)
+const AuthContext: Context<AuthContextValue | null> =
+  import.meta.hot?.data.authContext ?? createContext<AuthContextValue | null>(null)
+if (import.meta.hot) import.meta.hot.data.authContext = AuthContext
 
 /** The client id is a public identifier -- it travels in every authorize URL.
  *

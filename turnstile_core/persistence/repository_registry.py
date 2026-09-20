@@ -92,6 +92,9 @@ class PostgreSqlRegistryRepositoryMixin:
                                     price.price_sync_status,
                                     price.price_sync_message,
                                     price.pending_list_price,
+                                    COALESCE(price.context_price_tiers, '[]'::jsonb)
+                                        AS context_price_tiers,
+                                    price.pending_context_price_tiers,
                                     -- Resolved here rather than in the caller so every reader
                                     -- sees the same answer to "which discount actually applied".
                                     COALESCE(
@@ -140,6 +143,7 @@ class PostgreSqlRegistryRepositoryMixin:
             WHERE guard.model_id = model.id
               AND guard.price_source = %(expected_source)s
               AND guard.price_reference IS NOT DISTINCT FROM %(expected_reference)s
+              AND guard.context_price_tiers = %(expected_context_price_tiers)s::jsonb
               AND COALESCE(
                     guard.price_discount_percent, runtime_price.price_discount_percent
                   ) IS NOT DISTINCT FROM %(expected_discount_percent)s
@@ -158,6 +162,17 @@ class PostgreSqlRegistryRepositoryMixin:
                     Jsonb(update["pending_list_price"])
                     if update.get("pending_list_price") is not None
                     else None
+                )
+                parameters["expected_context_price_tiers"] = Jsonb(
+                    update.get("expected_context_price_tiers") or []
+                )
+                parameters["context_price_tiers"] = (
+                    Jsonb(update["context_price_tiers"])
+                    if update.get("context_price_tiers") is not None else None
+                )
+                parameters["pending_context_price_tiers"] = (
+                    Jsonb(update["pending_context_price_tiers"])
+                    if update.get("pending_context_price_tiers") is not None else None
                 )
                 superseded = False
                 if update.get("writes"):
@@ -208,6 +223,14 @@ class PostgreSqlRegistryRepositoryMixin:
                 # it is meant to gate agrees with it on the second run.
                 connection.execute(
                     """UPDATE managed_model_price SET
+                           context_price_tiers = CASE
+                               WHEN %(writes)s AND %(context_price_tiers)s::jsonb IS NOT NULL
+                               THEN %(context_price_tiers)s::jsonb ELSE context_price_tiers END,
+                           pending_context_price_tiers = CASE
+                               WHEN %(writes)s THEN NULL
+                               WHEN %(pending_context_price_tiers)s::jsonb IS NOT NULL
+                               THEN %(pending_context_price_tiers)s::jsonb
+                               ELSE pending_context_price_tiers END,
                            list_input_cost_per_million = CASE WHEN %(writes)s
                                THEN COALESCE(%(list_input_cost_per_million)s,
                                              list_input_cost_per_million)
@@ -360,22 +383,24 @@ class PostgreSqlRegistryRepositoryMixin:
                     "price_source": values.get("price_source") or "manual",
                     "price_reference": values.get("price_reference"),
                     "price_discount_percent": values.get("price_discount_percent"),
+                    "context_price_tiers": values.get("context_price_tiers") or [],
                 }
                 # A row only when there is something to say. 'manual' with no reference and no
                 # override is exactly what an absent row means, and every model created before
                 # this migration has no row.
                 if price != {"price_source": "manual", "price_reference": None,
-                             "price_discount_percent": None}:
+                             "price_discount_percent": None, "context_price_tiers": []}:
                     connection.execute(
                         """INSERT INTO managed_model_price (
                                model_id, price_source, price_reference,
-                               price_discount_percent
-                           ) VALUES (%s, %s, %s, %s)""",
+                               price_discount_percent, context_price_tiers
+                           ) VALUES (%s, %s, %s, %s, %s)""",
                         (
                             row["id"],
                             price["price_source"],
                             price["price_reference"],
                             price["price_discount_percent"],
+                            Jsonb(price["context_price_tiers"]),
                         ),
                     )
                 row = {**row, **metadata, **price}
@@ -643,7 +668,9 @@ class PostgreSqlRegistryRepositoryMixin:
         metadata_values = {key: values[key] for key in metadata_fields if key in values}
         price_fields = {
             "runtime": {"price_discount_percent"},
-            "model": {"price_source", "price_reference", "price_discount_percent"},
+            "model": {
+                "price_source", "price_reference", "price_discount_percent", "context_price_tiers",
+            },
         }.get(kind, set())
         price_values = {key: values[key] for key in price_fields if key in values}
         if not assignments and not metadata_values and not price_values:
@@ -796,25 +823,53 @@ class PostgreSqlRegistryRepositoryMixin:
                 "price_discount_percent",
                 current["price_discount_percent"] if current else None,
             ),
+            "context_price_tiers": values.get(
+                "context_price_tiers", (current.get("context_price_tiers") or []) if current else []
+            ),
         }
         # Going back to manual drops the reference with it. Keeping it would leave a model
         # that reads as "following gpt-4.1 mini" while charging whatever was typed.
         if merged["price_source"] == "manual":
             merged["price_reference"] = None
+            merged["context_price_tiers"] = []
         connection.execute(
             """INSERT INTO managed_model_price (
-                   model_id, price_source, price_reference, price_discount_percent
-               ) VALUES (%s, %s, %s, %s)
+                   model_id, price_source, price_reference, price_discount_percent,
+                   context_price_tiers
+               ) VALUES (%s, %s, %s, %s, %s)
                ON CONFLICT (model_id) DO UPDATE SET
                  price_source = EXCLUDED.price_source,
                  price_reference = EXCLUDED.price_reference,
                  price_discount_percent = EXCLUDED.price_discount_percent,
+                 context_price_tiers = EXCLUDED.context_price_tiers,
+                 pending_context_price_tiers = CASE
+                     WHEN managed_model_price.context_price_tiers IS DISTINCT FROM
+                          EXCLUDED.context_price_tiers
+                     OR managed_model_price.price_source IS DISTINCT FROM EXCLUDED.price_source
+                            OR managed_model_price.price_reference IS DISTINCT FROM
+                                EXCLUDED.price_reference
+                     THEN NULL ELSE managed_model_price.pending_context_price_tiers END,
+                 price_sync_status = CASE
+                     WHEN managed_model_price.context_price_tiers IS DISTINCT FROM
+                          EXCLUDED.context_price_tiers
+                     THEN CASE WHEN jsonb_array_length(EXCLUDED.context_price_tiers) > 0
+                               THEN 'ok' ELSE NULL END
+                     ELSE managed_model_price.price_sync_status END,
+                 price_sync_message = CASE
+                     WHEN managed_model_price.context_price_tiers IS DISTINCT FROM
+                          EXCLUDED.context_price_tiers
+                     THEN NULL ELSE managed_model_price.price_sync_message END,
+                 price_synced_at = CASE
+                     WHEN managed_model_price.context_price_tiers IS DISTINCT FROM
+                          EXCLUDED.context_price_tiers
+                     THEN now() ELSE managed_model_price.price_synced_at END,
                  updated_at = now()""",
             (
                 item_id,
                 merged["price_source"],
                 merged["price_reference"],
                 merged["price_discount_percent"],
+                Jsonb(merged["context_price_tiers"]),
             ),
         )
         return merged

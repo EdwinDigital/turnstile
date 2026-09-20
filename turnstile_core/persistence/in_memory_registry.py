@@ -109,11 +109,13 @@ class InMemoryRegistryRepositoryMixin:
                     str(model.get("price_source") or "manual"),
                     model.get("price_reference"),
                     self._effective_discount(model),
+                    model.get("context_price_tiers") or [],
                 )
                 planned = (
                     str(update.get("expected_source")),
                     update.get("expected_reference"),
                     update.get("expected_discount_percent"),
+                    update.get("expected_context_price_tiers") or [],
                 )
                 if current != planned:
                     model["price_sync_status"] = "superseded"
@@ -131,10 +133,15 @@ class InMemoryRegistryRepositoryMixin:
                 for column in charged:
                     model[column] = update.get(column)
                 model["pending_list_price"] = None
+                if update.get("context_price_tiers") is not None:
+                    model["context_price_tiers"] = update["context_price_tiers"]
+                model["pending_context_price_tiers"] = None
                 model["updated_at"] = now
                 written += 1
             elif update.get("pending_list_price") is not None:
                 model["pending_list_price"] = update["pending_list_price"]
+            if not update.get("writes") and update.get("pending_context_price_tiers") is not None:
+                model["pending_context_price_tiers"] = update["pending_context_price_tiers"]
 
             model["price_sync_status"] = update.get("status")
             model["price_sync_message"] = update.get("message")
@@ -244,6 +251,8 @@ class InMemoryRegistryRepositoryMixin:
     def update_registry_item(
         self, kind: str, item_id: UUID, values: Mapping[str, Any]
     ) -> dict[str, Any] | None:
+        if kind == "model" and values.get("price_source") == "manual":
+            values = {**values, "price_reference": None, "context_price_tiers": []}
         target = self._registry_target(kind)
         row = self._find(target, item_id)
         if row is None:
@@ -283,6 +292,17 @@ class InMemoryRegistryRepositoryMixin:
             elif kind == "model":
                 for runtime in self.runtimes:
                     runtime["is_default"] = runtime["id"] == values["runtime_id"]
+        if kind == "model" and any(
+            key in values and values[key] != row.get(key)
+            for key in ("price_source", "price_reference", "context_price_tiers")
+        ):
+            row["pending_context_price_tiers"] = None
+        if kind == "model" and "context_price_tiers" in values and (
+            values["context_price_tiers"] != (row.get("context_price_tiers") or [])
+        ):
+            row["price_sync_status"] = "ok" if values["context_price_tiers"] else None
+            row["price_sync_message"] = None
+            row["price_synced_at"] = datetime.now(UTC)
         row.update(values)
         row["updated_at"] = datetime.now(UTC)
         if kind == "runtime":

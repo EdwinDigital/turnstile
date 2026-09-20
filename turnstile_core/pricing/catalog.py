@@ -28,20 +28,30 @@ of hiding it.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import urllib.parse
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from importlib.resources import files
 from typing import Any, NamedTuple, Protocol
 
 import httpx
 
-from turnstile_core.domain.runtime_models import PriceSource
+from turnstile_core.domain.runtime_models import (
+    PriceCatalogContextTier,
+    PriceCatalogInputRange,
+    PriceCatalogRuleSource,
+    PriceSource,
+)
 
 AZURE_RETAIL_ENDPOINT = "https://prices.azure.com/api/retail/prices"
 ANTHROPIC_PRICING_URL = "https://docs.claude.com/en/docs/about-claude/pricing"
 CATALOG_TTL_SECONDS = 6 * 60 * 60
+_CONTEXT_RULES: dict[str, Any] = json.loads(
+    files("turnstile_core.pricing").joinpath("context-rules.json").read_text(encoding="utf-8")
+)
 
 # The index is read from one region because a model's Global rate is identical in every region --
 # measured across 24 to 28 regions per model, always one figure. This region is chosen for
@@ -103,9 +113,43 @@ class CatalogModel:
     label: str
     product: str
     source: PriceSource
+    context_tier: PriceCatalogContextTier | None = None
+
+    @property
+    def resolved_context_tier(self) -> PriceCatalogContextTier | None:
+        descriptor = self.context_tier
+        if descriptor is None or descriptor.input_range is not None:
+            return descriptor
+        matching = [
+            rule for rule in _CONTEXT_RULES["rules"]
+            if rule["basis"] == "request_input_tokens" and any(
+                match["source"] == self.source and match["product"] == self.product
+                and match["group_key"] == descriptor.group_key
+                and match["service_tier"] == descriptor.service_tier
+                for match in rule["matches"]
+            )
+        ]
+        if len(matching) != 1:
+            return descriptor
+        rule = matching[0]
+        tier = next((tier for tier in rule["tiers"] if tier["key"] == descriptor.key), None)
+        if tier is None:
+            return descriptor
+        return descriptor.model_copy(update={
+            "input_range": PriceCatalogInputRange.model_validate(tier["input_range"]),
+            "input_range_source": PriceCatalogRuleSource(
+                rule_id=rule["id"], url=rule["source_url"],
+                revision=rule["source_revision"], verified_on=rule["verified_on"],
+            ),
+        })
 
     @property
     def search_text(self) -> str:
+        if self.context_tier is not None:
+            return " ".join(filter(None, (
+                self.label, self.product,
+                self.context_tier.model_label, self.context_tier.service_tier,
+            )))
         return f"{self.label} {self.product}"
 
 
@@ -127,6 +171,7 @@ class CatalogEntry:
     output_per_million: float | None = None
     cached_per_million: float | None = None
     cache_write_per_million: float | None = None
+    context_tier: PriceCatalogContextTier | None = None
     # False when the source was read only in part -- a page of the price feed failed and the
     # rest was kept. The buckets that did arrive are correct, but the ones that did not are
     # indistinguishable from buckets the vendor does not publish, and writing that difference
@@ -293,6 +338,25 @@ def parse_meter_name(name: str) -> tuple[str, str, str] | None:
     return stem, resolved, (deployment or UNSPECIFIED_DEPLOYMENT)
 
 
+def parse_context_tier(label: str) -> PriceCatalogContextTier | None:
+    markers = list(re.finditer(r"\b(short|long)(?:co\b|[\s_-]+context\b)", label, re.IGNORECASE))
+    if len(markers) != 1:
+        return None
+    marker = markers[0]
+    name = f"{label[:marker.start()]} {label[marker.end():]}"
+    name = re.sub(r"\s+", " ", re.sub(r"\(\s*\)", "", name)).strip()
+    if not name:
+        return None
+    short = marker.group(1).lower() == "short"
+    return PriceCatalogContextTier(
+        group_key=name.lower(),
+        model_label=name,
+        key="short" if short else "long",
+        label="短上下文" if short else "长上下文",
+        order=0 if short else 1,
+    )
+
+
 def prices_a_chat_request(name: str) -> bool:
     """Whether a meter is the sort of thing that could price a chat request at all."""
     normalised = _TWO_WORD_DEPLOYMENT.sub("DataZone", name)
@@ -367,6 +431,7 @@ class AzureRetailCatalog:
                     label=parsed.stem,
                     product=parsed.product,
                     source=PriceSource.AZURE_RETAIL,
+                    context_tier=parse_context_tier(parsed.stem),
                 ),
             )
         # A model with only one side of the trade cannot price a request, so it is left out of
@@ -459,6 +524,9 @@ class AzureRetailCatalog:
                             output_per_million=rates[1],
                             cached_per_million=rates[2],
                             cache_write_per_million=rates[3],
+                            context_tier=(
+                                model.resolved_context_tier or parse_context_tier(model.label)
+                            ),
                             complete=fetched.complete,
                         ),
                         regions=regions_sorted,

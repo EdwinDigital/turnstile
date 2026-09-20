@@ -13,6 +13,7 @@ from tests.support.paths import FRONTEND_SOURCE, REPOSITORY_ROOT, read_frontend_
         "model-edit-form.test.mjs",
         "model-publication-connections.test.mjs",
         "openai-compatible.test.mjs",
+        "vite-proxy.test.mjs",
     ),
 )
 def test_model_form_unit_cases(suite_name: str) -> None:
@@ -60,6 +61,17 @@ def test_model_editing_uses_the_dedicated_dialog_without_generic_identity_inputs
     assert "if (!busy) onClose()" in dialog
     assert "disabled={busy || !dirty || Boolean(validation) || imagePriceMissing}" in dialog
     assert 'role="alert">{message}' in dialog
+
+
+def test_model_save_error_uses_the_notice_text_column() -> None:
+    page = (FRONTEND_SOURCE / "pages/model-management-page.tsx").read_text(encoding="utf-8")
+    error = page.split('{error && <div className="registry-error smh-notice"', 1)[1]
+    error = error.split("<ResizableGridTable", 1)[0]
+    assert 'role="alert"' in error
+    assert '<TriangleAlert size={13} aria-hidden="true" />' in error
+    assert '<div className="smh-notice-copy">' in error
+    assert "<b>保存失败：</b>" in error
+    assert '<span data-no-localize title={String(error)}>{String(error)}</span>' in error
 
 
 def test_model_editor_layout_contains_long_identity_and_role_values() -> None:
@@ -245,10 +257,13 @@ def test_model_publication_selects_existing_connections_and_clears_connection_dr
     )[0]
     for setter in (
         "setProviderApiKey", "setFoundryDeployment", "setModelKey", "setDisplayName",
-        "setUpstreamModelId", "setContextWindow", "setInputPrice", "setOutputPrice",
-        "setCacheReadPrice", "setCacheWritePrice",
+        "setUpstreamModelId", "setContextWindow",
     ):
         assert f'{setter}("")' in clear_draft
+    assert (
+        "setPricing(createModelPriceDraft(registry.context_pricing_supported === true))"
+        in clear_draft
+    )
     assert "setKeyRevealed(false)" in clear_draft
     assert source.count("clearConnectionInputs()") == 2
     assert "if (publishing) return" in source

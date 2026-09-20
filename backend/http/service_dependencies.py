@@ -66,9 +66,9 @@ def control_plane_service(repository: Repository) -> GatewayControlPlaneService:
         application_default_token_limit=settings.gateway_application_default_monthly_token_limit,
         application_default_tokens_per_minute=settings.gateway_application_default_tokens_per_minute,
         application_product_id=settings.apim_product_id,
-        image_generation_enabled=settings.image_generation_enabled,
         image_generation_defaults=settings.image_generation_defaults,
         databricks_oauth_enabled=settings.databricks_oauth_enabled,
+        price_catalog=price_catalog(),
     )
 
 

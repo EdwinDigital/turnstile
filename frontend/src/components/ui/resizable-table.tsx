@@ -296,12 +296,13 @@ export function ResizableGridTable({
 type ResizableTableProps = TableHTMLAttributes<HTMLTableElement> & {
   children: ReactNode
   minWidths?: readonly number[]
+  resizable?: boolean
 }
 
-export function ResizableTable({ children, minWidths, style, ...props }: ResizableTableProps) {
+export function ResizableTable({ children, minWidths, style, resizable = true, ...props }: ResizableTableProps) {
   const tableRef = useRef<HTMLTableElement>(null)
   const enabled = useDesktopColumnResize()
-  const resize = useResizableColumns({ rootRef: tableRef, headerSelector: "thead > tr", minWidths, enabled })
+  const resize = useResizableColumns({ rootRef: tableRef, headerSelector: "thead > tr", minWidths, enabled: enabled && resizable })
   const activeWidths = resize.enabled ? resize.widths : null
   const contentWidth = activeWidths?.reduce((total, width) => total + width, 0)
 

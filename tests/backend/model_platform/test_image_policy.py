@@ -24,7 +24,6 @@ def test_image_operation_has_budget_marker_and_bypasses_text_observer() -> None:
     repository = InMemoryRepository()
     publication = GatewayControlPlaneService(
         repository,
-        image_generation_enabled=True,
         apim_principal_id="unit-principal",
     ).publish(image_publication(repository), "owner@example.com")
     compiled = ApimPolicyCompiler(

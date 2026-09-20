@@ -12,11 +12,18 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import Mock, patch
 from uuid import UUID, uuid4
 
 import pytest
 
-from turnstile_core.domain.runtime_models import ManagedModel, PriceSource, PriceSyncStatus
+from turnstile_core.domain.runtime_models import (
+    ManagedModel,
+    PendingListPrice,
+    PriceSource,
+    PriceSyncStatus,
+    StoredContextPriceTier,
+)
 from turnstile_core.persistence.in_memory_registry import InMemoryRegistryRepositoryMixin
 from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
 from turnstile_core.pricing.sync import plan_price_sync
@@ -82,6 +89,62 @@ def only(summary: Any) -> Any:
 # ------------------------------------------------------------------------------------------
 # The arithmetic
 # ------------------------------------------------------------------------------------------
+
+
+def context_model() -> ManagedModel:
+    return model(context_price_tiers=[StoredContextPriceTier(
+        key=f"tier-{index}", label=f"Tier {index}",
+        reference=f"azure_retail:Unit:meter-{index}:Global:*",
+        min_input_tokens=0 if index == 0 else 1001,
+        max_input_tokens=1000 if index == 0 else None,
+        input_price_per_million=2 + index, output_price_per_million=10 + index,
+        cached_price_per_million=0.2, cache_write_price_per_million=1.0,
+        list_prices=PendingListPrice(input=2 + index, output=10 + index, cached=0.2, cache_write=1),
+    ) for index in range(2)])
+
+
+def test_context_sync_updates_every_tier_without_flattening_the_prices() -> None:
+    current = context_model()
+    updated = [tier.model_copy(deep=True) for tier in current.context_price_tiers]
+    for tier in updated:
+        assert tier.list_prices.input is not None
+        tier.list_prices.input *= 1.05
+        tier.input_price_per_million *= 1.05
+    with patch("turnstile_core.pricing.sync.resolve_context_prices", return_value=updated):
+        change = only(plan_price_sync([current], Mock(spec=CompositeCatalog)))
+    assert change.writes
+    assert change.context_price_tiers == [tier.model_dump(mode="json") for tier in updated]
+    assert change.input_cost_per_million is None
+    assert change.expected_context_price_tiers == [
+        tier.model_dump(mode="json") for tier in current.context_price_tiers
+    ]
+
+
+@pytest.mark.parametrize("kind", ["price", "threshold", "unavailable"])
+def test_context_sync_holds_the_whole_schedule_on_price_or_rule_changes(kind: str) -> None:
+    current = context_model()
+    updated = [tier.model_copy(deep=True) for tier in current.context_price_tiers]
+    if kind == "price":
+        updated[1].list_prices.output = 100
+    if kind == "threshold":
+        updated[0].max_input_tokens = 900
+        updated[1].min_input_tokens = 901
+    with patch(
+        "turnstile_core.pricing.sync.resolve_context_prices", return_value=updated,
+    ) as resolve:
+        if kind == "unavailable":
+            resolve.side_effect = TimeoutError("offline")
+        first = only(plan_price_sync([current], Mock(spec=CompositeCatalog)))
+        second = only(plan_price_sync([current], Mock(spec=CompositeCatalog)))
+    assert not first.writes and not second.writes
+    expected = PriceSyncStatus.STALE if kind == "unavailable" else PriceSyncStatus.REVIEW_NEEDED
+    assert first.status is expected
+    if kind != "unavailable":
+        assert first.pending_context_price_tiers == [
+            tier.model_dump(mode="json") for tier in updated
+        ]
+    assert current.context_price_tiers[0].max_input_tokens == 1000
+    assert current.context_price_tiers[1].list_prices.output == 11
 
 
 def test_the_charged_rate_is_the_list_price_times_the_discount() -> None:

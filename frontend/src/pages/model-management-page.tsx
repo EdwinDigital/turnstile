@@ -85,7 +85,7 @@ import {
 import { Textarea } from "../components/ui/textarea"
 import { ResizableGridTable } from "../components/ui/resizable-table"
 import { getIntlLocale } from "../locales/index"
-import { priceRequests } from "../lib/pricing"
+import { hasModelPrices, priceRequests } from "../lib/pricing"
 import { finopsKeys, finopsQueries } from "../data-sources/apim/queries"
 import { assistantSettingsKey } from "../components/assistant/queries"
 import { useTimezone } from "../providers/timezone-provider"
@@ -255,6 +255,12 @@ function modelPayload(model: ManagedModel, patch: Partial<ManagedModel> = {}) {
     cached_cost_per_million: value.cached_cost_per_million,
     cache_write_cost_per_million: value.cache_write_cost_per_million,
     allowed_roles: value.allowed_roles,
+    price_source: value.price_source ?? "manual",
+    price_reference: value.price_reference,
+    price_discount_percent: value.price_discount_percent,
+    ...(value.context_price_tiers?.length ? {
+      context_price_references: value.context_price_tiers.map(tier => tier.reference),
+    } : {}),
   }
 }
 
@@ -769,7 +775,7 @@ function RuntimeDetailView({ runtime, registry, busy, checking, onEdit, onEditMo
 
   const models = registry.models.filter((model) => model.runtime_id === runtime.id)
   const enabledModelCount = models.filter((model) => model.enabled).length
-  const missingPrices = models.filter((model) => model.input_cost_per_million == null || model.output_cost_per_million == null)
+  const missingPrices = models.filter(model => !hasModelPrices(model))
   const runtimeRequests = usage.data ?? []
   // The distribution is ranked by tokens, but this card counts calls, so it has to be
   // re-sorted on the field it shows -- otherwise the busiest caller lands mid-list. The
@@ -1163,7 +1169,13 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
       </div>
     </div>
     {notice && <RegistryNoticeBanner notice={notice} onDismiss={onDismissNotice} onAction={onNoticeAction} />}
-    {error && <div className="registry-error smh-notice">保存失败：{String(error)}</div>}
+    {error && <div className="registry-error smh-notice" role="alert">
+      <TriangleAlert size={13} aria-hidden="true" />
+      <div className="smh-notice-copy">
+        <b>保存失败：</b>
+        <span data-no-localize title={String(error)}>{String(error)}</span>
+      </div>
+    </div>}
     <ResizableGridTable className={`model-table ${activeTab}`} role="table" aria-label={`${addLabel}列表`} headerSelector=".model-table-head" minWidths={MODEL_TABLE_COLUMN_MIN_WIDTHS} columnGap={12} horizontalPadding={32} resizeAtAllWidths>
       <div className="model-table-head" role="row">
         {columnHeaders.map((label, index) => <span className="model-table-heading" role="columnheader" aria-label={label} key={label}>
@@ -1283,7 +1295,9 @@ function ModelRow({ model, oauthCredential, busy, removing, publication, canRota
   return <article className="model-list-row" role="row">
     <div className="model-primary-cell"><span className="model-list-icon" data-model-family={family} title={modelFamilyLabel(family)}><ModelFamilyLogo family={family} /></span><div><b>{model.display_name}</b><code>{model.model_key}</code></div>{model.is_default && <em>默认</em>}</div>
     <div className="model-runtime-cell"><b>{model.runtime_name}</b><span>{model.provider_name}</span></div>
-    <div className="model-pricing-cell"><b>{model.context_window?.toLocaleString() ?? "—"}</b><span>输入 ${model.input_cost_per_million ?? "—"} · 缓存读 ${model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 缓存写 ${model.cache_write_cost_per_million ?? model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 输出 ${model.output_cost_per_million ?? "—"}</span></div>
+    <div className="model-pricing-cell"><b>{model.context_window?.toLocaleString() ?? "—"}</b>{model.context_price_tiers?.length
+      ? <span>分档价格 <span data-no-localize>({model.context_price_tiers.length})</span></span>
+      : <span>输入 ${model.input_cost_per_million ?? "—"} · 缓存读 ${model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 缓存写 ${model.cache_write_cost_per_million ?? model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 输出 ${model.output_cost_per_million ?? "—"}</span>}</div>
     <div className="model-status-cell">{publication ? <ModelPublicationStatus publication={publication} onOpen={onOpenPublication} /> : removing ? <span className="model-removing-status"><RefreshCw className="spin" size={12} />正在删除</span> : <Health status={model.enabled ? "available" : "unavailable"} enabled={model.enabled} />}</div>
   <div className="model-row-actions"><button className="model-edit-action" title="编辑" disabled={busy || removing || Boolean(publication && publication.status !== "failed" && publication.status !== "rolled_back")} onClick={onEdit}><Edit3 size={14} /></button><button className="model-delete-action" title={deleteDisabledReason ?? "删除模型"} disabled={busy || removing || Boolean(publication) || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button>{canRotateCredential && <button className="model-credential-action" title={oauthCredential ? "更新 OAuth Secret" : "更新 API Key"} disabled={busy || removing || Boolean(publication)} onClick={onRotateCredential}><KeyRound size={14} /></button>}<Toggle checked={model.enabled} disabled={busy || removing || Boolean(publication)} onChange={onToggle} /></div>
   </article>

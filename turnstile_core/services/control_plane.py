@@ -79,6 +79,7 @@ from ..domain.runtime_models import (
     ModelFamilyKey,
     ModelVendorKey,
     OAuthClientCredentialsConfig,
+    PriceSource,
     databricks_connection_config,
     databricks_workspace_url,
     foundry_runtime_name,
@@ -87,6 +88,8 @@ from ..domain.runtime_models import (
     openai_compatible_runtime_name,
 )
 from ..persistence.repository import QueryRepository
+from ..pricing.catalog import CompositeCatalog, build_default_catalog, parse_context_tier
+from ..pricing.context import context_price_reference, resolve_context_prices
 from ..security import CredentialCipher
 
 
@@ -123,11 +126,12 @@ class GatewayControlPlaneService:
         application_default_token_limit: int = 100_000,
         application_default_tokens_per_minute: int = 100_000,
         application_product_id: str = _APPLICATION_PRODUCT_ID,
-        image_generation_enabled: bool = False,
         image_generation_defaults: ImageGenerationLimits | None = None,
         databricks_oauth_enabled: bool = False,
+        price_catalog: CompositeCatalog | None = None,
     ) -> None:
         self._repository = repository
+        self._price_catalog = price_catalog or build_default_catalog()
         self._cipher = cipher
         self._apim_principal_id = apim_principal_id
         self._databricks_oauth_enabled = databricks_oauth_enabled
@@ -136,7 +140,6 @@ class GatewayControlPlaneService:
         self._application_default_token_limit = application_default_token_limit
         self._application_default_tokens_per_minute = application_default_tokens_per_minute
         self._application_product_id = application_product_id
-        self._image_generation_enabled = image_generation_enabled
         self._image_generation_defaults = image_generation_defaults
         self._retention_policy = retention_policy or GatewayReleaseRetentionPolicy(
             retained_count=20,
@@ -1015,8 +1018,6 @@ class GatewayControlPlaneService:
         effective = GatewayPublication.model_validate(effective_row)
         profiles = {}
         for model_id, configuration in (image_configurations or {}).items():
-            if not self._image_generation_enabled:
-                raise ControlPlaneUnavailableError("Image generation is not enabled")
             model = self._find(registry["models"], model_id)
             if model is None or model.get("capabilities") != ["image_generation"]:
                 raise ControlPlaneConflictError("An image profile requires an existing image model")
@@ -1536,6 +1537,13 @@ class GatewayControlPlaneService:
                 output_cost_per_million=model.get("output_cost_per_million"),
                 cached_cost_per_million=model.get("cached_cost_per_million"),
                 cache_write_cost_per_million=model.get("cache_write_cost_per_million"),
+                price_source=model.get("price_source", "manual"),
+                price_reference=model.get("price_reference"),
+                price_discount_percent=model.get("price_discount_percent"),
+                context_price_references=[
+                    tier["reference"] for tier in model.get("context_price_tiers") or []
+                ],
+                context_price_tiers=model.get("context_price_tiers") or [],
                 allowed_roles=list(model.get("allowed_roles") or ["owner", "admin", "member"]),
                 assignment_required=bool(model.get("assignment_required", False)),
                 image_profile=model.get("image_profile"),
@@ -1713,8 +1721,6 @@ class GatewayControlPlaneService:
     def publish(
         self, write: GatewayPublicationCreate, created_by: str
     ) -> GatewayPublication:
-        if write.model.operation == "image_generation" and not self._image_generation_enabled:
-            raise ControlPlaneUnavailableError("Image generation is not enabled")
         registry = self._repository.registry()
         gateway = self._find(registry["gateways"], write.gateway_profile_id)
         if gateway is None or not gateway["enabled"] or gateway["implementation"] != "apim":
@@ -1732,6 +1738,7 @@ class GatewayControlPlaneService:
             )
         model = self._release_model(model_input, provider, runtime)
         self._validate_model(model, registry["models"])
+        model = self._price_model(model, runtime)
         binding_runtime = self._model_binding_runtime(provider, runtime, model)
 
         previous_row = self._repository.effective_gateway_publication(
@@ -2304,6 +2311,7 @@ class GatewayControlPlaneService:
                 "key_vault_secret_id": config.get("key_vault_secret_id"),
                 "managed_identity_resource": config.get("managed_identity_resource"),
                 "streaming_mode": config.get("streaming_mode", StreamingMode.NATIVE),
+                "price_discount_percent": runtime.get("price_discount_percent"),
                 "config": config,
             }
         brand = BrandKey(provider["brand_key"])
@@ -2542,6 +2550,62 @@ class GatewayControlPlaneService:
             "New runtime publication requires a supported provider template"
         )
 
+    def _price_model(self, model: ModelTarget, runtime: Mapping[str, Any]) -> ModelTarget:
+        if model.price_source is PriceSource.MANUAL:
+            return model
+        percent = model.price_discount_percent
+        if percent is None and runtime.get("price_discount_percent") is not None:
+            percent = float(runtime["price_discount_percent"])
+        if model.context_price_references:
+            try:
+                tiers = resolve_context_prices(
+                    self._price_catalog, model.price_source,
+                    model.context_price_references, percent,
+                )
+            except ValueError as error:
+                raise ControlPlaneConflictError(str(error)) from error
+            except Exception as error:
+                raise ControlPlaneUnavailableError(
+                    "The selected price source is unavailable"
+                ) from error
+            return model.model_copy(update={
+                "context_price_tiers": tiers,
+                "context_price_references": [tier.reference for tier in tiers],
+                "price_reference": context_price_reference(
+                    model.price_source, [tier.reference for tier in tiers],
+                ),
+                "input_cost_per_million": None, "output_cost_per_million": None,
+                "cached_cost_per_million": None, "cache_write_cost_per_million": None,
+            })
+        try:
+            entry = self._price_catalog.lookup(model.price_reference or "")
+        except Exception as error:  # noqa: BLE001
+            raise ControlPlaneUnavailableError(
+                "The selected price source is unavailable"
+            ) from error
+        if (
+            entry is None or not entry.complete or not entry.priced
+            or entry.source != model.price_source
+        ):
+            raise ControlPlaneConflictError(
+                "The selected catalog price is incomplete or unavailable"
+            )
+        if entry.context_tier is not None or parse_context_tier(entry.label) is not None:
+            raise ControlPlaneConflictError(
+                "Select the complete context price schedule, not one tier"
+            )
+        charged = entry.discounted(percent)
+        return model.model_copy(update={
+            "input_cost_per_million": charged.input_per_million,
+            "output_cost_per_million": charged.output_per_million,
+            "cached_cost_per_million": charged.cached_per_million,
+            "cache_write_cost_per_million": charged.cache_write_per_million,
+            "list_input_cost_per_million": entry.input_per_million,
+            "list_output_cost_per_million": entry.output_per_million,
+            "list_cached_cost_per_million": entry.cached_per_million,
+            "list_cache_write_cost_per_million": entry.cache_write_per_million,
+        })
+
     @staticmethod
     def _validate_model(
         model: ModelTarget, models: Sequence[dict[str, Any]]
@@ -2627,6 +2691,10 @@ class GatewayControlPlaneService:
                 output_cost_per_million=model.output_cost_per_million,
                 cached_cost_per_million=model.cached_cost_per_million,
                 cache_write_cost_per_million=model.cache_write_cost_per_million,
+                price_source=model.price_source,
+                price_reference=model.price_reference,
+                price_discount_percent=model.price_discount_percent,
+                context_price_references=model.context_price_references,
                 allowed_roles=["owner", "admin", "member"],
                 assignment_required=True,
                 image_profile=profile,

@@ -95,7 +95,7 @@ def test_openapi_root_is_a_small_domain_index() -> None:
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
     assert len(paths) == 78
-    assert len(schemas) == 172
+    assert len(schemas) == 173
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -107,6 +107,27 @@ def test_openapi_root_is_a_small_domain_index() -> None:
         "model-platform.yaml",
         "observability.yaml",
     }
+
+
+def test_publication_contract_describes_catalog_prices_and_discounts() -> None:
+    schema = _documented_schemas()["GatewayModelTarget"]
+    properties = cast(dict[str, dict[str, object]], schema["properties"])
+    assert properties["price_source"]["enum"] == ["manual", "azure_retail", "anthropic"]
+    assert properties["price_source"]["default"] == "manual"
+    assert properties["price_reference"]["maxLength"] == 1000
+    assert properties["price_discount_percent"]["exclusiveMinimum"] == 0
+    assert properties["price_discount_percent"]["maximum"] == 100
+    assert properties["price_discount_percent"]["type"] == ["number", "null"]
+    conditions = cast(list[dict[str, dict[str, object]]], schema["allOf"])
+    image = cast(dict[str, dict[str, object]], conditions[0]["then"]["properties"])
+    assert image["price_source"]["const"] == "manual"
+    for condition, source in zip(conditions[1:], ("azure_retail", "anthropic"), strict=True):
+        assert condition["if"]["required"] == ["price_source"]
+        alternatives = cast(list[dict[str, object]], condition["then"]["anyOf"])
+        assert alternatives[0]["required"] == ["price_reference"]
+        assert alternatives[1]["required"] == ["context_price_references"]
+        fields = cast(dict[str, dict[str, object]], alternatives[0]["properties"])
+        assert fields["price_reference"] == {"type": "string", "pattern": f"^{source}:"}
 
 
 def test_databricks_contract_describes_workspace_authentication_and_owned_adoption() -> None:

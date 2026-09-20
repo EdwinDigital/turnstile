@@ -397,6 +397,13 @@ class InMemoryRepository(
             if existing.id != record.id:
                 continue
             if existing.estimated and not record.estimated:
+                if existing.price_context_snapshot is not None:
+                    record = record.model_copy(update=ModelPrice.model_validate(
+                        existing.price_context_snapshot,
+                    ).snapshot_prices(
+                        record.input_tokens, record.cached_tokens,
+                        record.output_tokens, record.cache_write_tokens,
+                    ))
                 self.usage_records[index] = record.model_copy(
                     update={
                         "budget_admission": record.budget_admission
@@ -435,19 +442,9 @@ class InMemoryRepository(
     def model_prices(self) -> dict[str, ModelPrice]:
         prices: dict[str, ModelPrice] = {}
         for model in self.models:
-            input_price = model["input_cost_per_million"]
-            output_price = model["output_cost_per_million"]
-            if input_price is None or output_price is None:
+            price = ModelPrice.from_registry(model)
+            if price is None:
                 continue
-            cached_price = model.get("cached_cost_per_million")
-            write_price = model.get("cache_write_cost_per_million")
-            cached = input_price if cached_price is None else cached_price
-            price = ModelPrice(
-                input_price_per_million=input_price,
-                cached_price_per_million=cached,
-                cache_write_price_per_million=cached if write_price is None else write_price,
-                output_price_per_million=output_price,
-            )
             prices[str(model["id"])] = price
             prices[model["model_key"]] = price
         return prices
@@ -503,10 +500,18 @@ class InMemoryRepository(
                 item is None
                 or not record.estimated
                 or record.status_code >= 400
-                or record.ingest_error == "stream_cache_usage_unavailable"
+                or (record.ingest_error == "stream_cache_usage_unavailable"
+                    and record.price_context_snapshot is None)
             ):
                 continue
             cache_unknown = item.cached_tokens is None
+            context_prices = (
+                ModelPrice.model_validate(record.price_context_snapshot).snapshot_prices(
+                    item.input_tokens, item.cached_tokens,
+                    item.output_tokens, record.cache_write_tokens,
+                ) if record.price_context_snapshot is not None and item.cached_tokens is not None
+                else {}
+            )
             self.usage_records[index] = record.model_copy(
                 update={
                     "input_tokens": item.input_tokens,
@@ -519,9 +524,11 @@ class InMemoryRepository(
                     "ingest_error": (
                         "stream_cache_usage_unavailable" if cache_unknown else None
                     ),
+                    **context_prices,
                 }
             )
-            self.reconciled_usage_ids.add(record.id)
+            if record.price_context_snapshot is None or not cache_unknown:
+                self.reconciled_usage_ids.add(record.id)
             self.budget_evidence_received_at.setdefault(
                 "reconciled:" + record.id, datetime.now(UTC)
             )

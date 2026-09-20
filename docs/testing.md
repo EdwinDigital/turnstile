@@ -22,13 +22,19 @@ git diff --check
 
 ## Database validation
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, and `008_price_review_and_guard`), then run the command again and verify that no migration is reapplied.
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, and `009_context_tier_pricing`), then run the command again and verify that no migration is reapplied.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
 For an existing installation, run the same migration command to apply only pending upgrades. Verify that the initial migration checksum and existing usage rows are unchanged. Migration `002` replaces the unique caller-request index with a non-unique `(request_id, ts DESC)` index; it does not rewrite historical usage. Apply it before running the updated telemetry consumer, and drain older telemetry consumers before enabling the new version. Do not overlap consumers that use the old and new identity rules. Index replacement takes a table lock, so schedule the upgrade for an appropriate maintenance window. Migration `007` only adds nullable columns and defaults every existing model to `price_source = 'manual'`, so rates already in the registry are left exactly as they were and the price sync skips those rows until someone opts a model in.
 
 Request-attempt validation must prove that two APIM attempts with the same `request_id` and different `correlation_id` values both persist, while redelivery of one attempt is idempotent. Replay a pre-upgrade event whose stored primary key differs from its correlation ID: the existing primary key and Application attribution must remain unchanged, an estimated record may gain exact usage, and an already exact record must not be charged again. Detail lookup prefers an exact `correlation_id`; a legacy `request_id` selects the latest matching APIM attempt. Verify both lookups and confirm that Copilot records remain excluded. Isolated unit and migration-source tests do not substitute for this database validation.
+
+### Context-tier pricing validation
+
+Apply `009_context_tier_pricing` only to the separately approved database before updating API, Control Plane and Telemetry packages together. The migration adds accepted/pending schedules to the price side table and request-level tier/schedule snapshots; it does not rewrite historical requests. Registry responses advertise `context_pricing_supported` only in the compatible application version. Do not enable tier writes while an old consumer still reads scalar rates.
+
+Run `uv run --frozen --no-sync pytest -q tests/backend/persistence/test_price_sync_concurrency.py tests/backend/telemetry/test_processor.py tests/platform/pricing` and the two frontend model form Node suites. The PostgreSQL fixture starts an isolated session-owned local cluster; verify it runs rather than skips. Cover save/reopen, source/region/range mismatch, inherited and model discounts, sync review and concurrent edits, publication activation, exact threshold boundaries including cached input, missing usage, and reconciliation using the original schedule after registry prices change. Local source fixtures and local SQL results are not cloud deployment evidence.
 
 ### Ledger upgrade validation
 
@@ -87,7 +93,7 @@ and promotion, resume without duplication, rerun after success, and verify expli
 before introducing later model publications. Never make the current revision writable through
 a fabricated success response or relax the shared Publisher role to pass these checks.
 
-Image generation is off by default. The version-2 budget evidence cutoff is independently disabled (`budget_evidence_policy.effective_at IS NULL`). Applying migrations does not enable either feature or reassess historical requests. Enabling a future cutoff requires separate operational authorization; it cannot be cleared or moved after being set.
+Image generation is available without an enablement setting. Verify that a default installation advertises image support, allows selecting the image operation and accepts a valid publication without extra feature configuration. The version-2 budget evidence cutoff remains independently disabled (`budget_evidence_policy.effective_at IS NULL`). Applying migrations does not enable that cutoff or reassess historical requests. Enabling a future cutoff requires separate operational authorization; it cannot be cleared or moved after being set.
 
 Focused local checks include `tests/backend/model_platform/test_image_*.py`, `tests/backend/telemetry/test_billable_requests.py`, `tests/backend/telemetry/test_ledger.py`, and `tests/platform/frontend/test_image_generation.py`. These use unit fixtures and mocked transports, not live images or database evidence.
 

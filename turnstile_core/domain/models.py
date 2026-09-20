@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictModel(BaseModel):
@@ -658,12 +659,26 @@ class TokenUsageRecord(StrictModel):
     cached_price_per_million: float | None = Field(default=None, ge=0)
     cache_write_price_per_million: float | None = Field(default=None, ge=0)
     output_price_per_million: float | None = Field(default=None, ge=0)
+    price_context_tier: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    price_context_snapshot: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     error_message: str | None = Field(default=None, max_length=2000)
     estimated: bool
     ingest_source: str
     ingest_error: str | None = None
     budget_admission: str | None = Field(default=None, max_length=64)
     model_admission: str | None = Field(default=None, max_length=64)
+
+
+class ModelPriceTier(StrictModel):
+    key: str = Field(min_length=1)
+    min_input_tokens: int = Field(ge=0, strict=True)
+    max_input_tokens: int | None = Field(default=None, ge=0, strict=True)
+    input_price_per_million: float = Field(ge=0, allow_inf_nan=False)
+    cached_price_per_million: float = Field(ge=0, allow_inf_nan=False)
+    cache_write_price_per_million: float = Field(ge=0, allow_inf_nan=False)
+    output_price_per_million: float = Field(ge=0, allow_inf_nan=False)
 
 
 class ModelPrice(StrictModel):
@@ -673,6 +688,88 @@ class ModelPrice(StrictModel):
     cached_price_per_million: float = Field(ge=0)
     cache_write_price_per_million: float = Field(ge=0)
     output_price_per_million: float = Field(ge=0)
+    context_tiers: list[ModelPriceTier] = Field(default_factory=list, max_length=32)
+    selected_tier: str | None = None
+
+    @classmethod
+    def from_registry(cls, values: Mapping[str, Any]) -> ModelPrice | None:
+        tiers = values.get("context_price_tiers")
+        if tiers:
+            return cls(
+                input_price_per_million=0, cached_price_per_million=0,
+                cache_write_price_per_million=0, output_price_per_million=0,
+                context_tiers=[ModelPriceTier.model_validate({
+                    key: tier[key] for key in ModelPriceTier.model_fields if key in tier
+                }) for tier in tiers],
+            )
+        input_price = values.get("input_cost_per_million")
+        output_price = values.get("output_cost_per_million")
+        if input_price is None or output_price is None:
+            return None
+        cached = values.get("cached_cost_per_million")
+        cached = input_price if cached is None else cached
+        writes = values.get("cache_write_cost_per_million")
+        return cls(
+            input_price_per_million=input_price, output_price_per_million=output_price,
+            cached_price_per_million=cached,
+            cache_write_price_per_million=cached if writes is None else writes,
+        )
+
+    def snapshot_prices(
+        self, input_tokens: int, cached_tokens: int,
+        output_tokens: int, cache_write_tokens: int = 0,
+    ) -> dict[str, Any]:
+        price = self.for_input_tokens(input_tokens + cached_tokens)
+        return {
+            "price_context_tier": price.selected_tier,
+            "price_context_snapshot": self.model_dump(mode="json"),
+            "input_price_per_million": price.input_price_per_million,
+            "cached_price_per_million": price.cached_price_per_million,
+            "cache_write_price_per_million": price.cache_write_price_per_million,
+            "output_price_per_million": price.output_price_per_million,
+            "estimated_cost": price.cost(
+                input_tokens, cached_tokens, output_tokens, cache_write_tokens,
+            ),
+        }
+
+    @model_validator(mode="after")
+    def require_complete_context_ranges(self) -> ModelPrice:
+        if not self.context_tiers:
+            return self
+        minimum = 0
+        keys: set[str] = set()
+        for index, tier in enumerate(self.context_tiers):
+            if tier.key in keys or tier.min_input_tokens != minimum:
+                raise ValueError("Context price tiers must be unique, ordered and contiguous")
+            keys.add(tier.key)
+            if tier.max_input_tokens is None:
+                if index != len(self.context_tiers) - 1:
+                    raise ValueError("Only the final context price tier may be unbounded")
+            elif tier.max_input_tokens < tier.min_input_tokens:
+                raise ValueError("Context price tier bounds must be ordered")
+            else:
+                minimum = tier.max_input_tokens + 1
+        if self.context_tiers[-1].max_input_tokens is not None:
+            raise ValueError("Context price tiers must cover all input lengths")
+        return self
+
+    def for_input_tokens(self, total_input_tokens: int) -> ModelPrice:
+        if type(total_input_tokens) is not int or total_input_tokens < 0:
+            raise ValueError("Measured total input tokens must be a nonnegative integer")
+        if not self.context_tiers:
+            return self
+        for tier in self.context_tiers:
+            if total_input_tokens >= tier.min_input_tokens and (
+                tier.max_input_tokens is None or total_input_tokens <= tier.max_input_tokens
+            ):
+                return ModelPrice(
+                    input_price_per_million=tier.input_price_per_million,
+                    cached_price_per_million=tier.cached_price_per_million,
+                    cache_write_price_per_million=tier.cache_write_price_per_million,
+                    output_price_per_million=tier.output_price_per_million,
+                    selected_tier=tier.key,
+                )
+        raise ValueError("No context price tier covers the request")
 
     def cost(
         self,
@@ -682,13 +779,14 @@ class ModelPrice(StrictModel):
         cache_write_tokens: int = 0,
     ) -> float:
         """Price a request. `cached_tokens` is the full cache bucket; writes are its subset."""
+        price = self.for_input_tokens(input_tokens + cached_tokens)
         cache_reads = max(cached_tokens - cache_write_tokens, 0)
         return round(
             (
-                input_tokens * self.input_price_per_million
-                + cache_reads * self.cached_price_per_million
-                + cache_write_tokens * self.cache_write_price_per_million
-                + output_tokens * self.output_price_per_million
+            input_tokens * price.input_price_per_million
+            + cache_reads * price.cached_price_per_million
+            + cache_write_tokens * price.cache_write_price_per_million
+            + output_tokens * price.output_price_per_million
             )
             / 1_000_000,
             8,
