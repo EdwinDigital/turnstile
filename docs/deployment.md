@@ -83,10 +83,34 @@ The supported Databricks publication path is native Anthropic chat/streaming, no
 generation or an assumption of every OpenAI-compatible operation.
 
 Foundry text, governed images and an OpenAI-compatible provider have separate model and
-credential prerequisites. Images require `IMAGE_GENERATION_ENABLED=true` on both API and
-Control-plane and explicit consent for paid probes. Publication probes also consume upstream
+credential prerequisites. Images are available without an enablement setting and require an
+existing Foundry image deployment, image-ready APIM infrastructure and consent for paid probes.
+Publication probes also consume upstream
 requests; include them when choosing a validation budget. Never enable an upstream provider's
 local-key authentication or weaken networking merely to complete installation.
+
+### Control-plane host storage networking
+
+New installations provision the Control-plane Function's own host storage with public network
+access disabled, managed-identity authentication and Blob, Queue and Table private endpoints.
+These endpoints are distinct from the telemetry storage endpoints. The existing platform private
+DNS zones are linked to the Function VNet and receive records for this specific storage account.
+
+For an older installation, use
+[control-plane-storage-network-upgrade.bicep](../infra/control-plane-storage-network-upgrade.bicep).
+Select the storage account named by that Function's `AzureWebJobsStorage__accountName`, its existing
+resource group, VNet and private endpoint subnet. The three platform storage private DNS zones must
+already exist in that resource group and be linked to the Function VNet. The upgrade reuses the
+same private endpoint module as a fresh installation; it does not recreate the Function, storage,
+VNet or resource group, change application settings, open public access or grant additional roles.
+Review a subscription-scope what-if before deployment and require that only the selected account's
+three private endpoints and their DNS zone groups are created.
+
+After deployment, verify approved endpoint connections and the corresponding private DNS records,
+then verify actual timer listener activity and the original publication's transition out of
+`queued`. A Function App showing `Running` and indexed functions is not sufficient: a listener
+can fail to acquire its host-storage lease while the application still reports `Running`.
+Do not submit another publication to work around a task that has never been claimed.
 
 ### Immediate model-access upgrade
 
@@ -293,13 +317,50 @@ Use the authenticated web console to add the existing Foundry Project Endpoint a
 
 Creating connections or models through direct API calls does not count as frontend E2E evidence.
 
+### Managed identity authorization
+
+Enabling a managed identity and granting it Foundry access are separate operations. The API,
+publisher Function and APIM have different identities. APIM authenticates the upstream model
+request; use the **APIM principal ID returned by the pending publication**, not the API or
+Function principal. The default project-endpoint profile uses the `https://ai.azure.com` audience
+and declares `Cognitive Services User` (`a97b65f3-24c7-4388-baec-2e87135dc908`) on the existing
+Foundry account. `Cognitive Services OpenAI User`, individual Responses actions and
+`Foundry Agent Consumer` are not interchangeable authorization profiles for that route.
+
+After account-owner approval, [foundry-managed-identity-access.bicep](../infra/foundry-managed-identity-access.bicep)
+can apply that declared role. Supply the existing account's `resourceGroupName`, `accountName`
+and the publication's `apimPrincipalId`. Run subscription-scope what-if with an explicit
+subscription and deployment location, review that it creates only the intended account-scoped
+role assignment, then apply the same template and parameters. This is an explicit customer
+authorization step, never part of the default Turnstile deployment. The built-in role includes
+account key access and broad Cognitive Services data access; review those permissions before
+granting it. The template does not read or output keys, create a Foundry account, or change
+networking or local authentication.
+
+Read back the assignment and allow RBAC propagation before resuming the **same** publication.
+Require its real Chat Completions, Responses and compact probes to pass and the publication to
+reach `active`. A Running Function, successful role deployment, or a single Chat response is
+not proof of completed model publication. Do not infer a particular missing permission from
+a generic 403 alone.
+
+### API-key alternative
+
+For an explicitly authorized API-key connection, supply the Project Endpoint and a matching
+same-account Inference Endpoint ending in `/openai/v1`; provide the key at the first model
+publication. Turnstile transfers the encrypted one-time credential to a secret APIM Named Value
+and does not return it in the registry. Never put it in a deployment parameter file or log.
+The Foundry account must already permit local-key authentication. Do not enable it automatically
+as a fallback. Connection endpoint and authentication identity are immutable: use normal
+connection/publication operations to replace a failed MI configuration, retaining the original
+publication history rather than rewriting its snapshot or bypassing its probes.
+
 ### Image and evidence upgrade boundary
 
 Apply pending migrations `004_apim_usage_identity_guard`, `005_billable_request_lifecycle` and `006_versioned_budget_evidence` through the same authorized migration entry point before running the new packages. Do not edit or replay the earlier migrations. The upgrade adds guarded APIM attempt identity, a durable billable-request journal and versioned budget evidence without rewriting historical usage. Drain old consumers before introducing the new identity guard. PostgreSQL concurrency and upgrade safety require the database checks in [Testing](testing.md).
 
-The API and Control-plane packages both require the pinned Pillow dependency for full image validation. The Control-plane artifact includes the public canonical parent policy at `policies/foundry-finops-policy.xml`; publication and image rollback read it through `CONTROL_PLANE_PARENT_POLICY_PATH`. The publisher verifies the live policy and its readback, and refuses incompatible image policies instead of transforming an unknown live template. Use the APIM infrastructure upgrade below before enabling image generation; do not rerun the bootstrap template against customer routing.
+The API and Control-plane packages both require the pinned Pillow dependency for full image validation. The Control-plane artifact includes the public canonical parent policy at `policies/foundry-finops-policy.xml`; publication and image rollback read it through `CONTROL_PLANE_PARENT_POLICY_PATH`. The publisher verifies the live policy and its readback, and refuses incompatible image policies instead of transforming an unknown live template. Use the APIM infrastructure upgrade below before publishing image models on an older installation; do not rerun the bootstrap template against customer routing.
 
-Keep `IMAGE_GENERATION_ENABLED=false` and the evidence-v2 cutoff unset during the code and migration rollout. Enabling images, authorizing paid publication probes and scheduling the future evidence cutoff are separate operational decisions. This upgrade does not provision a Foundry account or model, modify an upstream deployment, or grant new provider roles.
+Image generation has no separate enablement switch. Keep the evidence-v2 cutoff unset during the code and migration rollout; authorizing paid publication probes and scheduling the future evidence cutoff remain separate operational decisions. This upgrade does not provision a Foundry account or model, modify an upstream deployment, or grant new provider roles.
 
 ### Incremental APIM infrastructure upgrade
 

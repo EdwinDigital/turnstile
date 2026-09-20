@@ -290,6 +290,41 @@ def test_telemetry_host_storage_is_fully_reachable_over_private_links() -> None:
     assert "resource functionStorageTableContributor" in DATA_PLANE
 
 
+def test_control_plane_host_storage_uses_private_links_for_new_and_existing_installs() -> None:
+    storage = CONTROL_PLANE.split("resource storage ", 1)[1].split(
+        "module storagePrivateNetwork", 1
+    )[0]
+    assert "publicNetworkAccess: 'Disabled'" in storage
+    assert "allowSharedKeyAccess: false" in storage
+    assert "defaultAction: 'Deny'" in storage
+    assert "bypass: 'None'" in storage
+    assert "SecurityControl" not in storage
+    assert "module storagePrivateNetwork 'storage-private-endpoints.bicep'" in CONTROL_PLANE
+    assert "storageAccountName: storage.name" in CONTROL_PLANE
+    function_app = CONTROL_PLANE.split("resource functionApp ", 1)[1].split(
+        "resource functionVnetIntegration", 1
+    )[0]
+    assert "dependsOn: [\n    storagePrivateNetwork\n  ]" in function_app
+    network = (ROOT / "infra/modules/storage-private-endpoints.bicep").read_text()
+    upgrade = (ROOT / "infra/control-plane-storage-network-upgrade.bicep").read_text()
+    for service in ("blob", "queue", "table"):
+        assert f"'{service}'" in network
+    assert "privateLinkServiceId: storage.id" in network
+    assert "privateDnsZoneId: privateDnsZones[index].id" in network
+    assert "name: 'privatelink.${service}.${environment().suffixes.storage}'" in network
+    assert "parent: privateEndpoints[index]" in network
+    assert "name: 'pe-${storageAccountName}-${service}'" in network
+    assert "storageAccounts@2023-05-01' existing" in network
+    assert "virtualNetworks@2024-05-01' existing" in network
+    assert "subnets@2024-05-01' existing" in network
+    assert "privateDnsZones@2024-06-01' existing" in network
+    assert "targetScope = 'subscription'" in upgrade
+    assert "'modules/storage-private-endpoints.bicep'" in upgrade
+    assert "scope: resourceGroup(resourceGroupName)" in upgrade
+    for forbidden in ("Microsoft.Web/sites", "Microsoft.Authorization", "listKeys("):
+        assert forbidden not in network + upgrade
+
+
 def test_api_and_apim_share_the_same_gateway_path() -> None:
     assert "param gatewayApiRelativePath string = 'turnstile/llm'" in MAIN
     assert (
@@ -526,6 +561,30 @@ def test_control_plane_uses_its_own_flex_plan_and_the_platform_vnet() -> None:
     assert "var planName = 'plan-${resourcePrefix}-control-${suffix}'" in CONTROL_PLANE
     assert "plan-finops" not in CONTROL_PLANE
     assert "vnet-finops" not in CONTROL_PLANE
+
+
+def test_foundry_managed_identity_access_matches_account_role_contract() -> None:
+    from turnstile_core.domain.runtime_models import FOUNDRY_INFERENCE_ROLE_ID
+
+    role = (ROOT / "infra/modules/foundry-managed-identity-rbac.bicep").read_text()
+    entry = (ROOT / "infra/foundry-managed-identity-access.bicep").read_text()
+    assert FOUNDRY_INFERENCE_ROLE_ID in role
+    assert "accounts@2025-06-01' existing" in role
+    assert "scope: account" in role
+    assert "name: guid(account.id, apimPrincipalId, inferenceRoleId)" in role
+    assert "principalId: apimPrincipalId" in role
+    assert "principalType: 'ServicePrincipal'" in role
+    assert "roleDefinitionId: inferenceRoleId" in role
+    assert "includes account key access" in role
+    assert "targetScope = 'subscription'" in entry
+    assert "'modules/foundry-managed-identity-rbac.bicep'" in entry
+    assert "publicNetworkAccess" not in role + entry
+    assert "foundry-managed-identity" not in MAIN
+    documentation = (ROOT / "docs/deployment.md").read_text()
+    assert "foundry-managed-identity-access.bicep" in documentation
+    assert FOUNDRY_INFERENCE_ROLE_ID in documentation
+    assert "Cognitive Services OpenAI User" in documentation
+    assert "does not read or output keys" in documentation
 
 
 def test_application_key_management_role_is_least_privilege() -> None:

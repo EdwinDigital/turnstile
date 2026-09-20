@@ -50,9 +50,6 @@ var effectiveEnabled = effectivePublicationWorkerEnabled || effectiveReleaseWork
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageName
   location: location
-  tags: {
-    SecurityControl: 'Ignore'
-  }
   sku: {
     name: 'Standard_LRS'
   }
@@ -62,11 +59,20 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     allowBlobPublicAccess: false
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: 'Disabled'
     networkAcls: {
-      bypass: 'AzureServices'
-      defaultAction: 'Allow'
+      bypass: 'None'
+      defaultAction: 'Deny'
     }
+  }
+}
+
+module storagePrivateNetwork 'storage-private-endpoints.bicep' = {
+  name: 'control-plane-storage-private-network'
+  params: {
+    location: location
+    storageAccountName: storage.name
+    virtualNetworkName: virtualNetworkName
   }
 }
 
@@ -115,6 +121,9 @@ resource functionApp 'Microsoft.Web/sites@2024-11-01' = {
   identity: {
     type: 'SystemAssigned'
   }
+  dependsOn: [
+    storagePrivateNetwork
+  ]
   properties: {
     serverFarmId: plan.id
     httpsOnly: true
