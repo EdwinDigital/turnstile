@@ -410,13 +410,43 @@ def test_application_output_clamp_uses_monthly_budget_not_tpm() -> None:
     limits = root.findall(".//llm-token-limit")
     assert len(limits) == 2
     assert {limit.attrib["tokens-per-minute"] for limit in limits} == {
-        "__TOKENS_PER_MINUTE__", "__EMPLOYEE_TOKENS_PER_MINUTE__",
+        '@((long)context.Variables["applicationTokensPerMinute"])',
+        "__EMPLOYEE_TOKENS_PER_MINUTE__",
     }
     assert all(limit.attrib["estimate-prompt-tokens"] == "true" for limit in limits)
     assert all(limit.attrib["retry-after-header-name"] == "Retry-After" for limit in limits)
     assert all("token-quota" not in limit.attrib for limit in limits)
     assert any("finops:subscription:" in limit.attrib["counter-key"] for limit in limits)
     assert any("finops:employee:" in limit.attrib["counter-key"] for limit in limits)
+
+
+def test_application_tpm_uses_validated_quota_and_preserves_default_protection() -> None:
+    root = ElementTree.fromstring(POLICY_PATH.read_text())
+    variable = root.find(".//set-variable[@name='applicationTokensPerMinute']")
+    assert variable is not None
+    expression = " ".join(variable.attrib["value"].split())
+    assert "long defaultRate = __TOKENS_PER_MINUTE__;" in expression
+    assert 'GetValueOrDefault<string>("applicationAdmission", "") != "ok"' in expression
+    assert '!context.Variables.ContainsKey("applicationLedgerState")' in expression
+    assert '!((bool?)state["available"] ?? false)' in expression
+    assert '(string)state["budgetStatus"] != "ok"' in expression
+    assert 'long configured = (long?)state["tokensPerMinute"] ?? 0;' in expression
+    assert "configured > 0 && configured <= int.MaxValue ? configured : defaultRate" in expression
+    assert "Request.Headers" not in expression
+    assert "model" not in expression.casefold()
+
+    limits = root.findall(".//llm-token-limit")
+    employee = next(node for node in limits if "finops:employee:" in node.attrib["counter-key"])
+    subscription = next(
+        node for node in limits if "finops:subscription:" in node.attrib["counter-key"]
+    )
+    assert employee.attrib["tokens-per-minute"] == "__EMPLOYEE_TOKENS_PER_MINUTE__"
+    assert subscription.attrib["tokens-per-minute"] == (
+        '@((long)context.Variables["applicationTokensPerMinute"])'
+    )
+    assert subscription.attrib["estimate-prompt-tokens"] == "true"
+    assert subscription.attrib["tokens-consumed-variable-name"] == "tokensConsumed"
+    assert root.findall(".//rate-limit-by-key")[1].attrib["calls"] == "__TOKENS_PER_MINUTE__"
 
 
 def test_apim_token_metrics_have_only_the_fixed_api_dimension() -> None:
@@ -611,7 +641,11 @@ def test_apim_token_limits_use_product_subscription_identity() -> None:
     assert "finops:subscription:" in policy
     assert 'token-quota="__MONTHLY_TOKEN_QUOTA__"' not in policy
     assert 'token-quota-period="Monthly"' not in policy
-    assert 'tokens-per-minute="__TOKENS_PER_MINUTE__"' in policy
+    assert (
+        'tokens-per-minute="@((long)context.Variables[&quot;applicationTokensPerMinute&quot;])"'
+        in policy
+    )
+    assert "long defaultRate = __TOKENS_PER_MINUTE__;" in policy
     assert "finops:user:" not in policy
     assert "Microsoft.ApiManagement/service/products@" in module
     assert "Microsoft.ApiManagement/service/products/apis@" in module

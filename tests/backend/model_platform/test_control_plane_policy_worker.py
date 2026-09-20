@@ -37,7 +37,12 @@ from turnstile_core.integrations.apim_control_plane import (
     RetryablePublicationError,
 )
 from turnstile_core.integrations.apim_control_plane_contract import ImageProbeJournal
-from turnstile_core.integrations.apim_policy_components import parse_policy, serialize_policy
+from turnstile_core.integrations.apim_policy_components import (
+    parse_policy,
+    serialize_policy,
+    upgrade_application_tpm_policy,
+    validate_parent_policy,
+)
 from turnstile_core.persistence.in_memory import InMemoryRepository
 
 
@@ -150,8 +155,52 @@ def test_parent_policy_hooks_are_idempotent_and_preserve_inference_invariants() 
     )
     assert 'token-quota="__MONTHLY_TOKEN_QUOTA__"' not in patched
     assert patched.index('name="applicationMapPartition"') < patched.index(
-        'tokens-per-minute="__TOKENS_PER_MINUTE__"'
+        'name="applicationTokensPerMinute"'
     )
+
+
+@pytest.mark.parametrize("default_rate", ["25000", "100000", "__TOKENS_PER_MINUTE__"])
+def test_existing_application_tpm_upgrade_preserves_default_and_is_idempotent(
+    default_rate: str,
+) -> None:
+    canonical = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    root = parse_policy(canonical)
+    variable = root.find(".//set-variable[@name='applicationTokensPerMinute']")
+    parents = {child: parent for parent in root.iter() for child in parent}
+    assert variable is not None
+    parents[variable].remove(variable)
+    subscription = next(node for node in root.iter("llm-token-limit")
+                        if "finops:subscription:" in node.get("counter-key", ""))
+    subscription.set("tokens-per-minute", default_rate)
+    source = serialize_policy(root)
+    upgraded = upgrade_application_tpm_policy(source)
+    observed = parse_policy(upgraded).find(".//set-variable[@name='applicationTokensPerMinute']")
+    assert observed is not None
+    assert f"long defaultRate = {default_rate};" in observed.attrib["value"]
+    assert upgrade_application_tpm_policy(upgraded) == upgraded
+    assert validate_parent_policy(source, canonical) == upgraded
+    assert 'name="applicationTokensPerMinute"' in ApimPolicyCompiler().patch_parent_policy(source)
+
+
+@pytest.mark.parametrize("change", ["guard", "attribute", "duplicate", "invalid-default"])
+def test_application_tpm_upgrade_rejects_partial_or_weakened_rules(change: str) -> None:
+    source = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    root = parse_policy(source)
+    variable = root.find(".//set-variable[@name='applicationTokensPerMinute']")
+    assert variable is not None
+    if change == "guard":
+        variable.set("value", variable.attrib["value"].replace('!= "ok"', '== "ok"'))
+    elif change == "attribute":
+        subscription = next(node for node in root.iter("llm-token-limit")
+                            if "finops:subscription:" in node.get("counter-key", ""))
+        subscription.set("tokens-per-minute", "999999999")
+    elif change == "duplicate":
+        root.append(ElementTree.Element("set-variable", dict(variable.attrib)))
+    else:
+        variable.set("value", variable.attrib["value"].replace("__TOKENS_PER_MINUTE__", "0"))
+    with pytest.raises(PolicyCompilationError):
+        upgrade_application_tpm_policy(serialize_policy(root))
+
 
 def test_parent_policy_rejects_publication_without_compact_admission() -> None:
     source = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()

@@ -90,6 +90,56 @@ def expression_tokens(value: str) -> tuple[str, ...]:
     return tuple(token for token in _TOKENS.findall(value) if not token.startswith(("//", "/*")))
 
 
+def upgrade_application_tpm_policy(source: str) -> str:
+    root = parse_policy(source)
+    limits = [node for node in root.iter("llm-token-limit")
+              if "finops:subscription:" in node.get("counter-key", "")]
+    if len(limits) != 1:
+        raise PolicyCompilationError("Subscription token limit is missing or ambiguous")
+    limit = limits[0]
+    variables = root.findall(".//set-variable[@name='applicationTokensPerMinute']")
+    attribute = '@((long)context.Variables["applicationTokensPerMinute"])'
+    configured = limit.get("tokens-per-minute", "")
+    if variables:
+        if len(variables) != 1 or configured != attribute:
+            raise PolicyCompilationError("Application token limit upgrade is incomplete")
+        match = re.search(r"long\s+defaultRate\s*=\s*([0-9]+|__TOKENS_PER_MINUTE__)\s*;",
+                          variables[0].get("value", ""))
+        if match is None:
+            raise PolicyCompilationError("Application token limit default is unavailable")
+        configured = match[1]
+    if configured != "__TOKENS_PER_MINUTE__" and (
+        not configured.isdecimal() or not 0 < int(configured) <= 2_147_483_647
+    ):
+        raise PolicyCompilationError("Subscription token limit must retain a positive default")
+    expression = '''@{
+          long defaultRate = DEFAULT_RATE;
+          if (context.Variables.GetValueOrDefault<string>("applicationAdmission", "") != "ok"
+            || !context.Variables.ContainsKey("applicationLedgerState")) { return defaultRate; }
+          var state = (JObject)context.Variables["applicationLedgerState"];
+          if (!((bool?)state["available"] ?? false)
+            || (string)state["budgetStatus"] != "ok") { return defaultRate; }
+          long configured = (long?)state["tokensPerMinute"] ?? 0;
+          return configured > 0 && configured <= int.MaxValue ? configured : defaultRate;
+        }'''.replace("DEFAULT_RATE", configured)
+    if variables:
+        if expression_tokens(variables[0].get("value", "")) != expression_tokens(expression):
+            raise PolicyCompilationError(
+                "Application token limit differs from the reviewed contract"
+            )
+        return source
+    consumer = _variable(root, "consumerId")
+    parents = {child: parent for parent in root.iter() for child in parent}
+    parent = parents[consumer]
+    if limit not in list(parent.iter()) or parent.tag != "when":
+        raise PolicyCompilationError("Subscription token limit is outside its identity branch")
+    parent.insert(list(parent).index(consumer) + 1, ET.Element(
+        "set-variable", {"name":"applicationTokensPerMinute", "value":expression},
+    ))
+    limit.set("tokens-per-minute", attribute)
+    return serialize_policy(root)
+
+
 def component_digest(node: ET.Element, *, normalize_text_defaults: bool = True) -> str:
     def normalized(value: str) -> object:
         if not value.strip().startswith("@"):
@@ -367,8 +417,8 @@ def validate_parent_policy(
         )
 
     root, template = (
-        parse_policy(without_slots(source)),
-        parse_policy(without_slots(canonical_parent)),
+        parse_policy(without_slots(upgrade_application_tpm_policy(source))),
+        parse_policy(without_slots(upgrade_application_tpm_policy(canonical_parent))),
     )
     for policy in (root, template):
         if policy.tag != "policies" or [
@@ -418,7 +468,7 @@ def validate_parent_policy(
                 rate.get("increment-count", "0")
             ) < max((profile.burst_reservation_tokens for profile in profiles), default=1):
                 raise PolicyCompilationError("Image burst limits exceed the reviewed parent policy")
-    return source
+    return upgrade_application_tpm_policy(source)
 
 
 def parent_readback_matches(

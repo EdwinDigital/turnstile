@@ -84,6 +84,10 @@ In Bicep, `gatewayApplicationProvisioningEnabled` preserves the requested capabi
 
 New operations snapshot the gateway, product and positive `GATEWAY_APPLICATION_DEFAULT_MONTHLY_TOKEN_LIMIT` / `GATEWAY_APPLICATION_DEFAULT_TOKENS_PER_MINUTE` values. They create a suspended APIM subscription, materialize the Application, prepare and read back its quota, model access, confirmed balance and subscription mapping, then activate using an ETag and verify the result. Retries never reset an existing confirmed balance or modify reservations. Historical version-1 queued operations retain their original behavior.
 
+Text requests use the associated Application's `tokens_per_minute` after its mapping, quota and model admission are verified. The value must be positive and fit a signed 32-bit integer; absent, invalid or unavailable application configuration retains the gateway's existing default burst limit. Counters remain subscription-scoped. Employee and image burst limits, monthly budgets and prompt-token estimation are unchanged.
+
+Existing gateways adopt this behavior through a normal reviewed Control Plane publication. The compiler preserves each installed default limit and rejects partial or unrecognized rate-limit changes; uploading the package alone does not update the live APIM policy.
+
 The initial key is returned once with `Cache-Control: no-store`. The browser keeps it only in memory for copying, never in the DOM, URL or query cache. Terminal operation state and temporary ciphertext deletion commit together. Failed operations retain their resource and checkpoint evidence; they do not automatically delete subscriptions or regenerate credentials. Inspect an interrupted activation's live state before taking further action.
 
 ## Budget ledger recovery

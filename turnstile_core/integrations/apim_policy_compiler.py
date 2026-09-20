@@ -35,6 +35,7 @@ from .apim_control_plane_contract import (
         PolicyCompilationError,
 )
 from .apim_image_policy import IMAGE_OPERATION_ID, IMAGE_POLICY_VERSION, image_request_validation
+from .apim_policy_components import upgrade_application_tpm_policy
 
 
 def _chat_completions_policy(publication: GatewayPublication) -> str:
@@ -569,7 +570,7 @@ class ApimPolicyCompiler:
             raise PolicyCompilationError(
                 "The live parent policy contains an invalid direct child under choose"
             )
-        return result
+        return upgrade_application_tpm_policy(result)
 
     @staticmethod
     def _patch_legacy_openai_stream_usage(source: str) -> str:

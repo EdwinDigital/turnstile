@@ -1181,11 +1181,21 @@
     <choose>
       <when condition="@(context.Subscription != null &amp;&amp; (bool)context.Variables[&quot;isInferenceOperation&quot;])">
         <set-variable name="consumerId" value="@(context.Subscription.Id)" />
+        <set-variable name="applicationTokensPerMinute" value="@{
+          long defaultRate = __TOKENS_PER_MINUTE__;
+          if (context.Variables.GetValueOrDefault&lt;string&gt;(&quot;applicationAdmission&quot;, &quot;&quot;) != &quot;ok&quot;
+            || !context.Variables.ContainsKey(&quot;applicationLedgerState&quot;)) { return defaultRate; }
+          var state = (JObject)context.Variables[&quot;applicationLedgerState&quot;];
+          if (!((bool?)state[&quot;available&quot;] ?? false)
+            || (string)state[&quot;budgetStatus&quot;] != &quot;ok&quot;) { return defaultRate; }
+          long configured = (long?)state[&quot;tokensPerMinute&quot;] ?? 0;
+          return configured &gt; 0 &amp;&amp; configured &lt;= int.MaxValue ? configured : defaultRate;
+        }" />
         <choose>
           <when condition="@(!(bool)context.Variables[&quot;isImagesOperation&quot;])">
         <llm-token-limit
           counter-key="@($&quot;finops:subscription:{(string)context.Variables[&quot;consumerId&quot;]}&quot;)"
-          tokens-per-minute="__TOKENS_PER_MINUTE__"
+          tokens-per-minute="@((long)context.Variables[&quot;applicationTokensPerMinute&quot;])"
           estimate-prompt-tokens="true"
           retry-after-header-name="Retry-After"
           remaining-tokens-header-name="x-ratelimit-remaining-tokens"
