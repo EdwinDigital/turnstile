@@ -397,13 +397,10 @@ class InMemoryRepository(
             if existing.id != record.id:
                 continue
             if existing.estimated and not record.estimated:
-                if existing.price_context_snapshot is not None:
-                    record = record.model_copy(update=ModelPrice.model_validate(
-                        existing.price_context_snapshot,
-                    ).snapshot_prices(
-                        record.input_tokens, record.cached_tokens,
-                        record.output_tokens, record.cache_write_tokens,
-                    ))
+                record = record.model_copy(update=ModelPrice.restore_usage_prices(
+                    existing.model_dump(), record.input_tokens, record.cached_tokens,
+                    record.output_tokens, record.cache_write_tokens,
+                ))
                 self.usage_records[index] = record.model_copy(
                     update={
                         "budget_admission": record.budget_admission
@@ -856,6 +853,10 @@ class InMemoryRepository(
             "latency_ms": record.latency_ms,
             "status_code": record.status_code,
             "estimated_cost": record.estimated_cost,
+            "cost_available": record.estimated_cost > 0 or (
+                record.input_price_per_million is not None
+                and record.output_price_per_million is not None
+            ),
             "error_message": record.error_message,
         }
 
@@ -892,6 +893,12 @@ class InMemoryRepository(
             "turn_index": record.turn_index,
             "cached_tokens": record.cached_tokens,
             "cache_write_tokens": record.cache_write_tokens,
+            "input_price_per_million": record.input_price_per_million,
+            "cached_price_per_million": record.cached_price_per_million,
+            "cache_write_price_per_million": record.cache_write_price_per_million,
+            "output_price_per_million": record.output_price_per_million,
+            "price_context_tier": record.price_context_tier,
+            "price_context_snapshot": record.price_context_snapshot,
             "estimated": record.estimated,
             "ingest_source": record.ingest_source,
             "ingest_error": record.ingest_error,

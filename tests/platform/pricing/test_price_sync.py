@@ -308,6 +308,24 @@ def test_an_ordinary_repricing_passes_unattended() -> None:
     assert update.input_cost_per_million == pytest.approx(0.396)
 
 
+@pytest.mark.parametrize("previous,current", [(None, 0.1), (0.1, None), (0.0, 0.1)])
+def test_sync_reviews_added_removed_and_previously_free_buckets(
+    previous: float | None, current: float | None,
+) -> None:
+    update = only(plan_price_sync([
+        model(list_input_cost_per_million=0.4, list_output_cost_per_million=1.6,
+              list_cached_cost_per_million=previous),
+    ], StubCatalog(entry(cached_per_million=current))))
+    assert update.status is PriceSyncStatus.REVIEW_NEEDED and not update.writes
+
+
+def test_flat_sync_cannot_replace_a_price_with_only_one_context_tier() -> None:
+    update = only(plan_price_sync([model()], StubCatalog(replace(
+        entry(), label="Future model ShortCo Std",
+    ))))
+    assert update.status is PriceSyncStatus.REVIEW_NEEDED and not update.writes
+
+
 def test_drift_is_measured_against_the_list_price_not_the_charged_rate() -> None:
     """Otherwise changing a discount would read as a suspicious price move and block itself."""
     update = only(
@@ -440,6 +458,22 @@ def test_an_unchanged_configuration_still_lets_the_write_through() -> None:
     assert written == 1
 
 
+@pytest.mark.parametrize("writes", [False, True])
+def test_sync_result_cannot_overwrite_a_newly_accepted_baseline(writes: bool) -> None:
+    registry = registry_with(None, 90)
+    current = registry.models[0]
+    planned = sync_result(
+        current["id"], writes=writes, status="ok" if writes else "review_needed",
+        pending_list_price={"input": 99},
+    )
+    current["list_input_cost_per_million"] = 0.7
+    current["pending_list_price"] = {"input": 0.8}
+    assert registry.apply_model_price_sync([planned]) == 0
+    assert current["list_input_cost_per_million"] == 0.7
+    assert current["pending_list_price"] == {"input": 0.8}
+    assert current["price_sync_status"] == "superseded"
+
+
 def test_accepting_a_price_clears_the_proposal_waiting_on_it() -> None:
     registry = registry_with(None, 90)
     model = registry.models[0]
@@ -468,10 +502,7 @@ def test_a_skipped_sync_records_the_reason_without_moving_the_rates() -> None:
     registry = registry_with(None, 90)
     registry.models[0]["input_cost_per_million"] = 1.2345
     registry.apply_model_price_sync([
-        {"model_id": registry.models[0]["id"], "writes": False,
-         "status": "unmapped", "message": "找不到",
-         "list_input_cost_per_million": None, "list_output_cost_per_million": None,
-         "list_cached_cost_per_million": None, "list_cache_write_cost_per_million": None},
+        sync_result(registry.models[0]["id"], writes=False, status="unmapped", message="找不到"),
     ])
     stored = registry.registry()["models"][0]
     assert stored["input_cost_per_million"] == pytest.approx(1.2345)

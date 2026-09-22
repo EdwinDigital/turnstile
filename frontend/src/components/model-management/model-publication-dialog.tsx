@@ -46,7 +46,7 @@ import {
   publicationConnectionTarget,
 } from "./model-publication-connections"
 import { FieldHelp } from "./field-help"
-import { createModelPriceDraft, validateModelPricing } from "./model-edit-form"
+import { contextPriceRulePayload, createModelPriceDraft, validateModelPricing } from "./model-edit-form"
 import { ModelPriceSourceFields, ModelPriceText } from "./model-price-source"
 import { ModelVendorLogo } from "./model-vendor-select"
 import {
@@ -282,7 +282,7 @@ export function ModelPublicationDialog({
   const [displayName, setDisplayName] = useState("")
   const [upstreamModelId, setUpstreamModelId] = useState("")
   const [contextWindow, setContextWindow] = useState("")
-  const [pricing, setPricing] = useState(() => createModelPriceDraft(registry.context_pricing_supported === true))
+  const [pricing, setPricing] = useState(() => createModelPriceDraft(registry.context_pricing_supported === true, registry.context_price_rules_supported === true))
   const { inputPrice, outputPrice, cacheReadPrice, cacheWritePrice } = pricing
   const [formError, setFormError] = useState<string | null>(null)
   const [publishError, setPublishError] = useState<string | null>(null)
@@ -321,7 +321,7 @@ export function ModelPublicationDialog({
     setDisplayName("")
     setUpstreamModelId("")
     setContextWindow("")
-    setPricing(createModelPriceDraft(registry.context_pricing_supported === true))
+    setPricing(createModelPriceDraft(registry.context_pricing_supported === true, registry.context_price_rules_supported === true))
     setFormError(null)
     setPublishError(null)
   }
@@ -351,6 +351,8 @@ export function ModelPublicationDialog({
       price_reference: "请选择官方价目中的模型与计价方式。",
       context_pricing_preview: "当前后端尚不支持分档计费，暂不可保存或发布。",
       context_pricing_incomplete: "分档价格或阈值不完整，不能保存。",
+      context_price_rule: "阈值须为正整数。",
+      context_price_rule_preview: "当前后端尚不支持自定义阈值，暂不可保存或发布。",
       discount: "折扣必须大于 0 且不超过 100%。",
     }[priceError]
     if (foundry) {
@@ -393,7 +395,10 @@ export function ModelPublicationDialog({
           output_cost_per_million: pricing.contextPricingPreview ? null : numberOrNull(outputPrice),
           cached_cost_per_million: pricing.contextPricingPreview ? null : numberOrNull(cacheReadPrice),
           cache_write_cost_per_million: imageGeneration || pricing.contextPricingPreview ? null : numberOrNull(cacheWritePrice),
-          ...(pricing.contextPricingPreview ? { context_price_references: pricing.contextPriceReferences } : {}),
+          ...(pricing.contextPricingPreview ? {
+            context_price_references: pricing.contextPriceReferences,
+            ...(contextPriceRulePayload(pricing) ? { context_price_rule: contextPriceRulePayload(pricing) } : {}),
+          } : {}),
           ...(pricing.priceSource !== "manual" || pricing.discountPercent.trim() ? {
             price_source: pricing.priceSource,
             price_reference: pricing.priceSource === "manual" || pricing.contextPricingPreview ? null : pricing.priceReference.trim(),
@@ -604,7 +609,7 @@ export function ModelPublicationDialog({
                   if (operation !== "chat" && operation !== "image_generation") return
                   setModelOperation(operation)
                   setContextWindow("")
-                  setPricing(createModelPriceDraft(registry.context_pricing_supported === true))
+                  setPricing(createModelPriceDraft(registry.context_pricing_supported === true, registry.context_price_rules_supported === true))
                 }}>
                   <SelectTrigger className="registry-select-trigger" aria-label="模型用途"><SelectValue>{imageGeneration ? "文生图" : "对话"}</SelectValue></SelectTrigger>
                   <SelectContent align="start" alignItemWithTrigger={false}>

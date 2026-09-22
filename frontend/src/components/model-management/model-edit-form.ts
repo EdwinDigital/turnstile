@@ -1,24 +1,4 @@
-import contextRules from "../../../../turnstile_core/pricing/context-rules.json" with { type: "json" }
-import type { ManagedModel, PriceCatalogContextTier, PriceCatalogModel, PriceCatalogOption, PriceCatalogOptionsResponse, PriceSource } from "../../data-sources/apim/types"
-
-export function resolveContextPriceRule(
-  model: PriceCatalogModel,
-  descriptor: PriceCatalogContextTier,
-  rules = contextRules.rules,
-): PriceCatalogContextTier {
-  if (descriptor.input_range !== null) return descriptor
-  const matching = rules.filter(rule => rule.basis === "request_input_tokens" && rule.matches.some(match =>
-    match.source === model.source && match.product === model.product
-    && match.group_key === descriptor.group_key && match.service_tier === descriptor.service_tier))
-  if (matching.length !== 1) return descriptor
-  const rule = matching[0]
-  const tier = rule.tiers.find(candidate => candidate.key === descriptor.key)
-  return tier ? {
-    ...descriptor,
-    input_range: tier.input_range,
-    input_range_source: { rule_id: rule.id, url: rule.source_url, revision: rule.source_revision, verified_on: rule.verified_on },
-  } : descriptor
-}
+import type { ContextPriceRule, ManagedModel, PriceCatalogContextTier, PriceCatalogModel, PriceCatalogOption, PriceCatalogOptionsResponse, PriceSource } from "../../data-sources/apim/types"
 
 type ModelContextTier = {
   key: string
@@ -69,12 +49,11 @@ export function groupContextPriceModels(models: PriceCatalogModel[]): ModelPrice
   const result: ModelPriceCandidate[] = []
   const groups = new Map<string, ModelPriceCandidate>()
   for (const model of models) {
-    const discovered = contextTierFromModel(model)
-    if (!discovered) {
+    const descriptor = contextTierFromModel(model)
+    if (!descriptor) {
       result.push(model)
       continue
     }
-    const descriptor = resolveContextPriceRule(model, discovered)
     const groupKey = JSON.stringify([model.source, model.product, descriptor.group_key, descriptor.service_tier])
     let grouped = groups.get(groupKey)
     if (!grouped) {
@@ -116,9 +95,8 @@ export function pairContextPriceOptions(
       || metadata.key !== tier.key || metadata.order !== tier.order) {
       throw new Error("分档价目与所选模型不匹配。")
     }
-    const resolved = resolveContextPriceRule(details, metadata)
-    return resolved.input_range === null ? tier : {
-      ...tier, inputRange: resolved.input_range, inputRangeSource: resolved.input_range_source,
+    return metadata.input_range === null ? tier : {
+      ...tier, inputRange: metadata.input_range, inputRangeSource: metadata.input_range_source,
     }
   })
   const ranges = tiers.map(tier => tier.inputRange)
@@ -218,6 +196,11 @@ export type ModelPriceDraft = {
   contextPriceReferences?: string[]
   contextPriceTiers?: ModelContextPriceTier[]
   contextPriceRefresh?: boolean
+  contextPriceRulesSupported?: boolean
+  contextRuleMode?: "catalog" | "custom"
+  contextThreshold?: string
+  contextRuleNote?: string
+  contextRuleUrl?: string
 }
 
 export type ModelEditDraft = ModelPriceDraft & {
@@ -237,17 +220,20 @@ export type ModelEditError =
   | "discount"
   | "context_pricing_preview"
   | "context_pricing_incomplete"
+  | "context_price_rule"
+  | "context_price_rule_preview"
 
-export function createModelPriceDraft(contextPricingSupported = false): ModelPriceDraft {
+export function createModelPriceDraft(contextPricingSupported = false, contextPriceRulesSupported = false): ModelPriceDraft {
   return {
     inputPrice: "", outputPrice: "", cacheReadPrice: "", cacheWritePrice: "",
     priceSource: "manual", priceReference: "", discountPercent: "",
     contextPricingPreview: false,
     contextPricingSupported, contextPriceReferences: [], contextPriceTiers: [], contextPriceRefresh: false,
+    contextPriceRulesSupported, contextRuleMode: "catalog", contextThreshold: "", contextRuleNote: "", contextRuleUrl: "",
   }
 }
 
-export function createModelEditDraft(model: ManagedModel, contextPricingSupported = false): ModelEditDraft {
+export function createModelEditDraft(model: ManagedModel, contextPricingSupported = false, contextPriceRulesSupported = false): ModelEditDraft {
   const restored = restoreContextPrices(model)
   return {
     displayName: model.display_name,
@@ -267,7 +253,54 @@ export function createModelEditDraft(model: ManagedModel, contextPricingSupporte
     contextPriceReferences: model.context_price_tiers?.map(tier => tier.reference) ?? [],
     contextPriceTiers: restored?.options[0].contextPricing?.tiers ?? [],
     contextPriceRefresh: false,
+    contextPriceRulesSupported,
+    contextRuleMode: model.context_price_rule ? "custom" : "catalog",
+    contextThreshold: model.context_price_rule?.short_context_max_tokens.toString() ?? "",
+    contextRuleNote: model.context_price_rule?.note ?? "",
+    contextRuleUrl: model.context_price_rule?.source_url ?? "",
   }
+}
+
+export function resetContextPriceRule<Draft extends ModelPriceDraft>(draft: Draft): Draft {
+  return { ...draft, contextRuleMode: "catalog", contextThreshold: "", contextRuleNote: "", contextRuleUrl: "" }
+}
+
+export function contextPriceRulePayload(draft: ModelPriceDraft): ContextPriceRule | undefined {
+  return draft.contextPricingPreview && draft.contextRuleMode === "custom" ? {
+    short_context_max_tokens: Number(draft.contextThreshold),
+    note: draft.contextRuleNote?.trim() ?? "",
+    source_url: draft.contextRuleUrl?.trim() || null,
+  } : undefined
+}
+
+export function validContextPriceRule(draft: ModelPriceDraft): boolean {
+  const rule = contextPriceRulePayload(draft)
+  if (!rule || !draft.contextThreshold?.trim() || !Number.isSafeInteger(rule.short_context_max_tokens)
+    || rule.short_context_max_tokens <= 0 || rule.short_context_max_tokens >= Number.MAX_SAFE_INTEGER
+    || (rule.note?.length ?? 0) > 500) return false
+  if (rule.source_url) {
+    try {
+      const url = new URL(rule.source_url)
+      if (url.protocol !== "https:" || !url.hostname || url.username || url.password
+        || /\s/.test(rule.source_url) || rule.source_url.length > 2000) return false
+    } catch { return false }
+  }
+  return true
+}
+
+export function effectiveContextPriceTiers(draft: ModelPriceDraft): ModelContextPriceTier[] {
+  const tiers = draft.contextPriceTiers ?? []
+  if (draft.contextRuleMode !== "custom") return tiers
+  const maximum = Number(draft.contextThreshold)
+  const valid = !!draft.contextThreshold?.trim() && Number.isSafeInteger(maximum)
+    && maximum > 0 && maximum < Number.MAX_SAFE_INTEGER
+  return tiers.map(tier => ({
+    ...tier, inputRangeSource: undefined,
+    inputRange: valid && ["short", "long"].includes(tier.key) ? {
+      min_input_tokens: tier.key === "short" ? 0 : maximum + 1,
+      max_input_tokens: tier.key === "short" ? maximum : null,
+    } : null,
+  }))
 }
 
 export function modelEditRoleOptions(model: ManagedModel): string[] {
@@ -291,10 +324,10 @@ export function setModelEditPriceSource(
   draft: ModelEditDraft,
   priceSource: PriceSource,
 ): ModelEditDraft {
-  if (priceSource === "manual") return {
+  if (priceSource === "manual") return resetContextPriceRule({
     ...draft, priceSource, contextPricingPreview: false, contextPriceReferences: [],
     contextPriceTiers: [], contextPriceRefresh: false,
-  }
+  })
   return { ...draft, priceSource }
 }
 
@@ -308,9 +341,12 @@ export function applyCatalogOption<Draft extends ModelPriceDraft>(
   if (option.contextPricing) {
     const region = option.regions.find(candidate => option.references_by_region?.[candidate] === option.reference)
     const references = region ? option.contextPricing.regionalReferences?.[region] : undefined
+    const selectedReferences = references ?? option.contextPricing.tiers.map(tier => tier.option.reference)
+    const sameScope = draft.priceSource === source
+      && JSON.stringify(draft.contextPriceReferences) === JSON.stringify(selectedReferences)
     return {
-      ...draft, priceSource: source, priceReference: "", contextPricingPreview: true,
-      contextPriceReferences: references ?? option.contextPricing.tiers.map(tier => tier.option.reference),
+      ...(sameScope ? draft : resetContextPriceRule(draft)), priceSource: source, priceReference: "", contextPricingPreview: true,
+      contextPriceReferences: selectedReferences,
       contextPriceTiers: option.contextPricing.tiers,
       contextPriceRefresh: true,
     }
@@ -318,7 +354,7 @@ export function applyCatalogOption<Draft extends ModelPriceDraft>(
   const rate = (value: number | null) =>
     value === null ? "" : discountedRate(value, effectiveDiscountPercent).toString()
   return {
-    ...draft,
+    ...resetContextPriceRule(draft),
     priceSource: source,
     priceReference: option.reference,
     contextPricingPreview: false,
@@ -362,7 +398,7 @@ export function resolveDiscount(
 export function modelEditHasChanges(initial: ModelEditDraft, draft: ModelEditDraft): boolean {
   const comparable = (value: ModelEditDraft) => ({
     ...value,
-    contextPriceTiers: undefined, contextPricingSupported: undefined,
+    contextPriceTiers: undefined, contextPricingSupported: undefined, contextPriceRulesSupported: undefined,
     allowedRoles: [...value.allowedRoles].sort(),
   })
   return JSON.stringify(comparable(initial)) !== JSON.stringify(comparable(draft))
@@ -381,19 +417,26 @@ export function validateModelEdit(draft: ModelEditDraft): ModelEditError | null 
   return null
 }
 
-export function validateModelPricing(draft: ModelPriceDraft): "prices" | "price_reference" | "discount" | "context_pricing_preview" | "context_pricing_incomplete" | null {
+export function validateModelPricing(draft: ModelPriceDraft): Exclude<ModelEditError, "display_name" | "context_window" | "default_disabled"> | null {
   const prices = [draft.inputPrice, draft.outputPrice, draft.cacheReadPrice, draft.cacheWritePrice]
   if (prices.some((value) => value.trim() && (!Number.isFinite(Number(value)) || Number(value) < 0))) {
     return "prices"
   }
   if (draft.priceSource !== "manual" && draft.contextPricingPreview) {
     if (!draft.contextPricingSupported) return "context_pricing_preview"
-    const tiers = draft.contextPriceTiers ?? []
+    if (draft.contextRuleMode === "custom") {
+      if (!validContextPriceRule(draft)) return "context_price_rule"
+      if (!draft.contextPriceRulesSupported) return "context_price_rule_preview"
+      const keys = draft.contextPriceTiers?.map(tier => tier.key)
+      if (keys?.length !== 2 || !keys.includes("short") || !keys.includes("long")) return "context_pricing_incomplete"
+    }
+    const tiers = effectiveContextPriceTiers(draft)
     const references = draft.contextPriceReferences ?? []
     if (tiers.length < 2 || references.length !== tiers.length || new Set(references).size !== references.length
       || references.some(reference => !reference.startsWith(`${draft.priceSource}:`))) return "context_pricing_incomplete"
     let minimum = 0
     for (const [index, tier] of tiers.entries()) {
+      if (tier.inputRangeSource?.origin === "reference" && draft.contextPriceRefresh !== false) return "context_pricing_incomplete"
       const range = tier.inputRange
       if (!range || !Number.isSafeInteger(range.min_input_tokens) || range.min_input_tokens !== minimum
         || (range.max_input_tokens !== null && (!Number.isSafeInteger(range.max_input_tokens)
@@ -439,6 +482,7 @@ export function modelEditPayload(model: ManagedModel, draft: ModelEditDraft) {
     ...(draft.contextPricingPreview ? {
       context_price_references: draft.contextPriceReferences,
       context_price_refresh: draft.contextPriceRefresh === true,
+      ...(contextPriceRulePayload(draft) ? { context_price_rule: contextPriceRulePayload(draft) } : {}),
     } : {}),
   }
 }

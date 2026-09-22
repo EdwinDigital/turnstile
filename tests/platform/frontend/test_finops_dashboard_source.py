@@ -100,6 +100,21 @@ def test_request_trace_cost_availability_is_per_request() -> None:
     assert "costAvailable={costAvailable}" not in request_trace
 
 
+def test_request_trace_cost_formula_uses_the_recorded_request() -> None:
+    source = read_apim_dashboard_source()
+    calculation = source.split("export function RequestCostCalculation(", 1)[1].split(
+        "function TraceFacts", 1
+    )[0]
+    assert "requestCostCalculation(request)" in calculation
+    assert "models" not in calculation
+    assert 'role="math"' in calculation
+    assert "calculation.matchesRecordedCost" in calculation
+    assert "当前后端未提供历史单价" in calculation
+    css = read_frontend_styles()
+    assert ".trace-cost-expression { display: flex; flex-wrap: wrap;" in css
+    assert ".trace-cost-numerator { display: flex; flex-wrap: wrap;" in css
+
+
 def test_recorded_cost_is_not_hidden_by_incomplete_registry_pricing() -> None:
     source = read_apim_dashboard_source()
     overview = source.split("function ExecutiveOverview(", 1)[1].split("function Kpi(", 1)[0]

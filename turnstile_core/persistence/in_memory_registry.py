@@ -104,26 +104,27 @@ class InMemoryRegistryRepositoryMixin:
             # Same guard the SQL repository applies. Without it here, every test that reaches a
             # sync through the fake would agree that a stale result may land on a model whose
             # pricing changed underneath it -- and the database would disagree in production.
-            if update.get("writes"):
-                current = (
-                    str(model.get("price_source") or "manual"),
-                    model.get("price_reference"),
-                    self._effective_discount(model),
-                    model.get("context_price_tiers") or [],
+            current = (
+                str(model.get("price_source") or "manual"),
+                model.get("price_reference"),
+                self._effective_discount(model),
+                model.get("context_price_tiers") or [],
+                {column: model.get(column) for column in listed},
+            )
+            planned = (
+                str(update.get("expected_source")),
+                update.get("expected_reference"),
+                update.get("expected_discount_percent"),
+                update.get("expected_context_price_tiers") or [],
+                update.get("expected_list_prices") or {column: None for column in listed},
+            )
+            if current != planned:
+                model["price_sync_status"] = "superseded"
+                model["price_sync_message"] = (
+                    "同步期间该模型的计价配置被改动，本次结果已作废，未写入"
                 )
-                planned = (
-                    str(update.get("expected_source")),
-                    update.get("expected_reference"),
-                    update.get("expected_discount_percent"),
-                    update.get("expected_context_price_tiers") or [],
-                )
-                if current != planned:
-                    model["price_sync_status"] = "superseded"
-                    model["price_sync_message"] = (
-                        "同步期间该模型的计价配置被改动，本次结果已作废，未写入"
-                    )
-                    model["price_synced_at"] = now
-                    continue
+                model["price_synced_at"] = now
+                continue
 
             if update.get("writes"):
                 # The accepted baseline moves only when the price is accepted.

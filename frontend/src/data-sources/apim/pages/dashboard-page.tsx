@@ -85,7 +85,7 @@ import {
 } from "../../../components/ui/dropdown-menu"
 import { usageWindow } from "../api"
 import { getIntlLocale, useLocale, type LocalePreference } from "../../../locales/index"
-import { estimateRequestCost, hasModelPrices, priceRequests } from "../../../lib/pricing"
+import { estimateRequestCost, hasModelPrices, priceRequests, requestCostCalculation } from "../../../lib/pricing"
 import { finopsKeys, finopsQueries, trendDimensionForFilters } from "../queries"
 import type {
   AnomalyRule,
@@ -1396,7 +1396,11 @@ function RequestTraceDetail({
       </div>
       <dl className={`trace-token-facts columns-${tokenSegments.length}`}>
         {tokenSegments.map((item) => <div className={`trace-token-fact ${item.className}`} key={item.label}><dt>{item.label}</dt><dd>{tokenValue(item)}</dd></div>)}
-        <div className="trace-token-cost"><dt>估算费用</dt><dd>{!inputOutputMeasured ? usagePlaceholder : costAvailable ? `${cacheUsageUnmeasured ? "≥ " : ""}${currency.format(request.estimated_cost)}` : "未计价"}</dd></div>
+        <div className="trace-token-cost">
+          <dt>估算费用</dt>
+          <dd>{!inputOutputMeasured ? usagePlaceholder : costAvailable ? `${cacheUsageUnmeasured ? "≥ " : ""}${currency.format(request.estimated_cost)}` : "未计价"}</dd>
+          {inputOutputMeasured && costAvailable && <dd className="trace-cost-calculation"><RequestCostCalculation request={request} /></dd>}
+        </div>
       </dl>
       {cacheUsageUnmeasured && <p className="trace-token-note"><CircleAlert size={13} />流式缓存用量未实测；当前 Token 总量与费用均为下限。</p>}
     </section>
@@ -1415,6 +1419,39 @@ function RequestTraceDetail({
       ["Turn", String(request.turn_index)],
     ]} />
   </div>
+}
+
+export function RequestCostCalculation({ request }: { request: UsageRequestDetail }) {
+  const calculation = requestCostCalculation(request);
+  if (!calculation) return <span className="trace-cost-unavailable">{request.input_price_per_million === undefined ? "当前后端未提供历史单价" : "历史单价不可用"}</span>;
+  const number = (value: number) => value.toLocaleString(getIntlLocale(), { maximumFractionDigits: 0 });
+  const rate = (value: number) => value.toLocaleString(getIntlLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 20 });
+  const amount = (value: number) => value.toLocaleString(getIntlLocale(), { minimumFractionDigits: 8, maximumFractionDigits: 8 });
+  const labels: Record<string, string> = { input: "未缓存输入", cached: "缓存读取", write: "缓存写入", output: "输出" };
+  const tier = calculation.contextTier;
+  const range = tier == null ? null : tier.max_input_tokens == null
+    ? `${number(calculation.inputTokens)} > ${number(tier.min_input_tokens - 1)}`
+    : `${tier.min_input_tokens ? `${number(tier.min_input_tokens)} ≤ ` : ""}${number(calculation.inputTokens)} ≤ ${number(tier.max_input_tokens)}`;
+  return <div className="trace-cost-formula">
+    {tier && <div className="trace-cost-tier">
+      <strong>{tier.key === "short" ? "短上下文" : tier.key === "long" ? "长上下文" : tier.key}</strong>
+      <span>{range} Tokens</span>
+      {tier.input_range_source?.origin === "custom" && <span>管理员自定义</span>}
+    </div>}
+    <span className="trace-cost-unit">单价：USD / 百万 Tokens</span>
+    <div className="trace-cost-expression" role="math" aria-label={`${calculation.lowerBound ? "C ≥ " : ""}(${calculation.terms.map(term => `${labels[term.bucket]} ${number(term.tokens)} × ${rate(term.rate)}`).join(" + ")}) ÷ 1,000,000 = ${amount(calculation.calculatedCost)} USD`}>
+      {calculation.lowerBound && <span>C ≥</span>}
+      <span className="trace-cost-fraction">
+        <span className="trace-cost-numerator">{calculation.terms.map((term, index) => <span className="trace-cost-summand" key={term.bucket}>
+          {index > 0 && <span aria-hidden="true">+</span>}
+          <span className="trace-cost-term"><small>{labels[term.bucket]}</small><span>{number(term.tokens)} × {rate(term.rate)}</span></span>
+        </span>)}</span>
+        <span className="trace-cost-denominator">{number(1_000_000)}</span>
+      </span>
+      <strong className="trace-cost-result">= ${amount(calculation.calculatedCost)}</strong>
+    </div>
+    {!calculation.matchesRecordedCost && <span className="trace-cost-mismatch" role="alert"><span>费用与价格快照不一致</span> · ${amount(calculation.recordedCost)}</span>}
+  </div>;
 }
 
 function TraceFacts({ title, facts, mono = false }: { title: string; facts: Array<[string, string]>; mono?: boolean }) {

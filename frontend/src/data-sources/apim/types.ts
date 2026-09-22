@@ -122,6 +122,7 @@ export type UsageRequestSummary = {
   latency_ms: number
   status_code: number
   estimated_cost: number
+  cost_available?: boolean | null
   error_message: string | null
 }
 
@@ -131,6 +132,14 @@ export type UsageRequestDetail = UsageRequestSummary & {
   run_id: string
   turn_index: number
   cached_tokens: number
+  input_price_per_million?: number | null
+  cached_price_per_million?: number | null
+  cache_write_price_per_million?: number | null
+  output_price_per_million?: number | null
+  price_context_tier?: string | null
+  price_context_snapshot?: { context_tiers?: Array<Pick<StoredContextPriceTier,
+    "key" | "min_input_tokens" | "max_input_tokens" | "input_price_per_million" | "cached_price_per_million"
+    | "cache_write_price_per_million" | "output_price_per_million" | "input_range_source">> } | null
   cache_write_tokens: number
   ingest_error: string | null
   reconciled_at: string | null
@@ -524,6 +533,7 @@ export type ManagedModel = {
   price_source: PriceSource
   price_reference: string | null
   context_price_references?: string[]
+  context_price_rule?: ContextPriceRule | null
   context_price_tiers?: StoredContextPriceTier[]
   pending_context_price_tiers?: StoredContextPriceTier[] | null
   // Percent of list price, overriding the connection's own figure. null inherits it.
@@ -543,7 +553,13 @@ export type ManagedModel = {
 }
 
 export type PriceSource = "manual" | "azure_retail" | "anthropic"
-export type PriceSyncStatus = "ok" | "unmapped" | "stale" | "review_needed"
+export type PriceSyncStatus = "ok" | "unmapped" | "stale" | "review_needed" | "superseded"
+
+export type ContextPriceRule = {
+  short_context_max_tokens: number
+  note?: string
+  source_url?: string | null
+}
 
 export type PriceCatalogContextTier = {
   group_key: string
@@ -553,7 +569,10 @@ export type PriceCatalogContextTier = {
   label: string
   order: number
   input_range: { min_input_tokens: number; max_input_tokens: number | null } | null
-  input_range_source?: { rule_id: string; url: string; revision: string; verified_on: string } | null
+  input_range_source?: {
+    rule_id: string; url: string | null; revision: string; verified_on: string | null
+    origin?: "official" | "reference" | "custom"; configured_at?: string | null; note?: string | null
+  } | null
 }
 
 export type StoredContextPriceTier = {
@@ -631,12 +650,14 @@ export type PriceSyncResponse = {
   unmapped: number
   review_needed: number
   stale: number
+  superseded: number
   details: PriceSyncDetail[]
   registry: ModelRegistry
 }
 
 export type ModelRegistry = {
   context_pricing_supported?: boolean
+  context_price_rules_supported?: boolean
   backend_pool_session_affinity_supported?: boolean
   databricks_connections_supported?: boolean
   databricks_oauth_supported?: boolean
@@ -706,6 +727,7 @@ export type GatewayPublicationCreate = {
     price_reference?: string | null
     price_discount_percent?: number | null
     context_price_references?: string[]
+    context_price_rule?: ContextPriceRule
   }
 }
 

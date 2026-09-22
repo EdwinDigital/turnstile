@@ -29,6 +29,7 @@ from turnstile_core.domain.control_plane import (
     GatewayRateLimitResilience,
     ModelCreateTarget,
     RuntimeTarget,
+    publication_model_id,
 )
 from turnstile_core.domain.runtime_models import OAuthClientCredentialsConfig, ProviderTarget
 from turnstile_core.integrations.apim_control_plane import (
@@ -566,6 +567,12 @@ def test_foundry_candidate_probes_chat_and_responses_before_promotion() -> None:
         "/turnstile/llm;rev=turnstile-test/responses",
         "/turnstile/llm;rev=turnstile-test/responses/compact",
     ]
+    for request in requests:
+        assert request.headers["x-hive-run-id"] == str(publication.id)
+        if request.method == "POST":
+            assert request.headers["x-model-id"] == str(publication_model_id(publication.id, alias))
+            assert request.headers["x-hive-model"] == alias
+            assert "x-hive-runtime" not in request.headers
 
 def test_pool_candidate_probe_covers_every_member_and_operation() -> None:
     repository = InMemoryRepository()
@@ -657,6 +664,13 @@ def test_pool_candidate_probe_covers_every_member_and_operation() -> None:
                 },
             )
         member_id = request.headers["x-turnstile-pool-member"]
+        assert request.headers["x-hive-run-id"] == str(publication.id)
+        assert request.headers["x-model-id"] == str(
+            publication_model_id(publication.id, binding.model.model_key)
+        )
+        assert request.headers["x-hive-model"] == binding.model.model_key
+        assert request.headers["x-runtime-id"] == str(binding.runtime_id)
+        assert "x-hive-runtime" not in request.headers
         calls.append((member_id, request.url.path.rsplit("/", 1)[-1]))
         if request.url.path.endswith("/responses/compact"):
             return httpx.Response(
@@ -785,6 +799,14 @@ def test_foundry_removal_probe_requires_survivor_and_removed_alias_rejection() -
     assert probe_headers["x-user-id"] == "system-gateway-publication"
     assert probe_headers["x-hive-user"] == "Turnstile Publisher"
     assert probe_headers["x-hive-workflow"] == "gateway-publication-probe"
+    for request in requests:
+        assert request.headers["x-hive-run-id"] == str(publication.id)
+        if request.method == "POST":
+            alias = json.loads(request.content)["model"]
+            assert request.headers["x-hive-model"] == alias
+            assert request.headers["x-model-id"] == (
+                str(model["id"]) if alias == model["model_key"] else alias
+            )
 
 @pytest.mark.parametrize("api_format", [ApiFormat.OPENAI_CHAT, ApiFormat.ANTHROPIC_MESSAGES])
 @pytest.mark.parametrize("json_body", [False, True], ids=["plain-text", "json"])

@@ -78,6 +78,41 @@ def test_http_runtime_requests_reuse_the_price_catalog() -> None:
     assert first._price_catalog is second._price_catalog
 
 
+@pytest.mark.parametrize("outcome", ["stale", "unmapped", "review_needed"])
+def test_price_sync_response_reports_superseded_nonwriting_plans(
+    price_edit_service: tuple[ModelRuntimeService, Mock, ManagedModelWrite, UUID],
+    outcome: str,
+) -> None:
+    service, catalog, write, model_id = price_edit_service
+    service.save_model(write, model_id)
+
+    def changed_during_lookup(reference: str) -> CatalogEntry | None:
+        service._repository.update_registry_item("model", model_id, {
+            "price_reference": "azure_retail:Unit:new:Global:*",
+            "input_cost_per_million": 9,
+        })
+        if outcome == "stale":
+            raise TimeoutError("offline")
+        if outcome == "unmapped":
+            return None
+        return CatalogEntry(
+            reference=reference, label="Arbitrary unit", source=PriceSource.AZURE_RETAIL,
+            input_per_million=20, output_per_million=80,
+        )
+
+    catalog.lookup.side_effect = changed_during_lookup
+    response = service.sync_prices([model_id])
+    assert response.considered == 1
+    assert response.updated == 0
+    assert response.superseded == 1
+    assert response.review_needed == response.stale == response.unmapped == 0
+    assert len(response.details) == 1
+    assert response.details[0].status == "superseded"
+    current = next(model for model in response.registry.models if model.id == model_id)
+    assert current.input_cost_per_million == 9
+    assert current.pending_list_price is None
+
+
 def request(*, model: str = "gpt-4.1", runtime: str = "Foundry Test") -> ModelInvocationRequest:
     return ModelInvocationRequest(
         metadata=InvocationMetadata(
@@ -1617,30 +1652,39 @@ def test_price_catalog_response_preserves_context_metadata_from_any_source(
 @pytest.mark.parametrize("band,minimum,maximum", [
     ("ShortCo", 0, 272000), ("LongCo", 272001, None),
 ])
-def test_price_catalog_response_includes_reviewed_threshold_and_source(
+def test_price_catalog_response_preserves_published_threshold_and_source(
     price_edit_service: tuple[ModelRuntimeService, Mock, ManagedModelWrite, UUID],
     band: str, minimum: int, maximum: int | None,
 ) -> None:
+    from turnstile_core.domain.runtime_models import PriceCatalogInputRange, PriceCatalogRuleSource
     from turnstile_core.pricing.catalog import ModelSearch, parse_context_tier
 
     service, catalog, _write, _model_id = price_edit_service
-    label = f"5.6 sol {band} Std"
+    label = f"Future Model {band} Std"
+    context_tier = parse_context_tier(label)
+    assert context_tier is not None
+    context_tier.input_range = PriceCatalogInputRange(
+        min_input_tokens=minimum, max_input_tokens=maximum,
+    )
+    context_tier.input_range_source = PriceCatalogRuleSource(
+        rule_id="publisher-input-context", url="https://publisher.example/model#pricing",
+        revision="sha256:published-document", verified_on="2026-09-21",
+    )
     model = CatalogModel(
-        key=f"azure_retail:Azure OpenAI GPT5:{label}", label=label,
-        product="Azure OpenAI GPT5", source=PriceSource.AZURE_RETAIL,
-        context_tier=parse_context_tier(label),
+        key=f"azure_retail:New Product:{label}", label=label,
+        product="New Product", source=PriceSource.AZURE_RETAIL,
+        context_tier=context_tier,
     )
     catalog.search_models.return_value = ModelSearch(models=(model,))
     catalog.options.return_value = CatalogOptions(model=model)
-    search = service.price_catalog_models("5.6 sol").model_dump(mode="json")
+    search = service.price_catalog_models("Future Model").model_dump(mode="json")
     details = service.price_catalog_options(model.key).model_dump(mode="json")
     descriptor = search["models"][0]["context_tier"]
     assert descriptor == details["model_entry"]["context_tier"]
     assert descriptor["input_range"] == {
         "min_input_tokens": minimum, "max_input_tokens": maximum,
     }
-    assert descriptor["input_range_source"]["url"].startswith("https://learn.microsoft.com/")
-    assert descriptor["input_range_source"]["revision"]
+    assert descriptor["input_range_source"] == context_tier.input_range_source.model_dump()
 
 
 @pytest.mark.parametrize("creating", [False, True])
@@ -1671,10 +1715,12 @@ def test_catalog_price_save_rejects_unusable_prices_without_changing_registry(
     assert next(model for model in before if model.id == model_id).cached_cost_per_million == 0.45
 
 
+@pytest.mark.parametrize("custom_rule", [False, True])
 def test_context_prices_save_and_reopen_without_trusting_client_rates(
     price_edit_service: tuple[ModelRuntimeService, Mock, ManagedModelWrite, UUID],
+    custom_rule: bool,
 ) -> None:
-    from turnstile_core.domain.runtime_models import InvocationUsage
+    from turnstile_core.domain.runtime_models import InvocationUsage, PriceCatalogInputRange
     from turnstile_core.pricing.catalog import parse_context_tier
 
     service, catalog, write, model_id = price_edit_service
@@ -1682,10 +1728,16 @@ def test_context_prices_save_and_reopen_without_trusting_client_rates(
     references = []
     for band, input_rate, output_rate in [("ShortCo", 4, 20), ("LongCo", 8, 30)]:
         label = f"5.6 sol {band} Std"
+        context_tier = parse_context_tier(label)
+        assert context_tier is not None
+        context_tier.input_range = None if custom_rule else PriceCatalogInputRange(
+            min_input_tokens=0 if band == "ShortCo" else 272001,
+            max_input_tokens=272000 if band == "ShortCo" else None,
+        )
         model = CatalogModel(
             key=f"azure_retail:Azure OpenAI GPT5:{label}", label=label,
             product="Azure OpenAI GPT5", source=PriceSource.AZURE_RETAIL,
-            context_tier=parse_context_tier(label),
+            context_tier=context_tier,
         )
         reference = f"{model.key}:Global:*"
         references.append(reference)
@@ -1703,6 +1755,8 @@ def test_context_prices_save_and_reopen_without_trusting_client_rates(
         "price_discount_percent": 80, "input_cost_per_million": 0.000001,
         "enabled": True,
     }
+    if custom_rule:
+        values["context_price_rule"] = {"short_context_max_tokens": 272000}
     result = service.save_model(ManagedModelWrite.model_validate(values), model_id)
     assert result.context_pricing_supported is True
     saved = next(model for model in result.models if model.id == model_id)
@@ -1715,7 +1769,15 @@ def test_context_prices_save_and_reopen_without_trusting_client_rates(
     assert saved.context_price_tiers[0].model_label == "5.6 sol ShortCo Std"
     assert saved.context_price_tiers[1].deployment == "Global"
     assert saved.context_price_tiers[0].regions == ["eastus"]
+    if custom_rule:
+        assert saved.context_price_rule is not None
+        assert saved.context_price_rule.short_context_max_tokens == 272000
+        source = saved.context_price_tiers[0].input_range_source
+        assert source is not None and source.origin == "custom"
+        assert source.configured_at is not None
     price = service._repository.model_prices()[str(model_id)]
+    if custom_rule:
+        assert price.context_tiers[0].input_range_source == source
     assert price.for_input_tokens(272001).input_price_per_million == 6.4
     route = service._repository.invocation_route(saved.runtime_id, saved.id)
     assert route is not None
@@ -1755,11 +1817,19 @@ def test_complete_catalog_price_can_be_saved(
 ) -> None:
     service, catalog, write, model_id = price_edit_service
 
-    result = service.save_model(write, model_id)
+    result = service.save_model(write.model_copy(update={
+        "input_cost_per_million": 0.000001, "output_cost_per_million": 99999,
+    }), model_id)
 
     saved = next(model for model in result.models if model.id == model_id)
     assert saved.price_source is PriceSource.AZURE_RETAIL
-    assert saved.cached_cost_per_million is None
+    published = catalog.lookup.return_value
+    charged = published.discounted(saved.effective_discount_percent)
+    assert saved.input_cost_per_million == charged.input_per_million
+    assert saved.output_cost_per_million == charged.output_per_million
+    assert saved.cached_cost_per_million == charged.cached_per_million
+    assert saved.list_input_cost_per_million == published.input_per_million
+    assert saved.price_sync_status == "ok"
     catalog.lookup.assert_called_once_with(write.price_reference)
 
 
@@ -1767,7 +1837,11 @@ def test_non_pricing_edit_does_not_require_an_available_catalog(
     price_edit_service: tuple[ModelRuntimeService, Mock, ManagedModelWrite, UUID],
 ) -> None:
     service, catalog, write, model_id = price_edit_service
-    service.save_model(write, model_id)
+    saved = next(model for model in service.save_model(write, model_id).models
+                 if model.id == model_id)
+    write = ManagedModelWrite.model_validate(
+        saved.model_dump(include=set(ManagedModelWrite.model_fields)),
+    )
     catalog.lookup.reset_mock()
     catalog.lookup.side_effect = TimeoutError("price source unavailable")
 

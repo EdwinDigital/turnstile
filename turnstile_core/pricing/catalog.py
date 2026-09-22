@@ -28,30 +28,23 @@ of hiding it.
 
 from __future__ import annotations
 
-import json
 import re
 import time
 import urllib.parse
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from importlib.resources import files
 from typing import Any, NamedTuple, Protocol
 
 import httpx
 
 from turnstile_core.domain.runtime_models import (
     PriceCatalogContextTier,
-    PriceCatalogInputRange,
-    PriceCatalogRuleSource,
     PriceSource,
 )
 
 AZURE_RETAIL_ENDPOINT = "https://prices.azure.com/api/retail/prices"
 ANTHROPIC_PRICING_URL = "https://docs.claude.com/en/docs/about-claude/pricing"
 CATALOG_TTL_SECONDS = 6 * 60 * 60
-_CONTEXT_RULES: dict[str, Any] = json.loads(
-    files("turnstile_core.pricing").joinpath("context-rules.json").read_text(encoding="utf-8")
-)
 
 # The index is read from one region because a model's Global rate is identical in every region --
 # measured across 24 to 28 regions per model, always one figure. This region is chosen for
@@ -117,31 +110,7 @@ class CatalogModel:
 
     @property
     def resolved_context_tier(self) -> PriceCatalogContextTier | None:
-        descriptor = self.context_tier
-        if descriptor is None or descriptor.input_range is not None:
-            return descriptor
-        matching = [
-            rule for rule in _CONTEXT_RULES["rules"]
-            if rule["basis"] == "request_input_tokens" and any(
-                match["source"] == self.source and match["product"] == self.product
-                and match["group_key"] == descriptor.group_key
-                and match["service_tier"] == descriptor.service_tier
-                for match in rule["matches"]
-            )
-        ]
-        if len(matching) != 1:
-            return descriptor
-        rule = matching[0]
-        tier = next((tier for tier in rule["tiers"] if tier["key"] == descriptor.key), None)
-        if tier is None:
-            return descriptor
-        return descriptor.model_copy(update={
-            "input_range": PriceCatalogInputRange.model_validate(tier["input_range"]),
-            "input_range_source": PriceCatalogRuleSource(
-                rule_id=rule["id"], url=rule["source_url"],
-                revision=rule["source_revision"], verified_on=rule["verified_on"],
-            ),
-        })
+        return self.context_tier
 
     @property
     def search_text(self) -> str:

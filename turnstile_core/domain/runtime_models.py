@@ -11,6 +11,7 @@ from pydantic import Field, HttpUrl, SecretStr, model_validator
 
 from .image_profiles import ImageGenerationLimits, ImageGenerationProfile
 from .models import ModelPriceTier, StrictModel
+from .models import PriceCatalogRuleSource as PriceCatalogRuleSource
 
 ModelCapability = Literal[
     "chat", "tools", "vision", "reasoning", "streaming", "embeddings", "image_generation"
@@ -438,6 +439,29 @@ class Runtime(RuntimeWrite):
     updated_at: datetime
 
 
+class ContextPriceRule(StrictModel):
+    short_context_max_tokens: int = Field(gt=0, le=9007199254740990, strict=True)
+    note: str = Field(default="", max_length=500)
+    source_url: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def normalize_rule(self) -> ContextPriceRule:
+        self.note = self.note.strip()
+        if self.source_url is not None:
+            self.source_url = self.source_url.strip()
+            parsed = urlsplit(self.source_url)
+            if (parsed.scheme != "https" or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or any(character.isspace() for character in self.source_url)):
+                raise ValueError("The rule source must be an HTTPS URL without credentials")
+            HttpUrl(self.source_url)
+        return self
+
+    @property
+    def revision(self) -> str:
+        return "sha256:" + hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+
+
 class ManagedModelWrite(StrictModel):
     provider_id: UUID
     runtime_id: UUID
@@ -467,6 +491,9 @@ class ManagedModelWrite(StrictModel):
         default_factory=list, max_length=32, exclude_if=lambda value: not value,
     )
     context_price_refresh: bool = Field(default=False, exclude_if=lambda value: not value)
+    context_price_rule: ContextPriceRule | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     # Percent of list price this model is charged at, overriding the connection's own figure.
     # None inherits it. This is a commercial term, so nothing derives it -- a person types it.
     price_discount_percent: float | None = Field(default=None, gt=0, le=100)
@@ -484,6 +511,8 @@ class ManagedModelWrite(StrictModel):
 
     @model_validator(mode="after")
     def validate_price_source(self) -> ManagedModelWrite:
+        if self.context_price_rule is not None and len(self.context_price_references) != 2:
+            raise ValueError("A custom context rule requires both short and long catalog tiers")
         if self.context_price_refresh and not self.context_price_references:
             raise ValueError("Refreshing context prices requires the complete tier selection")
         if self.context_price_references:
@@ -542,10 +571,10 @@ class ManagedModel(ManagedModelWrite):
     def restore_context_references(cls, values: Any) -> Any:
         if isinstance(values, dict) and values.get("context_price_tiers"):
             values = dict(values)
-            values["context_price_references"] = [
-                tier.reference if isinstance(tier, StoredContextPriceTier) else tier["reference"]
-                for tier in values["context_price_tiers"]
-            ]
+            tiers = [StoredContextPriceTier.model_validate(tier)
+                     for tier in values["context_price_tiers"]]
+            values["context_price_references"] = [tier.reference for tier in tiers]
+            values["context_price_rule"] = custom_context_rule(tiers)
         return values
 
 
@@ -560,13 +589,6 @@ class PriceCatalogInputRange(StrictModel):
         return self
 
 
-class PriceCatalogRuleSource(StrictModel):
-    rule_id: str = Field(min_length=1)
-    url: str = Field(pattern=r"^https://")
-    revision: str = Field(min_length=1)
-    verified_on: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
-
-
 class StoredContextPriceTier(ModelPriceTier):
     reference: str = Field(min_length=1, max_length=1000)
     label: str = Field(min_length=1)
@@ -579,6 +601,28 @@ class StoredContextPriceTier(ModelPriceTier):
     service_tier: str = ""
     deployment: str = ""
     regions: list[str] = Field(default_factory=list)
+
+
+def custom_context_rule(tiers: list[StoredContextPriceTier]) -> ContextPriceRule | None:
+    sources = [tier.input_range_source for tier in tiers]
+    if not any(source is not None and source.origin == "custom" for source in sources):
+        return None
+    ordered = sorted(tiers, key=lambda tier: tier.min_input_tokens)
+    source = ordered[0].input_range_source
+    if (len(ordered) != 2 or source is None or source.origin != "custom"
+        or any(item != source for item in sources)
+        or ordered[0].key != "short" or ordered[1].key != "long"
+        or ordered[0].min_input_tokens != 0 or ordered[0].max_input_tokens is None
+        or ordered[1].min_input_tokens != ordered[0].max_input_tokens + 1
+        or ordered[1].max_input_tokens is not None or source.configured_at is None):
+        raise ValueError("Stored custom context rules must describe one complete schedule")
+    rule = ContextPriceRule(
+        short_context_max_tokens=ordered[0].max_input_tokens,
+        note=source.note or "", source_url=source.url,
+    )
+    if source.rule_id != "custom-context-v1" or source.revision != rule.revision:
+        raise ValueError("Stored custom context rule revision does not match its contents")
+    return rule
 
 
 class PriceCatalogContextTier(StrictModel):
@@ -666,6 +710,7 @@ class RegistryResponse(StrictModel):
     runtimes: list[Runtime]
     models: list[ManagedModel]
     context_pricing_supported: bool = False
+    context_price_rules_supported: bool = False
     backend_pool_session_affinity_supported: bool = False
     databricks_connections_supported: bool = False
     databricks_oauth_supported: bool = False

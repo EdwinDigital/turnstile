@@ -187,7 +187,10 @@ class PostgreSqlOpsDbProxy(
                 )
                 candidates = connection.execute(
                           """SELECT id, correlation_id, usage_domain, user_id,
-                                        price_context_snapshot FROM token_usage
+                                        price_context_snapshot, price_context_tier,
+                                        input_price_per_million, cached_price_per_million,
+                                        cache_write_price_per_million, output_price_per_million,
+                                        estimated_cost FROM token_usage
                        WHERE (usage_domain = 'apim' AND correlation_id = %s) OR id = %s
                        ORDER BY id LIMIT 2 FOR UPDATE""",
                     (record.correlation_id, record.id),
@@ -203,13 +206,12 @@ class PostgreSqlOpsDbProxy(
                     ):
                         raise ValueError("APIM correlation identity conflicts with stored usage")
                     values["id"] = str(existing["id"])
-                    if existing.get("price_context_snapshot") is not None:
-                        snapshot = existing["price_context_snapshot"]
-                        if not record.estimated:
-                            values.update(ModelPrice.model_validate(snapshot).snapshot_prices(
-                                record.input_tokens, record.cached_tokens,
-                                record.output_tokens, record.cache_write_tokens,
-                            ))
+                    snapshot = existing.get("price_context_snapshot")
+                    if not record.estimated:
+                        values.update(ModelPrice.restore_usage_prices(
+                            existing, record.input_tokens, record.cached_tokens,
+                            record.output_tokens, record.cache_write_tokens,
+                        ))
             values["price_context_snapshot"] = Jsonb(snapshot) if snapshot is not None else None
             connection.execute(
                 """
@@ -284,9 +286,7 @@ class PostgreSqlOpsDbProxy(
                         ELSE existing.output_price_per_million END,
                     price_context_tier = CASE WHEN existing.estimated
                         THEN EXCLUDED.price_context_tier ELSE existing.price_context_tier END,
-                    price_context_snapshot = COALESCE(
-                        existing.price_context_snapshot, EXCLUDED.price_context_snapshot
-                    ),
+                    price_context_snapshot = existing.price_context_snapshot,
                     error_message = CASE WHEN existing.estimated
                         THEN EXCLUDED.error_message ELSE existing.error_message END,
                     estimated = CASE WHEN existing.estimated
@@ -1037,6 +1037,9 @@ class PostgreSqlOpsDbProxy(
                             + usage.output_tokens)::BIGINT AS total_tokens,
                         usage.latency_ms, usage.status_code,
                         usage.estimated_cost::DOUBLE PRECISION,
+                        (usage.estimated_cost > 0
+                         OR (usage.input_price_per_million IS NOT NULL
+                             AND usage.output_price_per_million IS NOT NULL)) AS cost_available,
                         usage.error_message
                     FROM token_usage usage
                     WHERE usage.ts >= %s AND usage.ts < %s{filter_sql}
@@ -1067,9 +1070,15 @@ class PostgreSqlOpsDbProxy(
                             + usage.output_tokens)::BIGINT AS total_tokens,
                         usage.latency_ms, usage.status_code,
                         usage.estimated_cost::DOUBLE PRECISION,
+                        (usage.estimated_cost > 0
+                         OR (usage.input_price_per_million IS NOT NULL
+                             AND usage.output_price_per_million IS NOT NULL)) AS cost_available,
                         usage.error_message, usage.provider, usage.workflow,
                         usage.run_id, usage.turn_index, usage.cached_tokens,
                         usage.cache_write_tokens, usage.estimated,
+                        usage.input_price_per_million, usage.cached_price_per_million,
+                        usage.cache_write_price_per_million, usage.output_price_per_million,
+                        usage.price_context_tier, usage.price_context_snapshot,
                         usage.ingest_source, usage.ingest_error,
                         usage.reconciled_at, usage.budget_admission,
                         usage.model_admission

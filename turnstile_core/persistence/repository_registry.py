@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
@@ -144,6 +145,16 @@ class PostgreSqlRegistryRepositoryMixin:
               AND guard.price_source = %(expected_source)s
               AND guard.price_reference IS NOT DISTINCT FROM %(expected_reference)s
               AND guard.context_price_tiers = %(expected_context_price_tiers)s::jsonb
+                            AND jsonb_build_object(
+                                        'list_input_cost_per_million',
+                                        guard.list_input_cost_per_million,
+                                        'list_output_cost_per_million',
+                                        guard.list_output_cost_per_million,
+                                        'list_cached_cost_per_million',
+                                        guard.list_cached_cost_per_million,
+                                        'list_cache_write_cost_per_million',
+                                        guard.list_cache_write_cost_per_million
+                                    ) = %(expected_list_prices)s::jsonb
               AND COALESCE(
                     guard.price_discount_percent, runtime_price.price_discount_percent
                   ) IS NOT DISTINCT FROM %(expected_discount_percent)s
@@ -166,6 +177,12 @@ class PostgreSqlRegistryRepositoryMixin:
                 parameters["expected_context_price_tiers"] = Jsonb(
                     update.get("expected_context_price_tiers") or []
                 )
+                parameters["expected_list_prices"] = Jsonb(update.get("expected_list_prices") or {
+                    column: None for column in (
+                        "list_input_cost_per_million", "list_output_cost_per_million",
+                        "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+                    )
+                })
                 parameters["context_price_tiers"] = (
                     Jsonb(update["context_price_tiers"])
                     if update.get("context_price_tiers") is not None else None
@@ -196,6 +213,14 @@ class PostgreSqlRegistryRepositoryMixin:
                         superseded = True
                     else:
                         written += 1
+                else:
+                    current = connection.execute(
+                        f"""SELECT model.id FROM managed_model model
+                            WHERE model.id = %(model_id)s
+                              AND {self._PRICE_CONFIG_STILL_MATCHES}""",
+                        parameters,
+                    ).fetchone()
+                    superseded = current is None
 
                 if superseded:
                     # Nothing about the rates changed, so nothing about the baseline should
@@ -670,6 +695,10 @@ class PostgreSqlRegistryRepositoryMixin:
             "runtime": {"price_discount_percent"},
             "model": {
                 "price_source", "price_reference", "price_discount_percent", "context_price_tiers",
+                "list_input_cost_per_million", "list_output_cost_per_million",
+                "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+                "pending_list_price", "pending_context_price_tiers", "price_synced_at",
+                "price_sync_status", "price_sync_message",
             },
         }.get(kind, set())
         price_values = {key: values[key] for key in price_fields if key in values}
@@ -832,44 +861,71 @@ class PostgreSqlRegistryRepositoryMixin:
         if merged["price_source"] == "manual":
             merged["price_reference"] = None
             merged["context_price_tiers"] = []
+        identity_changed = current is None or any(
+            merged[field] != current.get(field)
+            for field in ("price_source", "price_reference")
+        )
+        tiers_changed = merged["context_price_tiers"] != (
+            (current.get("context_price_tiers") or []) if current else []
+        )
+        for field in (
+            "list_input_cost_per_million", "list_output_cost_per_million",
+            "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+            "pending_list_price", "pending_context_price_tiers",
+            "price_synced_at", "price_sync_status", "price_sync_message",
+        ):
+            previous = current.get(field) if current and not identity_changed else None
+            merged[field] = values.get(field, previous)
+        if identity_changed or tiers_changed:
+            merged["pending_list_price"] = None
+            merged["pending_context_price_tiers"] = None
+        if tiers_changed:
+            merged["price_sync_status"] = "ok" if merged["context_price_tiers"] else None
+            merged["price_sync_message"] = None
+            merged["price_synced_at"] = values.get("price_synced_at", datetime.now(UTC))
+        if merged["price_source"] == "manual":
+            for field in (
+                "list_input_cost_per_million", "list_output_cost_per_million",
+                "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+                "pending_list_price", "pending_context_price_tiers",
+                "price_synced_at", "price_sync_status", "price_sync_message",
+            ):
+                merged[field] = None
+        parameters = {**merged, "model_id": item_id}
+        parameters["context_price_tiers"] = Jsonb(merged["context_price_tiers"])
+        for field in ("pending_list_price", "pending_context_price_tiers"):
+            parameters[field] = Jsonb(merged[field]) if merged[field] is not None else None
         connection.execute(
             """INSERT INTO managed_model_price (
                    model_id, price_source, price_reference, price_discount_percent,
-                   context_price_tiers
-               ) VALUES (%s, %s, %s, %s, %s)
+                   context_price_tiers, list_input_cost_per_million,
+                   list_output_cost_per_million, list_cached_cost_per_million,
+                   list_cache_write_cost_per_million, pending_list_price,
+                   pending_context_price_tiers, price_synced_at,
+                   price_sync_status, price_sync_message
+               ) VALUES (
+                   %(model_id)s, %(price_source)s, %(price_reference)s, %(price_discount_percent)s,
+                   %(context_price_tiers)s, %(list_input_cost_per_million)s,
+                   %(list_output_cost_per_million)s, %(list_cached_cost_per_million)s,
+                   %(list_cache_write_cost_per_million)s, %(pending_list_price)s,
+                   %(pending_context_price_tiers)s, %(price_synced_at)s,
+                   %(price_sync_status)s, %(price_sync_message)s
+               )
                ON CONFLICT (model_id) DO UPDATE SET
                  price_source = EXCLUDED.price_source,
                  price_reference = EXCLUDED.price_reference,
                  price_discount_percent = EXCLUDED.price_discount_percent,
                  context_price_tiers = EXCLUDED.context_price_tiers,
-                 pending_context_price_tiers = CASE
-                     WHEN managed_model_price.context_price_tiers IS DISTINCT FROM
-                          EXCLUDED.context_price_tiers
-                     OR managed_model_price.price_source IS DISTINCT FROM EXCLUDED.price_source
-                            OR managed_model_price.price_reference IS DISTINCT FROM
-                                EXCLUDED.price_reference
-                     THEN NULL ELSE managed_model_price.pending_context_price_tiers END,
-                 price_sync_status = CASE
-                     WHEN managed_model_price.context_price_tiers IS DISTINCT FROM
-                          EXCLUDED.context_price_tiers
-                     THEN CASE WHEN jsonb_array_length(EXCLUDED.context_price_tiers) > 0
-                               THEN 'ok' ELSE NULL END
-                     ELSE managed_model_price.price_sync_status END,
-                 price_sync_message = CASE
-                     WHEN managed_model_price.context_price_tiers IS DISTINCT FROM
-                          EXCLUDED.context_price_tiers
-                     THEN NULL ELSE managed_model_price.price_sync_message END,
-                 price_synced_at = CASE
-                     WHEN managed_model_price.context_price_tiers IS DISTINCT FROM
-                          EXCLUDED.context_price_tiers
-                     THEN now() ELSE managed_model_price.price_synced_at END,
+                 list_input_cost_per_million = EXCLUDED.list_input_cost_per_million,
+                 list_output_cost_per_million = EXCLUDED.list_output_cost_per_million,
+                 list_cached_cost_per_million = EXCLUDED.list_cached_cost_per_million,
+                 list_cache_write_cost_per_million = EXCLUDED.list_cache_write_cost_per_million,
+                 pending_list_price = EXCLUDED.pending_list_price,
+                 pending_context_price_tiers = EXCLUDED.pending_context_price_tiers,
+                 price_sync_status = EXCLUDED.price_sync_status,
+                 price_sync_message = EXCLUDED.price_sync_message,
+                 price_synced_at = EXCLUDED.price_synced_at,
                  updated_at = now()""",
-            (
-                item_id,
-                merged["price_source"],
-                merged["price_reference"],
-                merged["price_discount_percent"],
-                Jsonb(merged["context_price_tiers"]),
-            ),
+            parameters,
         )
         return merged

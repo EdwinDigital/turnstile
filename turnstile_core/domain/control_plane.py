@@ -18,6 +18,7 @@ from .image_profiles import ImageGenerationLimits, ImageGenerationProfile, valid
 from .models import StrictModel
 from .runtime_models import (
     BrandKey,
+    ContextPriceRule,
     ModelCapability,
     ModelFamilyKey,
     ModelVendorKey,
@@ -27,6 +28,7 @@ from .runtime_models import (
     ProviderTarget,
     RuntimeKind,
     StoredContextPriceTier,
+    custom_context_rule,
     default_capabilities,
 )
 
@@ -190,6 +192,9 @@ class ModelTarget(StrictModel):
     context_price_tiers: list[StoredContextPriceTier] = Field(
         default_factory=list, max_length=32, exclude_if=lambda value: not value,
     )
+    context_price_rule: ContextPriceRule | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     list_input_cost_per_million: float | None = Field(
         default=None, ge=0, exclude_if=lambda value: value is None,
     )
@@ -208,6 +213,15 @@ class ModelTarget(StrictModel):
 
     @model_validator(mode="after")
     def validate_image_contract(self) -> ModelTarget:
+        if self.context_price_tiers:
+            stored_rule = custom_context_rule(self.context_price_tiers)
+            if self.context_price_rule is not None and self.context_price_rule != stored_rule:
+                raise ValueError("The context rule must match the stored schedule")
+            self.context_price_rule = stored_rule
+        if self.context_price_rule is not None and (
+            self.price_source is PriceSource.MANUAL or len(self.context_price_references) != 2
+        ):
+            raise ValueError("A custom context rule requires both short and long catalog tiers")
         if self.price_source is not PriceSource.MANUAL:
             reference = (self.price_reference or "").strip()
             if not self.context_price_references and (
@@ -245,9 +259,14 @@ class ModelCreateTarget(StrictModel):
     price_reference: str | None = Field(default=None, max_length=1000)
     price_discount_percent: float | None = Field(default=None, gt=0, le=100)
     context_price_references: list[str] = Field(default_factory=list, max_length=32)
+    context_price_rule: ContextPriceRule | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def require_deployment_or_explicit_identity(self) -> ModelCreateTarget:
+        if self.context_price_rule is not None and len(self.context_price_references) != 2:
+            raise ValueError("A custom context rule requires both short and long catalog tiers")
         if self.context_price_references:
             if self.price_source is PriceSource.MANUAL or self.operation == "image_generation":
                 raise ValueError("Context pricing requires a catalog-priced text model")

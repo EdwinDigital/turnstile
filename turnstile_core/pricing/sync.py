@@ -21,7 +21,7 @@ from typing import Any
 from uuid import UUID
 
 from turnstile_core.domain.runtime_models import ManagedModel, PriceSource, PriceSyncStatus
-from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
+from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog, parse_context_tier
 from turnstile_core.pricing.context import resolve_context_prices
 
 # A published rate rarely moves more than a few percent. Twenty is generous enough that ordinary
@@ -67,6 +67,7 @@ class ModelPriceUpdate:
     expected_source: str | None = None
     expected_reference: str | None = None
     expected_discount_percent: float | None = None
+    expected_list_prices: dict[str, float | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,7 @@ def _planned_against(model: ManagedModel, **fields: Any) -> ModelPriceUpdate:
         expected_source=str(model.price_source),
         expected_reference=model.price_reference,
         expected_discount_percent=model.effective_discount_percent,
+        expected_list_prices={column: getattr(model, column) for _, column, _ in _BUCKETS},
         expected_context_price_tiers=[
             tier.model_dump(mode="json") for tier in model.context_price_tiers
         ],
@@ -158,6 +160,12 @@ def _plan_one(
             model,
             status=PriceSyncStatus.STALE,
             message=f"{entry.label} 的价目只读到一部分（分页中断），保留现有单价",
+        )
+
+    if entry.context_tier is not None or parse_context_tier(entry.label) is not None:
+        return _planned_against(
+            model, status=PriceSyncStatus.REVIEW_NEEDED,
+            message="价目包含上下文档位，需选择并确认完整分档规则，未按单档覆盖现有价格。",
         )
 
     moved = _largest_drift(model, entry)
@@ -202,6 +210,7 @@ def _plan_context(
         updated = resolve_context_prices(
             catalog, model.price_source, model.context_price_references,
             model.effective_discount_percent,
+            rule=model.context_price_rule, previous_tiers=model.context_price_tiers,
         )
     except Exception as error:
         return _planned_against(
@@ -214,7 +223,8 @@ def _plan_context(
         or (tier.min_input_tokens, tier.max_input_tokens, tier.reference) != (
             previous[tier.key].min_input_tokens, previous[tier.key].max_input_tokens,
             previous[tier.key].reference,
-        ) for tier in updated
+        ) or tier.input_range_source != previous[tier.key].input_range_source
+        for tier in updated
     )
     drift = 0.0
     for tier in updated:
@@ -249,12 +259,23 @@ def _largest_drift(model: ManagedModel, entry: CatalogEntry) -> tuple[str, float
     input rate let it through.
     """
     worst: tuple[str, float] | None = None
+    accepted = (
+        model.list_input_cost_per_million is not None
+        and model.list_output_cost_per_million is not None
+    )
     for field, baseline_field, label in _BUCKETS:
         previous = getattr(model, baseline_field)
         current = getattr(entry, field)
-        if previous is None or current is None or previous <= 0:
+        if previous == current:
             continue
-        drift = abs(current - previous) / previous
+        if previous is None:
+            if not accepted:
+                continue
+            drift = float("inf")
+        elif current is None or previous == 0:
+            drift = float("inf")
+        else:
+            drift = abs(current - previous) / previous
         if worst is None or drift > worst[1]:
             worst = (label, drift)
     return worst

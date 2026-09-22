@@ -225,47 +225,31 @@ class ModelRuntimeService:
                     "expected_source": update.expected_source,
                     "expected_reference": update.expected_reference,
                     "expected_discount_percent": update.expected_discount_percent,
+                    "expected_list_prices": update.expected_list_prices,
                 }
                 for update in summary.updates
             ]
         )
-        # The plan intended `summary.written` writes and the repository performed `written`. The
-        # difference is exactly the rows whose pricing changed while the sync was talking to the
-        # price feed, so the guard refused them. Reported rather than absorbed: "considered 45,
-        # updated 44" with nothing saying why is the kind of arithmetic nobody chases.
-        superseded = max(summary.written - written, 0)
-        details = [
-            PriceSyncDetail(
+        refreshed = self.registry()
+        current_models = {model.id: model for model in refreshed.models}
+        outcomes = []
+        for update in summary.updates:
+            current = current_models.get(update.model_id)
+            superseded = current is None or current.price_sync_status is PriceSyncStatus.SUPERSEDED
+            outcomes.append(PriceSyncDetail(
                 model_id=update.model_id,
                 model_key=update.model_key,
-                status=update.status,
-                message=update.message,
-            )
-            for update in summary.updates
-            if update.status is not PriceSyncStatus.OK
-        ]
-        refreshed = self.registry()
-        if superseded:
-            planned = {update.model_id for update in summary.updates if update.writes}
-            details.extend(
-                PriceSyncDetail(
-                    model_id=model.id,
-                    model_key=model.model_key,
-                    status=PriceSyncStatus.SUPERSEDED,
-                    message=model.price_sync_message,
-                )
-                for model in refreshed.models
-                if model.id in planned
-                and model.price_sync_status is PriceSyncStatus.SUPERSEDED
-            )
+                status=PriceSyncStatus.SUPERSEDED if superseded else update.status,
+                message=current.price_sync_message if superseded and current else update.message,
+            ))
         return PriceSyncResponse(
             considered=len(summary.updates),
             updated=written,
-            unmapped=summary.unmapped,
-            review_needed=summary.review_needed,
-            stale=summary.stale,
-            superseded=superseded,
-            details=details,
+            unmapped=sum(item.status is PriceSyncStatus.UNMAPPED for item in outcomes),
+            review_needed=sum(item.status is PriceSyncStatus.REVIEW_NEEDED for item in outcomes),
+            stale=sum(item.status is PriceSyncStatus.STALE for item in outcomes),
+            superseded=sum(item.status is PriceSyncStatus.SUPERSEDED for item in outcomes),
+            details=[item for item in outcomes if item.status is not PriceSyncStatus.OK],
             registry=refreshed,
         )
 
@@ -282,6 +266,7 @@ class ModelRuntimeService:
         runtime_ids = {row["id"] for row in runtimes}
         return RegistryResponse(
             context_pricing_supported=True,
+            context_price_rules_supported=True,
             backend_pool_session_affinity_supported=True,
             databricks_connections_supported=True,
             databricks_oauth_supported=self._settings.databricks_oauth_enabled,
@@ -901,6 +886,7 @@ class ModelRuntimeService:
             )
         price_fields = (
             "runtime_id", "price_source", "price_discount_percent", "context_price_references",
+            "context_price_rule",
             "input_cost_per_million", "output_cost_per_million",
             "cached_cost_per_million", "cache_write_cost_per_million",
         )
@@ -915,22 +901,26 @@ class ModelRuntimeService:
         values = write.model_dump(mode="python")
         values.pop("context_price_references", None)
         values.pop("context_price_refresh", None)
-        if write.context_price_references:
+        values.pop("context_price_rule", None)
+        discount = write.price_discount_percent
+        if write.price_source is not PriceSource.MANUAL:
             runtime = next(
                 (row for row in registry["runtimes"] if row["id"] == write.runtime_id), None,
             )
             if runtime is None:
                 raise HTTPException(status_code=422, detail="Unknown pricing connection")
-            discount = write.price_discount_percent
             if discount is None:
                 discount = runtime.get("price_discount_percent")
             if discount is not None:
                 discount = float(discount)
+        if write.context_price_references:
             try:
                 if pricing_changed:
                     tiers = resolve_context_prices(
                         self._price_catalog, write.price_source,
                         write.context_price_references, discount,
+                        rule=write.context_price_rule,
+                        previous_tiers=current_model.context_price_tiers if current_model else (),
                     )
                 else:
                     tiers = current_model.context_price_tiers if current_model else []
@@ -957,6 +947,8 @@ class ModelRuntimeService:
             if (
                 entry is None
                 or not entry.complete
+                or entry.source is not write.price_source
+                or entry.reference != write.price_reference
                 or entry.input_per_million is None
                 or entry.output_per_million is None
             ):
@@ -971,6 +963,28 @@ class ModelRuntimeService:
                     status_code=409,
                     detail="Select the complete context price schedule, not one tier",
                 )
+            charged = entry.discounted(discount)
+            for column, bucket in (
+                ("input_cost_per_million", "input_per_million"),
+                ("output_cost_per_million", "output_per_million"),
+                ("cached_cost_per_million", "cached_per_million"),
+                ("cache_write_cost_per_million", "cache_write_per_million"),
+            ):
+                values[column] = getattr(charged, bucket)
+                values[f"list_{column}"] = getattr(entry, bucket)
+        if pricing_changed:
+            for column in (
+                "list_input_cost_per_million", "list_output_cost_per_million",
+                "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+            ):
+                values.setdefault(column, None)
+            values.update(
+                pending_list_price=None, pending_context_price_tiers=None,
+                price_sync_status="ok" if write.price_source is not PriceSource.MANUAL else None,
+                price_sync_message=None,
+                price_synced_at=datetime.now(UTC)
+                if write.price_source is not PriceSource.MANUAL else None,
+            )
         if not write.context_price_references:
             values["context_price_tiers"] = []
         self._save("model", values, item_id)

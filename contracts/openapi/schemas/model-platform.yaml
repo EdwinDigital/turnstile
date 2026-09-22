@@ -258,6 +258,10 @@ schemas:
         type: boolean
         default: false
         description: Compatible API, Publisher and Telemetry support complete context price schedules after migration 009.
+      context_price_rules_supported:
+        type: boolean
+        default: false
+        description: API and shared snapshot readers support explicit administrator-defined context thresholds. Does not assert official billing equivalence.
       backend_pool_session_affinity_supported:
         type: boolean
         default: false
@@ -301,6 +305,10 @@ schemas:
               type: array
               maxItems: 32
               items: {type: string, maxLength: 1000}
+            context_price_rule:
+              oneOf:
+              - $ref: ../../openapi.yaml#/components/schemas/ContextPriceRule
+              - type: 'null'
             context_price_tiers:
               type: array
               maxItems: 32
@@ -317,6 +325,20 @@ schemas:
               oneOf:
               - $ref: ../../openapi.yaml#/components/schemas/ImageGenerationProfile
               - type: 'null'
+  ContextPriceRule:
+    type: object
+    additionalProperties: false
+    required: [short_context_max_tokens]
+    description: An explicit administrator-defined estimation rule, not a discovered or official billing threshold. Requires exactly the short and long catalog references; versions and configuration times are server-owned.
+    properties:
+      short_context_max_tokens: {type: integer, minimum: 1, maximum: 9007199254740990}
+      note: {type: string, maxLength: 500, default: ''}
+      source_url:
+        type: [string, 'null']
+        format: uri
+        pattern: '^https://'
+        maxLength: 2000
+        description: Optional reference only. Credentials and whitespace are rejected; the server does not fetch this URL.
   StoredContextPriceTier:
     type: object
     additionalProperties: false
@@ -343,9 +365,12 @@ schemas:
         type: [object, 'null']
         properties:
           rule_id: {type: string}
-          url: {type: string, format: uri}
+          url: {type: [string, 'null'], format: uri}
           revision: {type: string}
-          verified_on: {type: string, format: date}
+          verified_on: {type: [string, 'null'], format: date}
+          origin: {type: string, enum: [official, reference, custom], default: official}
+          configured_at: {type: [string, 'null'], format: date-time, readOnly: true}
+          note: {type: [string, 'null'], maxLength: 500}
       model_key: {type: string}
       model_label: {type: string}
       product: {type: string}
@@ -834,7 +859,11 @@ schemas:
         maxItems: 32
         uniqueItems: true
         items: {type: string, minLength: 1, maxLength: 1000}
-        description: Complete context-tier selection. The server resolves prices and thresholds; client amounts do not set catalog prices.
+        description: Complete context-tier selection. The server resolves all prices and validates catalog or explicit custom ranges; client amounts do not set catalog prices.
+      context_price_rule:
+        oneOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ContextPriceRule
+        - type: 'null'
       price_discount_percent:
         type: [number, 'null']
         exclusiveMinimum: 0
@@ -856,6 +885,7 @@ schemas:
           cache_write_cost_per_million: {type: 'null'}
           price_source: {const: manual}
           context_price_references: {maxItems: 0}
+          context_price_rule: {type: 'null'}
     - if:
         required: [price_source]
         properties:
@@ -882,6 +912,15 @@ schemas:
         - required: [context_price_references]
           properties:
             context_price_references: {minItems: 2, items: {type: string, pattern: '^anthropic:'}}
+    - if:
+        required: [context_price_rule]
+        properties:
+          context_price_rule: {type: object}
+      then:
+        required: [price_source, context_price_references]
+        properties:
+          price_source: {enum: [azure_retail, anthropic]}
+          context_price_references: {minItems: 2, maxItems: 2}
   GatewayPublication:
     type: object
     additionalProperties: false

@@ -12,6 +12,7 @@ from ..domain.application_access import (
     ApplicationActorType,
     UsageApplicationAttribution,
 )
+from ..domain.control_plane import GatewayPublication, PublicationKind, publication_model_id
 from ..domain.models import ModelIdentity, ModelPrice, TokenUsageRecord, UsageEvent
 from ..persistence.repository import OpsDbProxy
 
@@ -57,6 +58,7 @@ class UsageProcessor:
         self._application_maps: dict[
             UUID, tuple[float, dict[str, Mapping[str, Any]]]
         ] = {}
+        self._probe_publications: dict[UUID, tuple[float, GatewayPublication]] = {}
 
     def _refresh_registry(self) -> None:
         now = time.monotonic()
@@ -80,6 +82,66 @@ class UsageProcessor:
     def _identity_for(self, model_id: str, model: str) -> ModelIdentity | None:
         self._refresh_registry()
         return self._identities.get(model_id) or self._identities.get(model)
+
+    def _publication_probe_model(
+        self, event: UsageEvent,
+    ) -> tuple[ModelIdentity | None, ModelPrice | None] | None:
+        if (event.request_source != "gateway-publication-probe"
+                or event.user_id != "system-gateway-publication"):
+            return None
+        try:
+            publication_id = UUID(event.run_id)
+        except ValueError:
+            return None
+        now = time.monotonic()
+        cached = self._probe_publications.get(publication_id)
+        if cached is not None and now - cached[0] < _PRICE_CACHE_SECONDS:
+            publication = cached[1]
+        else:
+            row = self._repository.get_gateway_publication(publication_id)
+            if row is None:
+                raise ValueError("Publication probe snapshot is unavailable")
+            publication = GatewayPublication.model_validate(row)
+            if len(self._probe_publications) >= 64:
+                self._probe_publications.pop(next(iter(self._probe_publications)))
+            self._probe_publications[publication_id] = (now, publication)
+        if event.gateway_profile_id != publication.gateway_profile_id:
+            raise ValueError("Publication probe belongs to another APIM target")
+        attribution = self._application_attribution(event)
+        if attribution is None or attribution.actor_type != "system":
+            raise ValueError("Publication probe requires a synchronized system subscription")
+        raw_model_id = event.model_id or event.model
+        for binding in publication.desired_spec.bindings:
+            alias = binding.model.model_key
+            identity = self._identity_for(alias, alias)
+            if (publication.publication_kind is PublicationKind.MODEL_ADD
+                    and binding is publication.desired_spec.bindings[-1]):
+                model_id = str(publication_model_id(publication.id, alias))
+            else:
+                model_id = identity.model_id if identity is not None else alias
+            if raw_model_id.casefold() not in {model_id.casefold(), alias.casefold()}:
+                continue
+            if event.model.casefold() not in {
+                model_id.casefold(), alias.casefold(), binding.model.display_name.casefold(),
+            }:
+                raise ValueError("Publication probe model identity does not match")
+            model = binding.model
+            price = ModelPrice.from_registry(model.model_dump(mode="python"))
+            return ModelIdentity(model_id=model_id, display_name=model.display_name), price
+        for removed in publication.desired_spec.removed_models:
+            if raw_model_id in {str(removed.model_id), removed.model_key}:
+                return (
+                    ModelIdentity(
+                        model_id=str(removed.model_id), display_name=removed.display_name,
+                    ),
+                    None,
+                )
+        if any(raw_model_id == model.id for model in publication.desired_spec.discovery_models):
+            return (
+                self._identity_for(raw_model_id, event.model),
+                self._price_for(raw_model_id, event.model),
+            )
+        raise ValueError("Publication probe model is absent from its snapshot")
 
     def _application_attribution(
         self, event: UsageEvent
@@ -210,12 +272,24 @@ class UsageProcessor:
         # The same model arrives as a registry UUID from the dashboard BFF and as a model key from
         # an employee desktop client. Both are collapsed onto the registry identity so aggregates
         # do not split one model across two rows. Unknown models keep the caller's own values.
-        identity = self._identity_for(raw_model_id, event.model)
+        try:
+            probe_model = self._publication_probe_model(event)
+        except Exception as error:
+            logger.warning("Publication probe snapshot lookup failed: %s", type(error).__name__)
+            probe_model = (None, None)
+            ingest_error = ingest_error or "publication_probe_snapshot_unavailable"
+        identity = (
+            probe_model[0] if probe_model is not None
+            else self._identity_for(raw_model_id, event.model)
+        )
         model_id = identity.model_id if identity else raw_model_id
         model_name = identity.display_name if identity else event.model
         # APIM emits no cost, so it is derived here from the registry and stored with the unit
         # prices used, making the amount reproducible and immune to later price edits.
-        price = self._price_for(raw_model_id, event.model)
+        price = (
+            probe_model[1] if probe_model is not None
+            else self._price_for(raw_model_id, event.model)
+        )
         context_snapshot = price.model_dump(mode="json") if price and price.context_tiers else None
         if context_snapshot is not None:
             if (estimated or invalid_usage
@@ -229,7 +303,7 @@ class UsageProcessor:
             if price and context_snapshot is not None
             else 0.0 if context_snapshot is not None
             else event.estimated_cost
-            if event.estimated_cost
+            if event.estimated_cost and probe_model is None
             else price.cost(input_tokens, cached_tokens, output_tokens, cache_write_tokens)
             if price
             else 0.0

@@ -852,6 +852,18 @@
 .model-price-source-choice { justify-self: start; max-width: 100%; }
 .model-price-source-choice > button:disabled { cursor: not-allowed; opacity: .6; }
 .model-price-follow { display: grid; gap: 16px; padding-top: 12px; }
+.model-price-rule { display: grid; gap: 8px; min-width: 0; padding-block: 4px 8px; border-bottom: 1px solid var(--border); }
+.model-price-rule-row { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px; align-items: end; min-width: 0; }
+.model-price-rule-mode { display: grid; gap: 8px; min-width: 0; }
+.model-price-rule-choice.usage-metric-segment { justify-self: start; max-width: 100%; height: 32px; gap: 2px; border: 1px solid var(--input); background: color-mix(in oklch, var(--muted-foreground) 10%, var(--muted)); }
+.model-price-rule-choice.usage-metric-segment > button { height: 26px; min-width: 0; flex: 1 1 auto; justify-content: center; padding-inline: 8px; line-height: 13px; white-space: normal; }
+.model-price-rule-choice.usage-metric-segment > button.active { box-shadow: none; }
+.model-price-rule-choice > button:disabled { cursor: not-allowed; opacity: .6; }
+.model-price-rule-fields { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+@media (max-width: 480px) {
+	.model-price-rule-row { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 8px; }
+	.model-price-rule-fields .registry-field-label-row { flex-wrap: wrap; }
+}
 .model-price-loading { display: flex; align-items: center; gap: 6px; }
 .model-price-loading > svg { flex: 0 0 auto; }
 .model-price-catalog-fields { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px; }

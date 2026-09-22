@@ -95,7 +95,7 @@ def test_openapi_root_is_a_small_domain_index() -> None:
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
     assert len(paths) == 78
-    assert len(schemas) == 173
+    assert len(schemas) == 174
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -121,13 +121,35 @@ def test_publication_contract_describes_catalog_prices_and_discounts() -> None:
     conditions = cast(list[dict[str, dict[str, object]]], schema["allOf"])
     image = cast(dict[str, dict[str, object]], conditions[0]["then"]["properties"])
     assert image["price_source"]["const"] == "manual"
-    for condition, source in zip(conditions[1:], ("azure_retail", "anthropic"), strict=True):
+    for condition, source in zip(conditions[1:3], ("azure_retail", "anthropic"), strict=True):
         assert condition["if"]["required"] == ["price_source"]
         alternatives = cast(list[dict[str, object]], condition["then"]["anyOf"])
         assert alternatives[0]["required"] == ["price_reference"]
         assert alternatives[1]["required"] == ["context_price_references"]
         fields = cast(dict[str, dict[str, object]], alternatives[0]["properties"])
         assert fields["price_reference"] == {"type": "string", "pattern": f"^{source}:"}
+
+
+def test_custom_context_rule_contract_matches_strict_runtime_fields() -> None:
+    from turnstile_core.domain.models import UsageRequestDetail, UsageRequestSummary
+    from turnstile_core.domain.runtime_models import ContextPriceRule
+
+    schemas = _documented_schemas()
+    rule = schemas["ContextPriceRule"]
+    actual = ContextPriceRule.model_json_schema()
+    assert rule["additionalProperties"] is False
+    assert rule["required"] == actual["required"] == ["short_context_max_tokens"]
+    fields = cast(dict[str, dict[str, object]], rule["properties"])
+    assert fields["short_context_max_tokens"]["maximum"] == (
+        actual["properties"]["short_context_max_tokens"]["maximum"]
+    )
+    assert set(fields) == set(actual["properties"])
+    registry = cast(dict[str, dict[str, object]], schemas["ModelRegistry"]["properties"])
+    assert registry["context_price_rules_supported"]["default"] is False
+    assert "cost_available" in UsageRequestSummary.model_fields
+    assert {"input_price_per_million", "cached_price_per_million",
+            "cache_write_price_per_million", "output_price_per_million",
+            "price_context_tier", "price_context_snapshot"} <= set(UsageRequestDetail.model_fields)
 
 
 def test_databricks_contract_describes_workspace_authentication_and_owned_adoption() -> None:

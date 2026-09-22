@@ -39,6 +39,8 @@ const VALIDATION_MESSAGES: Record<ModelEditError, string> = {
   price_reference: "跟随官方价时，必须先选定一个官方价基准。",
   context_pricing_preview: "当前后端尚不支持分档计费，暂不可保存或发布。",
   context_pricing_incomplete: "分档价格或阈值不完整，不能保存。",
+  context_price_rule: "阈值须为正整数。",
+  context_price_rule_preview: "当前后端尚不支持自定义阈值，暂不可保存或发布。",
   discount: "折扣须为 0–100 之间的数字，或留空以继承连接折扣。",
 }
 
@@ -73,7 +75,7 @@ export function ModelEditDialog({ registry, model, busy, error, onClose, onSave 
   onSave: (value: ReturnType<typeof modelEditPayload>) => void
 }) {
   const id = useId()
-  const [initial] = useState(() => createModelEditDraft(model, registry.context_pricing_supported === true))
+  const [initial] = useState(() => createModelEditDraft(model, registry.context_pricing_supported === true, registry.context_price_rules_supported === true))
   const [draft, setDraft] = useState<ModelEditDraft>(initial)
   const [submitted, setSubmitted] = useState(false)
   const runtime = registry.runtimes.find((item) => item.id === model.runtime_id)

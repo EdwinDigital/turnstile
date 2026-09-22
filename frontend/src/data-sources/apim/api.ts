@@ -129,6 +129,7 @@ function normalizeRegistry(registry: ModelRegistry): ModelRegistry {
   const runtimeIds = new Set(runtimes.map((runtime) => runtime.id))
   return {
     context_pricing_supported: registry.context_pricing_supported === true,
+    context_price_rules_supported: registry.context_price_rules_supported === true,
     backend_pool_session_affinity_supported: registry.backend_pool_session_affinity_supported === true,
     databricks_connections_supported: registry.databricks_connections_supported === true,
     databricks_oauth_supported: registry.databricks_oauth_supported === true,
@@ -159,6 +160,7 @@ function normalizeRegistry(registry: ModelRegistry): ModelRegistry {
         upstream_model_id: model.upstream_model_id ?? model.model_key,
         assignment_required: model.assignment_required ?? false,
         publication_id: model.publication_id ?? null,
+        context_price_rule: model.context_price_rule ?? null,
       })),
   }
 }

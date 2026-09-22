@@ -3,13 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from turnstile_core.domain.models import ModelPrice, ModelPriceTier
 from turnstile_core.domain.runtime_models import (
+    ContextPriceRule,
     PendingListPrice,
+    PriceCatalogInputRange,
+    PriceCatalogRuleSource,
     PriceSource,
     StoredContextPriceTier,
+    custom_context_rule,
 )
 from turnstile_core.pricing.catalog import CompositeCatalog
 
@@ -38,6 +43,9 @@ def resolve_context_prices(
     source: PriceSource,
     references: Sequence[str],
     discount_percent: float | None,
+    *,
+    rule: ContextPriceRule | None = None,
+    previous_tiers: Sequence[StoredContextPriceTier] = (),
 ) -> list[StoredContextPriceTier]:
     if source is PriceSource.MANUAL or not 2 <= len(references) <= 32:
         raise ValueError("Context pricing requires a complete catalog tier selection")
@@ -45,6 +53,19 @@ def resolve_context_prices(
         raise ValueError("Context tier references must be distinct")
     if discount_percent is not None and not 0 < discount_percent <= 100:
         raise ValueError("Discount must be greater than zero and at most 100")
+    configured_source = None
+    if rule is not None:
+        if len(references) != 2:
+            raise ValueError("A custom context rule requires both short and long catalog tiers")
+        if (sorted(tier.reference for tier in previous_tiers) == sorted(references)
+            and custom_context_rule(list(previous_tiers)) == rule):
+            configured_source = previous_tiers[0].input_range_source
+        else:
+            configured_source = PriceCatalogRuleSource(
+                rule_id="custom-context-v1", revision=rule.revision,
+                origin="custom", configured_at=datetime.now(UTC),
+                url=rule.source_url, note=rule.note or None,
+            )
     tiers: list[StoredContextPriceTier] = []
     expected_scope: tuple[str, str, str, str, str] | None = None
     common_regions: set[str] | None = None
@@ -56,7 +77,23 @@ def resolve_context_prices(
         if found is None or not found.complete:
             raise ValueError("Complete context prices are unavailable")
         descriptor = found.model.resolved_context_tier
-        if descriptor is None or descriptor.input_range is None:
+        if descriptor is None:
+            raise ValueError("Context tier identity is unavailable")
+        input_range = descriptor.input_range
+        range_source = descriptor.input_range_source
+        if rule is None and range_source is not None and range_source.origin != "official":
+            raise ValueError("Catalog context thresholds are unverified; configure a custom rule")
+        if rule is not None:
+            if descriptor.key not in {"short", "long"}:
+                raise ValueError("A custom context rule requires short and long catalog tiers")
+            input_range = PriceCatalogInputRange(
+                min_input_tokens=0 if descriptor.key == "short"
+                else rule.short_context_max_tokens + 1,
+                max_input_tokens=rule.short_context_max_tokens
+                if descriptor.key == "short" else None,
+            )
+            range_source = configured_source
+        if input_range is None:
             raise ValueError("Verified context price thresholds are unavailable")
         matches = [option for option in found.options if option.reference == reference
                    or reference in option.references_by_region.values()]
@@ -88,8 +125,8 @@ def resolve_context_prices(
         writes = charged.cache_write_per_million
         tiers.append(StoredContextPriceTier(
             key=descriptor.key, label=descriptor.label, reference=reference,
-            min_input_tokens=descriptor.input_range.min_input_tokens,
-            max_input_tokens=descriptor.input_range.max_input_tokens,
+            min_input_tokens=input_range.min_input_tokens,
+            max_input_tokens=input_range.max_input_tokens,
             input_price_per_million=charged.input_per_million,
             output_price_per_million=charged.output_per_million,
             cached_price_per_million=cached,
@@ -98,7 +135,7 @@ def resolve_context_prices(
                 input=entry.input_per_million, output=entry.output_per_million,
                 cached=entry.cached_per_million, cache_write=entry.cache_write_per_million,
             ),
-            input_range_source=descriptor.input_range_source,
+            input_range_source=range_source,
             model_key=found.model.key, model_label=found.model.label,
             product=found.model.product, group_key=descriptor.group_key,
             service_tier=descriptor.service_tier, deployment=option.deployment,

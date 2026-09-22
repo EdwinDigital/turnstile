@@ -18,11 +18,14 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { FieldHelp } from "./field-help"
 import {
   applyCatalogOption,
+  contextPriceRulePayload,
   discountedRate,
+  effectiveContextPriceTiers,
   groupContextPriceModels,
   modelKeyFromReference,
   pairContextPriceOptions,
   resolveDiscount,
+  resetContextPriceRule,
   restoreContextPrices,
   validateModelPricing,
   type ModelPriceCandidate,
@@ -42,6 +45,7 @@ const SYNC_STATUS_LABEL: Record<string, string> = {
   unmapped: "未映射",
   stale: "来源读取失败，保留上次单价",
   review_needed: "官方价变动较大，待复核",
+  superseded: "配置已更新，保留当前单价",
 }
 
 function money(value: number | null | undefined): string {
@@ -164,7 +168,7 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
     setSearching(false)
     setError(null)
     setPreviewReference("")
-    setDraft(current => ({ ...current, priceReference: "", contextPricingPreview: false,
+    setDraft(current => ({ ...resetContextPriceRule(current), priceReference: "", contextPricingPreview: false,
       contextPriceReferences: [], contextPriceTiers: [], contextPriceRefresh: false }))
   }
 
@@ -196,8 +200,13 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
   const chooseModel = async (candidate: ModelPriceCandidate) => {
     if (candidate.source !== draft.priceSource) return
     const version = ++requestVersion.current
-    setDraft(current => ({ ...current, priceReference: "", contextPricingPreview: !!candidate.contextPricing,
-      contextPriceReferences: [], contextPriceTiers: [], contextPriceRefresh: false }))
+    const previousRule = chosenModel?.key === candidate.key ? contextPriceRulePayload(draft) : undefined
+    const previousReferences = chosenModel?.key === candidate.key ? draft.contextPriceReferences ?? [] : []
+    const preserveSelection = !!candidate.contextPricing && previousReferences.length > 0
+    setDraft(current => ({ ...(preserveSelection ? current : resetContextPriceRule(current)),
+      priceReference: "", contextPricingPreview: !!candidate.contextPricing,
+      contextPriceReferences: preserveSelection ? previousReferences : [],
+      contextPriceTiers: [], contextPriceRefresh: false }))
     setPreviewReference("")
     setChosenModel(candidate)
     setQuery(candidate.label)
@@ -209,11 +218,25 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
       const response = await loadModelPrices(candidate)
       if (version !== requestVersion.current) return
       setDetails(response)
-      const first = response.options[0]
-      if (response.complete && first) {
-        if (first.contextPricing) setPreviewReference(first.reference)
-        setDraft((current) =>
-          applyCatalogOption(current, candidate.source, first, discount.percent))
+      const selected = preserveSelection ? response.options.map(option => {
+        const region = Object.entries(option.contextPricing?.regionalReferences ?? {})
+          .find(([, references]) => references.length === previousReferences.length
+            && references.every(reference => previousReferences.includes(reference)))?.[0]
+        return region === undefined ? undefined : {
+          ...option, reference: option.references_by_region?.[region] ?? option.reference,
+        }
+      }).find(option => option !== undefined) : response.options[0]
+      if (response.complete && selected) {
+        if (selected.contextPricing) setPreviewReference(selected.reference)
+        setDraft((current) => {
+          const next = applyCatalogOption(current, candidate.source, selected, discount.percent)
+          return preserveSelection && previousRule
+            ? { ...next, contextRuleMode: "custom", contextThreshold: String(previousRule.short_context_max_tokens),
+              contextRuleNote: previousRule.note, contextRuleUrl: previousRule.source_url ?? "" }
+            : next
+        })
+      } else if (response.complete && preserveSelection) {
+        setError("分档价目与所选模型不匹配。")
       }
     } catch (failure) {
       if (version !== requestVersion.current) return
@@ -286,7 +309,8 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
         draft={draft} setDraft={setDraft} busy={busy || details?.complete === false}
         connectionDiscount={connectionDiscount} />
 
-      <PriceArithmetic model={model} draft={draft} percent={discount.percent}
+      <PriceArithmetic model={model} draft={draft} setDraft={setDraft} percent={discount.percent}
+        busy={busy || loadingOptions || details?.complete === false}
         option={details?.complete ? selectedOption : null} otherMeters={details?.other_meters ?? []} />
 
       {draft.contextPricingPreview && validateModelPricing(draft) === "context_pricing_preview" && <p className="publication-form-note" role="status">
@@ -294,6 +318,9 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
       </p>}
       {draft.contextPricingPreview && validateModelPricing(draft) === "context_pricing_incomplete" && <p className="publication-form-note" role="status">
         <ModelPriceText>分档价格或阈值不完整，不能保存。</ModelPriceText>
+      </p>}
+      {draft.contextPricingPreview && draft.contextRuleMode === "custom" && !draft.contextPriceRulesSupported && <p className="publication-form-note" role="status">
+        <ModelPriceText>当前后端尚不支持自定义阈值，暂不可保存或发布。</ModelPriceText>
       </p>}
       {draft.contextPricingPreview && chosenModel && model?.context_price_tiers?.length ? <div className="registry-field-label-row">
         <Button type="button" variant="outline" size="sm" disabled={busy || loadingOptions}
@@ -534,6 +561,47 @@ export function ModelPriceText({ children }: { children: string }) {
   return <span data-no-localize>{translation?.source === children && translation.locale === locale ? translation.text : children}</span>
 }
 
+function ContextRuleFields<Draft extends ModelPriceDraft>({ draft, setDraft, busy }: {
+  draft: Draft
+  setDraft: (updater: (current: Draft) => Draft) => void
+  busy: boolean
+}) {
+  const mode = draft.contextRuleMode ?? "catalog"
+  const tiers = draft.contextPriceTiers ?? []
+  const pair = tiers.length === 2 && tiers.some(tier => tier.key === "short") && tiers.some(tier => tier.key === "long")
+  const referenceOnly = tiers.some(tier => tier.inputRangeSource?.origin === "reference")
+  const maximum = Number(draft.contextThreshold)
+  const invalidThreshold = !!draft.contextThreshold && (!Number.isSafeInteger(maximum) || maximum <= 0 || maximum >= Number.MAX_SAFE_INTEGER)
+  const update = (fields: Partial<ModelPriceDraft>) => setDraft(current => ({ ...current, ...fields, contextPriceRefresh: true }))
+  return <div className="model-price-rule">
+    <div className="model-price-rule-row">
+      <div className="model-price-rule-mode">
+        <div className="registry-field-label-row">
+          <span className="registry-field-label">阈值规则</span>
+          <FieldHelp>{mode === "custom" ? "管理员自定义估算，非官方计费规则。" : "按单次请求的完整输入 Tokens 选档（含缓存输入），不含输出 Tokens；整次请求使用对应档位价格。"}</FieldHelp>
+        </div>
+        <ButtonGroup className="model-tabs usage-metric-segment model-price-rule-choice" aria-label="阈值来源" data-value={mode}>
+          <button type="button" disabled={busy} className={mode === "catalog" ? "active" : ""} aria-pressed={mode === "catalog"}
+            onClick={() => setDraft(current => ({ ...resetContextPriceRule(current), contextPriceRefresh: true }))}>目录规则</button>
+          <button type="button" disabled={busy || !pair} className={mode === "custom" ? "active" : ""} aria-pressed={mode === "custom"}
+            onClick={() => update({ contextRuleMode: "custom" })}>管理员自定义</button>
+        </ButtonGroup>
+      </div>
+      {mode === "custom" && <div className="model-price-rule-fields">
+        <label className="registry-field" htmlFor="model-context-threshold">
+          <span className="registry-field-label-row"><span className="registry-field-label">短上下文上限</span><span className="model-editor-unit" data-no-localize>Tokens</span></span>
+          <Input id="model-context-threshold" type="number" inputMode="numeric" min={1} max={9007199254740990} step={1}
+            required disabled={busy} aria-invalid={invalidThreshold || undefined} value={draft.contextThreshold ?? ""}
+            onChange={event => update({ contextThreshold: event.target.value, contextRuleNote: "", contextRuleUrl: "" })} />
+        </label>
+      </div>}
+    </div>
+    {mode !== "custom" && (referenceOnly || tiers.some(tier => !tier.inputRange)) ? <p className="publication-form-note" role="status">
+      <ModelPriceText>{referenceOnly ? "目录只有参考说明，计费阈值尚未验证。" : "目录未提供上下文计费阈值。"}</ModelPriceText>
+    </p> : null}
+  </div>
+}
+
 function ContextPriceTable({ pricing, percent }: {
   pricing: NonNullable<ModelPriceOption["contextPricing"]>
   percent: number | null
@@ -559,10 +627,11 @@ function ContextPriceTable({ pricing, percent }: {
           return <th key={tier.key} colSpan={2} scope="colgroup">
             <ModelPriceText>{tier.label}</ModelPriceText>
             <small>{rangeLabel === null ? <ModelPriceText>阈值未提供</ModelPriceText>
-              : <><span>输入</span>{" "}{tier.inputRangeSource
+              : <><span>输入</span>{" "}{tier.inputRangeSource?.url
                 ? <a href={tier.inputRangeSource.url} target="_blank" rel="noopener noreferrer"
                   title={`${tier.inputRangeSource.url}\n${tier.inputRangeSource.verified_on}`} data-no-localize>{rangeLabel}</a>
                 : <span data-no-localize>{rangeLabel}</span>}</>}</small>
+              {tier.inputRangeSource?.origin === "reference" && <small><ModelPriceText>参考阈值</ModelPriceText></small>}
           </th>
         })}
       </tr>
@@ -587,9 +656,11 @@ function ContextPriceTable({ pricing, percent }: {
   </div>
 }
 
-function PriceArithmetic({ model, draft, percent, option, otherMeters }: {
+function PriceArithmetic<Draft extends ModelPriceDraft>({ model, draft, setDraft, busy, percent, option, otherMeters }: {
   model?: ManagedModel
-  draft: ModelPriceDraft
+  draft: Draft
+  setDraft: (updater: (current: Draft) => Draft) => void
+  busy: boolean
   percent: number | null
   option: ModelPriceOption | null
   otherMeters: string[]
@@ -624,7 +695,8 @@ function PriceArithmetic({ model, draft, percent, option, otherMeters }: {
       <span className="registry-field-label">实际单价</span>
       <span className="model-editor-unit" data-no-localize>USD / 1M Tokens</span>
     </div>
-    {option?.contextPricing ? <ContextPriceTable pricing={option.contextPricing} percent={percent} /> : <div className="model-price-grid">
+    {draft.contextPricingPreview && <ContextRuleFields draft={draft} setDraft={setDraft} busy={busy} />}
+    {option?.contextPricing ? <ContextPriceTable pricing={{ ...option.contextPricing, tiers: effectiveContextPriceTiers(draft) }} percent={percent} /> : <div className="model-price-grid">
       <div className="model-price-grid-head">
         <span>计费项</span><span>官方价</span><span>折扣</span><span>实际单价</span>
       </div>

@@ -100,7 +100,10 @@ def test_new_model_contract_rejects_invalid_pricing(changes: dict[str, Any]) -> 
         ModelCreateTarget.model_validate({"deployment_name": "unit-deployment", **changes})
 
 
-def test_context_pricing_publication_and_activation_keep_the_complete_schedule() -> None:
+@pytest.mark.parametrize("custom_rule", [False, True])
+def test_context_pricing_publication_and_activation_keep_the_complete_schedule(
+    custom_rule: bool,
+) -> None:
     from turnstile_core.domain.runtime_models import PriceCatalogContextTier, PriceCatalogInputRange
     from turnstile_core.pricing.catalog import CatalogModel, CatalogOption, CatalogOptions
 
@@ -114,8 +117,10 @@ def test_context_pricing_publication_and_activation_keep_the_complete_schedule()
             key=f"azure_retail:Unit:{label}", label=label, product="Unit",
             source=PriceSource.AZURE_RETAIL,
             context_tier=PriceCatalogContextTier(
-                group_key="arbitrary-model", model_label="Arbitrary model", key=str(index),
-                label=label, order=index, input_range=PriceCatalogInputRange(
+                group_key="arbitrary-model", model_label="Arbitrary model",
+                key=("short" if index == 0 else "long") if custom_rule else str(index),
+                label=label, order=index,
+                input_range=None if custom_rule else PriceCatalogInputRange(
                     min_input_tokens=0 if index == 0 else 1201,
                     max_input_tokens=1200 if index == 0 else None,
                 ),
@@ -139,6 +144,7 @@ def test_context_pricing_publication_and_activation_keep_the_complete_schedule()
     write.model = ModelCreateTarget.model_validate(write.model.model_dump() | {
         "price_source": "azure_retail", "context_price_references": references,
         "price_discount_percent": 80, "input_cost_per_million": 999,
+        **({"context_price_rule": {"short_context_max_tokens": 1200}} if custom_rule else {}),
     })
     service = GatewayControlPlaneService(
         repository, apim_principal_id=str(UUID(int=99)), price_catalog=catalog,
@@ -147,6 +153,11 @@ def test_context_pricing_publication_and_activation_keep_the_complete_schedule()
     model = publication.desired_spec.bindings[-1].model
     assert [tier.input_price_per_million for tier in model.context_price_tiers] == [1.6, 2.4]
     assert model.input_cost_per_million is None
+    if custom_rule:
+        assert model.context_price_rule is not None
+        assert model.context_price_rule.short_context_max_tokens == 1200
+        source = model.context_price_tiers[0].input_range_source
+        assert source is not None and source.origin == "custom"
     assert service.publish(write, "unit-owner").id == publication.id
     for before, after in zip(
         ("queued", "validating", "provisioning", "building_revision", "verifying"),

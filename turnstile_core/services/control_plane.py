@@ -1738,6 +1738,21 @@ class GatewayControlPlaneService:
             )
         model = self._release_model(model_input, provider, runtime)
         self._validate_model(model, registry["models"])
+        if model.context_price_rule is not None:
+            for row in self._repository.list_gateway_publications(write.gateway_profile_id, 1):
+                pending = GatewayPublication.model_validate(row)
+                if (pending.publication_kind is PublicationKind.MODEL_ADD
+                    and pending.status not in {
+                        PublicationStatus.SUPERSEDED, PublicationStatus.ROLLED_BACK,
+                    } and pending.desired_spec.bindings):
+                    previous_binding = pending.desired_spec.bindings[-1]
+                    previous_model = previous_binding.model
+                    if (previous_model.model_key == model.model_key
+                        and previous_binding.runtime_id == runtime.get("id")
+                        and previous_model.context_price_rule == model.context_price_rule):
+                        model = model.model_copy(update={
+                            "context_price_tiers": previous_model.context_price_tiers,
+                        })
         model = self._price_model(model, runtime)
         binding_runtime = self._model_binding_runtime(provider, runtime, model)
 
@@ -2561,6 +2576,7 @@ class GatewayControlPlaneService:
                 tiers = resolve_context_prices(
                     self._price_catalog, model.price_source,
                     model.context_price_references, percent,
+                    rule=model.context_price_rule, previous_tiers=model.context_price_tiers,
                 )
             except ValueError as error:
                 raise ControlPlaneConflictError(str(error)) from error
@@ -2695,6 +2711,7 @@ class GatewayControlPlaneService:
                 price_reference=model.price_reference,
                 price_discount_percent=model.price_discount_percent,
                 context_price_references=model.context_price_references,
+                context_price_rule=model.context_price_rule,
                 allowed_roles=["owner", "admin", "member"],
                 assignment_required=True,
                 image_profile=profile,

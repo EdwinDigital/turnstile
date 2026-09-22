@@ -148,6 +148,7 @@ class UsageRequestSummary(StrictModel):
     latency_ms: int = Field(ge=0)
     status_code: int = Field(ge=100, le=599)
     estimated_cost: float = Field(ge=0)
+    cost_available: bool | None = None
     error_message: str | None
 
 
@@ -162,6 +163,12 @@ class UsageRequestDetail(UsageRequestSummary):
     run_id: str
     turn_index: int = Field(ge=1)
     cached_tokens: int = Field(ge=0)
+    input_price_per_million: float | None = Field(default=None, ge=0)
+    cached_price_per_million: float | None = Field(default=None, ge=0)
+    cache_write_price_per_million: float | None = Field(default=None, ge=0)
+    output_price_per_million: float | None = Field(default=None, ge=0)
+    price_context_tier: str | None = None
+    price_context_snapshot: dict[str, Any] | None = None
     # Write-only subset of cached_tokens. Writes bill far above reads, so two requests with the
     # same token counts can differ in cost by an order of magnitude without this field.
     cache_write_tokens: int = Field(ge=0, default=0)
@@ -671,6 +678,18 @@ class TokenUsageRecord(StrictModel):
     model_admission: str | None = Field(default=None, max_length=64)
 
 
+class PriceCatalogRuleSource(StrictModel):
+    rule_id: str = Field(min_length=1)
+    url: str | None = Field(default=None, pattern=r"^https://")
+    revision: str = Field(min_length=1)
+    verified_on: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    origin: Literal["official", "reference", "custom"] = Field(
+        default="official", exclude_if=lambda value: value == "official",
+    )
+    configured_at: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
+    note: str | None = Field(default=None, max_length=500, exclude_if=lambda value: value is None)
+
+
 class ModelPriceTier(StrictModel):
     key: str = Field(min_length=1)
     min_input_tokens: int = Field(ge=0, strict=True)
@@ -679,6 +698,9 @@ class ModelPriceTier(StrictModel):
     cached_price_per_million: float = Field(ge=0, allow_inf_nan=False)
     cache_write_price_per_million: float = Field(ge=0, allow_inf_nan=False)
     output_price_per_million: float = Field(ge=0, allow_inf_nan=False)
+    input_range_source: PriceCatalogRuleSource | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
 
 class ModelPrice(StrictModel):
@@ -731,6 +753,32 @@ class ModelPrice(StrictModel):
                 input_tokens, cached_tokens, output_tokens, cache_write_tokens,
             ),
         }
+
+    @classmethod
+    def restore_usage_prices(
+        cls, stored: Mapping[str, Any], input_tokens: int, cached_tokens: int,
+        output_tokens: int, cache_write_tokens: int = 0,
+    ) -> dict[str, Any]:
+        snapshot = stored.get("price_context_snapshot")
+        rates = {
+            field: stored.get(field) for field in (
+                "input_price_per_million", "cached_price_per_million",
+                "cache_write_price_per_million", "output_price_per_million",
+            )
+        }
+        price = cls.model_validate(snapshot) if snapshot is not None else cls.from_registry({
+            field.replace("_price_", "_cost_"): value for field, value in rates.items()
+        })
+        restored = {
+            **rates, "price_context_tier": stored.get("price_context_tier"),
+            "estimated_cost": stored.get("estimated_cost", 0),
+        }
+        if price is not None:
+            restored.update(price.snapshot_prices(
+                input_tokens, cached_tokens, output_tokens, cache_write_tokens,
+            ))
+        restored["price_context_snapshot"] = snapshot
+        return restored
 
     @model_validator(mode="after")
     def require_complete_context_ranges(self) -> ModelPrice:

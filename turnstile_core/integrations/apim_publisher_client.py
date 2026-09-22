@@ -36,6 +36,7 @@ from ..domain.control_plane import (
     GatewayPublication,
     GatewayReleaseDependencies,
     PublicationKind,
+    publication_model_id,
 )
 from ..domain.image_profiles import ImageGenerationProfile, validate_image_profile
 from ..integrations.reconciliation import ManagedIdentityTokenProvider
@@ -680,7 +681,7 @@ class AzureApimPublisherClient:
             "x-hive-agent": "Turnstile Publisher",
             "x-hive-user": "Turnstile Publisher",
             "x-hive-workflow": "gateway-publication-probe",
-            "x-hive-run-id": "gateway-publication-probe",
+            "x-hive-run-id": str(publication.id),
             "x-hive-turn-index": "1",
             "x-hive-model": "gateway-publication-probe",
             "x-hive-runtime": "gateway-publication-probe",
@@ -749,7 +750,7 @@ class AzureApimPublisherClient:
             ):
                 self._probe_model(
                     revision_path,
-                    headers,
+                    self._model_probe_headers(publication, headers, regression.id),
                     regression.id,
                     api_format=regression.api_format,
                     max_tokens_field=str(
@@ -776,7 +777,7 @@ class AzureApimPublisherClient:
             target = removed[0]
             self._probe_removed_model(
                 revision_path,
-                headers,
+                self._model_probe_headers(publication, headers, target.model_key),
                 target.model_key,
                 target.api_format,
             )
@@ -788,7 +789,7 @@ class AzureApimPublisherClient:
             ):
                 self._probe_model(
                     revision_path,
-                    headers,
+                    self._model_probe_headers(publication, headers, binding.model.model_key),
                     binding.model.model_key,
                     api_format=binding.api_format,
                     max_tokens_field=str(
@@ -818,7 +819,9 @@ class AzureApimPublisherClient:
                     continue
                 self._probe_responses_model(
                     revision_path,
-                    headers,
+                    self._model_probe_headers(
+                        publication, headers, responses_binding.model.model_key,
+                    ),
                     responses_binding.model.model_key,
                     retry_assignment_denial=responses_binding is target_binding,
                     baseline_base=(
@@ -833,7 +836,9 @@ class AzureApimPublisherClient:
                 )
                 self._probe_responses_compact_model(
                     revision_path,
-                    headers,
+                    self._model_probe_headers(
+                        publication, headers, responses_binding.model.model_key,
+                    ),
                     responses_binding.model.model_key,
                     retry_assignment_denial=responses_binding is target_binding,
                     baseline_base=(
@@ -878,7 +883,9 @@ class AzureApimPublisherClient:
                 )
                 for member in pool.members:
                     member_headers = {
-                        **headers,
+                        **self._model_probe_headers(
+                            publication, headers, pooled_binding.model.model_key,
+                        ),
                         "x-turnstile-pool-member": (
                             pool_compiler.pool_member_backend_id(
                                 publication,
@@ -909,7 +916,10 @@ class AzureApimPublisherClient:
                         ), None)
                         if baseline_member_id is not None:
                             baseline_member_headers = {
-                                **headers, "x-turnstile-pool-member": baseline_member_id,
+                                **self._model_probe_headers(
+                                    publication, headers, pooled_binding.model.model_key,
+                                ),
+                                "x-turnstile-pool-member": baseline_member_id,
                             }
                     member_baseline = (
                         baseline_path if baseline_member_headers is not None
@@ -965,11 +975,35 @@ class AzureApimPublisherClient:
                 partial(
                     self._send_bound_image_probe,
                     revision_path,
-                    headers,
+                    self._model_probe_headers(publication, headers, image_binding.model.model_key),
                     image_binding,
                     profile,
                 ),
             )
+
+    @staticmethod
+    def _model_probe_headers(
+        publication: GatewayPublication, headers: dict[str, str], model_key: str,
+    ) -> dict[str, str]:
+        binding = next((item for item in publication.desired_spec.bindings
+                        if item.model.model_key.casefold() == model_key.casefold()), None)
+        removed = next((item for item in publication.desired_spec.removed_models
+                        if item.model_key.casefold() == model_key.casefold()), None)
+        model_id = model_key
+        if removed is not None:
+            model_id = str(removed.model_id)
+        elif (binding is not None and publication.publication_kind is PublicationKind.MODEL_ADD
+              and binding is publication.desired_spec.bindings[-1]):
+            model_id = str(publication_model_id(publication.id, model_key))
+        model_headers = {
+            **headers, "x-model-id": model_id, "x-hive-model": model_key,
+            "x-hive-run-id": str(publication.id),
+        }
+        model_headers.pop("x-hive-runtime", None)
+        model_headers.pop("x-runtime-id", None)
+        if binding is not None and binding.runtime_id is not None:
+            model_headers["x-runtime-id"] = str(binding.runtime_id)
+        return model_headers
 
     def _send_bound_image_probe(
         self,

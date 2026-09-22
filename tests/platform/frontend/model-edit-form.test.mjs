@@ -428,47 +428,81 @@ test("context pricing grouping is independent of model names, products and servi
   assert.equal(modelEditForm.groupContextPriceModels([short, { ...long, source: "anthropic" }]).length, 2)
 })
 
-test("context pricing preserves documented thresholds through generic grouping", () => {
-  for (const family of ["sol", "terra"]) {
-    const models = ["ShortCo", "LongCo"].map(band => ({
-      key: `azure_retail:Azure OpenAI GPT5:5.6 ${family} ${band} Std`,
-      label: `5.6 ${family} ${band} Std`, product: "Azure OpenAI GPT5", source: "azure_retail",
+test("context pricing never derives a threshold from a known or new model name", () => {
+  for (const [product, name] of [["Azure OpenAI GPT5", "5.6 sol"], ["Azure OpenAI GPT6", "6 astra"], ["New Publisher", "future model 99"]]) {
+    const models = ["ShortCo", "LongCo"].map(band => contextCatalogModel(band, {
+      key: `${product}:${name}:${band}`, label: `${name} ${band} Std`, product,
     }))
     const [grouped] = modelEditForm.groupContextPriceModels(models)
-    assert.deepEqual(grouped.contextPricing.tiers.map(tier => tier.inputRange), [
-      { min_input_tokens: 0, max_input_tokens: 272000 },
-      { min_input_tokens: 272001, max_input_tokens: null },
-    ])
-    for (const changes of [{ source: "anthropic" }, { product: "Different Product" }]) {
-      const [other] = modelEditForm.groupContextPriceModels(models.map(model => ({ ...model, ...changes })))
-      assert.ok(other.contextPricing.tiers.every(tier => tier.inputRange === null))
-    }
+    assert.ok(grouped.contextPricing.tiers.every(tier => tier.inputRange === null))
   }
-  const unknown = ["ShortCo", "LongCo"].map(band => contextCatalogModel(band, {
-    label: `6 astra ${band} Std`, product: "Azure OpenAI GPT6",
-  }))
-  assert.ok(modelEditForm.groupContextPriceModels(unknown)[0].contextPricing.tiers.every(tier => tier.inputRange === null))
 })
 
-test("context pricing rule resolution is data-driven and preserves authoritative metadata", () => {
-  const model = contextCatalogModel("ShortCo")
-  const descriptor = {
-    group_key: "any-model", model_label: "Any model", service_tier: "flex",
-    key: "middle", label: "Middle", order: 1, input_range: null,
+test("context pricing preserves backend ranges and provenance without bundled rules", () => {
+  const source = { rule_id: "published-input-context", url: "https://example.com/model#pricing", revision: "sha256:unit", verified_on: "2026-09-21" }
+  const ranges = [{ min_input_tokens: 0, max_input_tokens: 91000 }, { min_input_tokens: 91001, max_input_tokens: null }]
+  for (const name of ["Any model", "Model invented after this release"]) {
+    const models = ranges.map((input_range, order) => contextCatalogModel("", {
+      key: `vendor:${name}:${order}`, label: `SKU ${order}`, product: "Any product", source: "anthropic",
+      context_tier: { group_key: name, model_label: name, service_tier: "standard",
+        key: order === 0 ? "short" : "long", label: `Band ${order}`, order,
+        input_range, input_range_source: source },
+    }))
+    const [grouped] = modelEditForm.groupContextPriceModels(models)
+    assert.deepEqual(grouped.contextPricing.tiers.map(tier => tier.inputRange), ranges)
+    assert.ok(grouped.contextPricing.tiers.every(tier => tier.inputRangeSource === source))
   }
-  const rule = {
-    id: "unit-rule", basis: "request_input_tokens", source_url: "https://example.com/pricing",
-    source_revision: "unit-revision", verified_on: "2026-09-20",
-    matches: [{ source: model.source, product: model.product, group_key: "any-model", service_tier: "flex" }],
-    tiers: [{ key: "middle", input_range: { min_input_tokens: 10001, max_input_tokens: 90000 } }],
+})
+
+test("custom context thresholds are explicit and require backend support", () => {
+  const tiers = ["short", "long"].map((key, order) => ({
+    key, order, label: key, inputRange: null,
+    option: catalogOption({ reference: `azure_retail:Any:Future ${key}:Global:*` }),
+  }))
+  const draft = {
+    ...createModelEditDraft(savedModel(), true, true), priceSource: "azure_retail",
+    contextPricingPreview: true, contextPriceTiers: tiers,
+    contextPriceReferences: tiers.map(tier => tier.option.reference),
+    contextRuleMode: "custom", contextThreshold: "12345",
   }
-  const resolved = modelEditForm.resolveContextPriceRule(model, descriptor, [rule])
-  assert.deepEqual(resolved.input_range, rule.tiers[0].input_range)
-  const authoritative = { ...descriptor, input_range: { min_input_tokens: 9001, max_input_tokens: 80000 } }
-  assert.equal(modelEditForm.resolveContextPriceRule(model, authoritative, [rule]), authoritative)
-  assert.equal(modelEditForm.resolveContextPriceRule(model, descriptor, [rule, rule]), descriptor)
-  assert.equal(modelEditForm.resolveContextPriceRule(model, descriptor, []), descriptor)
-  assert.equal(descriptor.input_range, null)
+  assert.equal(validateModelEdit(draft), null)
+  assert.deepEqual(modelEditForm.effectiveContextPriceTiers(draft).map(tier => tier.inputRange), [
+    { min_input_tokens: 0, max_input_tokens: 12345 }, { min_input_tokens: 12346, max_input_tokens: null },
+  ])
+  assert.deepEqual(modelEditPayload(savedModel(), draft).context_price_rule, {
+    short_context_max_tokens: 12345, note: "", source_url: null,
+  })
+  assert.equal(validateModelEdit({ ...draft, contextPriceRulesSupported: false }), "context_price_rule_preview")
+  for (const value of ["", "0", "-1", "1.5", "Infinity", "9007199254740991"]) {
+    assert.equal(validateModelEdit({ ...draft, contextThreshold: value }), "context_price_rule")
+  }
+  assert.equal(validateModelEdit({ ...draft, contextRuleMode: "catalog" }), "context_pricing_incomplete")
+  assert.equal(modelEditForm.setModelEditPriceSource(draft, "manual").contextRuleMode, "catalog")
+})
+
+test("request cost formulas use recorded token buckets and preserve unpriced versus zero", async () => {
+  const { estimateRequestCost, requestCostCalculation } = await import("../../../frontend/src/lib/pricing.ts")
+  const request = {
+    prompt_tokens: 100, cached_tokens: 200, cache_write_tokens: 50, completion_tokens: 10,
+    total_tokens: 310, estimated: false, reconciled_at: null, cost_available: true,
+    input_price_per_million: 2, cached_price_per_million: 0.5,
+    cache_write_price_per_million: 3, output_price_per_million: 8,
+    estimated_cost: 0.000505, ingest_error: null,
+    price_context_tier: "short",
+    price_context_snapshot: { context_tiers: [{ key: "short", min_input_tokens: 0, max_input_tokens: 500 }] },
+  }
+  const calculation = requestCostCalculation(request)
+  assert.deepEqual(calculation.terms.map(term => term.tokens), [100, 150, 50, 10])
+  assert.equal(calculation.inputTokens, 300)
+  assert.equal(calculation.calculatedCost, 0.000505)
+  assert.equal(calculation.matchesRecordedCost, true)
+  assert.equal(estimateRequestCost({ ...request, estimated_cost: 0 }, []), 0)
+  assert.equal(estimateRequestCost({ ...request, estimated_cost: 0, cost_available: false }, [savedModel()]), null)
+  assert.equal(requestCostCalculation({ ...request, input_price_per_million: null }), null)
+  assert.equal(requestCostCalculation({ ...request, cache_write_tokens: 201 }), null)
+  assert.equal(requestCostCalculation({ ...request, prompt_tokens: 501 }), null)
+  assert.equal(requestCostCalculation({ ...request, estimated: true }), null)
+  assert.equal(requestCostCalculation({ ...request, estimated_cost: 1 }).matchesRecordedCost, false)
 })
 
 test("context pricing pairs exact deployment and regional rates without deriving long prices", () => {
@@ -581,6 +615,126 @@ test("context pricing preview loads both real catalog keys and discounts both wi
   assert.equal(harness.draft.inputPrice, originalInput)
   assert.equal(harness.all().some(node => node.props?.className === "model-price-context-table"), false)
 })
+
+test("context threshold control previews explicit ranges and preserves same-scope refresh", async () => {
+  const models = [contextCatalogModel("ShortCo"), contextCatalogModel("LongCo")]
+  const harness = priceSourceHarness(key => catalogResponse({
+    model_entry: models.find(model => model.key === key),
+    options: [catalogOption({ reference: `${key}:Global:*` })],
+  }), savedModel(), { models, unavailable: [] })
+  await harness.find(node => node.type?.name === "ModelStep").props.onSearch()
+  const candidate = harness.find(node => node.type?.name === "ModelStep").props.matches[0]
+  await harness.find(node => node.type?.name === "ModelStep").props.onChoose(candidate)
+  Object.assign(harness.draft, { contextPricingSupported: true, contextPriceRulesSupported: true })
+  harness.find(node => node.type === "button" && node.props.children === "管理员自定义").props.onClick()
+  harness.find(node => node.props?.id === "model-context-threshold").props.onChange({ target: { value: "98765" } })
+  assert.equal(validateModelEdit(harness.draft), null)
+  assert.equal(harness.payload().context_price_rule.short_context_max_tokens, 98765)
+  const table = harness.find(node => node.type?.name === "ContextPriceTable")
+  assert.deepEqual(table.props.pricing.tiers.map(tier => tier.inputRange), [
+    { min_input_tokens: 0, max_input_tokens: 98765 }, { min_input_tokens: 98766, max_input_tokens: null },
+  ])
+  await harness.find(node => node.type?.name === "ModelStep").props.onChoose(candidate)
+  assert.equal(harness.draft.contextThreshold, "98765")
+  harness.find(node => node.type?.name === "ModelStep").props.setQuery("another model")
+  assert.equal(harness.draft.contextRuleMode, "catalog")
+  assert.equal(harness.draft.contextThreshold, "")
+})
+
+function contextRefreshFixture(customRule = true) {
+  const threshold = customRule ? 98765 : 1000
+  const rule = { short_context_max_tokens: threshold, note: "Accepted estimate", source_url: "https://example.com/pricing" }
+  const tiers = ["short", "long"].map((key, index) => ({
+    key, label: key, reference: `azure_retail:Unit:meter-${key}:Regional:westus`,
+    min_input_tokens: index ? threshold + 1 : 0, max_input_tokens: index ? null : threshold,
+    input_price_per_million: 2 + index, output_price_per_million: 8,
+    cached_price_per_million: 0.5, cache_write_price_per_million: 1,
+    list_prices: { input: 2 + index, output: 8, cached: 0.5, cache_write: 1 },
+    model_key: `azure_retail:Unit:meter-${key}`, model_label: `Meter ${key}`,
+    product: "Unit", group_key: "unit-model", service_tier: "Standard",
+    deployment: "Regional", regions: ["westus"],
+  }))
+  const model = savedModel({
+    price_source: "azure_retail", price_reference: "azure_retail:context:unit",
+    price_discount_percent: 80, context_price_rule: customRule ? rule : null,
+    context_price_tiers: tiers, input_cost_per_million: null, output_cost_per_million: null,
+    cached_cost_per_million: null, cache_write_cost_per_million: null,
+  })
+  return {
+    model,
+    responseFor(key) {
+      const index = tiers.findIndex(tier => tier.model_key === key)
+      assert.ok(index >= 0)
+      const tier = tiers[index]
+      return catalogResponse({
+        model_entry: { key, label: tier.model_label, source: "azure_retail", product: "Unit",
+          context_tier: { group_key: "unit-model", model_label: "Unit model", service_tier: "Standard",
+            key: tier.key, label: tier.label, order: index,
+            input_range: { min_input_tokens: index ? 1001 : 0, max_input_tokens: index ? null : 1000 } } },
+        options: [
+          catalogOption({ reference: `${key}:Global:*`, regions: ["*"] }),
+          catalogOption({ reference: `${key}:Regional:eastus`, deployment: "Regional",
+            regions: ["eastus", "westus"], region_required: true, input_per_million: 2.25 + index,
+            references_by_region: { eastus: `${key}:Regional:eastus`, westus: `${key}:Regional:westus` } }),
+        ],
+      })
+    },
+  }
+}
+
+for (const customRule of [false, true]) {
+  test(`context refresh preserves saved region and rule (${customRule ? "custom" : "catalog"})`, async () => {
+    const { model, responseFor } = contextRefreshFixture(customRule)
+    const harness = priceSourceHarness(responseFor, model)
+    Object.assign(harness.draft, { contextPricingSupported: true, contextPriceRulesSupported: true })
+    const expectedReferences = model.context_price_tiers.map(tier => tier.reference)
+    const picker = harness.find(node => node.type?.name === "ModelStep")
+    await picker.props.onChoose(picker.props.chosen)
+    assert.deepEqual(Array.from(harness.draft.contextPriceReferences), expectedReferences)
+    assert.equal(harness.draft.contextRuleMode, customRule ? "custom" : "catalog")
+    assert.equal(harness.draft.contextThreshold, customRule ? "98765" : "")
+    assert.deepEqual(modelEditForm.contextPriceRulePayload(harness.draft), customRule ? model.context_price_rule : undefined)
+    assert.deepEqual(Array.from(harness.draft.contextPriceTiers, tier => tier.option.input_per_million), [2.25, 3.25])
+    assert.equal(harness.draft.contextPriceRefresh, true)
+    assert.equal(validateModelEdit(harness.draft), null)
+    const selected = harness.find(node => node.type?.name === "DeploymentStep").props.selected
+    assert.equal(selected.deployment, "Regional")
+    assert.equal(selected.reference, selected.references_by_region.westus)
+    assert.deepEqual(Array.from(harness.payload().context_price_references), expectedReferences)
+    assert.equal(harness.payload().price_discount_percent, 80)
+  })
+}
+
+for (const failure of ["missing", "incomplete", "offline"]) {
+  test(`context refresh blocks ${failure} scope and preserves retry selection`, async () => {
+    const { model, responseFor } = contextRefreshFixture()
+    let failing = true
+    const harness = priceSourceHarness(key => {
+      if (failing && failure === "offline") throw new Error("offline")
+      const response = responseFor(key)
+      if (failing && failure === "incomplete") response.complete = false
+      if (failing && failure === "missing") response.options = response.options.slice(0, 1)
+      return response
+    }, model)
+    Object.assign(harness.draft, { contextPricingSupported: true, contextPriceRulesSupported: true })
+    const expectedReferences = model.context_price_tiers.map(tier => tier.reference)
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const picker = harness.find(node => node.type?.name === "ModelStep")
+      const refreshing = picker.props.onChoose(picker.props.chosen)
+      assert.notEqual(validateModelEdit(harness.draft), null)
+      await refreshing
+      assert.deepEqual(Array.from(harness.draft.contextPriceReferences), expectedReferences)
+      assert.deepEqual(modelEditForm.contextPriceRulePayload(harness.draft), model.context_price_rule)
+      assert.equal(validateModelEdit(harness.draft), "context_pricing_incomplete")
+      assert.throws(() => harness.payload(), /context_pricing_incomplete/)
+    }
+    failing = false
+    const picker = harness.find(node => node.type?.name === "ModelStep")
+    await picker.props.onChoose(picker.props.chosen)
+    assert.deepEqual(Array.from(harness.payload().context_price_references), expectedReferences)
+    assert.deepEqual(harness.payload().context_price_rule, model.context_price_rule)
+  })
+}
 
 test("context pricing preview renders every metadata band and its own range", async () => {
   const bounds = [[0, 14999], [15000, 45999], [46000, null]]
@@ -700,7 +854,8 @@ test("context pricing coverage uses tier schedules and never reprices aggregates
   assert.equal(pricing.hasModelPrices(model),true)
   assert.equal(pricing.estimateBucketCost({key:model.id,label:model.display_name,input:999999,cached:0,output:10},[model]),null)
   assert.equal(pricing.estimateRequestCost({model_id:model.id,estimated_cost:1.234},[model]),1.234)
-  assert.equal(pricing.estimateRequestCost({model_id:model.id,estimated_cost:0},[model]),0)
+  assert.equal(pricing.estimateRequestCost({model_id:model.id,estimated_cost:0},[model]),null)
+  assert.equal(pricing.estimateRequestCost({model_id:model.id,estimated_cost:0,cost_available:true},[model]),0)
 })
 
 test("recorded request costs survive incomplete pricing coverage and model removal", async () => {

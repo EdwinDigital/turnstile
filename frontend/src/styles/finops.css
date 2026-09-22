@@ -605,6 +605,20 @@ section.simple-pricing { padding-top: 16px; }
 .trace-token-fact dt::before { content: ""; width: 8px; height: 8px; flex: 0 0 8px; border-radius: 2px; }
 .trace-token-facts dd { margin: 2px 0 0; font-size: 11px; line-height: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .trace-token-cost { grid-column: 1 / -1; margin-top: 16px; }
+.trace-token-facts dd.trace-cost-calculation { margin-top: 10px; font-weight: 400; }
+.trace-cost-formula { display: grid; gap: 8px; min-width: 0; padding: 12px; border-radius: 8px; background: var(--muted); }
+.trace-cost-tier { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 10px; }
+.trace-cost-tier > span, .trace-cost-unit, .trace-cost-unavailable { color: var(--muted-foreground); font-size: 10px; }
+.trace-cost-expression { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; font-variant-numeric: tabular-nums; }
+.trace-cost-fraction { display: grid; gap: 4px; min-width: 0; max-width: 100%; }
+.trace-cost-numerator { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; padding: 0 2px 6px; border-bottom: 1px solid var(--foreground); }
+.trace-cost-summand { display: inline-flex; align-items: end; gap: 8px; max-width: 100%; }
+.trace-cost-term { display: grid; gap: 3px; min-width: 0; }
+.trace-cost-term small { color: var(--muted-foreground); font: inherit; font-size: 9px; }
+.trace-cost-term > span, .trace-cost-denominator, .trace-cost-result { font-family: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace; overflow-wrap: anywhere; }
+.trace-cost-denominator { text-align: center; }
+.trace-cost-result { font-weight: 600; }
+.trace-cost-mismatch { color: var(--destructive); font-size: 10px; }
 .trace-token-note { display: flex; align-items: flex-start; gap: 6px; margin: 10px 0 0; color: var(--muted-foreground); font-size: 11px; line-height: 16px; }
 .trace-token-note svg { flex: 0 0 13px; margin-top: 1px; color: var(--chart-3); }
 .trace-facts { gap: 10px 16px; }.trace-facts dd { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 11px; line-height: 16px; }

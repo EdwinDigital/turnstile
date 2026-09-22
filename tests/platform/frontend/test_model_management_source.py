@@ -261,7 +261,8 @@ def test_model_publication_selects_existing_connections_and_clears_connection_dr
     ):
         assert f'{setter}("")' in clear_draft
     assert (
-        "setPricing(createModelPriceDraft(registry.context_pricing_supported === true))"
+        "setPricing(createModelPriceDraft(registry.context_pricing_supported === true, "
+        "registry.context_price_rules_supported === true))"
         in clear_draft
     )
     assert "setKeyRevealed(false)" in clear_draft

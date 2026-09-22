@@ -1,24 +1,35 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch, sentinel
 from uuid import UUID
 
+import httpx
 import pytest
+from pydantic import SecretStr
 
+from tests.backend.model_platform.control_plane_support import (
+    GatewayControlPlaneService,
+    StubTokenProvider,
+    foundry_publication,
+    publisher_settings,
+)
 from turnstile_core.domain.application_access import (
     GatewayApplicationDiscovery,
     GatewayApplicationDiscoveryItem,
     UsageApplicationAttribution,
 )
+from turnstile_core.domain.control_plane import publication_model_id
 from turnstile_core.domain.models import ModelIdentity, ModelPrice, ModelPriceTier, TokenUsageRecord
 from turnstile_core.ingestion.processor import (
     CoefficientResolver,
     UsageProcessor,
     calculate_et,
 )
+from turnstile_core.integrations.apim_publisher_client import AzureApimPublisherClient
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
 from turnstile_core.services.application_access import ApplicationAccessService
@@ -52,6 +63,10 @@ class RecordingRepository:
         self.identity_reads += 1
         return self.identities
 
+    def get_gateway_publication(self, publication_id: UUID) -> None:
+        del publication_id
+        return None
+
     def gateway_application_attribution_map(
         self, gateway_profile_id: UUID
     ) -> list[dict[str, object]]:
@@ -84,6 +99,202 @@ def event(**overrides: object) -> dict[str, object]:
 
 def test_calculate_et() -> None:
     assert calculate_et(1000, 200, 100, 0.5) == 710
+
+
+def register_publication_probe(repository: InMemoryRepository) -> None:
+    ApplicationAccessService(repository, sync_available=True).sync_discovery(
+        GatewayApplicationDiscovery(
+            gateway_profile_id=GATEWAY_ID,
+            discovered_at=datetime(2026, 9, 18, tzinfo=UTC),
+            items=[GatewayApplicationDiscoveryItem(
+                apim_subscription_id="unit-publisher-probe", display_name="Unit Publisher",
+                state="active", scope_type="api", scope_id="unit-api", scope_exists=True,
+                application_type="system", system_managed=True,
+            ), GatewayApplicationDiscoveryItem(
+                apim_subscription_id="unit-service", display_name="Unit Service",
+                state="active", scope_type="api", scope_id="unit-api", scope_exists=True,
+                application_type="service", system_managed=False,
+            )],
+        ),
+        "application-sync-worker",
+    )
+
+
+@pytest.mark.parametrize("delayed", [False, True])
+def test_publication_probe_uses_frozen_identity_and_price_before_activation(delayed: bool) -> None:
+    repository = InMemoryRepository()
+    register_publication_probe(repository)
+    request = foundry_publication()
+    request.provider = request.provider.model_copy(update={
+        "existing_id": next(item["id"] for item in repository.providers
+                            if item["brand_key"] == "microsoft_foundry"),
+        "template": None,
+    })
+    request.model = request.model.model_copy(update={
+        "input_cost_per_million": 0.25, "cached_cost_per_million": 0.025,
+        "cache_write_cost_per_million": 0.25, "output_cost_per_million": 2.0,
+    })
+    publication = GatewayControlPlaneService(
+        repository, apim_principal_id=str(UUID(int=90)),
+    ).publish(request, "owner@example.com")
+    binding = publication.desired_spec.bindings[-1]
+    model_id = str(publication_model_id(publication.id, binding.model.model_key))
+    assert model_id not in repository.model_prices()
+    requests: list[httpx.Request] = []
+
+    def handler(outbound: httpx.Request) -> httpx.Response:
+        requests.append(outbound)
+        if outbound.method == "GET":
+            return httpx.Response(200, json={"data": [
+                {"id": item.id} for item in publication.desired_spec.discovery_models
+            ]})
+        assert outbound.method == "POST"
+        if outbound.url.path.endswith("/responses/compact"):
+            return httpx.Response(200, json={
+                "object": "response.compaction", "output": [],
+                "usage": {"input_tokens": 11, "output_tokens": 10, "total_tokens": 21},
+            })
+        if outbound.url.path.endswith("/responses"):
+            return httpx.Response(200, json={"output": []})
+        if outbound.url.path.endswith("/messages"):
+            return httpx.Response(200, json={"content": [{"type": "text", "text": "OK"}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+
+    settings = publisher_settings().model_copy(update={
+        "apim_probe_subscription_key": SecretStr("unit-probe-key"),
+    })
+    with httpx.Client(transport=httpx.MockTransport(handler)) as transport:
+        client = AzureApimPublisherClient(settings, cast(Any, StubTokenProvider()), transport)
+        client.probe_revision("unit-pricing-review", publication)
+    probes = [outbound for outbound in requests if outbound.method == "POST"
+              and json.loads(outbound.content)["model"] == binding.model.model_key]
+    assert probes
+    if delayed:
+        repository.gateway_publications[-1]["status"] = "superseded"
+        current_model = dict(repository.models[0])
+        current_model.update(
+            id=UUID(model_id), model_key=binding.model.model_key, display_name="Later name",
+            input_cost_per_million=99, output_cost_per_million=99,
+        )
+        repository.models.append(current_model)
+    processor = UsageProcessor(repository, CoefficientResolver({"default": 1.0}))
+    headers = probes[0].headers
+    payload = event(
+        request_source=headers["x-request-source"], user_id=headers["x-user-id"],
+        gateway_profile_id=str(GATEWAY_ID), apim_subscription_id="unit-publisher-probe",
+        run_id=headers["x-hive-run-id"], model_id=headers["x-model-id"],
+        model=headers["x-hive-model"],
+        input_tokens=11, cached_tokens=0, output_tokens=10, estimated_cost=99,
+    )
+    record = processor.normalize(payload)
+    assert record is not None
+    assert record.model_id == model_id
+    assert record.model == binding.model.display_name
+    assert record.input_price_per_million == 0.25
+    assert record.output_price_per_million == 2.0
+    assert record.estimated_cost == 0.00002275
+    assert record.ingest_error is None
+    for index, probe in enumerate(probes):
+        observed = processor.normalize({
+            **payload, "id": f"probe-{index}",
+            "run_id": probe.headers["x-hive-run-id"],
+            "model_id": probe.headers["x-model-id"], "model": probe.headers["x-hive-model"],
+        })
+        assert observed is not None and observed.model_id == model_id
+        assert observed.estimated_cost == 0.00002275
+        assert observed.ingest_error is None
+    for overrides in (
+        {"model_id": str(UUID(int=981))},
+        {"model": "another-model"},
+        {"run_id": str(UUID(int=982))},
+        {"apim_subscription_id": "unregistered-subscription"},
+        {"apim_subscription_id": None},
+        {"gateway_profile_id": None},
+        {"apim_subscription_id": "unit-service", "application_actor_type": "service"},
+    ):
+        rejected = processor.normalize({**payload, **overrides})
+        assert rejected is not None
+        assert rejected.input_price_per_million is None
+        assert rejected.estimated_cost == 0
+        assert rejected.ingest_error == "publication_probe_snapshot_unavailable"
+
+
+def test_publication_probe_resolves_the_selected_existing_binding_not_the_first() -> None:
+    repository = InMemoryRepository()
+    register_publication_probe(repository)
+    request = foundry_publication()
+    request.provider = request.provider.model_copy(update={
+        "existing_id": next(item["id"] for item in repository.providers
+                            if item["brand_key"] == "microsoft_foundry"),
+        "template": None,
+    })
+    publication = GatewayControlPlaneService(
+        repository, apim_principal_id=str(UUID(int=90)),
+    ).publish(request, "owner@example.com")
+    template = publication.desired_spec.bindings[-1]
+    bindings = [template.model_copy(update={
+        "model": template.model.model_copy(update={
+            "model_key": model["model_key"], "display_name": model["display_name"],
+            "input_cost_per_million": rate, "output_cost_per_million": rate * 2,
+        }),
+    }) for rate, model in enumerate(repository.models[:2], start=1)]
+    repository.gateway_publications[-1].update(
+        publication_kind="route_reconcile",
+        desired_spec={
+            **publication.desired_spec.model_dump(mode="json"),
+            "bindings": [binding.model_dump(mode="json") for binding in bindings],
+            "discovery_models": [{
+                "id": binding.model.model_key, "display_name": binding.model.display_name,
+                "api_format": binding.api_format.value,
+            } for binding in bindings],
+        },
+    )
+    selected = bindings[-1]
+    identity = repository.model_identities()[selected.model.model_key]
+    processor = UsageProcessor(repository, CoefficientResolver({"default": 1.0}))
+    record = processor.normalize(event(
+        request_source="gateway-publication-probe", user_id="system-gateway-publication",
+        gateway_profile_id=str(GATEWAY_ID), apim_subscription_id="unit-publisher-probe",
+        run_id=str(publication.id), model_id=identity.model_id, model=selected.model.model_key,
+        input_tokens=1000, cached_tokens=0, output_tokens=100,
+    ))
+    assert record is not None
+    assert record.model_id == identity.model_id
+    assert record.model == selected.model.display_name
+    assert record.input_price_per_million == 2
+    assert record.output_price_per_million == 4
+    assert record.estimated_cost == 0.0024
+    assert record.ingest_error is None
+
+
+@pytest.mark.parametrize("priced,recorded_cost,available", [
+    (False, 0, False), (True, 0, True), (False, 0.123, True),
+])
+def test_usage_cost_availability_and_details_belong_to_the_recorded_snapshot(
+    priced: bool, recorded_cost: float, available: bool,
+) -> None:
+    from turnstile_core.domain.models import UsageRequestDetail
+
+    repository = InMemoryRepository()
+    processor = UsageProcessor(RecordingRepository(), CoefficientResolver({"default": 1.0}))
+    record = processor.normalize(event())
+    assert record is not None
+    record = record.model_copy(update={
+        "estimated_cost": recorded_cost,
+        "input_price_per_million": 0 if priced else None,
+        "cached_price_per_million": 0 if priced else None,
+        "cache_write_price_per_million": 0 if priced else None,
+        "output_price_per_million": 0 if priced else None,
+    })
+    repository.write_token_usage(record)
+    detail = repository.get_usage_request(record.correlation_id)
+    assert detail is not None and detail["cost_available"] is available
+    parsed = UsageRequestDetail.model_validate(detail)
+    assert parsed.estimated_cost == recorded_cost
+    assert parsed.input_price_per_million == record.input_price_per_million
+    assert parsed.price_context_snapshot == record.price_context_snapshot
+    repository.models.clear()
+    assert repository.get_usage_request(record.correlation_id) == detail
 
 
 @pytest.mark.parametrize(
@@ -738,6 +949,55 @@ def test_context_price_late_formal_usage_preserves_first_price_schedule() -> Non
     assert saved.price_context_tier == "long"
     assert saved.input_price_per_million == 6
     assert saved.price_context_snapshot == original.price_context_snapshot
+
+
+@pytest.mark.parametrize("new_pricing", ["flat", "tiered"])
+@pytest.mark.parametrize("originally_priced", [False, True])
+@pytest.mark.parametrize("backend", ["memory", "postgres"])
+def test_late_formal_usage_keeps_original_flat_prices(
+    new_pricing: str, originally_priced: bool, backend: str,
+) -> None:
+    original_price = ModelPrice(
+        input_price_per_million=2, cached_price_per_million=0.2,
+        cache_write_price_per_million=2.5, output_price_per_million=8,
+    )
+    recording = RecordingRepository(
+        {"gpt-4.1-mini": original_price} if originally_priced else {},
+    )
+    processor = UsageProcessor(recording, CoefficientResolver({"default": 1.0}))
+    processor.process(event(input_tokens=None, cached_tokens=None, output_tokens=None))
+    original = recording.records[-1]
+    recording.prices["gpt-4.1-mini"] = (
+        context_price() if new_pricing == "tiered"
+        else original_price.model_copy(update={"input_price_per_million": 999})
+    )
+    UsageProcessor(recording, CoefficientResolver({"default": 1.0})).process(
+        event(input_tokens=1001, cached_tokens=200, cache_write_tokens=50, output_tokens=100),
+    )
+    if backend == "memory":
+        repository = InMemoryRepository()
+        repository.write_token_usage(original)
+        repository.write_token_usage(recording.records[-1])
+        saved = repository.usage_records[-1].model_dump()
+    else:
+        proxy = PostgreSqlOpsDbProxy("postgresql://nobody@127.0.0.1:1/unused")
+        with patch.object(proxy, "_connection") as connection_context:
+            connection = connection_context.return_value.__enter__.return_value
+            connection.execute.return_value.fetchall.return_value = [original.model_dump()]
+            proxy.write_token_usage(recording.records[-1])
+            upsert = next(call for call in connection.execute.call_args_list
+                          if "INSERT INTO token_usage AS existing" in call.args[0])
+            saved = upsert.args[1]
+            assert "price_context_snapshot = existing.price_context_snapshot" in upsert.args[0]
+    assert not saved["estimated"]
+    assert saved.get("price_context_snapshot") is None
+    assert saved.get("price_context_tier") is None
+    assert saved["input_price_per_million"] == (2 if originally_priced else None)
+    assert saved["cached_price_per_million"] == (0.2 if originally_priced else None)
+    assert saved["cache_write_price_per_million"] == (2.5 if originally_priced else None)
+    assert saved["output_price_per_million"] == (8 if originally_priced else None)
+    expected = original_price.cost(1001, 200, 100, 50) if originally_priced else 0
+    assert saved["estimated_cost"] == expected
 
 
 def test_cost_is_priced_at_ingestion_with_the_cached_rate() -> None:
