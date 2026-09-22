@@ -573,6 +573,10 @@ class OptimizationEventListResponse(StrictModel):
 
 class UsageEvent(StrictModel):
     id: str
+    budget_execution: list[dict[str, Any]] = Field(default_factory=list, max_length=2)
+    usage_complete: bool = Field(default=False, strict=True)
+    native_gateway_id: str | None = Field(default=None, min_length=1, max_length=80)
+    usage_event_source: Literal["apim", "observer", "reconciliation", "backfill"] = "apim"
     request_id: str | None = None
     correlation_id: str | None = None
     ts: datetime

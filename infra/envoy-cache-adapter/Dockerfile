@@ -7,6 +7,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY entrypoint.py shipper.py envoy.yaml.template /app/
+COPY turnstile_core /app/turnstile_core/
 RUN mkdir -p /tmp/turnstile-envoy \
     && chown -R envoy:envoy /app /tmp/turnstile-envoy
 

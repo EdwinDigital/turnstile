@@ -1,22 +1,28 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import azure.functions as func
 
-from turnstile_core.config import get_settings
+from turnstile_core.config import Settings, get_settings
 from turnstile_core.domain.control_plane import GatewayReleaseRetentionPolicy
+from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
 from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
     AzureApimPublisherClient,
 )
+from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
 from turnstile_core.integrations.ledger import TableStorageLedger
 from turnstile_core.persistence.factory import repository_session
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.application_provisioning_ledger import prepare_application_ledger
+from turnstile_core.services.budget_settlement import BudgetScopeRepository, BudgetScopeService
 from turnstile_core.services.gateway_publication_worker import GatewayPublicationWorker
 from turnstile_core.services.gateway_release_operation_worker import (
     GatewayReleaseOperationWorker,
@@ -24,6 +30,40 @@ from turnstile_core.services.gateway_release_operation_worker import (
 
 app = func.FunctionApp()
 logger = logging.getLogger(__name__)
+
+
+def _budget_parent_overrides(source: str, settings: Settings) -> dict[UUID, str]:
+    targets = getattr(settings, "budget_execution_target_ids", [])
+    if not targets:
+        return {}
+    if not settings.budget_execution_enabled:
+        raise ValueError("Budget publication requires the execution reader")
+    return {target: compose_budget_execution_parent(
+        source, source, enabled=True, delegation=settings.budget_delegation_trust.get(target),
+    ) for target in targets}
+
+
+def _budget_configuration(gateway_id: UUID, settings: Settings) -> dict[str, object]:
+    if (not settings.budget_execution_enabled
+            or gateway_id not in settings.budget_execution_target_ids
+            or not settings.ledger_table_endpoint or not settings.apim_service_name):
+        raise ValueError("Budget publication target is not enabled")
+    service = settings.apim_service_name.lower()
+    partition = (
+        f"budget-protocol|{hashlib.sha256(service.encode()).hexdigest()}|{settings.apim_api_id}"
+    )
+    ledger = AtomicTableLedger(
+        settings.ledger_table_endpoint, settings.ledger_table_name, timeout=2,
+    )
+    with ledger:
+        entity = ledger.read_entity(partition, "F")
+    fence = json.loads(entity["Document"]) if entity is not None else None
+    if (not isinstance(fence, dict) or fence.get("protocol_version") != 2
+            or fence.get("mode") != "active" or fence.get("gateway_profile_id") != str(gateway_id)
+            or fence.get("api_id") != settings.apim_api_id
+            or str(fence.get("apim_service_id", "")).lower() != service):
+        raise ValueError("Budget publication fence does not match its configured target")
+    return fence
 
 
 @app.timer_trigger(
@@ -52,10 +92,20 @@ def publish_gateway_changes(timer: func.TimerRequest) -> None:
         if not policy_path.is_file():
             logger.error("Gateway publication skipped: parent policy baseline is unavailable")
         else:
+            parent_policy = policy_path.read_text(encoding="utf-8")
+            overrides = _budget_parent_overrides(parent_policy, settings)
+            budget_options: dict[str, Any] = {}
+            if overrides:
+                budget_options = {
+                    "parent_policy_overrides": overrides,
+                    "budget_configuration": lambda gateway_id: _budget_configuration(
+                        gateway_id, settings,
+                    ),
+                }
             worker = GatewayPublicationWorker(
                 repository,
                 publisher,
-                policy_path.read_text(encoding="utf-8"),
+                parent_policy,
                 ApimPolicyCompiler(
                     settings.apim_probe_subscription_id,
                     settings.apim_usage_observer_url,
@@ -68,6 +118,7 @@ def publish_gateway_changes(timer: func.TimerRequest) -> None:
                 messages_operation_id=settings.apim_messages_operation_id,
                 count_tokens_operation_id=settings.apim_count_tokens_operation_id,
                 models_operation_id=settings.apim_models_operation_id,
+                **budget_options,
             )
             result = worker.run_once(
                 worker_id=worker_id,
@@ -103,6 +154,18 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
         def project_application(gateway_id: UUID, application_id: UUID) -> None:
             if not settings.ledger_table_endpoint:
                 raise RuntimeError("Application admission ledger is not configured")
+            if gateway_id in getattr(settings, "budget_execution_target_ids", []):
+                if not isinstance(repository, BudgetScopeRepository):
+                    raise RuntimeError("Application execution needs a durable repository")
+                atomic_store = AtomicTableLedger(
+                    settings.ledger_table_endpoint, settings.ledger_table_name,
+                )
+                with atomic_store:
+                    prepare_application_ledger(repository, atomic_store, gateway_id, application_id)
+                    BudgetScopeService(repository, atomic_store).prepare(
+                        application_id=application_id, gateway_profile_id=gateway_id,
+                    )
+                return
             with TableStorageLedger(
                 settings.ledger_table_endpoint, settings.ledger_table_name
             ) as store:
@@ -111,6 +174,8 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
         policy_path = Path(
             os.environ.get("CONTROL_PLANE_PARENT_POLICY_PATH", "policies/foundry-finops-policy.xml")
         )
+        parent_policy = policy_path.read_text(encoding="utf-8") if policy_path.is_file() else None
+        overrides = _budget_parent_overrides(parent_policy or "", settings)
         release_worker = GatewayReleaseOperationWorker(
             repository,
             publisher,
@@ -125,9 +190,8 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
                 settings.gateway_application_default_tokens_per_minute
             ),
             cipher=CredentialCipher.from_settings(settings),
-            parent_policy=(
-                policy_path.read_text(encoding="utf-8") if policy_path.is_file() else None
-            ),
+            parent_policy=parent_policy,
+            **({"parent_policy_overrides": overrides} if overrides else {}),
             application_projector=(
                 project_application
                 if (

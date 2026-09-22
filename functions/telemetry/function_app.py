@@ -28,11 +28,76 @@ def telemetry_health(req: func.HttpRequest) -> func.HttpResponse:
 def _processor() -> Iterator["UsageProcessor"]:
     from turnstile_core.config import get_settings
     from turnstile_core.ingestion.processor import CoefficientResolver, UsageProcessor
+    from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
     from turnstile_core.persistence.factory import repository_session
+    from turnstile_core.services.budget_settlement import (
+        BudgetSettlementRepository,
+        BudgetSettlementService,
+    )
 
     settings = get_settings()
     with repository_session(settings) as repository:
-        yield UsageProcessor(repository, CoefficientResolver(settings.model_coefficients))
+        def settle(usage_id: str) -> None:
+            if not isinstance(repository, BudgetSettlementRepository):
+                raise RuntimeError("Budget settlement requires a durable repository")
+            if not settings.ledger_table_endpoint:
+                raise RuntimeError("Budget settlement requires a Table endpoint")
+            store = AtomicTableLedger(
+                settings.ledger_table_endpoint, settings.ledger_table_name, timeout=2,
+            )
+            with store:
+                BudgetSettlementService(repository, store).drain(usage_id, limit=2, seconds=10)
+
+        yield UsageProcessor(
+            repository, CoefficientResolver(settings.model_coefficients),
+            execution_enabled=settings.budget_execution_enabled,
+            settle_committed_usage=settle if settings.budget_settlement_enabled else None,
+        )
+
+
+@app.timer_trigger(
+    arg_name="timer", schedule="*/5 * * * * *", run_on_startup=False, use_monitor=True,
+)
+def settle_budget_requests(timer: func.TimerRequest) -> None:
+    from turnstile_core.config import get_settings
+    from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
+    from turnstile_core.persistence.factory import repository_session
+    from turnstile_core.services.budget_settlement import (
+        BudgetRecoveryRepository,
+        BudgetRecoveryService,
+        BudgetScopeRepository,
+        BudgetScopeService,
+        BudgetSettlementRepository,
+        BudgetSettlementService,
+    )
+
+    del timer
+    settings = get_settings()
+    if not settings.budget_settlement_enabled:
+        return
+    if not settings.ledger_table_endpoint:
+        raise RuntimeError("Budget settlement requires a Table endpoint")
+    with repository_session(settings) as repository:
+        if (not isinstance(repository, BudgetSettlementRepository)
+                or not isinstance(repository, BudgetScopeRepository)
+                or not isinstance(repository, BudgetRecoveryRepository)):
+            raise RuntimeError("Budget execution requires a durable repository")
+        store = AtomicTableLedger(
+            settings.ledger_table_endpoint, settings.ledger_table_name, timeout=2,
+        )
+        with store:
+            BudgetScopeService(repository, store).prepare()
+            recovery = BudgetRecoveryService(repository, store)
+            recovery.policies()
+            recovery.recover()
+            recovery.completions()
+            recovery.finalize_uncertain()
+            applied = BudgetSettlementService(repository, store).drain()
+        health = repository.budget_settlement_health()
+        logger.info("Budget settlement drain applied=%d pending=%d oldest_seconds=%.3f",
+                    applied, health["pending"], health["oldest_seconds"])
+        if health["oldest_seconds"] > 30 or health["repeatedly_failed"]:
+            logger.error("Budget settlement backlog exceeds recovery target")
 
 
 @app.event_hub_message_trigger(

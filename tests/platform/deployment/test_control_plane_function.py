@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +14,36 @@ from functions.control_plane import function_app
 from turnstile_core.config import Settings
 from turnstile_core.persistence import factory
 from turnstile_core.security import CredentialCipher
+
+
+@pytest.mark.parametrize("change", [
+    {}, {"mode": "paused"}, {"protocol_version": 1}, {"api_id": "another-api"},
+    {"gateway_profile_id": str(UUID(int=2))}, {"apim_service_id": "another-service"},
+])
+def test_budget_fence_is_read_only_from_exact_configured_target(
+    monkeypatch: pytest.MonkeyPatch, change: dict[str, Any],
+) -> None:
+    gateway_id = UUID(int=1)
+    settings = Settings(
+        budget_execution_enabled=True, budget_execution_target_ids=[gateway_id],
+        ledger_table_endpoint="https://ledger.example.test", apim_service_name="Unit-Service",
+        apim_api_id="unit-api",
+    )
+    fence = {"protocol_version": 2, "mode": "active", "gateway_profile_id": str(gateway_id),
+             "apim_service_id": "unit-service", "api_id": "unit-api", **change}
+    ledger = MagicMock()
+    ledger.read_entity.return_value = {"Document": json.dumps(fence)}
+    factory_mock = MagicMock(return_value=ledger)
+    monkeypatch.setattr(function_app, "AtomicTableLedger", factory_mock)
+    if change:
+        with pytest.raises(ValueError, match="configured target"):
+            function_app._budget_configuration(gateway_id, settings)
+    else:
+        assert function_app._budget_configuration(gateway_id, settings) == fence
+    partition = "budget-protocol|" + hashlib.sha256(b"unit-service").hexdigest() + "|unit-api"
+    ledger.read_entity.assert_called_once_with(partition, "F")
+    ledger.__exit__.assert_called_once()
+    ledger.upsert.assert_not_called()
 
 
 def test_disabled_publication_timer_does_not_build_dependencies(monkeypatch: Any) -> None:

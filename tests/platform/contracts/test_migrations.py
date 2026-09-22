@@ -34,8 +34,25 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "007_model_price_source.up.sql",
         "008_price_review_and_guard.up.sql",
         "009_context_tier_pricing.up.sql",
+        "010_budget_execution_protocol.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
+
+
+def test_execution_upgrade_is_default_off_and_preserves_evidence_history() -> None:
+    sql = (MIGRATIONS / "010_budget_execution_protocol.up.sql").read_text()
+    assert table_names(sql) == {
+        "budget_execution_rollout", "budget_execution_scope", "budget_execution_dispatch",
+        "budget_execution_attempt", "budget_execution_evidence", "budget_settlement_task",
+    }
+    assert "scope_sync_enabled BOOLEAN NOT NULL DEFAULT FALSE" in sql
+    assert "DEFAULT 'prepared'" in sql
+    assert "WHERE EXCLUDED.evidence_rank > stored.evidence_rank" in sql
+    assert "IF evidence_id IS NULL OR source_rank = 1 THEN RETURN" in sql
+    assert "legacy_fence_verified_at IS NOT NULL" in sql
+    assert "reject_budget_reservation_finalization_mutation()" in sql
+    assert "gateway_profile_id = ANY(rollout.gateway_profile_ids)" in sql
+    assert not re.search(r"^(INSERT INTO|UPDATE|DELETE|TRUNCATE|DROP)\b", sql, re.MULTILINE)
 
 
 def test_context_tier_upgrade_keeps_rules_in_price_metadata_and_preserves_history() -> None:

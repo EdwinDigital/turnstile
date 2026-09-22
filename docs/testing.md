@@ -22,7 +22,7 @@ git diff --check
 
 ## Database validation
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, and `009_context_tier_pricing`), then run the command again and verify that no migration is reapplied.
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, and `010_budget_execution_protocol`), then run the command again and verify that no migration is reapplied.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
@@ -60,6 +60,33 @@ Apply `003_budget_reservation_finalization` before deploying the updated API and
 In a separately authorized PostgreSQL/Table/Log Analytics environment, verify exact recovery, terminal-zero failures, silent reservations past the grace period, unavailable and partial log results, both Person and Application scopes, retired applications, and old-month partitions. Upper-bound finalization must leave the original `R.Reserved` amount unchanged. Project confirmed usage before deleting settled reservations, including usage that crossed a month boundary. A late unmeasured event must not erase recovered exact usage; later final usage must replace it without double counting. Re-run after interrupted Table marking and deletion to prove convergence.
 
 For API and browser checks, distinguish a missing snapshot from zero pending usage. Verify that available Tokens subtract both pending reservations and finalized upper bounds. Recovery records have no model pricing or cache classification; they must not invent prices, latency or per-user cache measurements. Unit tests and SQL source checks do not establish live data-plane or migration correctness.
+
+### Budget execution validation
+
+Migration `010_budget_execution_protocol` adds default-off execution scopes, immutable admission
+and evidence records, and a durable settlement outbox. It does not activate a rollout or rewrite
+historical usage. Apply it only to the separately authorized database after preserving the existing
+migration checksums and data readback. Runtime activation requires a verified legacy-admission fence,
+drained in-flight work, equal opening balances, compatible readers, and an explicit epoch.
+
+```bash
+uv run --frozen --no-sync pytest -q tests/backend/telemetry/test_atomic_ledger.py \
+	tests/platform/infrastructure/test_budget_execution_policy.py
+```
+
+The policy suite requires an installed
+.NET 8 SDK and executes the generated expressions as C# 7.3 with the SDK's Newtonsoft.Json assembly;
+it does not substitute a Python parser or mock results for C# execution. Cover tool schemas and
+arguments, text containing JSON, protocol-specific mixed/remote content, incomplete structures,
+strict versus estimate contracts, native-count guarantees, error ownership, CAS conflicts and
+completion idempotence. Local HTTP doubles and SQL structure checks are not real database acceptance.
+
+For a separately approved deployed run, preserve parent-policy ETags and component hashes, prove
+all affected parents match the candidate, and verify exact request-to-receipt-to-settlement identity.
+Use the actual subscription header and model setting in a supported normal Claude Code session;
+do not treat bare-mode diagnostics or private-environment results as public acceptance. Unknown
+request outcomes cannot authorize a replay. Record unresolved transport errors without attributing
+their cause to the platform without evidence.
 
 ## Browser validation
 

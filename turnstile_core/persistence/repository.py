@@ -14,6 +14,7 @@ from psycopg_pool import ConnectionPool
 
 from ..domain.anomaly_engine import evaluate_anomaly_rules
 from ..domain.application_access import UsageApplicationAttribution
+from ..domain.ledger import LedgerAdmissionReceipt
 from ..domain.models import (
     ApimCacheReadBucket,
     ModelIdentity,
@@ -24,6 +25,7 @@ from ..domain.models import (
 from .repository_applications import PostgreSqlApplicationRepositoryMixin
 from .repository_assistant import PostgreSqlAssistantRepositoryMixin
 from .repository_billable_requests import PostgreSqlBillableRequestRepositoryMixin
+from .repository_budget_execution import PostgreSqlBudgetExecutionMixin
 from .repository_budgets import PostgreSqlBudgetRepositoryMixin
 from .repository_contract import OpsDbProxy, QueryRepository
 from .repository_publications import PostgreSqlPublicationRepositoryMixin
@@ -64,6 +66,7 @@ class PostgreSqlOpsDbProxy(
     PostgreSqlAssistantRepositoryMixin,
     PostgreSqlApplicationRepositoryMixin,
     PostgreSqlBudgetRepositoryMixin,
+    PostgreSqlBudgetExecutionMixin,
     PostgreSqlBillableRequestRepositoryMixin,
     PostgreSqlRegistryRepositoryMixin,
     PostgreSqlPublicationRepositoryMixin,
@@ -173,6 +176,12 @@ class PostgreSqlOpsDbProxy(
         self,
         record: TokenUsageRecord,
         application: UsageApplicationAttribution | None = None,
+        *,
+        execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
+        usage_complete: bool = False,
+        gateway_profile_id: UUID | None = None,
+        native_gateway_id: str | None = None,
+        evidence_source: str = "apim",
     ) -> None:
         values = record.model_dump()
         values["price_context_tier"] = record.price_context_tier
@@ -321,6 +330,12 @@ class PostgreSqlOpsDbProxy(
             if application is not None:
                 self._write_usage_application_attribution(
                     connection, values["id"], application
+                )
+            if execution_receipts:
+                self._write_execution_receipts(
+                    connection, record, values["id"], application,
+                    gateway_profile_id, native_gateway_id, execution_receipts,
+                    usage_complete, evidence_source,
                 )
 
     def model_prices(self) -> dict[str, ModelPrice]:

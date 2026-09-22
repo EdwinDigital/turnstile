@@ -87,6 +87,25 @@ def _documented_schemas() -> dict[str, dict[str, object]]:
     return _resolve_index(cast(dict[str, object], components["schemas"]))
 
 
+def test_execution_event_has_bounded_receipts_and_default_off_completion() -> None:
+    schema = _documented_schemas()["UsageEvent"]
+    properties = cast(dict[str, dict[str, object]], schema["properties"])
+    receipts = properties["budget_execution"]
+    assert receipts["maxItems"] == 2 and receipts["default"] == []
+    item = cast(dict[str, object], receipts["items"])
+    assert item["additionalProperties"] is False
+    assert set(cast(list[str], item["required"])) == {"identity", "epoch", "reserved_tokens"}
+    fields = cast(dict[str, dict[str, object]], item["properties"])
+    assert fields["reserved_tokens"]["minimum"] == 1
+    assert set(cast(list[str], fields["identity"]["required"])) == {
+        "scope", "gateway_profile_id", "native_gateway_id", "correlation_id", "model_id",
+        "admitted_at",
+    }
+    assert properties["usage_complete"]["default"] is False
+    assert properties["native_gateway_id"]["maxLength"] == 80
+    assert "cache_write_tokens" in properties
+
+
 def test_openapi_root_is_a_small_domain_index() -> None:
     root = _yaml_document(CONTRACT.resolve())
     paths = cast(dict[str, dict[str, str]], root["paths"])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +24,7 @@ from turnstile_core.domain.application_access import (
     UsageApplicationAttribution,
 )
 from turnstile_core.domain.control_plane import publication_model_id
+from turnstile_core.domain.ledger import LedgerAdmissionReceipt, LedgerAttemptIdentity, LedgerScope
 from turnstile_core.domain.models import ModelIdentity, ModelPrice, ModelPriceTier, TokenUsageRecord
 from turnstile_core.ingestion.processor import (
     CoefficientResolver,
@@ -44,16 +46,26 @@ class RecordingRepository:
         identities: dict[str, ModelIdentity] | None = None,
     ) -> None:
         self.records: list[TokenUsageRecord] = []
+        self.execution_writes: list[dict[str, Any]] = []
         self.prices = prices or {}
         self.identities = identities or {}
         self.price_reads = 0
         self.identity_reads = 0
 
     def write_token_usage(
-        self, record: TokenUsageRecord, application: object | None = None
+        self, record: TokenUsageRecord, application: object | None = None, *,
+        execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
+        usage_complete: bool = False, gateway_profile_id: UUID | None = None,
+        native_gateway_id: str | None = None, evidence_source: str = "apim",
     ) -> None:
         assert application is None
         self.records.append(record)
+        if execution_receipts:
+            self.execution_writes.append({
+                "receipts": execution_receipts, "complete": usage_complete,
+                "gateway_profile_id": gateway_profile_id, "native_gateway_id": native_gateway_id,
+                "evidence_source": evidence_source,
+            })
 
     def model_prices(self) -> dict[str, ModelPrice]:
         self.price_reads += 1
@@ -99,6 +111,133 @@ def event(**overrides: object) -> dict[str, object]:
 
 def test_calculate_et() -> None:
     assert calculate_et(1000, 200, 100, 0.5) == 710
+
+
+def execution_event(**overrides: object) -> dict[str, object]:
+    receipt = LedgerAdmissionReceipt(
+        identity=LedgerAttemptIdentity(
+            scope=LedgerScope(scope_type="person", scope_id="unit@example.com",
+                              period_start=datetime(2026, 7, 1, tzinfo=UTC).date()),
+            gateway_profile_id=GATEWAY_ID, native_gateway_id="managed",
+            correlation_id="unit-correlation", model_id="unit-model",
+            admitted_at=datetime(2026, 7, 17, tzinfo=UTC),
+        ), epoch=UUID(int=1), reserved_tokens=2000,
+    )
+    result = event(
+        user_id="unit@example.com", model_id="unit-model", model="unit-model",
+        correlation_id="unit-correlation", gateway_profile_id=str(GATEWAY_ID),
+        native_gateway_id="managed", budget_execution=[receipt.model_dump(mode="json")],
+        usage_complete=True, tokens_consumed=1300, cache_write_tokens=50,
+    )
+    result.update(overrides)
+    return result
+
+
+@pytest.mark.parametrize("source", ["apim", "observer"])
+def test_execution_usage_wakeup_runs_only_after_durable_write(source: str) -> None:
+    repository = RecordingRepository()
+    completed = []
+
+    def settle(usage_id: str) -> None:
+        assert repository.records and repository.execution_writes
+        completed.append(usage_id)
+
+    processor = UsageProcessor(repository, CoefficientResolver({}), execution_enabled=True,
+                               settle_committed_usage=settle)
+    assert processor.process(execution_event(usage_event_source=source))
+    assert completed == ["unit-correlation"]
+    assert repository.execution_writes[0]["complete"] is True
+    assert repository.execution_writes[0]["evidence_source"] == source
+
+
+@pytest.mark.parametrize("changes", [
+    {"output_tokens": None}, {"cache_write_tokens": None}, {"tokens_consumed": 999},
+    {"input_tokens": True}, {"cache_write_tokens": 201}, {"estimated": True},
+    {"usage_complete": False}, {"ingest_error": "unit_unavailable"},
+])
+def test_execution_incomplete_usage_never_becomes_strong_evidence(changes: dict[str, Any]) -> None:
+    repository = RecordingRepository()
+    processor = UsageProcessor(repository, CoefficientResolver({}), execution_enabled=True)
+    assert processor.process(execution_event(**changes))
+    assert repository.execution_writes[0]["complete"] is False
+
+
+def test_execution_disabled_reader_and_in_memory_repository_refuse_receipts() -> None:
+    repository = RecordingRepository()
+    with pytest.raises(RuntimeError, match="enabled execution reader"):
+        UsageProcessor(repository, CoefficientResolver({})).process(execution_event())
+    assert not repository.records
+    memory = InMemoryRepository()
+    with pytest.raises(RuntimeError, match="durable PostgreSQL"):
+        UsageProcessor(memory, CoefficientResolver({}), execution_enabled=True).process(
+            execution_event()
+        )
+    assert not memory.usage_records
+
+
+@pytest.mark.parametrize("changes", [
+    {"ingest_source": "copilot_cli"}, {"request_source": "copilot-assistant"},
+    {"usage_event_source": "backfill"}, {"native_gateway_id": None},
+    {"gateway_profile_id": None},
+])
+def test_execution_rejects_untrusted_event_attribution_before_write(
+    changes: dict[str, Any],
+) -> None:
+    repository = RecordingRepository()
+    with pytest.raises(ValueError, match="trusted gateway attribution"):
+        UsageProcessor(repository, CoefficientResolver({}), execution_enabled=True).process(
+            execution_event(**changes)
+        )
+    assert not repository.records
+
+
+def test_execution_failed_wakeup_keeps_committed_usage_for_outbox_retry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = RecordingRepository()
+    wakeup = MagicMock(side_effect=RuntimeError("private test details"))
+    processor = UsageProcessor(repository, CoefficientResolver({}), execution_enabled=True,
+                               settle_committed_usage=wakeup)
+    assert processor.process(execution_event())
+    assert len(repository.records) == 1
+    assert "RuntimeError" in caplog.text and "private test details" not in caplog.text
+
+
+def test_postgres_execution_receipts_share_usage_transaction_and_retained_id() -> None:
+    record = UsageProcessor(RecordingRepository(), CoefficientResolver({})).normalize(
+        event(user_id="unit@example.com", correlation_id="unit-correlation")
+    )
+    assert record is not None
+    receipt = LedgerAdmissionReceipt(
+        identity=LedgerAttemptIdentity(
+            scope=LedgerScope(scope_type="person", scope_id=record.user_id,
+                              period_start=record.ts.date().replace(day=1)),
+            gateway_profile_id=GATEWAY_ID, native_gateway_id="managed",
+            correlation_id=record.correlation_id, model_id=record.model_id,
+            admitted_at=record.ts,
+        ), epoch=UUID(int=1), reserved_tokens=2000,
+    )
+    connection = MagicMock()
+    connection.execute.return_value.fetchall.return_value = [{
+        "id": "retained-usage-id", "correlation_id": record.correlation_id,
+        "usage_domain": "apim", "user_id": record.user_id,
+    }]
+    context = MagicMock()
+    context.__enter__.return_value = connection
+    repository = PostgreSqlOpsDbProxy("postgresql://unused", pool_min_size=0)
+    with (
+        patch.object(repository, "_connection", return_value=context),
+        patch.object(repository, "_write_execution_receipts",
+                     side_effect=ValueError("receipt rejected")) as write,
+        pytest.raises(ValueError, match="receipt rejected"),
+    ):
+        repository.write_token_usage(
+            record, execution_receipts=[receipt], usage_complete=True,
+            gateway_profile_id=GATEWAY_ID, native_gateway_id="managed",
+        )
+    assert write.call_args.args[:3] == (connection, record, "retained-usage-id")
+    assert context.__exit__.call_args.args[0] is ValueError
+    assert connection.commit.call_count == 0
 
 
 def register_publication_probe(repository: InMemoryRepository) -> None:

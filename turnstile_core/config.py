@@ -4,10 +4,12 @@ import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .domain.budget_delegation import BudgetDelegationTarget, BudgetDelegationTrust
 from .domain.image_profiles import ImageGenerationLimits
 
 
@@ -31,6 +33,11 @@ class Settings(BaseSettings):
     # Budget ledger projected into Table Storage so the APIM admission check never
     # depends on this application.
     ledger_sync_enabled: bool = False
+    budget_execution_enabled: bool = False
+    budget_execution_target_ids: list[UUID] = Field(default_factory=list)
+    budget_delegation_targets: dict[UUID, BudgetDelegationTarget] = Field(default_factory=dict)
+    budget_delegation_trust: dict[UUID, BudgetDelegationTrust] = Field(default_factory=dict)
+    budget_settlement_enabled: bool = False
     ledger_table_endpoint: str | None = None
     ledger_table_name: str = "TurnstileLedger"
     ledger_reservation_recovery_lag_minutes: int = Field(default=10, ge=6, le=120)
@@ -152,6 +159,22 @@ class Settings(BaseSettings):
             )
         if self.control_plane_enabled and not observer_url:
             raise ValueError("The enabled control plane requires an APIM usage observer")
+        return self
+
+    @model_validator(mode="after")
+    def require_budget_execution_dependencies(self) -> Settings:
+        selected = set(self.budget_execution_target_ids)
+        if not self.budget_delegation_targets.keys() <= selected:
+            raise ValueError("Delegation targets must be explicitly enabled execution targets")
+        if not self.budget_delegation_trust.keys() <= selected:
+            raise ValueError("Delegation trust must be bound to enabled execution targets")
+        if selected and not self.budget_execution_enabled:
+            raise ValueError("Budget execution targets require the execution reader gate")
+        if self.budget_settlement_enabled and (
+            not self.budget_execution_enabled or not (self.ledger_table_endpoint or "").strip()
+            or self.data_backend != "postgresql"
+        ):
+            raise ValueError("Budget settlement requires enabled execution, PostgreSQL and Table")
         return self
 
     @field_validator("delegated_invocation_tester_ids")

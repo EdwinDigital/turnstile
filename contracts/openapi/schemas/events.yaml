@@ -21,6 +21,75 @@ schemas:
       id:
         type: string
         minLength: 1
+      budget_execution:
+        type: array
+        default: []
+        maxItems: 2
+        description: Immutable trusted APIM admission receipts, never caller-supplied accounting.
+        items:
+          type: object
+          additionalProperties: false
+          required: [identity, epoch, reserved_tokens]
+          properties:
+            epoch:
+              type: string
+              format: uuid
+            reserved_tokens:
+              type: integer
+              format: int64
+              minimum: 1
+              maximum: 9223372036854775807
+            identity:
+              type: object
+              additionalProperties: false
+              required: [scope, gateway_profile_id, native_gateway_id, correlation_id, model_id, admitted_at]
+              properties:
+                scope:
+                  type: object
+                  additionalProperties: false
+                  required: [scope_type, scope_id, period_start]
+                  properties:
+                    scope_type:
+                      type: string
+                      enum: [person, application]
+                    scope_id:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                    period_start:
+                      type: string
+                      format: date
+                      description: First day of the UTC admission month.
+                gateway_profile_id:
+                  type: string
+                  format: uuid
+                native_gateway_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 80
+                correlation_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                model_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+                admitted_at:
+                  type: string
+                  format: date-time
+      usage_complete:
+        type: boolean
+        default: false
+        description: Complete trusted producer counters; estimates and interrupted streams are false.
+      native_gateway_id:
+        type: [string, 'null']
+        minLength: 1
+        maxLength: 80
+      usage_event_source:
+        type: string
+        default: apim
+        enum: [apim, observer, reconciliation, backfill]
       ts:
         type: string
         format: date-time
@@ -102,6 +171,11 @@ schemas:
         - 'null'
         format: int64
         minimum: 0
+      cache_write_tokens:
+        type: [integer, 'null']
+        format: int64
+        minimum: 0
+        description: A subset of cached_tokens, not additional tokens.
       output_tokens:
         type:
         - integer

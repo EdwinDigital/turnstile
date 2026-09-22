@@ -4,7 +4,7 @@ import typing
 from datetime import timedelta
 from inspect import signature
 from pathlib import Path
-from typing import get_args, get_origin
+from typing import Any, get_args, get_origin
 from unittest.mock import MagicMock, patch
 
 import azure.functions as func
@@ -14,10 +14,12 @@ from functions.telemetry.function_app import (
     app,
     process_usage_events,
     reconcile_stream_usage,
+    settle_budget_requests,
     sync_budget_ledger,
     telemetry_health,
 )
 from turnstile_core.config import Settings
+from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -36,7 +38,7 @@ def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
 builtins.__import__ = guarded_import
 from functions.telemetry import function_app
 
-assert len(function_app.app.get_functions()) == 4
+assert len(function_app.app.get_functions()) == 5
 """
 
     subprocess.run(
@@ -56,6 +58,65 @@ def test_trigger_binding_names_match_function_parameters() -> None:
 
         assert trigger is not None
         assert trigger.name in parameters
+
+
+def test_budget_execution_is_default_off_and_settlement_timer_has_no_side_effects() -> None:
+    settings = Settings()
+    assert not settings.budget_execution_enabled and not settings.budget_settlement_enabled
+    with (
+        patch("turnstile_core.config.get_settings", return_value=settings),
+        patch("turnstile_core.persistence.factory.create_repository") as create,
+        patch("turnstile_core.integrations.atomic_ledger.AtomicTableLedger") as store,
+    ):
+        settle_budget_requests.build().get_user_function()(None)
+    create.assert_not_called()
+    store.assert_not_called()
+
+
+@pytest.mark.parametrize("options", [
+    {"budget_execution_target_ids": ["10000000-0000-4000-8000-000000000001"]},
+    {"budget_settlement_enabled": True, "ledger_table_endpoint": "https://ledger.example.com"},
+    {"budget_settlement_enabled": True, "budget_execution_enabled": True},
+    {"budget_settlement_enabled": True, "budget_execution_enabled": True,
+     "ledger_table_endpoint": "https://ledger.example.com", "data_backend": "demo"},
+])
+def test_budget_execution_settings_reject_incomplete_dependencies(options: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="Budget (execution|settlement)"):
+        Settings(**options)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_budget_settlement_timer_uses_durable_services_and_closes_resources(fails: bool) -> None:
+    settings = Settings(budget_execution_enabled=True,
+                        budget_settlement_enabled=True,
+                        ledger_table_endpoint="https://ledger.example.com")
+    repository = PostgreSqlOpsDbProxy("postgresql://unused", pool_min_size=0)
+    with (
+        patch("turnstile_core.config.get_settings", return_value=settings),
+        patch("turnstile_core.persistence.factory.create_repository", return_value=repository),
+        patch.object(repository, "close") as close,
+        patch.object(repository, "budget_settlement_health", return_value={
+            "pending": 0, "oldest_seconds": 0, "repeatedly_failed": 0,
+        }),
+        patch("turnstile_core.integrations.atomic_ledger.AtomicTableLedger") as store,
+        patch("turnstile_core.services.budget_settlement.BudgetScopeService") as scopes,
+        patch("turnstile_core.services.budget_settlement.BudgetRecoveryService") as recovery,
+        patch("turnstile_core.services.budget_settlement.BudgetSettlementService") as settlement,
+    ):
+        settlement.return_value.drain.return_value = 1
+        if fails:
+            settlement.return_value.drain.side_effect = RuntimeError("drain failed")
+            with pytest.raises(RuntimeError, match="drain failed"):
+                settle_budget_requests.build().get_user_function()(None)
+        else:
+            settle_budget_requests.build().get_user_function()(None)
+        scopes.assert_called_once_with(repository, store.return_value)
+        scopes.return_value.prepare.assert_called_once_with()
+        assert [call[0] for call in recovery.return_value.method_calls] == [
+            "policies", "recover", "completions", "finalize_uncertain",
+        ]
+        store.return_value.__exit__.assert_called_once()
+        close.assert_called_once_with()
 
 
 def test_event_hub_batch_annotation_is_available_at_runtime() -> None:

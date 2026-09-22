@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 from uuid import UUID
 from xml.etree import ElementTree
 
@@ -20,6 +21,10 @@ from tests.backend.model_platform.control_plane_support import (
     publisher_settings,
     transition_publication,
 )
+from tests.backend.model_platform.test_control_plane_contracts import (
+    budget_publication_contract_fixture,
+)
+from turnstile_core.domain.budget_counting import BudgetPublicationContracts
 from turnstile_core.domain.control_plane import (
     GatewayModelBinding,
     GatewayPublicationCreate,
@@ -28,6 +33,7 @@ from turnstile_core.domain.control_plane import (
     RuntimeTarget,
 )
 from turnstile_core.domain.runtime_models import ProviderTarget, databricks_connection_config
+from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
 from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
     AuthorizationRequiredError,
@@ -44,6 +50,128 @@ from turnstile_core.integrations.apim_policy_components import (
     validate_parent_policy,
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
+from turnstile_core.services.gateway_release_operation_worker import GatewayReleaseOperationWorker
+
+
+def test_budget_rollback_rejects_legacy_parent_before_probing() -> None:
+    publication, _ = budget_publication_contract_fixture()
+    publication = publication.model_copy(update={"apim_revision": "unit-budget-revision"})
+    source = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    canonical = compose_budget_execution_parent(source, source, enabled=True)
+    client = FakeApimClient()
+    worker = GatewayReleaseOperationWorker(
+        InMemoryRepository(), client, parent_policy=source,
+        parent_policy_overrides={publication.gateway_profile_id: canonical},
+    )
+    with (patch.object(client, "revision_api_policy", return_value=source),
+          patch.object(client, "probe_revision") as probe,
+          pytest.raises(PolicyCompilationError, match="compatible canonical")):
+        worker._validate_rollback_parent(publication)
+    probe.assert_not_called()
+
+
+@pytest.mark.parametrize("mutation", ["legacy", "version", "ordering", "analysis", "apply"])
+def test_budget_parent_requires_exact_version_order_and_both_plan_branches(mutation: str) -> None:
+    source = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    canonical = compose_budget_execution_parent(source, source, enabled=True)
+    validate_parent_policy(canonical, canonical)
+    root = parse_policy(canonical)
+    inbound = root.find("inbound")
+    marker = root.find("./inbound/set-variable[@name='budgetExecutionVersion']")
+    assert inbound is not None and marker is not None
+    if mutation == "legacy":
+        candidate = source
+    else:
+        if mutation == "version":
+            marker.set("value", "@(1)")
+        elif mutation == "ordering":
+            inbound.remove(marker)
+            inbound.append(marker)
+        elif mutation == "analysis":
+            analysis = root.find(".//set-variable[@name='executionRequestAnalysis']")
+            assert analysis is not None
+            analysis.set("value", "@(new JObject())")
+        else:
+            plans = root.findall(".//set-variable[@name='executionPlan']")
+            assert len(plans) == 2
+            plans[1].set("value", plans[0].attrib["value"])
+        candidate = serialize_policy(root)
+    with pytest.raises(PolicyCompilationError):
+        validate_parent_policy(candidate, canonical)
+
+
+def test_budget_worker_captures_contract_and_fences_epoch_change_before_backend_writes() -> None:
+    repository = InMemoryRepository()
+    repository.models = []
+    publication = GatewayControlPlaneService(repository).publish(
+        bedrock_publication(), "owner@example.com",
+    )
+    source = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    canonical = compose_budget_execution_parent(source, source, enabled=True)
+    fence = {"protocol_version": 2, "mode": "active", "epoch": str(UUID(int=2)),
+             "gateway_profile_id": str(publication.gateway_profile_id), "model_contracts": {}}
+    client = FakeApimClient()
+    worker = GatewayPublicationWorker(
+        repository, client, source,
+        parent_policy_overrides={publication.gateway_profile_id: canonical},
+        budget_configuration=lambda _: fence,
+    )
+    with (patch.object(client, "current_api_policy", return_value=("1", canonical)),
+          patch.object(client, "ensure_backend") as ensure_backend):
+        result = worker.run_once("budget-test")
+        assert result is not None and result.status.value == "validating"
+        snapshot = BudgetPublicationContracts.model_validate(
+            result.resource_manifest["budget_contracts"]
+        )
+        snapshot.validate_publication(result)
+        fence["epoch"] = str(UUID(int=3))
+        failed = worker.run_once("budget-test")
+        assert failed is not None and failed.status.value == "failed"
+        assert "epoch changed" in (failed.error_message or "")
+        ensure_backend.assert_not_called()
+
+
+def test_compiler_binds_immutable_budget_contract_before_parent_and_forwards_trusted_receipt(
+) -> None:
+    publication, fence = budget_publication_contract_fixture()
+    snapshot = BudgetPublicationContracts.capture(publication, {"models": []}, fence)
+    publication.resource_manifest["budget_contracts"] = snapshot.model_dump(mode="json")
+    compiler = ApimPolicyCompiler(usage_observer_url="https://observer.example.com",
+                                  usage_observer_key_named_value="unit-observer-key")
+    compiled = compiler.compile(publication)
+    for policy in (compiled.chat_completions_policy, compiled.responses_policy,
+                   compiled.responses_compact_policy):
+        root = ElementTree.fromstring(policy)
+        contract = root.find(
+            "./inbound/choose/when/set-variable[@name='selectedBudgetCountContract']"
+        )
+        assert contract is not None
+        encoded = json.loads(contract.attrib["value"])
+        assert encoded["epoch"] == str(snapshot.epoch)
+        alias = publication.desired_spec.bindings[-1].model.model_key
+        assert encoded["contract"]["model_id"] == str(snapshot.model_contracts[alias].model_id)
+        assert "selectedBudgetCountContract" in policy.split("<base />", 1)[0]
+        header = root.find(".//set-header[@name='x-turnstile-budget-execution']/value")
+        assert header is not None and "executionReceiptHeader" in (header.text or "")
+        removed = root.find(".//otherwise/set-header[@name='x-turnstile-budget-execution']")
+        assert removed is not None and removed.attrib["exists-action"] == "delete"
+    snapshot.publication_id = UUID(int=9)
+    publication.resource_manifest["budget_contracts"] = snapshot.model_dump(mode="json")
+    with pytest.raises(ValueError, match="another publication"):
+        compiler.compile(publication)
+
+
+def test_compiler_native_counter_uses_existing_origin_and_auth_without_bearer_rewrite() -> None:
+    publication, _ = budget_publication_contract_fixture()
+    binding = publication.desired_spec.bindings[-1]
+    root = ElementTree.fromstring("<policy>" + ApimPolicyCompiler._budget_counter_metadata(binding)
+                                  + "</policy>")
+    variables = {item.attrib["name"]: item.attrib["value"] for item in root}
+    assert variables["selectedBudgetCounterOrigin"] == str(binding.backend_url)
+    assert variables["selectedBudgetCounterAuth"] == binding.auth_strategy.value
+    assert variables["selectedBudgetUpstreamModel"] == binding.model.upstream_model_id
+    if binding.named_value_name:
+        assert variables["selectedBudgetCounterKey"] == "{{" + binding.named_value_name + "}}"
 
 
 def test_compiler_sets_trusted_metadata_before_parent_admission() -> None:

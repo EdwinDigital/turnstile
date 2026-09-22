@@ -456,6 +456,22 @@ def validate_parent_policy(
                 or ("otherwise" in branches and branches[-1] != "otherwise")
             ):
                 raise PolicyCompilationError("Parent policy choose branches are invalid")
+    execution_marker = root.find("./inbound/set-variable[@name='budgetExecutionVersion']")
+    expected_execution_marker = template.find(
+        "./inbound/set-variable[@name='budgetExecutionVersion']"
+    )
+    if (execution_marker is None) != (expected_execution_marker is None):
+        raise PolicyCompilationError("Budget execution requires a compatible canonical parent")
+    if execution_marker is not None:
+        inbound = root.find("inbound")
+        if inbound is None:
+            raise PolicyCompilationError("Budget execution requires an inbound policy")
+        base = inbound.find("base")
+        if (len(root.findall(".//set-variable[@name='budgetExecutionVersion']")) != 1
+                or expression_tokens(execution_marker.get("value", "")) != ("@", "(", "2", ")")
+                or base is None
+                or list(inbound).index(execution_marker) > list(inbound).index(base)):
+            raise PolicyCompilationError("Budget protocol version must precede the shared fence")
     if not _matches_component(root, template, {}):
         raise PolicyCompilationError("Parent policy differs from the reviewed public contract")
     marker = root.find("./inbound/set-variable[@name='imageGenerationPolicyVersion']")

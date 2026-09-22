@@ -10,7 +10,11 @@ from ..domain.anomaly_engine import evaluate_anomaly_rules
 from ..domain.application_access import UsageApplicationAttribution
 from ..domain.billable_requests import BillableRequestAttempt
 from ..domain.enterprise import enterprise_catalog
-from ..domain.ledger import BudgetReservationAdmission, BudgetReservationFinalization
+from ..domain.ledger import (
+    BudgetReservationAdmission,
+    BudgetReservationFinalization,
+    LedgerAdmissionReceipt,
+)
 from ..domain.models import (
     ApimCacheReadBucket,
     AuditFindingUpdate,
@@ -363,7 +367,15 @@ class InMemoryRepository(
         self,
         record: TokenUsageRecord,
         application: UsageApplicationAttribution | None = None,
+        *,
+        execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
+        usage_complete: bool = False,
+        gateway_profile_id: UUID | None = None,
+        native_gateway_id: str | None = None,
+        evidence_source: str = "apim",
     ) -> None:
+        if execution_receipts:
+            raise RuntimeError("Budget execution requires the durable PostgreSQL repository")
         with self.billable_request_lock:
             self._write_token_usage(record, application)
 

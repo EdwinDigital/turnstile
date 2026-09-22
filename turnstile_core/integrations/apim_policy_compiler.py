@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
+from ..domain.budget_counting import BudgetPublicationContracts
 from ..domain.control_plane import (
         ApiFormat,
         AuthStrategy,
@@ -99,6 +100,10 @@ class ApimPolicyCompiler:
         self._usage_observer_key_named_value = observer_key or None
 
     def compile(self, publication: GatewayPublication) -> CompiledGatewayRelease:
+        if publication.resource_manifest.get("budget_contracts") is not None:
+            BudgetPublicationContracts.model_validate(
+                publication.resource_manifest["budget_contracts"],
+            ).validate_publication(publication)
         bindings = publication.desired_spec.bindings
         backend_ids: dict[str, str] = {}
         pool_member_backend_ids: dict[str, tuple[str, ...]] = {}
@@ -926,7 +931,7 @@ class ApimPolicyCompiler:
         pool_member_backend_ids: dict[str, tuple[str, ...]],
     ) -> str:
         metadata_branches = "\n".join(
-            self._metadata_branch(binding, "dynamicChatModel")
+            self._metadata_branch(binding, "dynamicChatModel", publication)
             for binding in publication.desired_spec.bindings
             if binding.api_format is ApiFormat.OPENAI_CHAT
         )
@@ -1013,7 +1018,7 @@ class ApimPolicyCompiler:
             or '<when condition="@(false)" />'
         )
         metadata = "\n".join(
-            self._metadata_branch(binding, "dynamicImageModel") for binding in bindings
+            self._metadata_branch(binding, "dynamicImageModel", publication) for binding in bindings
         )
         routing = (
             "\n".join(
@@ -1053,7 +1058,7 @@ class ApimPolicyCompiler:
         pool_member_backend_ids: dict[str, tuple[str, ...]],
     ) -> str:
         metadata_branches = "\n".join(
-            self._metadata_branch(binding, "dynamicRequestedModel")
+            self._metadata_branch(binding, "dynamicRequestedModel", publication)
             for binding in publication.desired_spec.bindings
             if binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
         )
@@ -1159,7 +1164,7 @@ class ApimPolicyCompiler:
             is not None
         ]
         metadata_branches = "\n".join(
-            self._metadata_branch(binding, "dynamicResponsesModel")
+            self._metadata_branch(binding, "dynamicResponsesModel", publication)
             for binding, _ in bindings
         )
         metadata_choose = (
@@ -1223,6 +1228,7 @@ class ApimPolicyCompiler:
         self,
         binding: GatewayModelBinding,
         model_variable: str,
+        publication: GatewayPublication | None = None,
     ) -> str:
         alias = escape(binding.model.model_key)
         provider = escape(binding.provider_brand_key.value)
@@ -1244,14 +1250,60 @@ class ApimPolicyCompiler:
           body[&quot;stream&quot;] = false;
           return body.ToString(Newtonsoft.Json.Formatting.None);
         }</set-body>"""
+        counter_metadata = self._budget_counter_metadata(binding)
+        contract_metadata = ""
+        if publication is not None and publication.resource_manifest.get("budget_contracts") is not None:
+            snapshot = BudgetPublicationContracts.model_validate(publication.resource_manifest["budget_contracts"])
+            contract = snapshot.model_contracts[binding.model.model_key]
+            encoded = json.dumps({
+                "version": snapshot.version, "epoch": str(snapshot.epoch),
+                "gateway_profile_id": str(snapshot.gateway_profile_id),
+                "model_key": binding.model.model_key, "contract": contract.model_dump(mode="json"),
+            }, separators=(",", ":"))
+            contract_metadata = "\n        " + ElementTree.tostring(ElementTree.Element(
+                "set-variable", {"name": "selectedBudgetCountContract", "value": encoded},
+            ), encoding="unicode")
         return f"""      <when condition="@((string)context.Variables[&quot;{model_variable}&quot;] == &quot;{alias}&quot;)">
         <set-header name="x-hive-runtime" exists-action="override"><value>{runtime}</value></set-header>
         <set-variable name="selectedProviderName" value="{provider}" />
+        <set-variable name="selectedBudgetModelKey" value="{alias}" />{contract_metadata}
+        <set-variable name="selectedBudgetObserver" value="@({str(self._usage_observer_url is not None).lower()})" />
         <set-variable name="selectedRuntimeName" value="{runtime}" />
         <set-variable name="selectedContextWindow" value="@((long){binding.model.context_window or 0})" />
         <set-variable name="selectedRoutingManaged" value="@({routing_managed})" />
-            <set-variable name="selectedRequiresAssignment" value="@({requires_assignment})" />{force_buffered}
+            <set-variable name="selectedRequiresAssignment" value="@({requires_assignment})" />{force_buffered}{counter_metadata}
       </when>"""
+
+    @staticmethod
+    def _budget_counter_metadata(binding: GatewayModelBinding) -> str:
+        if not binding.routing_managed or binding.backend_url is None or binding.backend_pool is not None:
+            return ""
+        if binding.auth_strategy not in {
+            AuthStrategy.MANAGED_IDENTITY, AuthStrategy.NAMED_VALUE_API_KEY,
+            AuthStrategy.NAMED_VALUE_BEARER, AuthStrategy.NONE,
+        }:
+            return ""
+        header = (
+            "x-api-key" if binding.provider_brand_key is BrandKey.MICROSOFT_FOUNDRY
+            and binding.api_format is ApiFormat.ANTHROPIC_MESSAGES else "api-key"
+        )
+        values = {
+            "selectedBudgetCounterOrigin": str(binding.backend_url),
+            "selectedBudgetUpstreamModel": binding.model.upstream_model_id,
+            "selectedBudgetCounterAuth": binding.auth_strategy.value,
+            "selectedBudgetCounterHeader": header,
+            "selectedBudgetCounterAudience": binding.managed_identity_resource or "",
+        }
+        nodes = "".join(
+            f'\n        <set-variable name="{name}" value="{escape(value)}" />'
+            for name, value in values.items()
+        )
+        if binding.named_value_name:
+            nodes += (
+                '\n        <set-variable name="selectedBudgetCounterKey" value="{{'
+                + escape(binding.named_value_name) + '}}" />'
+            )
+        return nodes
 
     def _routing_branch(
         self,
@@ -1366,12 +1418,19 @@ class ApimPolicyCompiler:
             return "  <backend><base /></backend>"
         branches = "\n".join(
             f"""      <when condition="@((string)context.Variables[&quot;{model_variable}&quot;] == &quot;{escape(binding.model.model_key)}&quot;)">
+                <choose>
+                    <when condition="@(context.Variables.ContainsKey(&quot;executionReceiptHeader&quot;))">
+                        <forward-request timeout="{pool.rate_limit.backend_timeout_seconds}" buffer-request-body="true" buffer-response="false" />
+                    </when>
+                    <otherwise>
         <retry condition="@(context.Response != null &amp;&amp; context.Response.StatusCode == 429)"
           count="{pool.rate_limit.max_attempts_per_request - 1}"
           interval="{pool.rate_limit.retry_interval_seconds}"
           first-fast-retry="{str(pool.rate_limit.first_fast_retry).lower()}">
                     <forward-request timeout="{pool.rate_limit.backend_timeout_seconds}" buffer-request-body="true" buffer-response="false" />
         </retry>
+                    </otherwise>
+                </choose>
       </when>"""
             for binding, pool in pooled
         )
@@ -1419,6 +1478,33 @@ class ApimPolicyCompiler:
             '        <set-header name="x-turnstile-correlation-id" exists-action="override">'
             '<value>@(context.RequestId.ToString())</value></set-header>'
         ]
+        execution_headers = {
+            "budget-execution": "executionReceiptHeader",
+            "apim-subscription-id": "telemetryApimSubscriptionId",
+            "application-actor-type": "telemetryApplicationActorType",
+            "application-actor-id": "telemetryApplicationActorId",
+            "gateway-profile-id": "telemetryGatewayProfileId",
+        }
+        lines.append(
+            '        <choose><when condition="@(context.Variables.ContainsKey('
+            '&quot;executionReceiptHeader&quot;))">'
+        )
+        lines.extend(
+            f'        <set-header name="x-turnstile-{field}" exists-action="override">'
+            '<value>@(context.Variables.GetValueOrDefault&lt;string&gt;('
+            f'&quot;{variable}&quot;, &quot;&quot;))</value></set-header>'
+            for field, variable in execution_headers.items()
+        )
+        lines.append(
+            '        <set-header name="x-turnstile-native-gateway-id" exists-action="override">'
+            '<value>@(context.Deployment.Gateway.Id)</value></set-header>'
+        )
+        lines.append('        </when><otherwise>')
+        lines.extend(
+            f'        <set-header name="x-turnstile-{field}" exists-action="delete" />'
+            for field in (*execution_headers, "native-gateway-id")
+        )
+        lines.append('        </otherwise></choose>')
         lines.extend(
             f'        <set-header name="{name}" exists-action="override">'
             f'<value>{escape(value)}</value></set-header>'

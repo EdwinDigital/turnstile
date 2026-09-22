@@ -11,6 +11,7 @@ from ..domain.billable_requests import BillableRequestAttempt, BillableRequestPl
 from ..domain.ledger import (
     BudgetReservationAdmission,
     BudgetReservationFinalization,
+    LedgerAdmissionReceipt,
     LedgerScopeType,
 )
 from ..domain.models import (
@@ -30,6 +31,12 @@ class OpsDbProxy(Protocol):
         self,
         record: TokenUsageRecord,
         application: UsageApplicationAttribution | None = None,
+        *,
+        execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
+        usage_complete: bool = False,
+        gateway_profile_id: UUID | None = None,
+        native_gateway_id: str | None = None,
+        evidence_source: str = "apim",
     ) -> None: ...
 
     def model_prices(self) -> dict[str, ModelPrice]: ...
@@ -103,6 +110,12 @@ class QueryRepository(ABC):
         self,
         record: TokenUsageRecord,
         application: UsageApplicationAttribution | None = None,
+        *,
+        execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
+        usage_complete: bool = False,
+        gateway_profile_id: UUID | None = None,
+        native_gateway_id: str | None = None,
+        evidence_source: str = "apim",
     ) -> None: ...
 
     @abstractmethod

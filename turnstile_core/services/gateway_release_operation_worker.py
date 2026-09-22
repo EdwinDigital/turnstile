@@ -19,7 +19,7 @@ from ..integrations.apim_control_plane import (
     PolicyCompilationError,
     RetryablePublicationError,
 )
-from ..integrations.apim_policy_components import validate_parent_readback
+from ..integrations.apim_policy_components import parse_policy, validate_parent_readback
 from ..persistence.repository import QueryRepository
 from ..security import CredentialCipher
 from .application_access import ApplicationAccessService
@@ -41,12 +41,14 @@ class GatewayReleaseOperationWorker:
         cipher: CredentialCipher | None = None,
         application_projector: Callable[[UUID, UUID], None] | None = None,
         parent_policy: str | None = None,
+        parent_policy_overrides: Mapping[UUID, str] | None = None,
     ) -> None:
         self._repository = repository
         self._client = client
         self._cipher = cipher
         self._application_projector = application_projector
         self._parent_policy = parent_policy
+        self._parent_policy_overrides = dict(parent_policy_overrides or {})
         self._service = GatewayControlPlaneService(
             repository,
             retention_policy=retention_policy,
@@ -374,20 +376,28 @@ class GatewayReleaseOperationWorker:
             self._restore(row, prior, worker_id)
 
     def _validate_rollback_parent(self, publication: GatewayPublication) -> None:
+        canonical_parent = self._parent_policy_overrides.get(
+            publication.gateway_profile_id, self._parent_policy,
+        )
+        execution_enabled = canonical_parent is not None and parse_policy(canonical_parent).find(
+            "./inbound/set-variable[@name='budgetExecutionVersion']"
+        ) is not None
         profiles = [
             binding.model.image_profile
             for binding in publication.desired_spec.bindings
             if binding.model.image_profile is not None
         ]
-        if not profiles and not publication.resource_manifest.get("images_generations_operation"):
+        if (not profiles and not publication.resource_manifest.get("images_generations_operation")
+            and not execution_enabled
+            and not publication.resource_manifest.get("budget_contracts")):
             return
-        if self._parent_policy is None:
+        if canonical_parent is None:
             raise PolicyCompilationError(
-                "Image rollback requires the canonical parent policy contract"
+            "Governed rollback requires the canonical parent policy contract"
             )
         validate_parent_readback(
             self._client.revision_api_policy(self._revision(publication)),
-            self._parent_policy,
+            canonical_parent,
             profiles,
             expected_contract=publication.resource_manifest.get("parent_policy_contract_sha256"),
             expected_raw=publication.resource_manifest.get("parent_policy_sha256"),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import httpx
@@ -77,6 +78,36 @@ def _discovery(
             for subscription_id in subscription_ids
         ],
     )
+
+
+@pytest.mark.parametrize("state", ["current", "unavailable", "legacy"])
+def test_application_detail_uses_execution_balance_without_false_legacy_fallback(
+    state: str,
+) -> None:
+    repository = InMemoryRepository()
+    now = datetime.now(UTC)
+    reader = Mock(return_value=(None if state == "legacy" else {
+        "ledger_source": "execution", "ledger_status": state,
+        "used_tokens": 125, "remaining_tokens": 99875, "usage_percent": 0.125,
+        "pending_reserved_tokens": 75 if state == "current" else None,
+        "finalized_upper_bound_tokens": 20 if state == "current" else None,
+        "available_tokens": 99780 if state == "current" else None,
+        "ledger_snapshot_at": now if state == "current" else None,
+    }))
+    service = ApplicationAccessService(
+        repository, sync_available=True, read_execution_budget=reader,
+    )
+    service.sync_discovery(_discovery("unit-execution", discovered_at=now), "unit-worker")
+    application_id = application_id_for(APIM_ID, "unit-execution")
+    detail = service.application(application_id)
+    reader.assert_called_once_with(application_id, now.date().replace(day=1))
+    assert detail.budget is not None
+    if state == "legacy":
+        assert detail.budget.used_tokens == 0
+    else:
+        assert detail.budget.used_tokens == 125
+        assert detail.budget.available_tokens == (99780 if state == "current" else None)
+        assert detail.budget.ledger_snapshot_at == (now if state == "current" else None)
 
 
 def test_owner_subscription_create_normalizes_human_fields() -> None:

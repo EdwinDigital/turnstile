@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import Depends, Header
 
 from turnstile_core.config import Settings, get_settings
 from turnstile_core.domain.control_plane import GatewayReleaseRetentionPolicy
+from turnstile_core.domain.ledger import LedgerScope
 from turnstile_core.integrations.apim_subscription_key_client import (
     AzureApimSubscriptionKeyClient,
 )
+from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
 from turnstile_core.integrations.ledger import LedgerSyncService, TableStorageLedger
 from turnstile_core.pricing.catalog import CompositeCatalog, build_default_catalog
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.application_access import ApplicationAccessService
+from turnstile_core.services.budget_settlement import BudgetStatusRepository, execution_budget_view
 from turnstile_core.services.control_plane import GatewayControlPlaneService
 
 from ..services.anomaly_service import AnomalyRuleService
@@ -77,6 +82,19 @@ ControlPlaneService = Annotated[GatewayControlPlaneService, Depends(control_plan
 
 def application_access_service(repository: Repository) -> ApplicationAccessService:
     settings = get_settings()
+
+    def read_execution_budget(application_id: UUID, period_start: date) -> dict[str, Any] | None:
+        if not isinstance(repository, BudgetStatusRepository) or not settings.ledger_table_endpoint:
+            raise RuntimeError("Execution budget reads require PostgreSQL and Table")
+        scope = LedgerScope(
+            scope_type="application", scope_id=str(application_id), period_start=period_start,
+        )
+        store = AtomicTableLedger(
+            settings.ledger_table_endpoint, settings.ledger_table_name, timeout=2,
+        )
+        with store:
+            return execution_budget_view(repository, store, scope)
+
     provisioning_available = _application_provisioning_available(settings)
     key_settings_available = all(
         (
@@ -118,6 +136,7 @@ def application_access_service(repository: Repository) -> ApplicationAccessServi
         default_tokens_per_minute=(
             settings.gateway_application_default_tokens_per_minute
         ),
+        read_execution_budget=read_execution_budget if settings.budget_execution_enabled else None,
     )
 
 

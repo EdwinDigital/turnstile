@@ -6,6 +6,50 @@ Turnstile infrastructure includes PostgreSQL, Event Hubs, Storage, Key Vault, Ap
 
 The API, telemetry and control-plane Functions, observer, and budget ledger require public service endpoints for package deployment or runtime traffic. They explicitly enable public network access and carry the resource-level `SecurityControl=Ignore` tag so an organization-level network Modify policy does not silently disable them. The exemption is not applied at resource-group scope; platform Storage and Key Vault resources designed for private-link access remain private.
 
+## Budget execution cutover
+
+The atomic budget protocol is not activated by an application update. Keep all new execution flags
+off until migration `010_budget_execution_protocol`, compatible API/Telemetry/Control Plane packages,
+and the Observer image have been verified. The Observer build uses an isolated allowlist of its four
+runtime files and three shared standard-library completion modules; its version digest includes
+those modules. Do not build from the adapter directory alone or upload a whole working tree.
+
+For an existing installation, use an explicitly authorized maintenance plan bound to exact resource
+IDs, source/package hashes, old policy revisions and ETags. Preserve authentication, model access,
+TPM, historical usage, applied migration checksums and current budgets. Missing managed-identity
+roles or private connectivity require a separate infrastructure review, not a feature-flag workaround.
+
+1. Record the current parent and operation policies, all retained revisions, reader versions, active
+  work and per-scope financial counters. Verify that each application can reach the existing Table
+  with its own managed identity and only its required access.
+2. Apply only the approved new migration and deploy compatible readers/writers with flags disabled.
+  Confirm five Telemetry functions are indexed and the real worker can run, not just that its site
+  reports Running. Preserve the existing always-on policy.
+3. Prepare an explicit epoch, model counting contracts and disabled scope seeds. Use
+  `uv run python scripts/prepare_budget_execution.py --help` for offline candidate rendering; this
+  tool writes local artifacts only and refuses to generate an active cutover.
+4. Fence old admissions across every reachable revision, drain in-flight requests and telemetry,
+  and compare exact old confirmed balances. Outstanding or conservatively charged legacy
+  reservations block scope initialization. Seed each opening balance once, never by resetting
+  history. A stale readback cannot authorize the cutover.
+5. Validate the exact canonical execution parent and shared fence with its prepared validation
+  scope. Update only the reviewed policy resources using their exact ETags and read all content
+  back. Never replace every `executionPlan` variable: the native-count apply branch is distinct
+  from the initial plan. Retain all previous revisions without admitting unfenced old traffic.
+6. Activate only after scope balances, compatible readers and all policy readbacks agree. Verify
+  request, APIM correlation, receipt, formal event, database settlement task and Table S/A counters
+  for the same attempt. Errors and interrupted streams must preserve outstanding charges.
+
+Publication snapshots bind epoch, model identity, route digest and counting contracts. A normal
+publication cannot upgrade an incompatible parent, and rollback cannot reinstate a legacy parent
+under an execution fence. Returning to old admission requires its own drained, financially verified
+transition; switching a flag off is not a rollback procedure.
+
+Claude Code validation requires an already registered native Messages model and the actual gateway
+subscription header. Set the published alias through `ANTHROPIC_MODEL`, preserve normal client
+behavior, disable retries and never replay an unknown outcome. Bare mode, model-name substitution,
+thinking rewrites and successful checks against another environment are not acceptance evidence.
+
 ## Choose the v1.1 deployment path
 
 | Your installation | Use | Keep or create |

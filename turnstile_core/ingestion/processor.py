@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 from uuid import UUID
 
@@ -13,6 +13,7 @@ from ..domain.application_access import (
     UsageApplicationAttribution,
 )
 from ..domain.control_plane import GatewayPublication, PublicationKind, publication_model_id
+from ..domain.ledger import LedgerAdmissionReceipt
 from ..domain.models import ModelIdentity, ModelPrice, TokenUsageRecord, UsageEvent
 from ..persistence.repository import OpsDbProxy
 
@@ -49,9 +50,15 @@ class CoefficientResolver:
 
 
 class UsageProcessor:
-    def __init__(self, repository: OpsDbProxy, resolver: CoefficientResolver) -> None:
+    def __init__(
+        self, repository: OpsDbProxy, resolver: CoefficientResolver, *,
+        execution_enabled: bool = False,
+        settle_committed_usage: Callable[[str], object] | None = None,
+    ) -> None:
         self._repository = repository
         self._resolver = resolver
+        self._execution_enabled = execution_enabled
+        self._settle_committed_usage = settle_committed_usage
         self._prices: dict[str, ModelPrice] = {}
         self._identities: dict[str, ModelIdentity] = {}
         self._registry_read_at = 0.0
@@ -373,9 +380,37 @@ class UsageProcessor:
         if record is None:
             return False
         event = UsageEvent.model_validate(raw_event)
-        self._repository.write_token_usage(
-            record, self._application_attribution(event)
-        )
+        if event.budget_execution:
+            if not self._execution_enabled:
+                raise RuntimeError("Budget execution receipts require the enabled execution reader")
+            if (record.usage_domain != "apim" or event.ingest_source != "eventhub"
+                    or event.usage_event_source not in {"apim", "observer"}
+                    or event.gateway_profile_id is None or not event.native_gateway_id):
+                raise ValueError("Budget execution receipts require trusted gateway attribution")
+            receipts = [LedgerAdmissionReceipt.model_validate(value)
+                        for value in event.budget_execution]
+            self._repository.write_token_usage(
+                record, self._application_attribution(event),
+                execution_receipts=receipts,
+                gateway_profile_id=event.gateway_profile_id,
+                native_gateway_id=event.native_gateway_id,
+                evidence_source=event.usage_event_source,
+                usage_complete=(
+                    event.usage_complete and not record.estimated and record.ingest_error is None
+                    and all(type(raw_event.get(field)) is int for field in (
+                        "input_tokens", "cached_tokens", "cache_write_tokens",
+                        "output_tokens", "tokens_consumed",
+                    ))
+                ),
+            )
+            if self._settle_committed_usage is not None:
+                try:
+                    self._settle_committed_usage(record.id)
+                except Exception as error:
+                    logger.warning("Budget settlement wakeup failed after commit error_type=%s",
+                                   type(error).__name__)
+        else:
+            self._repository.write_token_usage(record, self._application_attribution(event))
         return True
 
 

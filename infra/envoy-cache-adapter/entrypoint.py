@@ -19,6 +19,14 @@ def required(name: str) -> str:
 
 
 def render_config() -> None:
+    completion = os.environ.get("BUDGET_COMPLETION_ENABLED", "false").lower()
+    if completion not in {"true", "false"}:
+        raise RuntimeError("BUDGET_COMPLETION_ENABLED must be true or false")
+    if completion == "true":
+        from turnstile_core.integrations.budget_completion import BudgetCompletionClient
+
+        BudgetCompletionClient(required("LEDGER_TABLE_ENDPOINT"), required("LEDGER_TABLE_NAME"),
+                               lambda: "")
     adapter_key = required("ADAPTER_SHARED_KEY")
     if not re.fullmatch(r"[A-Za-z0-9._~-]{32,256}", adapter_key):
         raise RuntimeError("ADAPTER_SHARED_KEY has an invalid value")

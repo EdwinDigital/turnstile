@@ -94,6 +94,51 @@ Existing gateways adopt this behavior through a normal reviewed Control Plane pu
 
 The initial key is returned once with `Cache-Control: no-store`. The browser keeps it only in memory for copying, never in the DOM, URL or query cache. Terminal operation state and temporary ciphertext deletion commit together. Failed operations retain their resource and checkpoint evidence; they do not automatically delete subscriptions or regenerate credentials. Inspect an interrupted activation's live state before taking further action.
 
+## Atomic budget execution
+
+The execution protocol is opt-in and separate from legacy ledger projection. Migration
+`010_budget_execution_protocol` adds default-off rollout/scope records, immutable admission and
+evidence, and a leased settlement outbox. It does not activate scopes or rewrite historical usage.
+Existing migrations and the evidence-v2 cutoff remain unchanged.
+
+| Variable | Purpose |
+| --- | --- |
+| `BUDGET_EXECUTION_ENABLED` | Enables the compatible event reader and execution-budget reads; default false. |
+| `BUDGET_EXECUTION_TARGET_IDS` | Explicit gateway-profile UUID array for reviewed execution parents; default empty. |
+| `BUDGET_SETTLEMENT_ENABLED` | Enables Telemetry's post-commit settlement and recovery timer; default false, requires PostgreSQL, the execution reader and Table endpoint. |
+| `BUDGET_DELEGATION_TRUST` | Optional per-target Entra tenant, audience, client and object identity allowlists; default empty. |
+| `BUDGET_DELEGATION_TARGETS` | Optional per-target audience and HTTPS origins; default empty and limited to enabled targets. |
+| `BUDGET_COMPLETION_ENABLED` | Observer-only direct completion writer; default false, requires the exact existing ledger endpoint/table and its own managed-identity access. |
+
+Do not enable these settings before the controlled procedure in [Deployment](deployment.md#budget-execution-cutover).
+API, Control Plane, Telemetry and Observer must agree on the same existing ledger. Permission and
+TPM projection still use legacy Q/M rows; the new S/A/D records live in separate `budget2` partitions.
+Changing limits or permissions never resets confirmed, pending or conservatively charged tokens.
+The in-memory demonstration repository deliberately rejects execution receipts.
+
+Before reservation, request analysis walks only protocol-defined message, content and tool-result
+positions. Tool schemas, arguments, metadata and text containing JSON are business data, not new
+envelopes to scan recursively. The entire original body still contributes to a legacy byte estimate.
+Chat Completions, Responses, Messages, compact Responses and Images have distinct rules. Unknown
+structures produce incomplete analysis: verified-bound contracts reject them, while an explicitly
+labelled legacy estimate remains an estimate. Analysis never logs user values in error paths.
+
+Native counting must belong to the selected route's HTTPS origin, operation and existing auth.
+Only a verified upper bound can reduce a reservation; an estimate or failed count cannot do so.
+Native-count payload projection does not mutate the provider request. Images and compact Responses
+retain their operation-specific counting contracts. No model name or client version bypass exists.
+
+Invalid requests return `budget_request_invalid` (400); analysis and plan faults return
+`budget_request_analysis_failed` or `budget_plan_failed` (500); invalid configuration or unavailable
+identity returns `budget_configuration_invalid` or `budget_identity_unavailable` (503). A real ledger
+failure retains `budget_ledger_unavailable`; it is not the fallback label for parser errors.
+
+Complete APIM/Observer evidence requires exact, consistent counters and immutable receipt identity.
+Interrupted or incomplete streams keep their reservation. Observer completion uses a bounded
+conditional Table transaction; a failed direct write still emits the event for durable recovery.
+Equal-rank conflicts remain recorded; weaker evidence cannot overwrite completion or release an
+unknown attempt. Retries of a receipted Pool request are disabled to preserve one attempt per charge.
+
 ## Budget ledger recovery
 
 The existing Telemetry timer uses managed identity and the configured `LOG_ANALYTICS_WORKSPACE_ID` and `APIM_API_ID` to recover reservation evidence. It creates no cloud resources and requires the existing Table and Log Analytics data-plane permissions.

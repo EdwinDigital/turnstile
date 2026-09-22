@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 
+from ..domain.budget_counting import BudgetPublicationContracts
 from ..domain.control_plane import (
     ApiFormat,
     GatewayPublication,
@@ -58,10 +59,14 @@ class GatewayPublicationWorker:
         messages_operation_id: str = "anthropic-messages",
         count_tokens_operation_id: str = "anthropic-count-tokens",
         models_operation_id: str = "anthropic-models",
+        parent_policy_overrides: Mapping[UUID, str] | None = None,
+        budget_configuration: Callable[[UUID], Mapping[str, object]] | None = None,
     ) -> None:
         self._repository = repository
         self._client = client
         self._parent_policy = parent_policy
+        self._parent_policy_overrides = dict(parent_policy_overrides or {})
+        self._budget_configuration = budget_configuration
         self._compiler = compiler or ApimPolicyCompiler()
         self._cipher = cipher
         self._chat_completions_operation_id = chat_completions_operation_id
@@ -166,29 +171,75 @@ class GatewayPublicationWorker:
         worker_id: str,
         heartbeat: Callable[[], None] | None = None,
     ) -> GatewayPublication:
+        registry = self._repository.registry()
+        status = publication.status.value
+        canonical_parent = self._parent_policy_overrides.get(
+            publication.gateway_profile_id, self._parent_policy,
+        )
         routed_publication = publication.model_copy(
             update={
                 "desired_spec": GatewayControlPlaneService._reconciled_release_spec(
                     publication.desired_spec,
-                    self._repository.registry(),
+                    registry,
                 )
             }
         )
+        execution_enabled = parse_policy(canonical_parent).find(
+            "./inbound/set-variable[@name='budgetExecutionVersion']"
+        ) is not None
+        if execution_enabled:
+            if self._budget_configuration is None:
+                raise PolicyCompilationError("Budget publication configuration is unavailable")
+            fence = self._budget_configuration(publication.gateway_profile_id)
+            if (fence.get("protocol_version") != 2 or fence.get("mode") != "active"
+                    or fence.get("gateway_profile_id") != str(publication.gateway_profile_id)):
+                raise PolicyCompilationError("Budget publication requires its active Gateway fence")
+            raw_snapshot = publication.resource_manifest.get("budget_contracts")
+            if raw_snapshot is None:
+                if status != "queued":
+                    raise PolicyCompilationError(
+                        "In-flight publication has no budget contract snapshot"
+                    )
+                previous_row = (
+                    self._repository.get_gateway_publication(publication.base_release_id)
+                    if publication.base_release_id is not None else None
+                )
+                snapshot = BudgetPublicationContracts.capture(
+                    routed_publication, registry, fence,
+                    GatewayPublication.model_validate(previous_row) if previous_row else None,
+                    new_model_key=(publication.desired_spec.bindings[-1].model.model_key
+                                   if publication.desired_spec.bindings else None),
+                )
+            else:
+                snapshot = BudgetPublicationContracts.model_validate(raw_snapshot)
+            snapshot.validate_publication(routed_publication)
+            if str(snapshot.epoch) != fence.get("epoch"):
+                raise PolicyCompilationError("Budget publication epoch changed after queueing")
+            manifest = {**publication.resource_manifest,
+                        "budget_contracts": snapshot.model_dump(mode="json")}
+            publication = publication.model_copy(update={"resource_manifest": manifest})
+            routed_publication = routed_publication.model_copy(
+                update={"resource_manifest": manifest}
+            )
+        elif publication.resource_manifest.get("budget_contracts") is not None:
+            raise PolicyCompilationError("Budget contract publication requires an execution parent")
         compiled = self._compiler.compile(routed_publication)
+        if (execution_enabled and status in {"verifying", "promoting"}
+                and publication.policy_sha256 != compiled.policy_sha256):
+            raise PolicyCompilationError("Candidate policy no longer matches the active compiler")
         profiles = [
             validate_image_profile(binding.model.image_profile)
             for binding in routed_publication.desired_spec.bindings
             if binding.api_format is ApiFormat.OPENAI_IMAGES
         ]
         image_release = compiled.images_generations_policy is not None
-        status = publication.status.value
         updates: dict[str, Any] = {}
         if status == "queued":
             base_revision, live_policy = self._client.current_api_policy()
-            if image_release or "imageGenerationPolicyVersion" in live_policy:
-                validate_parent_policy(live_policy, self._parent_policy, profiles)
+            if execution_enabled or image_release or "imageGenerationPolicyVersion" in live_policy:
+                validate_parent_policy(live_policy, canonical_parent, profiles)
             else:
-                self._compiler.patch_parent_policy(self._parent_policy)
+                self._compiler.patch_parent_policy(canonical_parent)
                 self._compiler.patch_parent_policy(live_policy)
             updates["resource_manifest"] = {
                 **publication.resource_manifest,
@@ -258,8 +309,9 @@ class GatewayPublicationWorker:
                     "The current APIM policy changed after publication was queued"
                 )
             parent = (
-                validate_parent_policy(live_policy, self._parent_policy, profiles)
-                if image_release or "imageGenerationPolicyVersion" in live_policy
+                validate_parent_policy(live_policy, canonical_parent, profiles)
+                if (execution_enabled or image_release
+                    or "imageGenerationPolicyVersion" in live_policy)
                 else self._compiler.patch_parent_policy(live_policy)
             )
             self._client.put_api_policy(publication.apim_revision, parent)
@@ -310,25 +362,26 @@ class GatewayPublicationWorker:
                         "parent_policy_contract_sha256": component_digest(
                             parse_policy(parent), normalize_text_defaults=False
                         ),
-                        "images_generations_operation": True,
                     }
-                    if image_release
+                    if image_release or execution_enabled
                     else {}
                 ),
+                **({"images_generations_operation": True} if image_release else {}),
             }
         elif status == "verifying":
             if not publication.apim_revision:
                 raise RuntimeError("Publication is missing its APIM revision")
-            if image_release:
+            if image_release or execution_enabled:
                 validate_parent_readback(
                     self._client.revision_api_policy(publication.apim_revision),
-                    self._parent_policy,
+                    canonical_parent,
                     profiles,
                     expected_contract=publication.resource_manifest.get(
                         "parent_policy_contract_sha256"
                     ),
                     expected_raw=publication.resource_manifest.get("parent_policy_sha256"),
                 )
+            if image_release:
                 authorization = ImageProbeAuthorization.model_validate(
                     publication.resource_manifest.get(
                         "image_probe_authorization", {"id": str(publication.id)}
@@ -363,10 +416,10 @@ class GatewayPublicationWorker:
                 raise RuntimeError("Publication is missing its APIM revision")
             if heartbeat:
                 heartbeat()
-            if image_release:
+            if image_release or execution_enabled:
                 validate_parent_readback(
                     self._client.revision_api_policy(publication.apim_revision),
-                    self._parent_policy,
+                    canonical_parent,
                     profiles,
                     expected_contract=publication.resource_manifest.get(
                         "parent_policy_contract_sha256"

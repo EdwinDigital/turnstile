@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
-from typing import Literal, Never
+from typing import Any, Literal, Never
 from uuid import UUID, uuid4
 
 import httpx
@@ -73,8 +73,10 @@ class ApplicationAccessService:
         key_client: ApimSubscriptionKeyClient | None = None,
         default_token_limit: int = 100_000,
         default_tokens_per_minute: int = 100_000,
+        read_execution_budget: Callable[[UUID, date], Mapping[str, Any] | None] | None = None,
     ) -> None:
         self._repository = repository
+        self._read_execution_budget = read_execution_budget
         self._sync_available = sync_available
         self._sync_unavailable_reason = sync_unavailable_reason
         self._provisioning_available = provisioning_available
@@ -170,6 +172,15 @@ class ApplicationAccessService:
         if row is None:
             raise ControlPlaneNotFoundError("Application not found")
         summary = self._summaries([row], period_start, period_end)[0]
+        if summary.budget is not None and self._read_execution_budget is not None:
+            execution = self._read_execution_budget(application_id, period_start)
+            if execution is not None:
+                updated_budget = GatewayApplicationBudget.model_validate({
+                    **summary.budget.model_dump(),
+                    **{field: value for field, value in execution.items()
+                       if field in GatewayApplicationBudget.model_fields},
+                })
+                summary = summary.model_copy(update={"budget": updated_budget})
         subscriptions = [
             GatewayApplicationSubscription.model_validate(item)
             for item in self._repository.list_gateway_application_subscriptions([application_id])

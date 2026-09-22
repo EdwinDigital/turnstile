@@ -27,6 +27,11 @@ from tests.backend.model_platform.control_plane_support import (
     transition_publication,
 )
 from turnstile_core.config import Settings
+from turnstile_core.domain.budget_counting import (
+    BudgetPublicationContracts,
+    NativeCountContract,
+    ProtocolCountContract,
+)
 from turnstile_core.domain.control_plane import (
     ApiFormat,
     AuthStrategy,
@@ -36,6 +41,7 @@ from turnstile_core.domain.control_plane import (
     GatewayBackendPoolMemberWrite,
     GatewayBackendPoolWrite,
     GatewayCredentialRotation,
+    GatewayPublication,
     GatewayPublicationCreate,
     GatewayPublicationRetry,
     GatewayPublicationView,
@@ -45,6 +51,7 @@ from turnstile_core.domain.control_plane import (
     ModelTarget,
     RuntimeTarget,
     publication_materialized_named_values,
+    publication_model_id,
     publication_retry_requires_credential,
 )
 from turnstile_core.domain.runtime_models import (
@@ -66,6 +73,120 @@ from turnstile_core.services.control_plane import (
     ControlPlaneConflictError,
     ControlPlaneUnavailableError,
 )
+
+
+@pytest.mark.parametrize("change", [
+    {"endpoint": "http://count.example.test/messages/count_tokens"},
+    {"endpoint": "https://count.example.test/messages"},
+    {"endpoint": "https://user:secret@count.example.test/messages/count_tokens"},
+    {"endpoint": "https://count.example.test/messages/count_tokens?key=unit"},
+    {"upper_bound_padding_tokens": 10},
+    {"upper_bound_padding_tokens": True},
+    {"supported_features": ["server_tools"]},
+    {"supported_features": ["background"]},
+])
+def test_budget_native_count_contract_rejects_unsafe_guarantees(change: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        NativeCountContract.model_validate({
+            "kind": "anthropic_messages",
+            "endpoint": "https://count.example.test/messages/count_tokens",
+            "evidence_sha256": "a" * 64,
+            **change,
+        })
+
+
+@pytest.mark.parametrize("change", [
+    {"input_ceiling": True},
+    {"input_ceiling": 2**63 - 1},
+    {"operations": ["images-generations"]},
+    {"operations": ["responses-compact"]},
+    {"output_field": "none"},
+    {"output_estimate": 4096},
+    {"algorithm": "legacy_request_estimate_v1", "output_estimate": 4096},
+])
+def test_budget_count_contract_does_not_conflate_estimates_and_ceilings(
+    change: dict[str, Any],
+) -> None:
+    with pytest.raises(ValidationError):
+        ProtocolCountContract.model_validate({
+            "input_ceiling": 1000, "output_ceiling": 100, "output_field": "max_tokens",
+            "operations": ["anthropic-messages"], "evidence_sha256": "a" * 64,
+            "verified_at": "2026-09-22T00:00:00Z", **change,
+        })
+
+
+def test_budget_count_contract_retains_protocol_specific_estimates() -> None:
+    text = ProtocolCountContract.model_validate({
+        "algorithm": "legacy_request_estimate_v1", "output_estimate": 4096,
+        "output_field": "max_tokens", "operations": ["anthropic-messages"],
+        "evidence_sha256": "a" * 64, "verified_at": "2026-09-22T00:00:00Z",
+    })
+    images = ProtocolCountContract.model_validate({
+        **text.model_dump(), "output_field": "none", "operations": ["images-generations"],
+    })
+    assert text.output_field == "max_tokens" and images.output_field == "none"
+    assert text.input_ceiling == images.input_ceiling == 0
+    assert text.native_counter is images.native_counter is None
+
+
+def budget_publication_contract_fixture() -> tuple[GatewayPublication, dict[str, Any]]:
+    repository = InMemoryRepository()
+    repository.models = []
+    request = foundry_publication()
+    request.provider = ProviderTarget(existing_id=next(
+        item["id"] for item in repository.providers if item["brand_key"] == "microsoft_foundry"
+    ))
+    service = GatewayControlPlaneService(repository, apim_principal_id=str(UUID(int=99)))
+    publication = service.publish(request, "owner@example.com")
+    return publication, {
+        "protocol_version": 2, "mode": "active", "epoch": str(UUID(int=2)),
+        "gateway_profile_id": str(publication.gateway_profile_id), "model_contracts": {},
+    }
+
+
+def test_budget_publication_default_is_explicit_estimate_with_public_model_identity() -> None:
+    publication, fence = budget_publication_contract_fixture()
+    snapshot = BudgetPublicationContracts.capture(publication, {"models": []}, fence)
+    snapshot.validate_publication(publication)
+    binding = publication.desired_spec.bindings[-1]
+    contract = snapshot.model_contracts[binding.model.model_key]
+    assert contract.model_id == publication_model_id(publication.id, binding.model.model_key)
+    assert contract.algorithm == "legacy_request_estimate_v1"
+    assert contract.native_counter is None and contract.input_ceiling == 0
+    assert contract.protocols["responses-compact"].output_field == "none"
+    assert contract.protocols["responses"].output_field == "max_output_tokens"
+
+
+@pytest.mark.parametrize("change", [
+    {"mode": "prepared"}, {"protocol_version": 1},
+    {"gateway_profile_id": str(UUID(int=9))}, {"model_contracts": None},
+])
+def test_budget_publication_requires_active_exact_fence(change: dict[str, Any]) -> None:
+    publication, fence = budget_publication_contract_fixture()
+    with pytest.raises(ValueError):
+        BudgetPublicationContracts.capture(publication, {"models": []}, {**fence, **change})
+
+
+def test_budget_publication_rejects_rebound_publication_and_modified_route() -> None:
+    publication, fence = budget_publication_contract_fixture()
+    snapshot = BudgetPublicationContracts.capture(publication, {"models": []}, fence)
+    with pytest.raises(ValueError, match="another publication"):
+        snapshot.validate_publication(publication.model_copy(update={"id": UUID(int=9)}))
+    binding = publication.desired_spec.bindings[-1].model_copy(update={"backend_path": "/changed"})
+    changed = publication.model_copy(update={
+        "desired_spec": publication.desired_spec.model_copy(update={"bindings": [binding]}),
+    })
+    with pytest.raises(ValueError, match="binding changed"):
+        snapshot.validate_publication(changed)
+
+
+def test_budget_existing_model_cannot_fall_back_to_unapproved_counting() -> None:
+    publication, fence = budget_publication_contract_fixture()
+    binding = publication.desired_spec.bindings[-1]
+    registry = {"models": [{"id": str(UUID(int=5)), "model_key": binding.model.model_key,
+                            "runtime_id": binding.runtime_id}]}
+    with pytest.raises(ValueError, match="missing its approved budget contract"):
+        BudgetPublicationContracts.capture(publication, registry, fence)
 
 
 @pytest.mark.parametrize("identity", [
