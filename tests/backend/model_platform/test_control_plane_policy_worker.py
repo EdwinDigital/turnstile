@@ -202,6 +202,25 @@ def test_application_tpm_upgrade_rejects_partial_or_weakened_rules(change: str) 
         upgrade_application_tpm_policy(serialize_policy(root))
 
 
+@pytest.mark.parametrize("placement", ["after-limit", "outside-identity-branch"])
+def test_application_tpm_upgrade_rejects_misplaced_rate_variable(placement: str) -> None:
+    root = parse_policy((ROOT / "infra/policies/foundry-finops-policy.xml").read_text())
+    variable = root.find(".//set-variable[@name='applicationTokensPerMinute']")
+    assert variable is not None
+    parents = {child: parent for parent in root.iter() for child in parent}
+    identity_branch = parents[variable]
+    identity_branch.remove(variable)
+    if placement == "after-limit":
+        identity_branch.append(variable)
+    else:
+        inbound = root.find("inbound")
+        assert inbound is not None
+        inbound.insert(0, variable)
+
+    with pytest.raises(PolicyCompilationError):
+        ApimPolicyCompiler().patch_parent_policy(serialize_policy(root))
+
+
 def test_parent_policy_rejects_publication_without_compact_admission() -> None:
     source = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
     source = source.replace('name="isResponsesCompactOperation"', 'name="removedCompact"')

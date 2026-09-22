@@ -97,12 +97,29 @@ def upgrade_application_tpm_policy(source: str) -> str:
     if len(limits) != 1:
         raise PolicyCompilationError("Subscription token limit is missing or ambiguous")
     limit = limits[0]
+    consumer = _variable(root, "consumerId")
+    parents = {child: parent for parent in root.iter() for child in parent}
+    parent = parents[consumer]
+    ordered = list(parent.iter())
+    if (
+        parent.tag != "when"
+        or limit not in ordered
+        or ordered.index(consumer) >= ordered.index(limit)
+    ):
+        raise PolicyCompilationError("Subscription token limit is outside its identity branch")
     variables = root.findall(".//set-variable[@name='applicationTokensPerMinute']")
     attribute = '@((long)context.Variables["applicationTokensPerMinute"])'
     configured = limit.get("tokens-per-minute", "")
     if variables:
         if len(variables) != 1 or configured != attribute:
             raise PolicyCompilationError("Application token limit upgrade is incomplete")
+        if (
+            parents[variables[0]] is not parent
+            or not ordered.index(consumer) < ordered.index(variables[0]) < ordered.index(limit)
+        ):
+            raise PolicyCompilationError(
+                "Application token rate must precede its subscription limit"
+            )
         match = re.search(r"long\s+defaultRate\s*=\s*([0-9]+|__TOKENS_PER_MINUTE__)\s*;",
                           variables[0].get("value", ""))
         if match is None:
@@ -128,11 +145,6 @@ def upgrade_application_tpm_policy(source: str) -> str:
                 "Application token limit differs from the reviewed contract"
             )
         return source
-    consumer = _variable(root, "consumerId")
-    parents = {child: parent for parent in root.iter() for child in parent}
-    parent = parents[consumer]
-    if limit not in list(parent.iter()) or parent.tag != "when":
-        raise PolicyCompilationError("Subscription token limit is outside its identity branch")
     parent.insert(list(parent).index(consumer) + 1, ET.Element(
         "set-variable", {"name":"applicationTokensPerMinute", "value":expression},
     ))
