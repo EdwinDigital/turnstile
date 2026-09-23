@@ -22,8 +22,9 @@ async function compile(path) {
 const apiCode = await compile("../../../frontend/src/data-sources/apim/api.ts")
 const queryCode = await compile("../../../frontend/src/data-sources/apim/queries.ts")
 const componentCode = await compile("../../../frontend/src/components/model-management/gateway-targets.tsx")
+const onboardingCode = await compile("../../../frontend/src/components/model-management/apim-onboarding-dialog.tsx")
 
-function componentHarness(exportName, props, { operation = null, mutationPending = false } = {}) {
+function componentHarness(exportName, props, { operation = null, mutationPending = false, code = componentCode, api = {} } = {}) {
   const slots = []
   let cursor = 0
   const effects = []
@@ -48,12 +49,26 @@ function componentHarness(exportName, props, { operation = null, mutationPending
     "@tanstack/react-query": {
       useQueryClient: () => queryClient,
       useQuery: () => ({ data: operation, error: null, refetch() {} }),
-      useMutation: options => ({ isPending: mutationPending, error: null, mutate: () => {
-        syncCalls.push(options)
-        options.onSuccess?.({ operation: { id: "unit-operation" } })
-      } }),
+      useMutation: options => {
+        const index = cursor++
+        if (!(index in slots)) slots[index] = { pending: false, error: null }
+        const state = slots[index]
+        return { isPending: mutationPending || state.pending, error: state.error,
+          reset() { state.error = null },
+          mutate: () => { syncCalls.push(options); options.onSuccess?.({ operation: { id: "unit-operation" } }) },
+          async mutateAsync(value) {
+            state.pending = true
+            try {
+              const result = await options.mutationFn(value)
+              await options.onSuccess?.(result)
+              return result
+            } catch (error) { state.error = error; throw error }
+            finally { state.pending = false; await options.onSettled?.() }
+          },
+        }
+      },
     },
-    "../../data-sources/apim/api": { dataSource: {} },
+    "../../data-sources/apim/api": { dataSource: api },
     "../../data-sources/apim/queries": {
       finopsKeys: { apimTargets: ["targets"], gatewayReleaseOperation: id => ["operation", id] },
       finopsQueries: { gatewayReleaseOperation: id => ({ queryKey: ["operation", id] }) },
@@ -61,7 +76,7 @@ function componentHarness(exportName, props, { operation = null, mutationPending
     "../../lib/gateway-topology": gatewayTopology,
   }
   const exports = {}
-  runInNewContext(componentCode, { exports, Set, require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }) })
+  runInNewContext(code, { exports, Set, require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }) })
   const nodes = value => Array.isArray(value) ? value.flatMap(nodes)
     : value && typeof value === "object" ? [value, ...nodes(value.props?.children)] : []
   const render = () => { cursor = 0; return exports[exportName](props) }
@@ -146,6 +161,151 @@ test("only a missing topology API enables legacy fallback", async () => {
   for (const status of [401, 403, 500, 503]) {
     await assert.rejects(apiHarness(async () => { throw new ApiError(status) }).apimTargets(), error => error.status === status)
   }
+})
+
+test("initialization clients use exact URLs and preserve authorization errors", async () => {
+  assert.equal(await apiHarness(async () => { throw new ApiError(404) }).apimOnboardingOperations(), null)
+  for (const status of [401, 403, 500, 503]) {
+    await assert.rejects(apiHarness(async () => { throw new ApiError(status) }).apimOnboardingOperations(), error => error.status === status)
+  }
+  const calls = []
+  const api = apiHarness(async (...args) => { calls.push(args); return {} })
+  const request = { tenant_id: "unit-tenant", resource_id: "unit-resource" }
+  const start = { request, confirmation_sha256: "a".repeat(64) }
+  await api.previewApimOnboarding(request)
+  await api.startApimOnboarding(start)
+  await api.retryApimOnboarding("first/second")
+  assert.equal(calls[0][0], "/api/v1/model-management/apim-onboarding/preview")
+  assert.equal(calls[0][1], request)
+  assert.equal(calls[1][0], "/api/v1/model-management/apim-onboarding")
+  assert.equal(calls[1][1], start)
+  assert.equal(calls[2][0], "/api/v1/model-management/apim-onboarding/first%2Fsecond/retry")
+  assert.equal(calls[2][1].method, "POST")
+})
+
+test("initialization polls only active tasks and replaces stale attempts after accepted retry", async () => {
+  const { finopsKeys, finopsQueries, storeApimOnboarding } = queryHarness()
+  const options = finopsQueries.apimOnboarding()
+  for (const status of ["succeeded", "failed", "restored"]) {
+    assert.equal(options.refetchInterval({ state: { data: { items: [{ status }] } } }), false)
+  }
+  assert.equal(options.refetchInterval({ state: { data: { items: [{ status: "queued" }] } } }), 2000)
+  assert.equal(options.retry, false)
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const other = { id: "other", gateway_profile_id: "other-target", status: "failed" }
+  const previous = { available: true, items: [{ id: "old", gateway_profile_id: "first", status: "failed" }, other] }
+  client.setQueryData(finopsKeys.apimOnboarding, previous)
+  let release
+  const pending = client.fetchQuery({ queryKey: finopsKeys.apimOnboarding, queryFn: () => new Promise(resolve => { release = resolve }) }).catch(() => {})
+  const accepted = { id: "new", gateway_profile_id: "first", status: "queued" }
+  await storeApimOnboarding(client, accepted)
+  release(previous)
+  await pending
+  const current = client.getQueryData(finopsKeys.apimOnboarding)
+  assert.equal(current.available, true)
+  assert.deepEqual(Array.from(current.items, item => item.id), ["new", "other"])
+  assert.equal(client.getQueryData(finopsKeys.gatewayReleaseOperation("new")), accepted)
+  client.clear()
+})
+
+function initializationPlan(ready = true) {
+  return {
+    request: { tenant_id: "00000000-0000-0000-0000-000000000012", resource_id: "/subscriptions/00000000-0000-0000-0000-000000000034/resourceGroups/unit/providers/Microsoft.ApiManagement/service/unit-service", name: "Unit APIM" },
+    service_name: "unit-service", service_tier: "Developer", location: "unit-region",
+    managed_gateway_origin: "https://unit-service.azure-api.net/", api_path: "turnstile/unit", api_id: "unit-api",
+    dashboard_subscription_id: "unit-dashboard", probe_subscription_id: "unit-probe",
+    initial_monthly_token_limit: 100000, initial_tokens_per_minute: 100000,
+    steps: ["validate_target", "create_api"], blockers: ready ? [] : ["budget_execution_not_ready"],
+    ready, confirmation_sha256: "a".repeat(64),
+  }
+}
+function onboardingHarness(api, extra = {}) {
+  const harness = componentHarness("ApimOnboardingDialog", {
+    available: true, onClose() {}, onAccepted() {}, onSettled() {}, ...extra,
+  }, { code: onboardingCode, api })
+  for (const input of harness.all().filter(node => node.type === "Input")) {
+    input.props.onChange({ target: { value: ` ${initializationPlan().request[input.props.name]} ` } })
+  }
+  return harness
+}
+const submitForm = harness => harness.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
+
+test("initialization uses the confirmed server plan and invalidates it on Back", async () => {
+  const plan = initializationPlan()
+  const calls = []
+  const accepted = []
+  const harness = onboardingHarness({
+    previewApimOnboarding: async request => { calls.push(["preview", request]); return plan },
+    startApimOnboarding: async request => { calls.push(["start", request]); return { operation: { id: "unit-operation" } } },
+  }, { onAccepted: operation => accepted.push(operation) })
+  await submitForm(harness)
+  assert.equal(calls[0][1].name, "Unit APIM")
+  assert.equal(calls[0][1].tenant_id, plan.request.tenant_id)
+  assert.equal(harness.all().filter(node => node.type === "Input").length, 0)
+  await submitForm(harness)
+  assert.equal(calls[1][1].request, plan.request)
+  assert.equal(calls[1][1].confirmation_sha256, plan.confirmation_sha256)
+  assert.equal(accepted[0].id, "unit-operation")
+  harness.find(node => node.type === "Button" && node.props.children?.includes?.("Back")).props.onClick()
+  assert.equal(harness.find(node => node.props?.name === "name").props.value.trim(), "Unit APIM")
+  await submitForm(harness)
+  assert.equal(calls[2][0], "preview")
+})
+
+test("blocked initialization plans can recheck but never start", async () => {
+  let checks = 0
+  const harness = onboardingHarness({
+    previewApimOnboarding: async () => { checks++; return initializationPlan(false) },
+    startApimOnboarding: async () => { throw new Error("blocked plan must not start") },
+  })
+  await submitForm(harness)
+  assert.ok(harness.find(node => node.props?.role === "alert"))
+  await submitForm(harness)
+  assert.equal(checks, 2)
+})
+
+test("initialization prevents duplicate submission and dismissal until preview settles", async () => {
+  let finish
+  let calls = 0
+  let closes = 0
+  const harness = onboardingHarness({ previewApimOnboarding: () => { calls++; return new Promise(resolve => { finish = resolve }) } }, { onClose() { closes++ } })
+  const pending = submitForm(harness)
+  await submitForm(harness)
+  harness.render().props.onOpenChange(false)
+  assert.equal(calls, 1)
+  assert.equal(closes, 0)
+  assert.ok(harness.all().filter(node => node.type === "Input").every(node => node.props.disabled))
+  finish(initializationPlan())
+  await pending
+  harness.render().props.onOpenChange(false)
+  assert.equal(closes, 1)
+})
+
+test("initialization error preserves the confirmed plan and disables unavailable execution", async () => {
+  const harness = onboardingHarness({
+    previewApimOnboarding: async () => initializationPlan(),
+    startApimOnboarding: async () => { throw new Error("Preflight unavailable") },
+  })
+  await submitForm(harness)
+  await submitForm(harness)
+  assert.equal(harness.find(node => node.props?.role === "alert").props.children, "Preflight unavailable")
+  assert.ok(harness.find(node => node.props?.["aria-label"] === "Initialization plan"))
+  harness.props.available = false
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+})
+
+test("initialization progress retains failure, exact retry identity and completed steps", () => {
+  const retries = []
+  const operation = { id: "failed-task", semantic_preview: initializationPlan(), status: "failed", worker_available: true,
+    checkpoint: { completed_steps: ["validate_target", "create_api"], retry_of: "previous-task" }, error_message: "Permission preflight failed" }
+  const harness = componentHarness("ApimOnboardingRow", { operation, available: true, retryingId: null, onRetry: id => retries.push(id) }, { code: onboardingCode })
+  assert.equal(harness.all().filter(node => node.props?.["data-complete"] === true).length, 2)
+  harness.find(node => node.props?.["aria-label"] === "Retry initialization").props.onClick()
+  assert.deepEqual(retries, ["failed-task"])
+  harness.find(node => node.props?.["aria-label"] === "Initialization progress").props.onClick()
+  assert.equal(harness.find(node => node.props?.role === "alert").props.children, "Permission preflight failed")
+  harness.props.retryingId = "another-task"
+  assert.equal(harness.find(node => node.props?.["aria-label"] === "Retry initialization").props.disabled, true)
 })
 
 test("registration and sync clients use the exact public routes", async () => {

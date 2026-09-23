@@ -1,4 +1,8 @@
 import type {
+  ApimOnboardingOperations,
+  ApimOnboardingPlan,
+  ApimOnboardingRequest,
+  ApimOnboardingStart,
   AnomalyRule,
   AnomalyRuleWrite,
   ApimTargetTopology,
@@ -327,6 +331,22 @@ export const dataSource = {
     workflow: string; label: string; notes: string; occurred_at: string; comparison_window_days: number
   }) => writeJson<OptimizationEvent>("/api/v1/observability/optimization-events", value),
   registry: () => request<ModelRegistry>("/api/v1/model-management").then(normalizeRegistry),
+  apimOnboardingOperations: async (): Promise<ApimOnboardingOperations | null> => {
+    try { return await request<ApimOnboardingOperations>("/api/v1/model-management/apim-onboarding") }
+    catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+  },
+  previewApimOnboarding: (value: ApimOnboardingRequest) => writeJson<ApimOnboardingPlan>(
+    "/api/v1/model-management/apim-onboarding/preview", value,
+  ),
+  startApimOnboarding: (value: ApimOnboardingStart) => writeJson<GatewayReleaseOperationAccepted>(
+    "/api/v1/model-management/apim-onboarding", value,
+  ),
+  retryApimOnboarding: (id: string) => request<GatewayReleaseOperationAccepted>(
+    `/api/v1/model-management/apim-onboarding/${encodeURIComponent(id)}/retry`, { method: "POST" },
+  ),
   apimTargets: async (): Promise<ApimTargetTopologyList | null> => {
     try { return await request<ApimTargetTopologyList>("/api/v1/model-management/apim-targets") }
     catch (error) {

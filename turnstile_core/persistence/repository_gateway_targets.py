@@ -8,6 +8,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from ..domain.gateway_targets import (
+    ApimOnboardingPlan,
     ApimTarget,
     ApimTargetRouteBinding,
     GatewayDeployment,
@@ -17,6 +18,216 @@ from ..domain.gateway_targets import (
 
 
 class PostgreSqlGatewayTargetRepositoryMixin:
+    def create_apim_onboarding_operation(
+        self, plan: ApimOnboardingPlan, credential_ciphertext: bytes, actor: str,
+    ) -> dict[str, Any]:
+        if not plan.ready or plan.blockers or not credential_ciphertext:
+            raise ValueError("APIM initialization prerequisites are incomplete")
+        resource_id = plan.request.resource_id.casefold()
+        with self._connection() as connection, connection.transaction():
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"apim-onboarding:{resource_id}",),
+            )
+            existing = connection.execute(
+                """SELECT * FROM gateway_release_operation WHERE gateway_profile_id = %s
+                   AND operation_kind = 'apim_onboarding'
+                   ORDER BY created_at DESC, id DESC LIMIT 1""", (plan.gateway_profile_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing["confirmation_sha256"] != plan.confirmation_sha256:
+                    raise ValueError("The APIM initialization plan has changed")
+                return cast(dict[str, Any], existing)
+            target = connection.execute(
+                "SELECT gateway_profile_id FROM apim_target_metadata "
+                "WHERE lower(arm_resource_id) = %s",
+                (resource_id,),
+            ).fetchone()
+            if target is not None:
+                raise ValueError("This APIM instance is already registered")
+            profile = connection.execute(
+                """INSERT INTO gateway_profile
+                   (id, name, implementation, auth_type, enabled, is_default, config)
+                   VALUES (%s, %s, 'apim', 'api_key', FALSE, FALSE, %s)
+                   ON CONFLICT DO NOTHING RETURNING id""",
+                (plan.gateway_profile_id,
+                 plan.request.name or f"{plan.service_name} ({plan.gateway_profile_id.hex[:8]})",
+                 Jsonb({"header_name": "Ocp-Apim-Subscription-Key",
+                        "onboarding_resource_id": resource_id,
+                        "onboarding_tenant_id": str(plan.request.tenant_id)})),
+            ).fetchone()
+            if profile is None:
+                raise ValueError("A Gateway profile already uses this identity or name")
+            operation = connection.execute(
+                """INSERT INTO gateway_release_operation
+                   (gateway_profile_id, operation_kind, confirmation_sha256,
+                    semantic_preview, created_by)
+                   VALUES (%s, 'apim_onboarding', %s, %s, %s) RETURNING *""",
+                (plan.gateway_profile_id, plan.confirmation_sha256,
+                 Jsonb(plan.model_dump(mode="json")), actor),
+            ).fetchone()
+            connection.execute(
+                """INSERT INTO gateway_release_operation_secret
+                   (operation_id, credential_ciphertext) VALUES (%s, %s)""",
+                (operation["id"], credential_ciphertext),
+            )
+            connection.execute(
+                """INSERT INTO gateway_release_operation_audit
+                   (operation_id, from_status, to_status, actor)
+                   VALUES (%s, NULL, 'queued', %s)""", (operation["id"], actor),
+            )
+        return cast(dict[str, Any], operation)
+
+    def list_apim_onboarding_operations(self) -> Sequence[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT ON (gateway_profile_id) * FROM gateway_release_operation
+                   WHERE operation_kind = 'apim_onboarding'
+                   ORDER BY gateway_profile_id, created_at DESC, id DESC""",
+            ).fetchall()
+        return cast(Sequence[dict[str, Any]], rows)
+
+    def retry_apim_onboarding_operation(self, operation_id: UUID, actor: str) -> dict[str, Any]:
+        with self._connection() as connection, connection.transaction():
+            prior = connection.execute(
+                "SELECT * FROM gateway_release_operation WHERE id = %s FOR UPDATE",
+                (operation_id,),
+            ).fetchone()
+            if prior is None or prior["operation_kind"] != "apim_onboarding":
+                raise ValueError("APIM initialization operation was not found")
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"gateway-release-operation:{prior['gateway_profile_id']}",),
+            )
+            current = connection.execute(
+                """SELECT * FROM gateway_release_operation WHERE gateway_profile_id = %s
+                   ORDER BY created_at DESC, id DESC LIMIT 1""", (prior["gateway_profile_id"],),
+            ).fetchone()
+            if current["id"] != operation_id or prior["status"] != "failed":
+                raise ValueError("Only the latest failed APIM initialization can be retried")
+            secret = connection.execute(
+                """SELECT credential_ciphertext FROM gateway_release_operation_secret
+                   WHERE operation_id = %s""", (operation_id,),
+            ).fetchone()
+            if secret is None:
+                raise ValueError("APIM initialization credentials are unavailable")
+            operation = connection.execute(
+                """INSERT INTO gateway_release_operation
+                   (gateway_profile_id, operation_kind, confirmation_sha256,
+                    semantic_preview, checkpoint, created_by)
+                   VALUES (%s, 'apim_onboarding', %s, %s, %s, %s) RETURNING *""",
+                (prior["gateway_profile_id"], prior["confirmation_sha256"],
+                 Jsonb(prior["semantic_preview"]), Jsonb({"retry_of": str(operation_id)}), actor),
+            ).fetchone()
+            connection.execute(
+                """INSERT INTO gateway_release_operation_secret
+                   (operation_id, credential_ciphertext) VALUES (%s, %s)""",
+                (operation["id"], secret["credential_ciphertext"]),
+            )
+            connection.execute(
+                """INSERT INTO gateway_release_operation_audit
+                   (operation_id, from_status, to_status, actor, detail)
+                   VALUES (%s, NULL, 'queued', %s, %s)""",
+                (operation["id"], actor, Jsonb({"retry_of": str(operation_id)})),
+            )
+        return cast(dict[str, Any], operation)
+
+    def finish_apim_onboarding_operation(
+        self, operation_id: UUID, worker_id: str, credential_ciphertext: bytes,
+        credential_hint: str, configuration_sha256: str,
+    ) -> dict[str, Any] | None:
+        with self._connection() as connection, connection.transaction():
+            operation = connection.execute(
+                """SELECT * FROM gateway_release_operation WHERE id = %s
+                   AND operation_kind = 'apim_onboarding' AND status = 'preflight_probing'
+                   AND lease_owner = %s AND lease_expires_at > now() FOR UPDATE""",
+                (operation_id, worker_id),
+            ).fetchone()
+            if operation is None:
+                return None
+            plan = ApimOnboardingPlan.model_validate(operation["semantic_preview"])
+            profile = connection.execute(
+                """UPDATE gateway_profile SET enabled = TRUE, base_url = %s,
+                   credential_ciphertext = %s, credential_hint = %s,
+                   config = config || %s, updated_at = now()
+                   WHERE id = %s AND NOT enabled AND NOT is_default
+                     AND config->>'onboarding_resource_id' = %s
+                     AND EXISTS (
+                       SELECT 1 FROM apim_target_metadata target
+                       JOIN gateway_deployment deployment
+                         ON deployment.apim_target_id = target.gateway_profile_id
+                       WHERE target.gateway_profile_id = gateway_profile.id
+                         AND lower(target.arm_resource_id) = %s
+                         AND deployment.native_gateway_id = 'managed'
+                         AND deployment.reachability_state = 'reachable') RETURNING id""",
+                (str(plan.managed_gateway_origin).rstrip("/") + "/" + plan.api_path,
+                 credential_ciphertext, credential_hint,
+                 Jsonb({"onboarding_ready": True,
+                        "onboarding_request": plan.request.model_dump(mode="json"),
+                        "onboarding_configuration_sha256": configuration_sha256}),
+                 plan.gateway_profile_id, plan.request.resource_id.casefold(),
+                 plan.request.resource_id.casefold()),
+            ).fetchone()
+            if profile is None:
+                raise ValueError("Cannot activate an unverified or changed APIM profile")
+            checkpoint = {
+                **operation["checkpoint"], "step": "activate_target",
+                "completed_steps": plan.steps, "managed_gateway_verified": True,
+            }
+            result = connection.execute(
+                """UPDATE gateway_release_operation SET status = 'succeeded', checkpoint = %s,
+                   error_code = NULL, error_message = NULL, lease_owner = NULL,
+                   lease_expires_at = NULL, completed_at = now(), updated_at = now()
+                   WHERE id = %s RETURNING *""", (Jsonb(checkpoint), operation_id),
+            ).fetchone()
+            connection.execute(
+                """INSERT INTO gateway_release_operation_audit
+                   (operation_id, from_status, to_status, actor, detail)
+                   VALUES (%s, 'preflight_probing', 'succeeded', %s, %s)""",
+                (operation_id, worker_id, Jsonb(checkpoint)),
+            )
+            connection.execute(
+                """DELETE FROM gateway_release_operation_secret secret
+                   USING gateway_release_operation operation
+                   WHERE secret.operation_id = operation.id
+                     AND operation.operation_kind = 'apim_onboarding'
+                     AND operation.gateway_profile_id = %s""", (plan.gateway_profile_id,),
+            )
+        return cast(dict[str, Any], result)
+
+    def enroll_apim_onboarding_budget_target(
+        self, operation_id: UUID, worker_id: str,
+    ) -> dict[str, Any]:
+        with self._connection() as connection, connection.transaction():
+            operation = connection.execute(
+                """SELECT operation.gateway_profile_id FROM gateway_release_operation operation
+                   JOIN gateway_profile profile ON profile.id = operation.gateway_profile_id
+                   WHERE operation.id = %s AND operation.operation_kind = 'apim_onboarding'
+                     AND operation.status = 'verifying_readback'
+                     AND operation.lease_owner = %s AND operation.lease_expires_at > now()
+                     AND NOT profile.enabled
+                     AND profile.config->>'onboarding_resource_id' IS NOT NULL
+                   FOR UPDATE OF operation""", (operation_id, worker_id),
+            ).fetchone()
+            if operation is None:
+                raise ValueError("A valid initialization lease is required for APIM enrollment")
+            rollout = connection.execute(
+                """SELECT * FROM budget_execution_rollout WHERE state = 'active'
+                   AND scope_sync_enabled AND prepared_period =
+                     date_trunc('month', clock_timestamp() AT TIME ZONE 'UTC')::date
+                   FOR UPDATE""",
+            ).fetchone()
+            if rollout is None:
+                raise ValueError("The current budget execution period is not ready")
+            if operation["gateway_profile_id"] not in rollout["gateway_profile_ids"]:
+                rollout = connection.execute(
+                    """UPDATE budget_execution_rollout SET
+                       gateway_profile_ids = array_append(gateway_profile_ids, %s::uuid)
+                       WHERE epoch = %s RETURNING *""",
+                    (operation["gateway_profile_id"], rollout["epoch"]),
+                ).fetchone()
+        return cast(dict[str, Any], rollout)
+
     def upsert_gateway_instance_observation(
         self,
         observation: GatewayInstanceObservation,

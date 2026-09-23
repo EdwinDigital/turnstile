@@ -12,6 +12,7 @@ from fastapi.routing import APIRoute
 
 from turnstile_core.config import get_settings
 from turnstile_core.domain.control_plane import (
+    ApimOnboardingOperations,
     GatewayBackendPoolConfig,
     GatewayBackendPoolWrite,
     GatewayCredentialRotation,
@@ -39,6 +40,9 @@ from turnstile_core.domain.enterprise import (
     merge_observed_users,
 )
 from turnstile_core.domain.gateway_targets import (
+    ApimOnboardingPlan,
+    ApimOnboardingRequest,
+    ApimOnboardingStart,
     ApimTargetTopology,
     ApimTargetTopologyList,
     ApimTargetWrite,
@@ -78,6 +82,7 @@ from ..services.traffic import TrafficGenerator
 from .dependencies import Repository
 from .publication_auth import PublicationOwner
 from .service_dependencies import (
+    ApimOnboardingServiceDependency,
     Authorization,
     ControlPlaneService,
     RuntimeService,
@@ -138,6 +143,77 @@ def list_apim_target_topologies(
 ) -> ApimTargetTopologyList:
     del identity
     return service.apim_target_topologies()
+
+
+@protected_router.get(
+    "/api/v1/model-management/apim-onboarding", response_model=ApimOnboardingOperations,
+)
+def list_apim_onboarding_operations(
+    service: ApimOnboardingServiceDependency, identity: OwnerSession,
+) -> ApimOnboardingOperations:
+    del identity
+    return service.operations()
+
+
+@protected_router.post(
+    "/api/v1/model-management/apim-onboarding/preview", response_model=ApimOnboardingPlan,
+)
+def preview_apim_onboarding(
+    write: ApimOnboardingRequest, service: ApimOnboardingServiceDependency,
+    runtime: RuntimeService, identity: OwnerSession, authorization: Authorization = None,
+) -> ApimOnboardingPlan:
+    runtime.authorize(identity.role, authorization, manage=True)
+    try:
+        return service.preview(write)
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except (PolicyCompilationError, httpx.HTTPError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="APIM preflight could not validate resource access or configuration",
+        ) from error
+
+
+@protected_router.post(
+    "/api/v1/model-management/apim-onboarding",
+    response_model=GatewayReleaseOperationAccepted, status_code=202,
+)
+def start_apim_onboarding(
+    write: ApimOnboardingStart, service: ApimOnboardingServiceDependency,
+    runtime: RuntimeService, identity: OwnerSession, authorization: Authorization = None,
+) -> GatewayReleaseOperationAccepted:
+    runtime.authorize(identity.role, authorization, manage=True)
+    try:
+        return service.start(write, identity.email)
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except (PolicyCompilationError, httpx.HTTPError) as error:
+        raise HTTPException(
+            status_code=502, detail="APIM initialization preflight is unavailable",
+        ) from error
+    except (ControlPlaneConflictError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@protected_router.post(
+    "/api/v1/model-management/apim-onboarding/{operation_id}/retry",
+    response_model=GatewayReleaseOperationAccepted, status_code=202,
+)
+def retry_apim_onboarding(
+    operation_id: UUID, service: ApimOnboardingServiceDependency,
+    runtime: RuntimeService, identity: OwnerSession, authorization: Authorization = None,
+) -> GatewayReleaseOperationAccepted:
+    runtime.authorize(identity.role, authorization, manage=True)
+    try:
+        return service.retry(operation_id, identity.email)
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except (PolicyCompilationError, httpx.HTTPError) as error:
+        raise HTTPException(
+            status_code=502, detail="APIM initialization retry preflight is unavailable",
+        ) from error
+    except (ControlPlaneConflictError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @protected_router.get(

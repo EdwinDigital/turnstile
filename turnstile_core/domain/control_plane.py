@@ -97,6 +97,7 @@ class GatewayReleaseOperationKind(StrEnum):
     APPLICATION_SYNC = "application_sync"
     APPLICATION_PROVISION = "application_provision"
     TARGET_INVENTORY_SYNC = "target_inventory_sync"
+    APIM_ONBOARDING = "apim_onboarding"
 
 
 class GatewayReleaseOperationStatus(StrEnum):
@@ -1031,6 +1032,12 @@ class GatewayReleaseOperation(StrictModel):
     worker_unavailable_reason: str | None = None
     audit: list[GatewayReleaseOperationAuditEvent] = Field(default_factory=list)
     gc_plan: GatewayReleaseGcPlan | None = None
+
+
+class ApimOnboardingOperations(StrictModel):
+    available: bool
+    unavailable_reason: str | None = None
+    items: list[GatewayReleaseOperation] = Field(default_factory=list)
 
 
 class GatewayReleaseOperationAccepted(StrictModel):

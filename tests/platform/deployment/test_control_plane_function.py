@@ -11,9 +11,18 @@ from uuid import UUID
 import pytest
 
 from functions.control_plane import function_app
+from tests.backend.model_platform.test_apim_onboarding import (
+    governance_configuration,
+    onboarding_request,
+)
+from tests.support.paths import REPOSITORY_ROOT
 from turnstile_core.config import Settings
+from turnstile_core.integrations.apim_onboarding_policy import render_onboarding_parent
+from turnstile_core.integrations.apim_policy_components import validate_parent_policy
 from turnstile_core.persistence import factory
+from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.security import CredentialCipher
+from turnstile_core.services.budget_settlement import BudgetScopeRepository
 
 
 @pytest.mark.parametrize("change", [
@@ -86,7 +95,91 @@ def test_budget_fence_uses_resolved_target_settings(monkeypatch: pytest.MonkeyPa
         "gateway_profile_id": str(gateway_id),
     }
     configs.resolve.assert_called_once_with(gateway_id)
-    read.assert_called_once_with(gateway_id, scoped)
+    read.assert_called_once_with(gateway_id, scoped, None)
+
+
+def test_initialized_parent_matches_the_public_rendered_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, config = onboarding_request(), governance_configuration()
+    parts = config.ledger_table_resource_id.split("/")
+    source = (REPOSITORY_ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    settings = Settings.model_construct(
+        apim_target_registry_enabled=True, budget_execution_enabled=True,
+        ledger_table_endpoint=f"https://{parts[8]}.table.core.windows.net/",
+        ledger_table_name=parts[-1],
+    )
+    repository = InMemoryRepository()
+    monkeypatch.setattr(
+        function_app, "initialized_apim_targets", lambda _: {request.gateway_profile_id: request},
+    )
+    parents = function_app._budget_parent_overrides(source, settings, repository)
+    validate_parent_policy(
+        render_onboarding_parent(request, config, source), parents[request.gateway_profile_id],
+    )
+    with pytest.raises(ValueError, match="manual parent override"):
+        function_app._budget_parent_overrides(source, settings.model_copy(update={
+            "budget_execution_target_ids": [request.gateway_profile_id],
+        }), repository)
+
+
+@pytest.mark.parametrize("enrollment", ["valid", "missing", "other_epoch", "other_target"])
+def test_initialized_budget_reader_requires_exact_active_epoch(
+    monkeypatch: pytest.MonkeyPatch, enrollment: str,
+) -> None:
+    request, epoch = onboarding_request(), UUID(int=24)
+    settings = Settings.model_construct(
+        apim_target_registry_enabled=True, budget_execution_enabled=True,
+        ledger_table_endpoint="https://unitledger.table.core.windows.net",
+        apim_service_name=request.service_name, apim_api_id=request.api_id,
+    )
+    repository = MagicMock(spec=BudgetScopeRepository)
+    monkeypatch.setattr(
+        function_app, "initialized_apim_targets", lambda _: {request.gateway_profile_id: request},
+    )
+    rollout = None if enrollment == "missing" else {
+        "epoch": epoch if enrollment != "other_epoch" else UUID(int=25),
+        "gateway_profile_ids": [request.gateway_profile_id] if enrollment != "other_target" else [],
+    }
+    repository.active_budget_execution_rollout.return_value = rollout
+    fence = {
+        "protocol_version": 2, "mode": "active", "epoch": str(epoch),
+        "gateway_profile_id": str(request.gateway_profile_id), "api_id": request.api_id,
+        "apim_service_id": request.service_name,
+    }
+    ledger = MagicMock()
+    ledger.read_entity.return_value = {"Document": json.dumps(fence)}
+    monkeypatch.setattr(function_app, "AtomicTableLedger", lambda *_, **__: ledger)
+    if enrollment == "valid":
+        actual = function_app._budget_configuration(
+            request.gateway_profile_id, settings, repository,
+        )
+        assert actual == fence
+    else:
+        with pytest.raises(ValueError, match="not enrolled"):
+            function_app._budget_configuration(request.gateway_profile_id, settings, repository)
+    ledger.upsert.assert_not_called()
+
+
+def test_release_timer_wires_lazy_initialization_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings.model_construct(
+        control_plane_enabled=True, gateway_release_worker_enabled=True,
+        apim_target_registry_enabled=True,
+    )
+    repository, service, worker = MagicMock(), MagicMock(), MagicMock()
+    worker.run_once.return_value = None
+    worker_factory = MagicMock(return_value=worker)
+    builder = MagicMock(return_value=service)
+    monkeypatch.setattr(function_app, "get_settings", lambda: settings)
+    monkeypatch.setattr(factory, "create_repository", lambda _: repository)
+    monkeypatch.setattr(function_app, "_publisher_clients", lambda *_: (MagicMock(), None))
+    monkeypatch.setattr(CredentialCipher, "from_settings", lambda _: None)
+    monkeypatch.setattr(function_app, "build_apim_onboarding_service", builder)
+    monkeypatch.setattr(function_app, "GatewayReleaseOperationWorker", worker_factory)
+    function_app.process_gateway_release_operations(None)
+    builder.assert_called_once_with(repository, settings)
+    assert worker_factory.call_args.kwargs["onboarding_handler"] == service.advance
+    repository.close.assert_called_once()
 
 
 @pytest.mark.parametrize("provisioning_enabled", (False, True))

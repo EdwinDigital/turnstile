@@ -1688,6 +1688,7 @@ schemas:
         - application_sync
         - application_provision
         - target_inventory_sync
+        - apim_onboarding
       target_release_id:
         type:
         - string

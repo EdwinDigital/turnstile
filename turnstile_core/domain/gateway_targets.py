@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -11,6 +12,7 @@ from .models import StrictModel
 
 _GATEWAY_DEPLOYMENT_NAMESPACE = UUID("559ea680-1788-44df-95c5-05f60387e1e1")
 _APIM_TARGET_ROUTE_NAMESPACE = UUID("fb2fc0a2-1d9b-409d-a52b-1f49ff530082")
+_APIM_ONBOARDING_NAMESPACE = UUID("accb7b42-78c1-4c4f-89f0-54f857c8ae38")
 
 
 def _require_https_gateway_endpoint(endpoint: HttpUrl) -> None:
@@ -303,6 +305,152 @@ class GatewayEndpointProbeResult(StrictModel):
     status: Literal["succeeded", "optional_pending"]
     error_code: str | None = Field(default=None, max_length=120)
     error_message: str | None = Field(default=None, max_length=1000)
+
+
+class ApimOnboardingRequest(StrictModel):
+    tenant_id: UUID
+    resource_id: str = Field(min_length=1, max_length=1024)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def validate_resource_identity(self) -> ApimOnboardingRequest:
+        parts = self.resource_id.strip().rstrip("/").split("/")
+        if (
+            len(parts) != 9 or parts[0] != ""
+            or parts[6].casefold() != "microsoft.apimanagement"
+            or [parts[index].casefold() for index in (1, 3, 5, 7)]
+            != ["subscriptions", "resourcegroups", "providers", "service"]
+            or not re.fullmatch(r"[A-Za-z0-9_().-]{1,90}", parts[4])
+            or not re.fullmatch(r"[A-Za-z](?:[A-Za-z0-9-]{0,48}[A-Za-z0-9])?", parts[8])
+        ):
+            raise ValueError("Provide the ARM resource ID of an existing API Management service")
+        subscription_id = UUID(parts[2])
+        self.resource_id = (
+            f"/subscriptions/{subscription_id}/resourceGroups/{parts[4]}/"
+            f"providers/Microsoft.ApiManagement/service/{parts[8]}"
+        )
+        if self.name is not None:
+            self.name = self.name.strip()
+            if not self.name:
+                raise ValueError("The APIM display name cannot be blank")
+        return self
+
+    @property
+    def subscription_id(self) -> UUID:
+        return UUID(self.resource_id.split("/")[2])
+
+    @property
+    def resource_group(self) -> str:
+        return self.resource_id.split("/")[4]
+
+    @property
+    def service_name(self) -> str:
+        return self.resource_id.split("/")[8]
+
+    @property
+    def gateway_profile_id(self) -> UUID:
+        return uuid5(_APIM_ONBOARDING_NAMESPACE, f"{self.tenant_id}:{self.resource_id.casefold()}")
+
+    @property
+    def api_id(self) -> str:
+        return f"turnstile-{self.gateway_profile_id.hex[:12]}"
+
+    @property
+    def api_path(self) -> str:
+        return f"turnstile/{self.gateway_profile_id.hex[:12]}"
+
+    @property
+    def dashboard_subscription_id(self) -> str:
+        return f"{self.api_id}-dashboard"
+
+    @property
+    def probe_subscription_id(self) -> str:
+        return f"{self.api_id}-publisher-probe"
+
+
+class EmployeeClientSurface(StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+    tokens: list[str] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def require_nonempty_tokens(self) -> EmployeeClientSurface:
+        if any(not token.strip() for token in self.tokens):
+            raise ValueError("Employee client surface tokens must not be empty")
+        return self
+
+
+class ApimOnboardingConfiguration(StrictModel):
+    management_tenant_id: UUID
+    event_hub_resource_id: str = Field(pattern=(
+        r"(?i)^/subscriptions/[0-9a-f-]{36}/resourceGroups/[^/]+/providers/"
+        r"Microsoft\.EventHub/namespaces/[A-Za-z0-9-]+/eventhubs/[A-Za-z0-9._-]+$"
+    ))
+    ledger_table_resource_id: str = Field(pattern=(
+        r"(?i)^/subscriptions/[0-9a-f-]{36}/resourceGroups/[^/]+/providers/"
+        r"Microsoft\.Storage/storageAccounts/[a-z0-9]+/tableServices/default/tables/[A-Za-z0-9]+$"
+    ))
+    employee_tenant_id: UUID
+    employee_client_id: UUID
+    employee_audience: str = Field(min_length=1, max_length=256)
+    organization_id: str = Field(min_length=1, max_length=120)
+    organization_name: str = Field(min_length=1, max_length=120)
+    employee_tokens_per_minute: int = Field(default=100_000, ge=1, le=2_147_483_647)
+    default_max_output_tokens: int = Field(default=1024, ge=1, le=2_147_483_647)
+    department_map: dict[str, str] = Field(default_factory=dict)
+    client_map: dict[str, str] = Field(default_factory=dict)
+    surface_map: list[EmployeeClientSurface] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_configuration(self) -> ApimOnboardingConfiguration:
+        for resource_id in (self.event_hub_resource_id, self.ledger_table_resource_id):
+            UUID(resource_id.split("/")[2])
+            if any(character in resource_id for character in ("?", "#", "%", "\\")):
+                raise ValueError("Onboarding dependencies require plain ARM resource IDs")
+        return self
+
+
+class ApimOnboardingPlan(StrictModel):
+    request: ApimOnboardingRequest
+    gateway_profile_id: UUID
+    service_name: str
+    service_tier: str
+    location: str
+    managed_gateway_origin: HttpUrl
+    api_id: str
+    api_path: str
+    dashboard_subscription_id: str
+    probe_subscription_id: str
+    initial_monthly_token_limit: int = Field(default=100_000, ge=1)
+    initial_tokens_per_minute: int = Field(default=100_000, ge=1, le=2_147_483_647)
+    ready: bool
+    blockers: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=lambda: [
+        "validate_target", "create_api", "configure_governance", "create_subscriptions",
+        "project_access", "verify_managed_gateway", "activate_target",
+    ])
+    confirmation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def require_derived_resources(self) -> ApimOnboardingPlan:
+        fields = ("gateway_profile_id", "service_name", "api_id", "api_path",
+                  "dashboard_subscription_id", "probe_subscription_id")
+        if any(getattr(self, name) != getattr(self.request, name) for name in fields):
+            raise ValueError("APIM initialization resources must match the requested service")
+        origin = self.managed_gateway_origin
+        _require_https_gateway_endpoint(origin)
+        if (
+            origin.host != f"{self.request.service_name.lower()}.azure-api.net"
+            or origin.path not in {None, "", "/"} or origin.port not in {None, 443}
+        ):
+            raise ValueError("APIM initialization requires its own Managed Gateway origin")
+        if self.ready and self.blockers:
+            raise ValueError("Blocked initialization cannot be ready")
+        return self
+
+
+class ApimOnboardingStart(StrictModel):
+    request: ApimOnboardingRequest
+    confirmation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ApimTargetWrite(StrictModel):

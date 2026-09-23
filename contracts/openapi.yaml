@@ -48,6 +48,12 @@ tags:
 - name: Model Router
   description: User-scoped model routing drafts, validation, version publication, and lifecycle.
 paths:
+  /api/v1/model-management/apim-onboarding:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-onboarding
+  /api/v1/model-management/apim-onboarding/preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-onboarding~1preview
+  /api/v1/model-management/apim-onboarding/{operation_id}/retry:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-onboarding~1{operation_id}~1retry
   /api/v1/model-management/apim-targets:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets
   /api/v1/model-management/apim-targets/{gateway_profile_id}:
@@ -261,6 +267,14 @@ components:
     ErrorResponse:
       $ref: ./openapi/components/common.yaml#/responses/ErrorResponse
   schemas:
+    ApimOnboardingRequest:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingRequest
+    ApimOnboardingPlan:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingPlan
+    ApimOnboardingStart:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingStart
+    ApimOnboardingOperations:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingOperations
     GatewayApplicationUsage:
       $ref: ./openapi/schemas/application-access.yaml#/schemas/GatewayApplicationUsage
     GatewayApplicationUserUsage:

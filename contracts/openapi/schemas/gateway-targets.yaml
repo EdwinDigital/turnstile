@@ -1,4 +1,104 @@
 schemas:
+  ApimOnboardingRequest:
+    properties:
+      tenant_id: {type: string, format: uuid, title: Tenant Id}
+      resource_id: {type: string, maxLength: 1024, minLength: 1, title: Resource Id}
+      name:
+        anyOf:
+        - {type: string, maxLength: 120, minLength: 1}
+        - {type: 'null'}
+        title: Name
+    additionalProperties: false
+    type: object
+    required: [tenant_id, resource_id]
+    title: ApimOnboardingRequest
+  ApimOnboardingPlan:
+    properties:
+      request:
+        $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingRequest
+      gateway_profile_id: {type: string, format: uuid, title: Gateway Profile Id}
+      service_name: {type: string, title: Service Name}
+      service_tier: {type: string, title: Service Tier}
+      location: {type: string, title: Location}
+      managed_gateway_origin:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Managed Gateway Origin
+      api_id: {type: string, title: Api Id}
+      api_path: {type: string, title: Api Path}
+      dashboard_subscription_id: {type: string, title: Dashboard Subscription Id}
+      probe_subscription_id: {type: string, title: Probe Subscription Id}
+      initial_monthly_token_limit:
+        type: integer
+        minimum: 1
+        title: Initial Monthly Token Limit
+        default: 100000
+      initial_tokens_per_minute:
+        type: integer
+        maximum: 2147483647
+        minimum: 1
+        title: Initial Tokens Per Minute
+        default: 100000
+      ready: {type: boolean, title: Ready}
+      blockers:
+        items: {type: string}
+        type: array
+        title: Blockers
+      steps:
+        items: {type: string}
+        type: array
+        title: Steps
+      confirmation_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Confirmation Sha256
+    additionalProperties: false
+    type: object
+    required:
+    - request
+    - gateway_profile_id
+    - service_name
+    - service_tier
+    - location
+    - managed_gateway_origin
+    - api_id
+    - api_path
+    - dashboard_subscription_id
+    - probe_subscription_id
+    - ready
+    - confirmation_sha256
+    title: ApimOnboardingPlan
+  ApimOnboardingStart:
+    properties:
+      request:
+        $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingRequest
+      confirmation_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Confirmation Sha256
+    additionalProperties: false
+    type: object
+    required: [request, confirmation_sha256]
+    title: ApimOnboardingStart
+  ApimOnboardingOperations:
+    properties:
+      available: {type: boolean, title: Available}
+      unavailable_reason:
+        anyOf:
+        - {type: string}
+        - {type: 'null'}
+        title: Unavailable Reason
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperation
+        type: array
+        title: Items
+    additionalProperties: false
+    type: object
+    required: [available]
+    title: ApimOnboardingOperations
   GatewayDeploymentScope:
     additionalProperties: false
     properties:

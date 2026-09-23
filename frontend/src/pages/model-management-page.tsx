@@ -87,7 +87,7 @@ import { Textarea } from "../components/ui/textarea"
 import { ResizableGridTable } from "../components/ui/resizable-table"
 import { getIntlLocale } from "../locales/index"
 import { hasModelPrices, priceRequests } from "../lib/pricing"
-import { finopsKeys, finopsQueries, storeGatewayName, storeRegistry } from "../data-sources/apim/queries"
+import { finopsKeys, finopsQueries, storeApimOnboarding, storeGatewayName, storeRegistry } from "../data-sources/apim/queries"
 import { assistantSettingsKey } from "../components/assistant/queries"
 import { useTimezone } from "../providers/timezone-provider"
 import { useAuth } from "../providers/auth-provider"
@@ -98,6 +98,7 @@ import {
 import { ConnectionDialog } from "../components/model-management/connection-dialog"
 import { ModelEditDialog } from "../components/model-management/model-edit-dialog"
 import { GatewayRegistrationAction, GatewayTargetGroup } from "../components/model-management/gateway-targets"
+import { ApimOnboardingDialog, ApimOnboardingRow, apimOnboardingOperationName } from "../components/model-management/apim-onboarding-dialog"
 import type {
   GatewayPublication,
   GatewayProfile,
@@ -1096,6 +1097,20 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
   const activeTab: ModelTableTab = tab
   const { user } = useAuth()
   const topology = useQuery({ ...finopsQueries.apimTargets(), enabled: activeTab === "gateways" })
+  const queryClient = useQueryClient()
+  const onboarding = useQuery({ ...finopsQueries.apimOnboarding(), enabled: activeTab === "gateways" && user?.role === "owner" })
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const retryOnboarding = useMutation({
+    mutationFn: dataSource.retryApimOnboarding,
+    onSuccess: accepted => storeApimOnboarding(queryClient, accepted.operation),
+    onSettled: () => { void queryClient.invalidateQueries({ queryKey: finopsKeys.apimOnboarding }) },
+  })
+  const initialized = onboarding.data?.items.filter(item => item.status === "succeeded").map(item => item.id).join("|") ?? ""
+  useEffect(() => {
+    if (!initialized) return
+    void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
+    void queryClient.invalidateQueries({ queryKey: finopsKeys.apimTargets })
+  }, [initialized, queryClient])
   const [search, setSearch] = useState("")
   const [providerFilter, setProviderFilter] = useState("all")
   const [connectionHealthFilter, setConnectionHealthFilter] = useState<"active" | RuntimeHealthState>("active")
@@ -1146,8 +1161,14 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
     else next.add(providerId)
     return next
   })
-  const gateways = registry.gateways.filter((gateway) => matches(`${gateway.name} ${gateway.implementation} ${gateway.base_url ?? ""}`))
-  const count = activeTab === "connections" ? connections.length : registry[activeTab].length
+  const onboardingOperations = (onboarding.data?.items ?? []).filter(operation => operation.status !== "succeeded"
+    || !registry.gateways.some(gateway => gateway.id === operation.gateway_profile_id && gateway.enabled))
+  const onboardingIds = new Set(onboardingOperations.map(operation => operation.gateway_profile_id))
+  const visibleOnboardings = onboardingOperations.filter(operation => matches(apimOnboardingOperationName(operation)))
+  const gateways = registry.gateways.filter(gateway => !onboardingIds.has(gateway.id)
+    && matches(`${gateway.name} ${gateway.implementation} ${gateway.base_url ?? ""}`))
+  const count = activeTab === "connections" ? connections.length
+    : activeTab === "gateways" ? gateways.length + visibleOnboardings.length : registry[activeTab].length
   const connectionHealthCounts = {
     active: inventoryConnections.filter((runtime) => runtime.enabled).length,
     online: inventoryConnections.filter((runtime) => runtimeHealthState(runtime) === "online").length,
@@ -1190,7 +1211,10 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
     <header className="smh-page-header">
       <div><Button type="button" variant="ghost" size="icon-sm" className="model-mobile-sidebar-toggle" aria-label="切换导航栏" title="切换导航栏" onClick={onToggleSidebar}><PanelLeft size={16} /></Button><span className="smh-header-icon"><Cpu size={17} /></span><h1>模型管理</h1><span>{registry.models.length}</span></div>
       {activeTab !== "gateways" && <div className="smh-header-actions"><button onClick={() => onAdd(kind)}><Plus size={14} />添加{addLabel}</button></div>}
-      {activeTab === "gateways" && user?.role === "owner" && topology.data?.inventory_sync_available && <div className="smh-header-actions"><GatewayRegistrationAction /></div>}
+      {activeTab === "gateways" && user?.role === "owner" && <div className="smh-header-actions gateway-header-actions">
+        {topology.data?.inventory_sync_available && <GatewayRegistrationAction />}
+        {topology.data?.onboarding_available && <Button type="button" title="Initialize APIM" aria-label="Initialize APIM" disabled={!onboarding.data?.available} onClick={() => setOnboardingOpen(true)}><Plus size={14} />Initialize APIM</Button>}
+      </div>}
     </header>
     <div className="model-toolbar">
       <ButtonGroup className="model-tabs usage-metric-segment" aria-label="模型管理类型">{tabs.map((value) => <button key={value} className={activeTab === value ? "active" : ""} aria-pressed={activeTab === value} onClick={() => onTabChange(value)}>{value === "models" ? "模型" : value === "connections" ? "连接" : "网关"}<span>{value === "connections" ? scopedConnections.length : registry[value].length}</span></button>)}</ButtonGroup>
@@ -1235,6 +1259,11 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
         </span>)}
       </div>
       <div className="model-table-body">
+        {activeTab === "gateways" && (onboarding.error || retryOnboarding.error) && <div className="registry-error gateway-operation-state" role="alert">
+          <span>{(retryOnboarding.error ?? onboarding.error)?.message}</span>
+          <Button type="button" variant="ghost" size="icon-sm" title="Refresh initialization" aria-label="Refresh initialization" onClick={() => { retryOnboarding.reset(); void onboarding.refetch() }}><RefreshCw size={14} /></Button>
+        </div>}
+        {activeTab === "gateways" && visibleOnboardings.map(operation => <ApimOnboardingRow key={operation.id} operation={operation} available={onboarding.data?.available === true} retryingId={retryOnboarding.isPending ? retryOnboarding.variables ?? null : null} onRetry={id => retryOnboarding.mutate(id)} />)}
         {activeTab === "models" && models.map((model) => {
           const provider = registry.providers.find((item) => item.id === model.provider_id)
           const runtime = registry.runtimes.find((item) => item.id === model.runtime_id)
@@ -1279,10 +1308,14 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
               : null
           return <GatewayRow key={gateway.id} gateway={gateway} runtimeCount={runtimeCount} busy={busy} deleteDisabledReason={deleteDisabledReason} onEdit={() => onEdit("gateway", gateway)} onToggle={() => onToggleGateway(gateway)} onDefault={() => onDefaultGateway(gateway)} onDelete={() => onDeleteGateway(gateway)} onRename={canRenameGateway ? () => onRenameGateway(gateway) : undefined} />
         })}
-        {((activeTab === "models" && !models.length) || (activeTab === "connections" && !connectionGroups.length) || (activeTab === "gateways" && !gateways.length)) && <div className="smh-empty"><Search size={28} /><b>没有找到{addLabel}</b><span>尝试调整搜索条件。</span></div>}
+        {((activeTab === "models" && !models.length) || (activeTab === "connections" && !connectionGroups.length) || (activeTab === "gateways" && !gateways.length && !visibleOnboardings.length)) && <div className="smh-empty"><Search size={28} /><b>没有找到{addLabel}</b><span>尝试调整搜索条件。</span></div>}
       </div>
     </ResizableGridTable>
     <footer className="model-table-footer">共 {count} 个{addLabel}</footer>
+    {onboardingOpen && <ApimOnboardingDialog available={onboarding.data?.available === true} onClose={() => setOnboardingOpen(false)} onAccepted={async operation => {
+      await storeApimOnboarding(queryClient, operation)
+      setOnboardingOpen(false)
+    }} onSettled={() => { void queryClient.invalidateQueries({ queryKey: finopsKeys.apimOnboarding }) }} />}
   </div>
 }
 

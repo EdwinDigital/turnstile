@@ -153,6 +153,33 @@
 .gateway-deployment-row .model-list-icon { flex-shrink: 0; }
 .gateway-target-group .model-row-actions > button:not(.toggle) { display: grid; }
 .gateway-operation-state { display: flex; align-items: center; gap: 8px; padding: 8px 16px; font-size: 12px; overflow-wrap: anywhere; }
+.model-workspace .smh-page-header:has(.gateway-header-actions) { flex-wrap: wrap; row-gap: 8px; }
+.gateway-header-actions { display: flex; flex-wrap: wrap; gap: 8px; max-width: 100%; }
+.apim-onboarding-dialog { width: min(640px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); }
+.apim-onboarding-dialog form { display: flex; flex-direction: column; min-height: 0; max-height: calc(100dvh - 48px); }
+.apim-onboarding-dialog .registry-editor-body { display: block; min-height: 0; overflow-y: auto; }
+.apim-onboarding-fields { display: grid; gap: 14px; }
+.apim-onboarding-fields .registry-field { min-width: 0; }
+.apim-onboarding-target { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; font-size: 13px; overflow-wrap: anywhere; }
+.apim-onboarding-target > svg { flex: 0 0 20px; width: 20px; height: 20px; }
+.apim-onboarding-target > span { color: var(--muted-foreground); font-size: 12px; }
+.apim-onboarding-endpoint { grid-column: 1 / -1; }
+.apim-onboarding-steps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin: 16px 0 0; padding: 0; list-style: none; }
+.apim-onboarding-steps li { display: flex; align-items: flex-start; gap: 8px; min-height: 18px; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.apim-onboarding-steps li > svg { flex: 0 0 13px; margin-top: 2px; }
+.apim-onboarding-steps li[data-complete="true"] > svg { color: var(--primary); }
+.apim-onboarding-steps li[data-failed="true"] { color: var(--destructive); }
+.apim-onboarding-blockers { margin: 16px 0 0; padding: 8px 12px 8px 26px; font-size: 12px; overflow-wrap: anywhere; }
+.apim-onboarding-footer { flex-wrap: wrap; gap: 8px; }
+.apim-onboarding-footer > button[type="button"] { border-color: var(--border); background: var(--background); color: var(--foreground); }
+.apim-onboarding-footer > button[type="button"]:hover { background: var(--muted); opacity: 1; }
+.apim-onboarding-progress { padding: 0 16px 14px; }
+.apim-onboarding-retry-link { margin: 12px 0 0; font-size: 11px; color: var(--muted-foreground); overflow-wrap: anywhere; }
+.apim-onboarding-row .registry-health { white-space: normal; }
+@media (max-width: 640px) {
+	.apim-onboarding-plan .gateway-inventory-fields { grid-template-columns: minmax(0, 1fr); }
+	.apim-onboarding-steps { column-gap: 12px; }
+}
 .gateway-inventory-dialog, .gateway-registration-dialog { width: min(680px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); }
 .gateway-registration-dialog form { display: flex; flex-direction: column; min-height: 0; max-height: calc(100dvh - 48px); }
 .gateway-registration-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }

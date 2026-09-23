@@ -40,7 +40,7 @@ Apply migration `011_gateway_targets` before upgrading the API and Control-plane
 It is additive and does not register an Azure resource, activate a protocol or rewrite usage.
 Keep `APIM_TARGET_REGISTRY_ENABLED=false` until target-specific identity, permissions and
 connection checks are ready. With the flag off, the existing single-target publisher remains
-unchanged. This feature does not create APIM instances, Gateway containers or role assignments.
+unchanged. Registration does not create APIM instances, Gateway containers or role assignments.
 
 When enabled, an Owner can register an existing APIM through
 `POST /api/v1/model-management/apim-targets`; normal management authorization and the write-origin
@@ -67,6 +67,52 @@ returns `202` with the existing release-operation status URL. It performs read-o
 and persists whitelisted API associations, hostnames and CA metadata. A declared deployment is
 not necessarily reachable or observed; missing evidence stays unknown. Retired deployments and
 confirmed names survive later inventory refreshes.
+
+### Initialize an existing APIM
+
+Initialization is a separate Owner workflow under `/api/v1/model-management/apim-onboarding`.
+It prepares an existing APIM service; it does not create an APIM instance, a resource group or
+a Self-hosted container. Apply `012_apim_onboarding` and upgrade the API and Control-plane
+packages together before use. Availability requires `APIM_TARGET_REGISTRY_ENABLED`,
+`GATEWAY_RELEASE_WORKER_ENABLED`, `BUDGET_EXECUTION_ENABLED`, PostgreSQL, credential encryption,
+the configured Table ledger, a complete legacy APIM identity and the public parent-policy template.
+The Function also requires `CONTROL_PLANE_ENABLED`. These switches remain disabled by default.
+`CONTROL_PLANE_PARENT_POLICY_PATH` defaults to `policies/foundry-finops-policy.xml` in the package;
+local initialization can resolve the same template under `infra/policies`.
+
+The existing platform APIM must already contain the non-secret Named Value
+`turnstile-platform-governance`, with the same display name and tag
+`turnstile-platform-configuration`. Its JSON value follows `ApimOnboardingConfiguration`:
+`management_tenant_id`, exact `event_hub_resource_id` and `ledger_table_resource_id`,
+`employee_tenant_id`, `employee_client_id`, `employee_audience`, `organization_id`,
+`organization_name`, positive `employee_tokens_per_minute` and `default_max_output_tokens`,
+and optional `department_map`, `client_map`, `surface_map`. Surface entries have `name` and
+nonempty `tokens`. No keys or connection strings belong in this value. Its Table account and
+table must exactly match the platform's `LEDGER_TABLE_ENDPOINT` and `LEDGER_TABLE_NAME`.
+Provision this configuration and approve resource-specific permissions separately; upgrading
+the application does not create them or grant its identity additional privileges.
+
+An Owner supplies the management tenant and the exact APIM service ARM ID, previews the derived
+API path, system subscription IDs, blockers and steps, then submits the returned confirmation hash.
+Configured management authorization and normal write-origin checks still apply. The worker checks
+APIM API/operation/policy/Logger/subscription permissions and role-assignment access at the exact
+Event Hub and Table scopes. If system identity must be enabled, it requires a concrete service
+ETag and preserves existing user-assigned identities. The two data roles are Event Hubs Data
+Sender and Storage Table Data Contributor at those resources only. Logger reference readback
+accepts a Named Value only after resolving and verifying its system-assigned identity value.
+
+Initialization creates an owned API and fixed protocol operations with default-deny policies,
+stages dashboard/probe subscriptions as suspended, projects access and the current budget epoch,
+then activates subscriptions with exact ETags. Authenticated catalog checks for both keys and
+anonymous/invalid-key denial must pass before the target is enabled. No inference is used.
+Ordinary model publication still cannot create missing protocol operations.
+
+The latest operation per target remains visible across reloads. Repeating the same start is
+idempotent; retry creates a linked attempt using the original encrypted credentials and plan.
+Changed previews, ownership, configuration, credentials or leases stop the operation. Successful
+activation clears temporary initialization credentials; failed history is retained. Initialization
+neither reopens networking nor overwrites an existing foreign API, policy or budget fence. Real
+Azure readiness and PostgreSQL transaction acceptance require separately authorized validation.
 
 ### OpenAI-compatible connections
 

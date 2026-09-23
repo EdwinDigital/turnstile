@@ -4,9 +4,11 @@ import { cachePolicies } from "../../api/cache-policies"
 import { resolveTimezone } from "../../lib/timezone"
 import { dataSource, usageWindow } from "./api"
 import type {
+  ApimOnboardingOperations,
   ApimTargetTopology,
   ApimTargetTopologyList,
   DistributionDimension,
+  GatewayReleaseOperation,
   ModelRegistry,
   PeopleBudgetFilter,
   TrendDimension,
@@ -79,6 +81,7 @@ export const finopsKeys = {
   entities: ["reference", "enterprise-entities"] as const,
   registry: ["reference", "model-registry"] as const,
   apimTargets: ["control-plane", "apim-targets"] as const,
+  apimOnboarding: ["control-plane", "apim-onboarding"] as const,
   modelBackendPool: (id: string) => ["model-platform", "model-backend-pool", id] as const,
   gatewayPublications: ["control-plane", "gateway-publications"] as const,
   gatewayPublication: (id: string) => ["control-plane", "gateway-publication", id] as const,
@@ -148,7 +151,30 @@ export async function storeApimTarget(queryClient: QueryClient, target: ApimTarg
   void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
 }
 
+export async function storeApimOnboarding(queryClient: QueryClient, operation: GatewayReleaseOperation) {
+  await Promise.all([
+    queryClient.cancelQueries({ queryKey: finopsKeys.apimOnboarding }),
+    queryClient.cancelQueries({ queryKey: finopsKeys.gatewayReleaseOperation(operation.id) }),
+  ])
+  queryClient.setQueryData(finopsKeys.gatewayReleaseOperation(operation.id), operation)
+  queryClient.setQueryData<ApimOnboardingOperations | null>(finopsKeys.apimOnboarding, current => ({
+    ...(current ?? { available: false, unavailable_reason: null }),
+    items: [operation, ...(current?.items ?? []).filter(item => item.gateway_profile_id !== operation.gateway_profile_id)],
+  }))
+  void queryClient.invalidateQueries({ queryKey: finopsKeys.apimOnboarding })
+}
+
 export const finopsQueries = {
+  apimOnboarding: () => queryOptions({
+    queryKey: finopsKeys.apimOnboarding,
+    queryFn: dataSource.apimOnboardingOperations,
+    retry: false,
+    ...cachePolicies.aggregate,
+    refetchIntervalInBackground: true,
+    refetchInterval: query => query.state.data?.items.some(
+      item => !["succeeded", "failed", "restored"].includes(item.status),
+    ) ? 2_000 : false,
+  }),
   apimTargets: () => queryOptions({
     queryKey: finopsKeys.apimTargets,
     queryFn: dataSource.apimTargets,

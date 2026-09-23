@@ -36,8 +36,17 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "009_context_tier_pricing.up.sql",
         "010_budget_execution_protocol.up.sql",
         "011_gateway_targets.up.sql",
+        "012_apim_onboarding.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
+
+
+def test_onboarding_upgrade_only_extends_durable_operation_kind() -> None:
+    sql = (MIGRATIONS / "012_apim_onboarding.up.sql").read_text()
+    assert table_names(sql) == set()
+    assert "'target_inventory_sync', 'apim_onboarding'" in sql
+    assert "DROP CONSTRAINT gateway_release_operation_operation_kind_check" in sql
+    assert not re.search(r"^(INSERT|UPDATE|DELETE|TRUNCATE|DROP TABLE)\b", sql, re.MULTILINE)
 
 
 def test_gateway_target_migration_keeps_history_and_cross_target_constraints() -> None:

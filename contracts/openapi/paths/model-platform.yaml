@@ -1,4 +1,126 @@
 paths:
+  /api/v1/model-management/apim-onboarding:
+    get:
+      tags: [Model Control Plane]
+      operationId: listApimOnboardingOperations
+      summary: List the latest initialization operation per APIM target
+      description: Requires an Owner session. Reads durable task state and capability without contacting Azure. Credentials are never returned.
+      security:
+      - sessionCookie: []
+      responses:
+        '200':
+          description: Initialization availability and persisted operations.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingOperations
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+    post:
+      tags: [Model Control Plane]
+      operationId: startApimOnboarding
+      summary: Queue a confirmed initialization of an existing APIM service
+      description: Requires an Owner session, the write-origin check and configured management authorization. Revalidates the preview hash before queuing. Repeating the same confirmed plan returns its existing operation; a changed plan is rejected. The leased worker initializes only owned API resources and enables the local target after budget projection and authenticated Managed Gateway readiness checks.
+      security:
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingStart
+      responses:
+        '202':
+          description: Persisted initialization operation and status URL.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '502':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/apim-onboarding/preview:
+    post:
+      tags: [Model Control Plane]
+      operationId: previewApimOnboarding
+      summary: Preview a target-bound APIM initialization plan
+      description: Requires an Owner session, the write-origin check and configured management authorization. Read-only validation of the existing APIM, reserved API identity, shared governance configuration and budget readiness. Returns exact generated identifiers, steps, blockers and a confirmation hash. No Azure resource or local target is created by preview.
+      security:
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingRequest
+      responses:
+        '200':
+          description: Initialization plan; ready is false when blockers remain.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingPlan
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '502':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/apim-onboarding/{operation_id}/retry:
+    post:
+      tags: [Model Control Plane]
+      operationId: retryApimOnboarding
+      summary: Retry the latest failed initialization with its original plan
+      description: Requires an Owner session, the write-origin check and configured management authorization. Revalidates the same preview hash, retains the failed operation, links retry_of and reuses the existing encrypted credentials. Does not silently accept changed plans or retry an older attempt.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: operation_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '202':
+          description: New linked operation and status URL.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '502':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
   /api/v1/model-management/apim-targets:
     get:
       tags: [Model Control Plane]

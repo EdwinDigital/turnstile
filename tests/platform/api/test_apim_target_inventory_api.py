@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
 from backend.api import app, control_plane_service
+from backend.http.service_dependencies import apim_onboarding_service
 from backend.http.session import SessionIdentity, require_authenticated_session
+from tests.backend.model_platform.test_apim_onboarding import onboarding_request, service_fixture
 from tests.backend.model_platform.test_gateway_targets import TARGET, deployment, target
 from tests.platform.api.test_model_management_api import (
     client,
@@ -18,8 +21,109 @@ from tests.platform.api.test_model_management_api import (
     publication_api as publication_api,
 )
 from turnstile_core.config import Settings
+from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.control_plane import GatewayControlPlaneService
+
+
+@pytest.mark.usefixtures("management_runtime_service")
+def test_onboarding_http_preview_start_idempotency_and_linked_retry(
+    publication_api: InMemoryRepository,
+) -> None:
+    del publication_api
+    service, repository, _, _ = service_fixture()
+    path = "/api/v1/model-management/apim-onboarding"
+    headers = {"Authorization": "Bearer management-secret"}
+    with patch.dict(app.dependency_overrides, {apim_onboarding_service: lambda: service}):
+        assert client.get(path).json()["available"] is True
+        denied = client.post(path + "/preview", json=onboarding_request().model_dump(mode="json"))
+        assert denied.status_code == 401
+        preview = client.post(path + "/preview", headers=headers,
+                              json=onboarding_request().model_dump(mode="json"))
+        assert preview.status_code == 200
+        plan = preview.json()
+        write = {"request": plan["request"], "confirmation_sha256": plan["confirmation_sha256"]}
+        started = client.post(path, headers=headers, json=write)
+        assert started.status_code == 202
+        operation = started.json()["operation"]
+        repeated = client.post(path, headers=headers, json=write)
+        assert repeated.json()["operation"]["id"] == operation["id"]
+        listed = client.get(path).json()["items"]
+        assert len(listed) == 1 and listed[0]["id"] == operation["id"]
+        assert "primary" not in started.text and "ciphertext" not in started.text
+        changed = client.post(path, headers=headers, json={
+            **write, "confirmation_sha256": "b" * 64,
+        })
+        assert changed.status_code == 409
+        assert client.post(f"{path}/{operation['id']}/retry", headers=headers).status_code == 409
+        row = repository.claim_gateway_release_operation("worker", 180)
+        assert row is not None
+        repository.transition_gateway_release_operation(row["id"], "queued", "failed", {}, "worker")
+        retried = client.post(f"{path}/{operation['id']}/retry", headers=headers)
+        assert retried.status_code == 202
+        assert retried.json()["operation"]["checkpoint"]["retry_of"] == operation["id"]
+
+
+@pytest.mark.usefixtures("management_runtime_service")
+@pytest.mark.parametrize("failure", [
+    PolicyCompilationError("unit-secret"), httpx.ConnectError("unit-secret"),
+])
+@pytest.mark.parametrize("action", ["preview", "start", "retry"])
+def test_onboarding_http_dependency_failures_are_safe(
+    publication_api: InMemoryRepository, failure: Exception, action: str,
+) -> None:
+    del publication_api
+    service = MagicMock()
+    getattr(service, action).side_effect = failure
+    path = "/api/v1/model-management/apim-onboarding"
+    body = onboarding_request().model_dump(mode="json")
+    if action == "preview":
+        path += "/preview"
+    elif action == "retry":
+        path += f"/{TARGET}/retry"
+        body = {}
+    else:
+        body = {"request": body, "confirmation_sha256": "a" * 64}
+    with patch.dict(app.dependency_overrides, {apim_onboarding_service: lambda: service}):
+        response = client.post(
+            path, json=body, headers={"Authorization": "Bearer management-secret"},
+        )
+    assert response.status_code == 502 and "unit-secret" not in response.text
+
+
+@pytest.mark.parametrize("access", ["anonymous", "member", "foreign-origin"])
+def test_onboarding_operations_preserve_owner_session_and_origin_guards(
+    publication_api: InMemoryRepository, access: str,
+) -> None:
+    del publication_api
+    owner = app.dependency_overrides[require_authenticated_session]()
+    service = MagicMock()
+
+    def identity() -> SessionIdentity:
+        if access == "anonymous":
+            raise HTTPException(status_code=401, detail="Sign in required")
+        return SessionIdentity(
+            id=owner.id, email=owner.email, name=owner.name, method=owner.method,
+            role="member" if access == "member" else "owner",
+            session_expires_at=owner.session_expires_at,
+        )
+
+    headers = {"Origin": "https://foreign.example.test"} if access == "foreign-origin" else {}
+    request = onboarding_request().model_dump(mode="json")
+    path = "/api/v1/model-management/apim-onboarding"
+    with patch.dict(app.dependency_overrides, {
+        apim_onboarding_service: lambda: service, require_authenticated_session: identity,
+    }):
+        for url, body in (
+            (path + "/preview", request),
+            (path, {"request": request, "confirmation_sha256": "a" * 64}),
+            (f"{path}/{TARGET}/retry", {}),
+        ):
+            response = client.post(url, json=body, headers=headers)
+            assert response.status_code == (401 if access == "anonymous" else 403)
+        if access != "foreign-origin":
+            assert client.get(path).status_code == (401 if access == "anonymous" else 403)
+    assert service.mock_calls == []
 
 
 def test_target_inventory_sync_is_a_durable_owner_operation(

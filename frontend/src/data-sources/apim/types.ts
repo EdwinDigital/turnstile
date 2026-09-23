@@ -564,6 +564,32 @@ export type ApimTargetTopologyList = {
   onboarding_available: boolean
   self_hosted_gateway_name_edit_supported: boolean
 }
+export type ApimOnboardingRequest = { tenant_id: string; resource_id: string; name?: string | null }
+export type ApimOnboardingPlan = {
+  request: ApimOnboardingRequest
+  gateway_profile_id: string
+  service_name: string
+  service_tier: string
+  location: string
+  managed_gateway_origin: string
+  api_id: string
+  api_path: string
+  dashboard_subscription_id: string
+  probe_subscription_id: string
+  initial_monthly_token_limit: number
+  initial_tokens_per_minute: number
+  ready: boolean
+  blockers: string[]
+  steps: string[]
+  confirmation_sha256: string
+}
+export type ApimOnboardingStart = { request: ApimOnboardingRequest; confirmation_sha256: string }
+export type ApimOnboardingOperations = {
+  available: boolean
+  unavailable_reason: string | null
+  items: GatewayReleaseOperation[]
+}
+
 export type ApimTargetWrite = {
   gateway_profile_id?: string
   name: string
@@ -1093,7 +1119,7 @@ export type GatewayReleaseGcPlan = {
 export type GatewayReleaseOperation = {
   id: string
   gateway_profile_id: string
-  operation_kind: "rollback" | "integrity_check" | "gc_plan" | "application_sync" | "application_provision" | "target_inventory_sync"
+  operation_kind: "rollback" | "integrity_check" | "gc_plan" | "application_sync" | "application_provision" | "target_inventory_sync" | "apim_onboarding"
   target_release_id: string | null
   prior_release_id: string | null
   status: GatewayReleaseOperationStatus

@@ -119,6 +119,7 @@ class Settings(BaseSettings):
     apim_usage_observer_key_named_value: str | None = None
     apim_usage_observers: dict[UUID, ApimUsageObserverConfig] = Field(default_factory=dict)
     control_plane_lease_seconds: int = Field(default=180, ge=30, le=900)
+    control_plane_parent_policy_path: Path = Path("policies/foundry-finops-policy.xml")
     # A normal publication advances through six leased steps. Thirty leaves propagation
     # headroom while still bounding a pathological crash loop.
     control_plane_max_attempts: int = Field(default=30, ge=6, le=60)

@@ -49,6 +49,7 @@ class GatewayReleaseOperationWorker:
         application_projector: Callable[[UUID, UUID], None] | None = None,
         parent_policy: str | None = None,
         parent_policy_overrides: Mapping[UUID, str] | None = None,
+        onboarding_handler: Callable[[Mapping[str, Any], str], None] | None = None,
     ) -> None:
         self._repository = repository
         self._client_resolver = coerce_apim_publisher_client_resolver(client)
@@ -59,6 +60,7 @@ class GatewayReleaseOperationWorker:
         )
         self._cipher = cipher
         self._application_projector = application_projector
+        self._onboarding_handler = onboarding_handler
         self._parent_policy = parent_policy
         self._parent_policy_overrides = dict(parent_policy_overrides or {})
         self._service = GatewayControlPlaneService(
@@ -122,6 +124,11 @@ class GatewayReleaseOperationWorker:
                 ),
                 lease_seconds,
             ):
+                if row["operation_kind"] == GatewayReleaseOperationKind.APIM_ONBOARDING:
+                    if self._onboarding_handler is None:
+                        raise RuntimeError("APIM initialization is not enabled on this Worker")
+                    self._onboarding_handler(row, worker_id)
+                    return self._service.release_operation(operation_id)
                 resolved = self._client_resolver.resolve(UUID(str(row["gateway_profile_id"])))
                 self._validate_operation_target_identity(row, resolved)
                 token = self._active_client.set(resolved.client)
@@ -578,7 +585,10 @@ class GatewayReleaseOperationWorker:
     ) -> None:
         status = str(row["status"])
         updates = self._error_updates(row, error)
-        if row["operation_kind"] == GatewayReleaseOperationKind.APPLICATION_PROVISION:
+        if row["operation_kind"] in {
+            GatewayReleaseOperationKind.APPLICATION_PROVISION,
+            GatewayReleaseOperationKind.APIM_ONBOARDING,
+        }:
             self._transition(row, "failed", updates, worker_id)
             return
         if status in {
@@ -599,7 +609,10 @@ class GatewayReleaseOperationWorker:
         self, row: Mapping[str, Any], worker_id: str
     ) -> None:
         status = str(row["status"])
-        if row["operation_kind"] == GatewayReleaseOperationKind.APPLICATION_PROVISION:
+        if row["operation_kind"] in {
+            GatewayReleaseOperationKind.APPLICATION_PROVISION,
+            GatewayReleaseOperationKind.APIM_ONBOARDING,
+        }:
             next_status = "failed"
         elif status in {
             "promoting",

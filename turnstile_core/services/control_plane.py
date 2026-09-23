@@ -156,6 +156,7 @@ class GatewayControlPlaneService:
         target_inventory_sync_enabled: bool = False,
         deployment_scoping_enabled: bool = False,
         target_registry_enabled: bool = False,
+        onboarding_enabled: bool = False,
     ) -> None:
         self._repository = repository
         self._price_catalog = price_catalog or build_default_catalog()
@@ -166,6 +167,7 @@ class GatewayControlPlaneService:
         self._target_inventory_sync_enabled = target_inventory_sync_enabled
         self._deployment_scoping_enabled = deployment_scoping_enabled
         self._target_registry_enabled = target_registry_enabled
+        self._onboarding_enabled = onboarding_enabled
         self._application_provisioning_enabled = application_provisioning_enabled
         self._application_default_token_limit = application_default_token_limit
         self._application_default_tokens_per_minute = application_default_tokens_per_minute
@@ -329,6 +331,7 @@ class GatewayControlPlaneService:
             ),
             resource_lifecycle_available=False,
             deployment_scoping_available=self._deployment_scoping_enabled,
+            onboarding_available=self._onboarding_enabled,
         )
 
     def apim_target_topology(self, gateway_profile_id: UUID) -> ApimTargetTopology:

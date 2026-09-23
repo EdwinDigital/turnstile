@@ -9,6 +9,7 @@ from uuid import UUID
 from ..domain.application_access import GatewayApplicationLedgerState, UsageApplicationAttribution
 from ..domain.billable_requests import BillableRequestAttempt, BillableRequestPlan
 from ..domain.gateway_targets import (
+    ApimOnboardingPlan,
     ApimTarget,
     ApimTargetRouteBinding,
     GatewayDeployment,
@@ -58,6 +59,28 @@ class OpsDbProxy(Protocol):
 
 
 class QueryRepository(ABC):
+    @abstractmethod
+    def finish_apim_onboarding_operation(
+        self, operation_id: UUID, worker_id: str, credential_ciphertext: bytes,
+        credential_hint: str, configuration_sha256: str,
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def enroll_apim_onboarding_budget_target(
+        self, operation_id: UUID, worker_id: str,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def create_apim_onboarding_operation(
+        self, plan: ApimOnboardingPlan, credential_ciphertext: bytes, actor: str,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def list_apim_onboarding_operations(self) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def retry_apim_onboarding_operation(self, operation_id: UUID, actor: str) -> dict[str, Any]: ...
+
     @abstractmethod
     def upsert_gateway_instance_observation(
         self, observation: GatewayInstanceObservation,

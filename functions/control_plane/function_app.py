@@ -21,6 +21,7 @@ from turnstile_core.integrations.apim_control_plane_contract import (
     ApimPublisherClient,
     ApimPublisherClientResolver,
 )
+from turnstile_core.integrations.apim_onboarding_policy import onboarding_canonical_parent
 from turnstile_core.integrations.apim_target_client_factory import (
     ApimTargetClientConfigResolver,
     AzureApimPublisherClientResolver,
@@ -31,6 +32,10 @@ from turnstile_core.integrations.ledger import TableStorageLedger
 from turnstile_core.persistence.factory import repository_session
 from turnstile_core.persistence.repository_contract import QueryRepository
 from turnstile_core.security import CredentialCipher
+from turnstile_core.services.apim_onboarding import (
+    build_apim_onboarding_service,
+    initialized_apim_targets,
+)
 from turnstile_core.services.application_provisioning_ledger import prepare_application_ledger
 from turnstile_core.services.budget_settlement import BudgetScopeRepository, BudgetScopeService
 from turnstile_core.services.gateway_publication_worker import GatewayPublicationWorker
@@ -55,25 +60,44 @@ def _publisher_clients(
 
 def _target_budget_configuration(
     gateway_id: UUID, settings: Settings, targets: ApimTargetClientConfigResolver | None,
+    repository: QueryRepository | None = None,
 ) -> dict[str, object]:
     scoped = targets.resolve(gateway_id).settings if targets is not None else settings
-    return _budget_configuration(gateway_id, scoped)
+    return _budget_configuration(gateway_id, scoped, repository)
 
 
-def _budget_parent_overrides(source: str, settings: Settings) -> dict[UUID, str]:
+def _budget_parent_overrides(
+    source: str, settings: Settings, repository: QueryRepository | None = None,
+) -> dict[UUID, str]:
     targets = getattr(settings, "budget_execution_target_ids", [])
-    if not targets:
-        return {}
-    if not settings.budget_execution_enabled:
+    if targets and not settings.budget_execution_enabled:
         raise ValueError("Budget publication requires the execution reader")
-    return {target: compose_budget_execution_parent(
+    overrides = {target: compose_budget_execution_parent(
         source, source, enabled=True, delegation=settings.budget_delegation_trust.get(target),
     ) for target in targets}
+    if repository is not None and getattr(settings, "apim_target_registry_enabled", False):
+        for target, request in initialized_apim_targets(repository).items():
+            if target in overrides:
+                raise ValueError("Initialized APIM cannot use a manual parent override")
+            if not settings.budget_execution_enabled or not settings.ledger_table_endpoint:
+                raise ValueError("Initialized APIM requires its budget execution configuration")
+            overrides[target] = onboarding_canonical_parent(
+                source, request.api_id,
+                ledger_table_endpoint=settings.ledger_table_endpoint.rstrip("/"),
+                ledger_table_name=settings.ledger_table_name,
+            )
+    return overrides
 
 
-def _budget_configuration(gateway_id: UUID, settings: Settings) -> dict[str, object]:
+def _budget_configuration(
+    gateway_id: UUID, settings: Settings, repository: QueryRepository | None = None,
+) -> dict[str, object]:
+    initialized = initialized_apim_targets(repository) if (
+        repository is not None and getattr(settings, "apim_target_registry_enabled", False)
+    ) else {}
+    configured = gateway_id in settings.budget_execution_target_ids or gateway_id in initialized
     if (not settings.budget_execution_enabled
-            or gateway_id not in settings.budget_execution_target_ids
+            or not configured
             or not settings.ledger_table_endpoint or not settings.apim_service_name):
         raise ValueError("Budget publication target is not enabled")
     service = settings.apim_service_name.lower()
@@ -91,6 +115,15 @@ def _budget_configuration(gateway_id: UUID, settings: Settings) -> dict[str, obj
             or fence.get("api_id") != settings.apim_api_id
             or str(fence.get("apim_service_id", "")).lower() != service):
         raise ValueError("Budget publication fence does not match its configured target")
+    if gateway_id in initialized:
+        if not isinstance(repository, BudgetScopeRepository):
+            raise ValueError("Initialized APIM requires durable budget execution enrollment")
+        rollout = repository.active_budget_execution_rollout()
+        if (
+            rollout is None or gateway_id not in rollout["gateway_profile_ids"]
+            or str(rollout["epoch"]) != fence.get("epoch")
+        ):
+            raise ValueError("Initialized APIM is not enrolled in the current budget execution")
     return fence
 
 
@@ -121,13 +154,13 @@ def publish_gateway_changes(timer: func.TimerRequest) -> None:
             logger.error("Gateway publication skipped: parent policy baseline is unavailable")
         else:
             parent_policy = policy_path.read_text(encoding="utf-8")
-            overrides = _budget_parent_overrides(parent_policy, settings)
+            overrides = _budget_parent_overrides(parent_policy, settings, repository)
             budget_options: dict[str, Any] = {}
             if overrides:
                 budget_options = {
                     "parent_policy_overrides": overrides,
                     "budget_configuration": lambda gateway_id: _target_budget_configuration(
-                        gateway_id, settings, targets,
+                        gateway_id, settings, targets, repository,
                     ),
                 }
             worker = GatewayPublicationWorker(
@@ -182,7 +215,11 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
         def project_application(gateway_id: UUID, application_id: UUID) -> None:
             if not settings.ledger_table_endpoint:
                 raise RuntimeError("Application admission ledger is not configured")
-            if gateway_id in getattr(settings, "budget_execution_target_ids", []):
+            initialized = initialized_apim_targets(repository) if getattr(
+                settings, "apim_target_registry_enabled", False
+            ) else {}
+            execution_targets = getattr(settings, "budget_execution_target_ids", [])
+            if gateway_id in execution_targets or gateway_id in initialized:
                 if not isinstance(repository, BudgetScopeRepository):
                     raise RuntimeError("Application execution needs a durable repository")
                 atomic_store = AtomicTableLedger(
@@ -203,7 +240,14 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
             os.environ.get("CONTROL_PLANE_PARENT_POLICY_PATH", "policies/foundry-finops-policy.xml")
         )
         parent_policy = policy_path.read_text(encoding="utf-8") if policy_path.is_file() else None
-        overrides = _budget_parent_overrides(parent_policy or "", settings)
+        overrides = _budget_parent_overrides(parent_policy or "", settings, repository)
+        release_options: dict[str, Any] = {}
+        if overrides:
+            release_options["parent_policy_overrides"] = overrides
+        if getattr(settings, "apim_target_registry_enabled", False):
+            release_options["onboarding_handler"] = build_apim_onboarding_service(
+                repository, settings,
+            ).advance
         release_worker = GatewayReleaseOperationWorker(
             repository,
             publisher,
@@ -219,7 +263,7 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
             ),
             cipher=CredentialCipher.from_settings(settings),
             parent_policy=parent_policy,
-            **({"parent_policy_overrides": overrides} if overrides else {}),
+            **release_options,
             application_projector=(
                 project_application
                 if (

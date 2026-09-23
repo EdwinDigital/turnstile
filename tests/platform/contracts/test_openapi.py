@@ -113,8 +113,8 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 82
-    assert len(schemas) == 200
+    assert len(paths) == 85
+    assert len(schemas) == 204
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -148,6 +148,28 @@ def test_gateway_target_contract_matches_actual_structures_and_owner_operations(
     sync = paths["/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync"]
     operation = cast(dict[str, object], sync["post"])
     assert "202" in cast(dict[str, object], operation["responses"])
+
+
+def test_onboarding_contract_has_exact_models_and_durable_owner_operations() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    for name in ("ApimOnboardingRequest", "ApimOnboardingPlan", "ApimOnboardingStart",
+                 "ApimOnboardingOperations"):
+        assert documented[name] == actual[name]
+    paths = _documented_paths()
+    root = "/api/v1/model-management/apim-onboarding"
+    for path, method, response in (
+        (root, "get", "200"), (root, "post", "202"),
+        (root + "/preview", "post", "200"), (root + "/{operation_id}/retry", "post", "202"),
+    ):
+        operation = cast(dict[str, object], paths[path][method])
+        assert operation["security"] == [{"sessionCookie": []}]
+        assert "Owner" in str(operation["description"])
+        assert response in cast(dict[str, object], operation["responses"])
+    properties = cast(
+        dict[str, dict[str, object]], documented["GatewayReleaseOperation"]["properties"],
+    )
+    assert "apim_onboarding" in cast(list[str], properties["operation_kind"]["enum"])
 
 
 def test_gateway_name_contract_preserves_owner_only_name_write_and_minimal_response() -> None:

@@ -4,9 +4,10 @@ from collections.abc import Sequence
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from ..domain.gateway_targets import (
+    ApimOnboardingPlan,
     ApimTarget,
     ApimTargetRouteBinding,
     GatewayDeployment,
@@ -16,6 +17,154 @@ from ..domain.gateway_targets import (
 
 
 class InMemoryGatewayTargetRepositoryMixin:
+    gateway_release_operations: list[dict[str, Any]]
+    gateway_release_operation_secrets: dict[UUID, bytes]
+    gateway_release_operation_audit: list[dict[str, Any]]
+
+    def create_apim_onboarding_operation(
+        self, plan: ApimOnboardingPlan, credential_ciphertext: bytes, actor: str,
+    ) -> dict[str, Any]:
+        if not plan.ready or plan.blockers or not credential_ciphertext:
+            raise ValueError("APIM initialization prerequisites are incomplete")
+        existing = next((row for row in reversed(self.gateway_release_operations)
+                         if row["gateway_profile_id"] == plan.gateway_profile_id
+                         and row["operation_kind"] == "apim_onboarding"), None)
+        if existing is not None:
+            if existing["confirmation_sha256"] != plan.confirmation_sha256:
+                raise ValueError("The APIM initialization plan has changed")
+            return deepcopy(existing)
+        resource_id = plan.request.resource_id.casefold()
+        if any(str(row["arm_resource_id"]).casefold() == resource_id
+               for row in self.apim_targets.values()):
+            raise ValueError("This APIM instance is already registered")
+        name = plan.request.name or f"{plan.service_name} ({plan.gateway_profile_id.hex[:8]})"
+        occupied = any(row["id"] == plan.gateway_profile_id or row["name"] == name
+                       for row in self.gateways)
+        if occupied:
+            raise ValueError("A Gateway profile already uses this identity or name")
+        now = datetime.now(UTC)
+        self.gateways.append({
+            "id": plan.gateway_profile_id, "name": name, "implementation": "apim",
+            "base_url": None, "auth_type": "api_key", "credential_ciphertext": None,
+            "credential_hint": None, "enabled": False, "is_default": False,
+            "created_at": now, "updated_at": now,
+            "config": {"header_name": "Ocp-Apim-Subscription-Key",
+                       "onboarding_resource_id": resource_id,
+                       "onboarding_tenant_id": str(plan.request.tenant_id)},
+        })
+        operation: dict[str, Any] = {
+            "id": uuid4(), "gateway_profile_id": plan.gateway_profile_id,
+            "operation_kind": "apim_onboarding", "target_release_id": None,
+            "prior_release_id": None, "status": "queued",
+            "confirmation_sha256": plan.confirmation_sha256,
+            "semantic_preview": plan.model_dump(mode="json"), "checkpoint": {},
+            "error_code": None, "error_message": None, "lease_owner": None,
+            "lease_expires_at": None, "attempt_count": 0, "created_by": actor,
+            "created_at": now, "started_at": None, "completed_at": None, "updated_at": now,
+        }
+        self.gateway_release_operations.append(operation)
+        self.gateway_release_operation_secrets[operation["id"]] = credential_ciphertext
+        self.gateway_release_operation_audit.append({
+            "id": uuid4(), "operation_id": operation["id"], "from_status": None,
+            "to_status": "queued", "actor": actor, "detail": {}, "created_at": now,
+        })
+        return deepcopy(operation)
+
+    def list_apim_onboarding_operations(self) -> Sequence[dict[str, Any]]:
+        latest = {row["gateway_profile_id"]: row for row in self.gateway_release_operations
+                  if row["operation_kind"] == "apim_onboarding"}
+        return deepcopy(list(latest.values()))
+
+    def retry_apim_onboarding_operation(self, operation_id: UUID, actor: str) -> dict[str, Any]:
+        prior = next((row for row in self.gateway_release_operations
+                      if row["id"] == operation_id), None)
+        if prior is None or prior["operation_kind"] != "apim_onboarding":
+            raise ValueError("APIM initialization operation was not found")
+        current = next(row for row in reversed(self.gateway_release_operations)
+                       if row["gateway_profile_id"] == prior["gateway_profile_id"])
+        if current["id"] != operation_id or prior["status"] != "failed":
+            raise ValueError("Only the latest failed APIM initialization can be retried")
+        secret = self.gateway_release_operation_secrets.get(operation_id)
+        if secret is None:
+            raise ValueError("APIM initialization credentials are unavailable")
+        now = datetime.now(UTC)
+        operation = {
+            **deepcopy(prior), "id": uuid4(), "status": "queued", "created_by": actor,
+            "attempt_count": 0, "lease_owner": None, "lease_expires_at": None,
+            "error_code": None, "error_message": None, "started_at": None,
+            "completed_at": None, "created_at": now, "updated_at": now,
+            "checkpoint": {"retry_of": str(operation_id)},
+        }
+        self.gateway_release_operations.append(operation)
+        self.gateway_release_operation_secrets[operation["id"]] = secret
+        self.gateway_release_operation_audit.append({
+            "id": uuid4(), "operation_id": operation["id"], "from_status": None,
+            "to_status": "queued", "actor": actor, "detail": {"retry_of": str(operation_id)},
+            "created_at": now,
+        })
+        return deepcopy(operation)
+
+    def finish_apim_onboarding_operation(
+        self, operation_id: UUID, worker_id: str, credential_ciphertext: bytes,
+        credential_hint: str, configuration_sha256: str,
+    ) -> dict[str, Any] | None:
+        operation = next((row for row in self.gateway_release_operations
+                          if row["id"] == operation_id), None)
+        now = datetime.now(UTC)
+        if (
+            operation is None or operation["operation_kind"] != "apim_onboarding"
+            or operation["status"] != "preflight_probing" or operation["lease_owner"] != worker_id
+            or operation["lease_expires_at"] is None or operation["lease_expires_at"] <= now
+        ):
+            return None
+        plan = ApimOnboardingPlan.model_validate(operation["semantic_preview"])
+        profile = next((row for row in self.gateways if row["id"] == plan.gateway_profile_id), None)
+        target = self.apim_targets.get(plan.gateway_profile_id)
+        verified = any(row["apim_target_id"] == plan.gateway_profile_id
+                       and row["native_gateway_id"] == "managed"
+                       and row["reachability_state"] == "reachable"
+                       for row in self.gateway_deployments.values())
+        resource_id = plan.request.resource_id.casefold()
+        if (
+            profile is None or profile["enabled"] or profile["is_default"] or target is None
+            or str(target["arm_resource_id"]).casefold() != resource_id
+            or profile["config"].get("onboarding_resource_id") != resource_id
+            or not verified
+        ):
+            raise ValueError("Cannot activate an unverified or changed APIM profile")
+        profile.update(
+            enabled=True,
+            base_url=str(plan.managed_gateway_origin).rstrip("/") + "/" + plan.api_path,
+            credential_ciphertext=credential_ciphertext, credential_hint=credential_hint,
+            updated_at=now,
+        )
+        profile["config"].update({
+            "onboarding_ready": True, "onboarding_request": plan.request.model_dump(mode="json"),
+            "onboarding_configuration_sha256": configuration_sha256,
+        })
+        checkpoint = {
+            **operation["checkpoint"], "step": "activate_target",
+            "completed_steps": plan.steps, "managed_gateway_verified": True,
+        }
+        operation.update(
+            status="succeeded", checkpoint=checkpoint, error_code=None, error_message=None,
+            lease_owner=None, lease_expires_at=None, completed_at=now, updated_at=now,
+        )
+        self.gateway_release_operation_audit.append({
+            "id": uuid4(), "operation_id": operation_id, "from_status": "preflight_probing",
+            "to_status": "succeeded", "actor": worker_id, "detail": checkpoint, "created_at": now,
+        })
+        for row in self.gateway_release_operations:
+            same_target = row["gateway_profile_id"] == plan.gateway_profile_id
+            if same_target and row["operation_kind"] == "apim_onboarding":
+                self.gateway_release_operation_secrets.pop(row["id"], None)
+        return deepcopy(operation)
+
+    def enroll_apim_onboarding_budget_target(
+        self, operation_id: UUID, worker_id: str,
+    ) -> dict[str, Any]:
+        raise RuntimeError("APIM budget enrollment requires a durable PostgreSQL repository")
+
     gateways: list[dict[str, Any]]
     apim_targets: dict[UUID, dict[str, Any]]
     gateway_deployments: dict[UUID, dict[str, Any]]

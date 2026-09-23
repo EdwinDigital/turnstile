@@ -22,13 +22,17 @@ git diff --check
 
 ## Database validation
 
+Migration `012_apim_onboarding` extends the durable release-operation kind constraint only.
+It creates no target or credentials and does not activate a feature. Real initialization acceptance
+must verify same-plan idempotency, failed-task history, linked retry and lease-bound activation.
+
 Migration `011_gateway_targets` adds registered APIM identities, deployment inventory and
 logical-model route bindings. It does not register live targets or rewrite legacy models or usage.
 Validate cross-target foreign keys, the unique enabled default route, preserved retired history,
 and transactional inventory replacement against a separately authorized PostgreSQL environment.
 Local domain and SQL-source tests are not evidence that a migration has been applied.
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, and `011_gateway_targets`), then run the command again and verify that no migration is reapplied.
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, `011_gateway_targets`, and `012_apim_onboarding`), then run the command again and verify that no migration is reapplied.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
@@ -95,6 +99,23 @@ request outcomes cannot authorize a replay. Record unresolved transport errors w
 their cause to the platform without evidence.
 
 ## Browser validation
+
+### APIM initialization
+
+Run the onboarding model-platform tests, target-inventory API tests, Control-plane Function tests
+and OpenAPI checks. Cover exact preview binding, ownership/readback drift, permissions, suspended
+subscriptions, concrete ETag activation, authentication denial, linked retries, lease expiry and
+failure without target activation. Verify repeated Ledger projection preserves confirmed usage and
+outstanding reservations and refuses a different F document. HTTP/SQL doubles are local evidence,
+not real PostgreSQL locking, role propagation, policy compilation or Gateway acceptance.
+
+Before deployment acceptance, authorize the exact existing APIM, Event Hub and Table resources
+and necessary role assignments. Verify the shared governance Named Value, target identity and
+current budget period; retain before/after resource and policy evidence. Confirm the seven owned
+protocol routes, two system-key catalog reads and anonymous denial, then exercise a normal model
+publication on that initialized target. Check the Owner dialog, preview blockers, durable progress,
+failure/retry and desktop/390 px layout against the real authenticated backend. Do not substitute a
+component fixture or create a new environment under a generic testing request.
 
 ### Governed image generation and evidence v2
 

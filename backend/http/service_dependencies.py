@@ -18,6 +18,11 @@ from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
 from turnstile_core.integrations.ledger import LedgerSyncService, TableStorageLedger
 from turnstile_core.pricing.catalog import CompositeCatalog, build_default_catalog
 from turnstile_core.security import CredentialCipher
+from turnstile_core.services.apim_onboarding import (
+    ApimOnboardingService,
+    apim_onboarding_available,
+    build_apim_onboarding_service,
+)
 from turnstile_core.services.application_access import ApplicationAccessService
 from turnstile_core.services.budget_settlement import BudgetStatusRepository, execution_budget_view
 from turnstile_core.services.control_plane import GatewayControlPlaneService
@@ -79,10 +84,20 @@ def control_plane_service(repository: Repository) -> GatewayControlPlaneService:
         ),
         deployment_scoping_enabled=settings.apim_target_registry_enabled,
         target_registry_enabled=settings.apim_target_registry_enabled,
+        onboarding_enabled=apim_onboarding_available(settings),
     )
 
 
 ControlPlaneService = Annotated[GatewayControlPlaneService, Depends(control_plane_service)]
+
+
+def apim_onboarding_service(repository: Repository) -> ApimOnboardingService:
+    return build_apim_onboarding_service(repository, get_settings())
+
+
+ApimOnboardingServiceDependency = Annotated[
+    ApimOnboardingService, Depends(apim_onboarding_service)
+]
 
 
 def application_access_service(repository: Repository) -> ApplicationAccessService:
