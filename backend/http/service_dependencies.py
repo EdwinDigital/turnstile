@@ -93,6 +93,7 @@ def control_plane_service(repository: Repository) -> GatewayControlPlaneService:
             GatewayConnectionProbe() if settings.self_hosted_gateway_enabled else None
         ),
         trusted_gateway_endpoints=settings.self_hosted_gateway_trusted_endpoints,
+        multi_target_rollout_enabled=settings.multi_apim_target_rollout_enabled,
     )
 
 

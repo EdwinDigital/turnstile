@@ -22,6 +22,11 @@ git diff --check
 
 ## Database validation
 
+Migration `013_multi_target_rollout` adds parent intent and target-bound child publication tables
+only. It leaves models, existing releases and financial history unchanged. Validate all-or-none
+queue creation, stable lock order, cross-target child rejection and derived partial status in an
+authorized PostgreSQL database; local repository doubles do not prove transaction isolation.
+
 Migration `012_apim_onboarding` extends the durable release-operation kind constraint only.
 It creates no target or credentials and does not activate a feature. Real initialization acceptance
 must verify same-plan idempotency, failed-task history, linked retry and lease-bound activation.
@@ -32,7 +37,7 @@ Validate cross-target foreign keys, the unique enabled default route, preserved 
 and transactional inventory replacement against a separately authorized PostgreSQL environment.
 Local domain and SQL-source tests are not evidence that a migration has been applied.
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, `011_gateway_targets`, and `012_apim_onboarding`), then run the command again and verify that no migration is reapplied.
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, `011_gateway_targets`, `012_apim_onboarding`, and `013_multi_target_rollout`), then run the command again and verify that no migration is reapplied.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
@@ -182,6 +187,13 @@ For images, verify model-operation selection, required text-input/cached-text/im
 Unit tests may use in-memory repositories. Integration and E2E results must identify the real deployed environment and resource boundary used for validation.
 
 ## Feature acceptance matrix
+
+Multi-target local coverage must include bounded distinct targets, stable parent identity,
+all-or-none child queueing, truthful partial status, canonical manual and tiered catalog prices,
+all price-identity drift fields, and route removal preserving shared access until the final target.
+Validate the same logic with concurrent PostgreSQL transactions and independent real APIM
+publications before operational acceptance. No local double proves distributed promotion,
+pricing under production load or per-target upstream invoice equivalence.
 
 Passing a helper test or finding a source string does not establish complete feature delivery.
 The image Node suites execute the production registry normalization, publication component and

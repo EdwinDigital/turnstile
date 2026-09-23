@@ -51,6 +51,10 @@ import type {
   ImageInvocationRequest,
   ImageInvocationResponse,
   ModelRegistry,
+  MultiTargetPublicationAccepted,
+  MultiTargetPublicationCreate,
+  MultiTargetRollout,
+  MultiTargetRolloutList,
   PriceCatalogModelsResponse,
   PriceCatalogOptionsResponse,
   PriceSyncResponse,
@@ -446,6 +450,15 @@ export const dataSource = {
   publishModel: (value: GatewayPublicationCreate) => requireOpenAICompatibleApi(
     writeJson<GatewayPublicationAccepted>("/api/v1/model-management/publications", value),
   ).then(normalizeGatewayPublicationAccepted),
+  publishMultiTargetModel: (value: MultiTargetPublicationCreate) => writeJson<MultiTargetPublicationAccepted>(
+    "/api/v1/model-management/rollouts", value,
+  ).then(accepted => ({ ...accepted, publications: accepted.publications.map(normalizeGatewayPublication) })),
+  multiTargetRollouts: () => request<MultiTargetRolloutList>(
+    "/api/v1/model-management/rollouts?limit=50",
+  ),
+  multiTargetRollout: (id: string) => request<MultiTargetRollout>(
+    `/api/v1/model-management/rollouts/${encodeURIComponent(id)}`,
+  ),
   gatewayPublication: (id: string) => request<GatewayPublication>(
     `/api/v1/model-management/publications/${encodeURIComponent(id)}`,
   ).then(normalizeGatewayPublication),

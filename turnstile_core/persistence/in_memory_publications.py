@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 from ..domain.control_plane import (
     GatewayPublication,
+    GatewayPublicationIntent,
     publication_materialized_named_values,
     publication_model_id,
 )
 from ..domain.gateway_targets import apim_target_route_binding_id_for
-from .repository_support import _activation_runtime_config, _validate_gateway_deployment_snapshots
+from .repository_support import (
+    _activation_runtime_config,
+    _require_multi_target_model_identity,
+    _validate_gateway_deployment_snapshots,
+)
 
 
 class InMemoryPublicationRepositoryMixin:
+    multi_target_rollouts: list[dict[str, Any]]
+    multi_target_rollout_children: list[dict[str, Any]]
     apim_targets: dict[UUID, dict[str, Any]]
     apim_target_route_bindings: dict[UUID, dict[str, Any]]
     gateway_deployments: dict[UUID, dict[str, Any]]
@@ -55,6 +63,101 @@ class InMemoryPublicationRepositoryMixin:
         cls, items: list[dict[str, Any]], item_id: Any, label: str
     ) -> dict[str, Any]:
         raise NotImplementedError
+
+    def create_multi_target_rollout(
+        self, rollout_id: UUID, rollout_kind: str, logical_model_id: UUID | None,
+        request_sha256: str, created_by: str, children: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        existing = next((row for row in self.multi_target_rollouts
+                         if row["request_sha256"] == request_sha256), None)
+        if existing is not None:
+            return self._multi_target_rollout_view(existing)
+        if len(children) < 2:
+            raise ValueError("A multi-target rollout requires at least two children")
+        if rollout_kind in {"model_add", "model_remove"} and logical_model_id is None:
+            raise ValueError("A model rollout requires a logical model identity")
+        targets = [UUID(str(child["gateway_profile_id"])) for child in children]
+        if len(targets) != len(set(targets)):
+            raise ValueError("A multi-target rollout cannot repeat an APIM target")
+        in_flight = {"queued", "validating", "provisioning", "building_revision", "verifying",
+                     "awaiting_authorization", "promoting", "rolling_back"}
+        for child, target_id in zip(children, targets, strict=True):
+            GatewayPublicationIntent.model_validate({
+                "gateway_profile_id": target_id, "publication_kind": rollout_kind,
+                "desired_spec": child["desired_spec"],
+            })
+            gateway = self._require(self.gateways, target_id, "gateway")
+            if (
+                gateway["implementation"] != "apim"
+                or (not gateway["enabled"] and rollout_kind != "model_remove")
+                or target_id not in self.apim_targets
+            ):
+                raise ValueError("The selected APIM target is unavailable")
+            for publication in self.gateway_publications:
+                if publication["gateway_profile_id"] != target_id:
+                    continue
+                if publication["desired_spec_sha256"] == str(child["desired_spec_sha256"]) \
+                        and publication["status"] not in {"superseded", "rolled_back"}:
+                    raise ValueError("A target already has this desired release")
+                if publication["status"] in in_flight:
+                    raise ValueError("Another gateway publication is already in progress")
+            _validate_gateway_deployment_snapshots(
+                target_id, child["desired_spec"], list(self.gateway_deployments.values()),
+            )
+        counts = (len(self.gateway_publications), len(self.gateway_publication_audit),
+                  len(self.gateway_publication_outbox))
+        secrets = dict(self.gateway_publication_secrets)
+        now = datetime.now(UTC)
+        parent = {"schema_version": 1, "id": rollout_id, "rollout_kind": rollout_kind,
+                  "logical_model_id": logical_model_id, "request_sha256": request_sha256,
+                  "created_by": created_by, "created_at": now}
+        child_rows: list[dict[str, Any]] = []
+        try:
+            for child, target_id in zip(children, targets, strict=True):
+                publication = self.create_gateway_publication(
+                    target_id, child["desired_spec"], str(child["desired_spec_sha256"]),
+                    rollout_kind, created_by, child.get("credential_ciphertext"),
+                )
+                child_rows.append({
+                    "rollout_id": rollout_id, "apim_target_id": target_id,
+                    "publication_id": publication["id"],
+                    "required": bool(child.get("required", True)),
+                    "created_at": now,
+                })
+        except Exception:
+            del self.gateway_publications[counts[0]:]
+            del self.gateway_publication_audit[counts[1]:]
+            del self.gateway_publication_outbox[counts[2]:]
+            self.gateway_publication_secrets.clear()
+            self.gateway_publication_secrets.update(secrets)
+            raise
+        self.multi_target_rollouts.append(parent)
+        self.multi_target_rollout_children.extend(child_rows)
+        return self._multi_target_rollout_view(parent)
+
+    def get_multi_target_rollout(self, rollout_id: UUID) -> dict[str, Any] | None:
+        row = next((item for item in self.multi_target_rollouts if item["id"] == rollout_id), None)
+        return self._multi_target_rollout_view(row) if row is not None else None
+
+    def list_multi_target_rollouts(self, limit: int = 50) -> Sequence[dict[str, Any]]:
+        rows = sorted(self.multi_target_rollouts,
+                      key=lambda item: (item["created_at"], str(item["id"])), reverse=True)[:limit]
+        return [self._multi_target_rollout_view(row) for row in rows]
+
+    def _multi_target_rollout_view(self, rollout: Mapping[str, Any]) -> dict[str, Any]:
+        children = []
+        child_rows = [row for row in self.multi_target_rollout_children
+                      if row["rollout_id"] == rollout["id"]]
+        for child in sorted(
+            child_rows,
+            key=lambda item: str(item["apim_target_id"]),
+        ):
+            publication = self._require(
+                self.gateway_publications, child["publication_id"], "publication",
+            )
+            children.append({**child, "publication_status": publication["status"],
+                             "publication": publication})
+        return deepcopy({**rollout, "children": children})
 
     def create_gateway_publication(
         self,
@@ -1058,40 +1161,50 @@ class InMemoryPublicationRepositoryMixin:
                 raise ValueError("The default model cannot be deleted")
             changed_at = datetime.now(UTC)
             changed_by = str(publication["created_by"])
-            for user_id, policy in self.user_model_policies.items():
-                previous_model_ids = list(policy["model_ids"])
-                current_model_ids = [
-                    item for item in previous_model_ids if item != model_id
-                ]
-                if current_model_ids == previous_model_ids:
-                    continue
-                policy.update(
-                    model_ids=current_model_ids,
-                    updated_at=changed_at,
-                    updated_by=changed_by,
-                )
-                self.user_model_access_audit.insert(
-                    0,
-                    {
-                        "id": uuid4(),
-                        "user_id": user_id,
-                        "previous_model_ids": previous_model_ids,
-                        "new_model_ids": current_model_ids,
-                        "changed_at": changed_at,
-                        "changed_by": changed_by,
-                    },
-                )
-            if self.assistant_setting.get("model_id") == model_id:
-                self.assistant_setting.update(
-                    model_id=None,
-                    updated_at=changed_at,
-                    updated_by=changed_by,
-                )
+            target_id = UUID(str(publication["gateway_profile_id"]))
             self.apim_target_route_bindings = {
                 identity: row for identity, row in self.apim_target_route_bindings.items()
-                if row["logical_model_id"] != model_id
+                if row["logical_model_id"] != model_id or row["apim_target_id"] != target_id
             }
-            self.models.remove(model)
+            remaining = [row for row in self.apim_target_route_bindings.values()
+                         if row["logical_model_id"] == model_id and row["enabled"]]
+            if remaining:
+                selected_route = next(
+                    (row for row in remaining if row["is_default_serving"]), remaining[0],
+                )
+                for row in remaining:
+                    row["is_default_serving"] = row is selected_route
+                selected_runtime = self._require(
+                    self.runtimes, selected_route["runtime_id"], "runtime",
+                )
+                selected_provider = self._require(
+                    self.providers, selected_runtime["provider_id"], "provider",
+                )
+                model.update(
+                    runtime_id=selected_runtime["id"], runtime_name=selected_runtime["name"],
+                    provider_id=selected_provider["id"], provider_name=selected_provider["name"],
+                    updated_at=changed_at,
+                )
+            else:
+                for user_id, policy in self.user_model_policies.items():
+                    previous_model_ids = list(policy["model_ids"])
+                    current_model_ids = [item for item in previous_model_ids if item != model_id]
+                    if current_model_ids == previous_model_ids:
+                        continue
+                    policy.update(
+                        model_ids=current_model_ids, updated_at=changed_at, updated_by=changed_by,
+                    )
+                    self.user_model_access_audit.insert(0, {
+                        "id": uuid4(), "user_id": user_id,
+                        "previous_model_ids": previous_model_ids,
+                        "new_model_ids": current_model_ids,
+                        "changed_at": changed_at, "changed_by": changed_by,
+                    })
+                if self.assistant_setting.get("model_id") == model_id:
+                    self.assistant_setting.update(
+                        model_id=None, updated_at=changed_at, updated_by=changed_by,
+                    )
+                self.models.remove(model)
             self._sync_active_route_bindings(publication)
             previous_release_id = self.effective_gateway_releases.get(
                 publication["gateway_profile_id"]
@@ -1216,7 +1329,10 @@ class InMemoryPublicationRepositoryMixin:
                 self.providers, UUID(str(binding["provider_id"])), "provider"
             )
         else:
-            provider = self.create_registry_item(
+            existing_provider = next((row for row in self.providers
+                                      if str(row["name"]).casefold()
+                                      == str(binding["provider_name"]).casefold()), None)
+            provider = existing_provider or self.create_registry_item(
                 "provider",
                 {
                     "name": binding["provider_name"],
@@ -1230,6 +1346,11 @@ class InMemoryPublicationRepositoryMixin:
                     "config": binding.get("provider_config") or {},
                 },
             )
+            if (
+                not provider["enabled"] or provider["provider_kind"] != binding["provider_kind"]
+                or dict(provider.get("config") or {}) != dict(binding.get("provider_config") or {})
+            ):
+                raise ValueError("A provider with this name exists with incompatible settings")
         if binding.get("runtime_id"):
             runtime = self._require(
                 self.runtimes, UUID(str(binding["runtime_id"])), "runtime"
@@ -1261,12 +1382,14 @@ class InMemoryPublicationRepositoryMixin:
                     "allowed_roles": ["owner", "admin", "member"],
                 },
             )
-        if any(
-            model["model_key"].casefold() == model_spec["model_key"].casefold()
-            for model in self.models
-        ):
-            raise ValueError("The model alias is already active")
-        model = self.create_registry_item(
+        existing_model = next((row for row in self.models
+                               if str(row["model_key"]).casefold()
+                               == str(model_spec["model_key"]).casefold()), None)
+        logical_value = binding.get("logical_model_id")
+        logical_id = UUID(str(logical_value)) if logical_value else None
+        if existing_model is not None:
+            _require_multi_target_model_identity(existing_model, model_spec, logical_id)
+        model = existing_model or self.create_registry_item(
             "model",
             {
                 "id": UUID(str(binding["logical_model_id"])) if binding.get("logical_model_id")
@@ -1304,7 +1427,8 @@ class InMemoryPublicationRepositoryMixin:
                 "publication_id": publication_id,
             },
         )
-        model["publication_id"] = publication_id
+        if existing_model is None:
+            model["publication_id"] = publication_id
         self._sync_active_route_bindings(publication)
         previous_release_id = self.effective_gateway_releases.get(
             publication["gateway_profile_id"]

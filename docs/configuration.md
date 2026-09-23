@@ -155,6 +155,37 @@ activation clears temporary initialization credentials; failed history is retain
 neither reopens networking nor overwrites an existing foreign API, policy or budget fence. Real
 Azure readiness and PostgreSQL transaction acceptance require separately authorized validation.
 
+### Multi-target model publication
+
+Apply `013_multi_target_rollout` and upgrade API and Control-plane code together before enabling
+`MULTI_APIM_TARGET_ROLLOUT_ENABLED` with the target registry. The flag defaults to false. The
+Owner API is `POST /api/v1/model-management/rollouts`; GET the same path for recent intents or
+append its returned rollout UUID for current status. This version exposes API/client support,
+not a multi-target selection dialog. Existing Add Model remains a single-target workflow.
+
+The request contains two to twenty `children`, each with a normal `publication` and optional
+`required` metadata. Targets must be distinct, registered and individually ready. All plans are
+validated before one transaction inserts the parent and all child publications/outboxes. The
+request's stable identity excludes credential values and child order. Repeating it returns the
+same rollout, not a new set of inference probes. Each child uses its own encrypted temporary
+credential and target-specific runtime, policy and probe configuration.
+
+The canonical child is the first child with an explicit model identity in target-UUID order,
+or the first child in that order when all aliases are derived. Multiple explicit model identities
+must agree. Its alias, display metadata, capabilities, access rules and complete price snapshot
+are used for all children. This includes source, reference, discount, all four charged/list prices
+and every context tier/range/provenance field. Upstream model IDs and target runtime bindings
+remain target-specific. The first successful activation establishes the logical model; later
+activations must match its full price identity and cannot silently reprice it.
+
+Targets execute independently; queue atomicity is not cross-APIM promotion atomicity. All queued
+children report `queued`; any active work reports `in_progress`; mixed terminal success and
+failure reports `partial`, including failure of an optional child. A failed child uses the existing
+publication retry or authorization-resume endpoint. Successful targets are not automatically
+replayed or rolled back. Removing one target route preserves the model, prices and user access
+while another enabled route remains, transferring the default serving runtime when necessary.
+Removing the last route uses the normal model-removal lifecycle and preserves request history.
+
 ### OpenAI-compatible connections
 
 Register an OpenAI-compatible Connection with an HTTPS Base URL and optional API-provider display metadata. URLs must not contain credentials, query parameters, or fragments. A trailing `/chat/completions` is normalized into the provider path; the public gateway path remains `/chat/completions`.

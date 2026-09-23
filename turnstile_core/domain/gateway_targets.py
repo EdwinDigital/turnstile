@@ -126,6 +126,86 @@ def apim_target_route_binding_id_for(logical_model_id: UUID, apim_target_id: UUI
     return uuid5(_APIM_TARGET_ROUTE_NAMESPACE, f"{logical_model_id}:{apim_target_id}")
 
 
+class TargetRolloutKind(StrEnum):
+    MODEL_ADD = "model_add"
+    MODEL_REMOVE = "model_remove"
+    CREDENTIAL_ROTATION = "credential_rotation"
+    ROUTE_RECONCILE = "route_reconcile"
+
+
+class TargetRolloutChildStatus(StrEnum):
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    ROLLING_BACK = "rolling_back"
+    ROLLED_BACK = "rolled_back"
+
+
+class TargetRolloutStatus(StrEnum):
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    SUCCEEDED = "succeeded"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    ROLLING_BACK = "rolling_back"
+    ROLLED_BACK = "rolled_back"
+
+
+class TargetRolloutChild(StrictModel):
+    apim_target_id: UUID
+    publication_id: UUID
+    required: bool = True
+    status: TargetRolloutChildStatus
+
+
+def derive_target_rollout_status(children: tuple[TargetRolloutChild, ...]) -> TargetRolloutStatus:
+    if not children:
+        raise ValueError("A multi-target rollout requires at least one child publication")
+    statuses = {child.status for child in children}
+    if statuses == {TargetRolloutChildStatus.QUEUED}:
+        return TargetRolloutStatus.QUEUED
+    if TargetRolloutChildStatus.ROLLING_BACK in statuses:
+        return TargetRolloutStatus.ROLLING_BACK
+    if statuses & {TargetRolloutChildStatus.QUEUED, TargetRolloutChildStatus.IN_PROGRESS}:
+        return TargetRolloutStatus.IN_PROGRESS
+    if statuses == {TargetRolloutChildStatus.SUCCEEDED}:
+        return TargetRolloutStatus.SUCCEEDED
+    if statuses == {TargetRolloutChildStatus.ROLLED_BACK}:
+        return TargetRolloutStatus.ROLLED_BACK
+    if TargetRolloutChildStatus.SUCCEEDED in statuses:
+        return TargetRolloutStatus.PARTIAL
+    return TargetRolloutStatus.FAILED
+
+
+class MultiTargetRollout(StrictModel):
+    schema_version: Literal[1] = 1
+    id: UUID
+    kind: TargetRolloutKind
+    logical_model_id: UUID | None = None
+    status: TargetRolloutStatus
+    children: tuple[TargetRolloutChild, ...] = Field(min_length=1)
+    created_by: str = Field(min_length=1, max_length=320)
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def validate_children_and_status(self) -> MultiTargetRollout:
+        targets = [child.apim_target_id for child in self.children]
+        if len(targets) != len(set(targets)):
+            raise ValueError("A multi-target rollout cannot repeat an APIM target")
+        expected = derive_target_rollout_status(self.children)
+        if self.status is not expected:
+            raise ValueError(f"Multi-target rollout status must be derived as {expected.value}")
+        if self.kind in {TargetRolloutKind.MODEL_ADD, TargetRolloutKind.MODEL_REMOVE} \
+                and self.logical_model_id is None:
+            raise ValueError("A model rollout requires a logical model identity")
+        return self
+
+
+class MultiTargetRolloutList(StrictModel):
+    items: list[MultiTargetRollout]
+
+
 class ApimTargetCapabilitySnapshot(StrictModel):
     schema_version: Literal[1] = 1
     self_hosted_gateway: CapabilitySupport = CapabilitySupport.UNKNOWN

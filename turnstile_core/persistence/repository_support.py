@@ -25,6 +25,28 @@ def _validate_gateway_deployment_snapshots(
             raise ValueError("Gateway deployment changed before publication; refresh and retry")
 
 
+def _require_multi_target_model_identity(
+    existing: Mapping[str, Any], model_spec: Mapping[str, Any], logical_model_id: UUID | None,
+) -> None:
+    if logical_model_id is None or UUID(str(existing["id"])) != logical_model_id:
+        raise ValueError("The model alias is already active")
+    fields = (
+        "display_name", "family_key", "capabilities", "context_window",
+        "input_cost_per_million", "output_cost_per_million", "cached_cost_per_million",
+        "cache_write_cost_per_million", "price_reference", "price_discount_percent",
+        "list_input_cost_per_million", "list_output_cost_per_million",
+        "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+        "allowed_roles", "assignment_required",
+    )
+    matching = all(existing.get(name) == model_spec.get(name) for name in fields)
+    same_source = existing.get("price_source", "manual") == model_spec.get("price_source", "manual")
+    same_tiers = (existing.get("context_price_tiers") or []) == (
+        model_spec.get("context_price_tiers") or []
+    )
+    if not matching or not same_source or not same_tiers:
+        raise ValueError("Multi-target child conflicts with the logical model identity")
+
+
 def _activation_runtime_config(binding: Mapping[str, Any]) -> dict[str, Any]:
     config = {
         **(binding.get("runtime_config") or {}),

@@ -32,6 +32,8 @@ from turnstile_core.domain.control_plane import (
     GatewayReleaseProtectionWrite,
     GatewayReleaseRollbackPreview,
     GatewayReleaseRollbackRequest,
+    MultiTargetPublicationCreate,
+    MultiTargetPublicationRequestAccepted,
 )
 from turnstile_core.domain.enterprise import (
     configured_invocation_tester,
@@ -47,6 +49,8 @@ from turnstile_core.domain.gateway_targets import (
     ApimTargetTopologyList,
     ApimTargetWrite,
     GatewayDeploymentTopology,
+    MultiTargetRollout,
+    MultiTargetRolloutList,
     SelfHostedGatewayAssociationChange,
     SelfHostedGatewayNameWrite,
     SelfHostedGatewayRemovalPreview,
@@ -736,6 +740,52 @@ def create_gateway_publication(
         publication=GatewayPublicationView.from_publication(publication),
         status_url=f"/api/v1/model-management/publications/{publication.id}",
     )
+
+
+@publication_router.post(
+    "/api/v1/model-management/rollouts",
+    response_model=MultiTargetPublicationRequestAccepted, status_code=202,
+)
+def create_multi_target_rollout(
+    write: MultiTargetPublicationCreate, service: ControlPlaneService,
+    owner_email: PublicationOwner,
+) -> MultiTargetPublicationRequestAccepted:
+    try:
+        rollout, publications = service.publish_multi_target(write, owner_email)
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return MultiTargetPublicationRequestAccepted(
+        rollout=rollout,
+        publications=[GatewayPublicationView.from_publication(item) for item in publications],
+        status_url=f"/api/v1/model-management/rollouts/{rollout.id}",
+    )
+
+
+@publication_router.get(
+    "/api/v1/model-management/rollouts", response_model=MultiTargetRolloutList,
+)
+def list_multi_target_rollouts(
+    service: ControlPlaneService, owner_email: PublicationOwner,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> MultiTargetRolloutList:
+    del owner_email
+    return MultiTargetRolloutList(items=service.multi_target_rollouts(limit))
+
+
+@publication_router.get(
+    "/api/v1/model-management/rollouts/{rollout_id}", response_model=MultiTargetRollout,
+)
+def get_multi_target_rollout(
+    rollout_id: UUID, service: ControlPlaneService, owner_email: PublicationOwner,
+) -> MultiTargetRollout:
+    del owner_email
+    try:
+        rollout, _ = service.multi_target_rollout(rollout_id)
+        return rollout
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @publication_router.post(

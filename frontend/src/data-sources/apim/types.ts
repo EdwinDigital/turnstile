@@ -932,6 +932,33 @@ export type GatewayPublicationAccepted = {
   status_url: string
 }
 
+export type MultiTargetPublicationCreate = {
+  children: Array<{ publication: GatewayPublicationCreate; required?: boolean }>
+}
+export type TargetRolloutChildStatus = "queued" | "in_progress" | "succeeded" | "failed" | "rolling_back" | "rolled_back"
+export type TargetRolloutStatus = TargetRolloutChildStatus | "partial"
+export type MultiTargetRollout = {
+  schema_version: 1
+  id: string
+  kind: "model_add" | "model_remove" | "credential_rotation" | "route_reconcile"
+  logical_model_id: string | null
+  status: TargetRolloutStatus
+  children: Array<{
+    apim_target_id: string
+    publication_id: string
+    required: boolean
+    status: TargetRolloutChildStatus
+  }>
+  created_by: string
+  created_at: string
+}
+export type MultiTargetRolloutList = { items: MultiTargetRollout[] }
+export type MultiTargetPublicationAccepted = {
+  rollout: MultiTargetRollout
+  publications: GatewayPublication[]
+  status_url: string
+}
+
 export type GatewayRateLimitCircuitBreaker = {
   failure_count: 1
   interval_seconds: 60

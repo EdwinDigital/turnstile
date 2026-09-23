@@ -48,6 +48,10 @@ tags:
 - name: Model Router
   description: User-scoped model routing drafts, validation, version publication, and lifecycle.
 paths:
+  /api/v1/model-management/rollouts:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1rollouts
+  /api/v1/model-management/rollouts/{rollout_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1rollouts~1{rollout_id}
   /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1self-hosted-gateways
   /api/v1/model-management/self-hosted-gateways/{deployment_id}/name:
@@ -279,6 +283,24 @@ components:
     ErrorResponse:
       $ref: ./openapi/components/common.yaml#/responses/ErrorResponse
   schemas:
+    MultiTargetPublicationChildCreate:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/MultiTargetPublicationChildCreate
+    MultiTargetPublicationCreate:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/MultiTargetPublicationCreate
+    MultiTargetPublicationRequestAccepted:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/MultiTargetPublicationRequestAccepted
+    MultiTargetRollout:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/MultiTargetRollout
+    MultiTargetRolloutList:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/MultiTargetRolloutList
+    TargetRolloutChild:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/TargetRolloutChild
+    TargetRolloutChildStatus:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/TargetRolloutChildStatus
+    TargetRolloutKind:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/TargetRolloutKind
+    TargetRolloutStatus:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/TargetRolloutStatus
     SelfHostedGatewayWrite:
       $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayWrite
     SelfHostedGatewayNameWrite:

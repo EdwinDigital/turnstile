@@ -1,4 +1,40 @@
 schemas:
+  MultiTargetPublicationChildCreate:
+    type: object
+    additionalProperties: false
+    title: MultiTargetPublicationChildCreate
+    required: [publication]
+    properties:
+      publication:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationCreate
+      required: {type: boolean, title: Required, default: true}
+  MultiTargetPublicationCreate:
+    type: object
+    additionalProperties: false
+    title: MultiTargetPublicationCreate
+    required: [children]
+    properties:
+      children:
+        type: array
+        minItems: 2
+        maxItems: 20
+        title: Children
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/MultiTargetPublicationChildCreate
+  MultiTargetPublicationRequestAccepted:
+    type: object
+    additionalProperties: false
+    title: MultiTargetPublicationRequestAccepted
+    required: [rollout, publications, status_url]
+    properties:
+      rollout:
+        $ref: ../../openapi.yaml#/components/schemas/MultiTargetRollout
+      publications:
+        type: array
+        title: Publications
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayPublication
+      status_url: {type: string, title: Status Url}
   GatewayProfileNameWrite:
     type: object
     additionalProperties: false

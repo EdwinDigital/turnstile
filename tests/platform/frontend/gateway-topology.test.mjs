@@ -498,6 +498,41 @@ test("adding a Self-hosted Gateway uses the selected APIM and schedules one inve
   assert.equal(harness.syncCalls.length, 1)
 })
 
+test("multi-target clients preserve parent and child identity with exact public URLs", async () => {
+  const calls = []
+  const rollout = { id: "parent", status: "partial", logical_model_id: "logical-model", children: [
+    { apim_target_id: "first", publication_id: "child-one", required: true, status: "succeeded" },
+    { apim_target_id: "second", publication_id: "child-two", required: false, status: "failed" },
+  ] }
+  const response = { rollout, status_url: "/api/v1/model-management/rollouts/parent", publications: [
+    { id: "child-one", gateway_profile_id: "first", status: "active" },
+    { id: "child-two", gateway_profile_id: "second", status: "failed", retry_requires_credential: true },
+  ] }
+  const api = apiHarness(async (...args) => { calls.push(args); return args[0].endsWith("?limit=50") ? { items: [rollout] } : rollout },
+    async (...args) => { calls.push(args); return response })
+  const payload = { children: [{ publication: { gateway_profile_id: "first" } }, { publication: { gateway_profile_id: "second" }, required: false }] }
+  const accepted = await api.publishMultiTargetModel(payload)
+  assert.equal(calls[0][0], "/api/v1/model-management/rollouts")
+  assert.equal(calls[0][1], payload)
+  assert.equal(accepted.rollout, rollout)
+  assert.equal(accepted.status_url, response.status_url)
+  assert.deepEqual(Array.from(accepted.publications, item => item.id), ["child-one", "child-two"])
+  assert.equal(accepted.publications[1].retry_requires_credential, true)
+  assert.equal((await api.multiTargetRollouts()).items[0], rollout)
+  assert.equal(await api.multiTargetRollout("parent/path"), rollout)
+  assert.equal(calls[1][0], "/api/v1/model-management/rollouts?limit=50")
+  assert.equal(calls[2][0], "/api/v1/model-management/rollouts/parent%2Fpath")
+})
+
+test("multi-target clients never turn authorization or availability errors into success", async () => {
+  for (const status of [401, 403, 404, 409, 503]) {
+    const api = apiHarness(async () => { throw new ApiError(status) })
+    await assert.rejects(api.publishMultiTargetModel({ children: [] }), error => error.status === status)
+    await assert.rejects(api.multiTargetRollout("parent"), error => error.status === status)
+    await assert.rejects(api.multiTargetRollouts(), error => error.status === status)
+  }
+})
+
 test("registration and sync clients use the exact public routes", async () => {
   const calls = []
   const api = apiHarness(async (...args) => { calls.push(args); return { operation: { id: "queued" } } })

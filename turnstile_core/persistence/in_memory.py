@@ -154,6 +154,8 @@ class InMemoryRepository(
         self.user_model_policies: dict[str, dict[str, Any]] = {}
         self.user_model_access_audit: list[dict[str, Any]] = []
         self.gateway_publications: list[dict[str, Any]] = []
+        self.multi_target_rollouts: list[dict[str, Any]] = []
+        self.multi_target_rollout_children: list[dict[str, Any]] = []
         self.gateway_publication_audit: list[dict[str, Any]] = []
         self.gateway_publication_outbox: list[dict[str, Any]] = []
         self.gateway_publication_secrets: dict[UUID, bytes] = {}

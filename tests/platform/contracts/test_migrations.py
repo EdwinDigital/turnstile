@@ -37,8 +37,19 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "010_budget_execution_protocol.up.sql",
         "011_gateway_targets.up.sql",
         "012_apim_onboarding.up.sql",
+        "013_multi_target_rollout.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
+
+
+def test_multi_target_upgrade_preserves_history_and_binds_child_publication_target() -> None:
+    sql = (MIGRATIONS / "013_multi_target_rollout.up.sql").read_text()
+    assert table_names(sql) == {"multi_target_rollout", "multi_target_rollout_child"}
+    assert "request_sha256 TEXT NOT NULL UNIQUE" in sql
+    assert "PRIMARY KEY (rollout_id, apim_target_id)" in sql
+    assert "publication_target <> NEW.apim_target_id" in sql
+    assert "ON DELETE RESTRICT" in sql
+    assert not re.search(r"^(INSERT|UPDATE|DELETE|TRUNCATE|DROP)\b", sql, re.MULTILINE)
 
 
 def test_onboarding_upgrade_only_extends_durable_operation_kind() -> None:

@@ -1,4 +1,93 @@
 paths:
+  /api/v1/model-management/rollouts:
+    post:
+      tags: [Model Control Plane]
+      operationId: createMultiTargetRollout
+      summary: Atomically queue model publication to multiple APIM targets
+      description: Requires the existing publication Owner session and write-origin checks plus MULTI_APIM_TARGET_ROLLOUT_ENABLED. Accepts two to twenty distinct registered targets. All plans are prepared before one queue transaction. A canonical child supplies the shared logical model and complete price identity; target-specific runtime and upstream bindings remain separate. The parent is idempotent, excludes credentials from its request identity, and reports independent child outcomes rather than distributed atomic promotion.
+      security:
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/MultiTargetPublicationCreate
+      responses:
+        '202':
+          description: Parent intent, safe child publication views and parent status URL.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/MultiTargetPublicationRequestAccepted
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+    get:
+      tags: [Model Control Plane]
+      operationId: listMultiTargetRollouts
+      summary: List recent multi-target rollout intents and derived status
+      description: Requires the publication Owner session. Status is derived from every child; mixed terminal success and failure is partial. This endpoint performs no ARM or inference requests.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: limit
+        in: query
+        schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+      responses:
+        '200':
+          description: Recent parent rollout states.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/MultiTargetRolloutList
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/rollouts/{rollout_id}:
+    get:
+      tags: [Model Control Plane]
+      operationId: getMultiTargetRollout
+      summary: Read one multi-target rollout with child publication identities
+      description: Requires the publication Owner session. Failed children retain their own existing publication retry and authorization-resume workflows; successful targets are not implicitly replayed or rolled back.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: rollout_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Parent intent with current derived status and child references.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/MultiTargetRollout
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
   /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways:
     post:
       tags: [Model Control Plane]

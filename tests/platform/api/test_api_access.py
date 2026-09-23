@@ -227,6 +227,7 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         if isinstance(route, APIRoute)
         and (
             route.path.startswith("/api/v1/model-management/publications")
+            or route.path.startswith("/api/v1/model-management/rollouts")
             or route.path.endswith("/credentials/rotate")
             or (
                 route.path.endswith("/backend-pool")
@@ -234,7 +235,13 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
             )
         )
     ]
-    assert len(publication_routes) == 9
+    assert len(publication_routes) == 12
+    rollout_routes = [route for route in publication_routes if "/rollouts" in route.path]
+    assert {(route.path, method) for route in rollout_routes for method in route.methods or ()} == {
+        ("/api/v1/model-management/rollouts", "GET"),
+        ("/api/v1/model-management/rollouts", "POST"),
+        ("/api/v1/model-management/rollouts/{rollout_id}", "GET"),
+    }
     for route in publication_routes:
         assert any(
             dependency.call is require_publication_owner

@@ -618,6 +618,18 @@ class QueryRepository(ABC):
     def delete_gateway_if_unused(self, gateway_id: UUID) -> bool: ...
 
     @abstractmethod
+    def create_multi_target_rollout(
+        self, rollout_id: UUID, rollout_kind: str, logical_model_id: UUID | None,
+        request_sha256: str, created_by: str, children: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_multi_target_rollout(self, rollout_id: UUID) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_multi_target_rollouts(self, limit: int = 50) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
     def create_gateway_publication(
         self,
         gateway_profile_id: UUID,

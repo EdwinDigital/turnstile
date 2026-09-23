@@ -7,14 +7,17 @@ import pytest
 from fastapi import HTTPException
 
 from backend.api import app, control_plane_service
+from backend.http.publication_auth import require_publication_owner
 from backend.http.service_dependencies import apim_onboarding_service
 from backend.http.session import SessionIdentity, require_authenticated_session
+from tests.backend.model_platform.control_plane_support import TEST_CIPHER
 from tests.backend.model_platform.test_apim_onboarding import onboarding_request, service_fixture
 from tests.backend.model_platform.test_apim_target_inventory import (
     lifecycle_service,
     self_hosted_write,
 )
 from tests.backend.model_platform.test_gateway_targets import TARGET, deployment, target
+from tests.backend.model_platform.test_multi_target_rollout import multi_request, rollout_fixture
 from tests.platform.api.test_model_management_api import (
     client,
 )
@@ -28,6 +31,57 @@ from turnstile_core.config import Settings
 from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.control_plane import GatewayControlPlaneService
+
+
+def test_multi_target_http_create_is_idempotent_and_credential_safe(
+    publication_api: InMemoryRepository,
+) -> None:
+    del publication_api
+    repository, children = rollout_fixture()
+    request = multi_request([child["gateway_profile_id"] for child in children])
+    write = request.model_dump(mode="json")
+    path = "/api/v1/model-management/rollouts"
+    assert client.post(path, json=write).status_code == 503
+    service = GatewayControlPlaneService(
+        repository, TEST_CIPHER, multi_target_rollout_enabled=True,
+    )
+    with patch.dict(app.dependency_overrides, {control_plane_service: lambda: service}):
+        assert client.get(path + f"/{TARGET}").status_code == 404
+        response = client.post(path, json=write)
+        assert response.status_code == 202, response.text
+        accepted = response.json()
+        assert accepted["rollout"]["status"] == "queued"
+        assert len(accepted["publications"]) == 2
+        assert "credential_ciphertext" not in response.text and "**********" not in response.text
+        assert all("api_key" not in item for item in accepted["publications"])
+        assert all("desired_spec" not in item for item in accepted["publications"])
+        assert client.post(path, json=write).json()["rollout"]["id"] == accepted["rollout"]["id"]
+        assert client.get(accepted["status_url"]).json() == accepted["rollout"]
+        assert client.get(path).json()["items"] == [accepted["rollout"]]
+        assert client.get(path, params={"limit": 101}).status_code == 422
+        invalid = {"children": [write["children"][0], write["children"][0]]}
+        assert client.post(path, json=invalid).status_code == 422
+    assert len(repository.gateway_publications) == 2
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_multi_target_http_routes_preserve_publication_owner_dependency(
+    publication_api: InMemoryRepository, status: int,
+) -> None:
+    del publication_api
+    service = MagicMock()
+
+    def denied() -> str:
+        raise HTTPException(status_code=status, detail="Denied")
+
+    with patch.dict(app.dependency_overrides, {
+        require_publication_owner: denied, control_plane_service: lambda: service,
+    }):
+        path = "/api/v1/model-management/rollouts"
+        assert client.get(path).status_code == status
+        assert client.get(path + f"/{TARGET}").status_code == status
+        assert client.post(path, json={"children": []}).status_code == status
+    assert service.mock_calls == []
 
 
 def test_self_hosted_http_lifecycle_is_metadata_only_and_name_acknowledgement_is_minimal(

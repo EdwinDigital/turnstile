@@ -113,8 +113,8 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 91
-    assert len(schemas) == 208
+    assert len(paths) == 93
+    assert len(schemas) == 217
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -187,6 +187,27 @@ def test_self_hosted_lifecycle_contract_preserves_minimal_names_and_metadata_bou
     assert "content" not in responses["204"]
     removal = cast(dict[str, object], paths[root]["delete"])
     assert "No Azure resource or container is deleted" in str(removal["description"])
+
+
+def test_multi_target_contract_matches_runtime_and_never_exposes_child_secrets() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    for name in ("MultiTargetPublicationCreate", "MultiTargetPublicationChildCreate"):
+        assert documented[name] == actual[name]
+    accepted = actual["MultiTargetPublicationRequestAccepted"]
+    expected = {**accepted, "properties": {**accepted["properties"], "publications": {
+        **accepted["properties"]["publications"],
+        "items": {"$ref": "#/components/schemas/GatewayPublication"},
+    }}}
+    assert documented["MultiTargetPublicationRequestAccepted"] == expected
+    paths = _documented_paths()
+    root = "/api/v1/model-management/rollouts"
+    assert set(paths[root]) == {"get", "post"}
+    for route in (root, root + "/{rollout_id}"):
+        for operation in paths[route].values():
+            values = cast(dict[str, object], operation)
+            assert values["security"] == [{"sessionCookie": []}]
+            assert "Owner" in str(values["description"])
 
 
 def test_gateway_name_contract_preserves_owner_only_name_write_and_minimal_response() -> None:

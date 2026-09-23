@@ -1,4 +1,63 @@
 schemas:
+  MultiTargetRollout:
+    properties:
+      schema_version: {type: integer, const: 1, title: Schema Version, default: 1}
+      id: {type: string, format: uuid, title: Id}
+      kind:
+        $ref: ../../openapi.yaml#/components/schemas/TargetRolloutKind
+      logical_model_id:
+        anyOf:
+        - {type: string, format: uuid}
+        - {type: 'null'}
+        title: Logical Model Id
+      status:
+        $ref: ../../openapi.yaml#/components/schemas/TargetRolloutStatus
+      children:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/TargetRolloutChild
+        type: array
+        minItems: 1
+        title: Children
+      created_by: {type: string, maxLength: 320, minLength: 1, title: Created By}
+      created_at: {type: string, format: date-time, title: Created At}
+    additionalProperties: false
+    type: object
+    required: [id, kind, status, children, created_by, created_at]
+    title: MultiTargetRollout
+  MultiTargetRolloutList:
+    properties:
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/MultiTargetRollout
+        type: array
+        title: Items
+    additionalProperties: false
+    type: object
+    required: [items]
+    title: MultiTargetRolloutList
+  TargetRolloutChild:
+    properties:
+      apim_target_id: {type: string, format: uuid, title: Apim Target Id}
+      publication_id: {type: string, format: uuid, title: Publication Id}
+      required: {type: boolean, title: Required, default: true}
+      status:
+        $ref: ../../openapi.yaml#/components/schemas/TargetRolloutChildStatus
+    additionalProperties: false
+    type: object
+    required: [apim_target_id, publication_id, status]
+    title: TargetRolloutChild
+  TargetRolloutChildStatus:
+    type: string
+    enum: [queued, in_progress, succeeded, failed, rolling_back, rolled_back]
+    title: TargetRolloutChildStatus
+  TargetRolloutKind:
+    type: string
+    enum: [model_add, model_remove, credential_rotation, route_reconcile]
+    title: TargetRolloutKind
+  TargetRolloutStatus:
+    type: string
+    enum: [queued, in_progress, succeeded, partial, failed, rolling_back, rolled_back]
+    title: TargetRolloutStatus
   SelfHostedGatewayWrite:
     properties:
       native_gateway_id: {type: string, maxLength: 80, minLength: 1, title: Native Gateway Id}

@@ -10,11 +10,16 @@ from psycopg.types.json import Jsonb
 
 from ..domain.control_plane import (
     GatewayPublication,
+    GatewayPublicationIntent,
     publication_materialized_named_values,
     publication_model_id,
 )
 from ..domain.gateway_targets import apim_target_route_binding_id_for
-from .repository_support import _activation_runtime_config, _validate_gateway_deployment_snapshots
+from .repository_support import (
+    _activation_runtime_config,
+    _require_multi_target_model_identity,
+    _validate_gateway_deployment_snapshots,
+)
 
 
 class PostgreSqlPublicationRepositoryMixin:
@@ -36,6 +41,141 @@ class PostgreSqlPublicationRepositoryMixin:
 
     def _invalidate_identities(self) -> None:
         raise NotImplementedError
+
+    def create_multi_target_rollout(
+        self, rollout_id: UUID, rollout_kind: str, logical_model_id: UUID | None,
+        request_sha256: str, created_by: str, children: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        if len(children) < 2:
+            raise ValueError("A multi-target rollout requires at least two children")
+        if rollout_kind in {"model_add", "model_remove"} and logical_model_id is None:
+            raise ValueError("A model rollout requires a logical model identity")
+        targets = [UUID(str(child["gateway_profile_id"])) for child in children]
+        if len(targets) != len(set(targets)):
+            raise ValueError("A multi-target rollout cannot repeat an APIM target")
+        for child, target_id in zip(children, targets, strict=True):
+            GatewayPublicationIntent.model_validate({
+                "gateway_profile_id": target_id, "publication_kind": rollout_kind,
+                "desired_spec": child["desired_spec"],
+            })
+        with self._connection() as connection, connection.transaction():
+            for target_id in sorted(targets, key=str):
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"gateway-publication:{target_id}",),
+                )
+            existing = connection.execute(
+                "SELECT * FROM multi_target_rollout WHERE request_sha256 = %s", (request_sha256,),
+            ).fetchone()
+            if existing is not None:
+                return self._multi_target_rollout_view(connection, existing)
+            for child, target_id in zip(children, targets, strict=True):
+                gateway = connection.execute(
+                    """SELECT gateway.id, gateway.enabled, gateway.implementation
+                       FROM gateway_profile gateway JOIN apim_target_metadata target
+                         ON target.gateway_profile_id = gateway.id WHERE gateway.id = %s""",
+                    (target_id,),
+                ).fetchone()
+                if gateway is None or gateway["implementation"] != "apim" or (
+                    not gateway["enabled"] and rollout_kind != "model_remove"
+                ):
+                    raise ValueError("The selected APIM target is unavailable")
+                duplicate = connection.execute(
+                    """SELECT id FROM gateway_publication WHERE gateway_profile_id = %s
+                       AND desired_spec_sha256 = %s AND status NOT IN ('superseded', 'rolled_back')
+                       LIMIT 1""", (target_id, str(child["desired_spec_sha256"])),
+                ).fetchone()
+                if duplicate is not None:
+                    raise ValueError("A target already has this desired release")
+                in_flight = connection.execute(
+                    "SELECT id FROM gateway_publication WHERE gateway_profile_id = %s "
+                    "AND status IN ('queued', 'validating', 'provisioning', 'building_revision', "
+                    "'verifying', 'awaiting_authorization', 'promoting', 'rolling_back') LIMIT 1",
+                    (target_id,),
+                ).fetchone()
+                if in_flight is not None:
+                    raise ValueError("Another gateway publication is already in progress")
+                self._validate_publication_deployments(connection, target_id, child["desired_spec"])
+            parent = connection.execute(
+                """INSERT INTO multi_target_rollout (
+                     id, rollout_kind, logical_model_id, request_sha256, created_by
+                   ) VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+                (rollout_id, rollout_kind, logical_model_id, request_sha256, created_by),
+            ).fetchone()
+            for child, target_id in zip(children, targets, strict=True):
+                generation = connection.execute(
+                    """SELECT COALESCE(MAX(generation), 0) + 1 AS generation
+                       FROM gateway_publication WHERE gateway_profile_id = %s""", (target_id,),
+                ).fetchone()["generation"]
+                base = connection.execute(
+                          """SELECT publication_id FROM effective_gateway_release
+                              WHERE gateway_profile_id = %s""",
+                    (target_id,),
+                ).fetchone()
+                publication = connection.execute(
+                          """INSERT INTO gateway_publication (
+                              gateway_profile_id, generation, desired_spec,
+                       desired_spec_sha256, publication_kind, base_release_id, created_by)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+                    (target_id, generation, Jsonb(dict(child["desired_spec"])),
+                     str(child["desired_spec_sha256"]), rollout_kind,
+                     base["publication_id"] if base else None, created_by),
+                ).fetchone()
+                connection.execute(
+                    "INSERT INTO gateway_publication_outbox (publication_id) VALUES (%s)",
+                    (publication["id"],),
+                )
+                if child.get("credential_ciphertext") is not None:
+                    connection.execute(
+                                """INSERT INTO gateway_publication_secret (
+                                    publication_id, credential_ciphertext) VALUES (%s, %s)""",
+                                (publication["id"], child["credential_ciphertext"]),
+                    )
+                connection.execute(
+                    """INSERT INTO gateway_publication_audit (publication_id, from_status,
+                       to_status, actor) VALUES (%s, NULL, 'queued', %s)""",
+                    (publication["id"], created_by),
+                )
+                connection.execute(
+                    """INSERT INTO multi_target_rollout_child
+                              (rollout_id, apim_target_id, publication_id, required)
+                              VALUES (%s, %s, %s, %s)""",
+                    (rollout_id, target_id, publication["id"], bool(child.get("required", True))),
+                )
+            return self._multi_target_rollout_view(connection, parent)
+
+    def get_multi_target_rollout(self, rollout_id: UUID) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            rollout = connection.execute(
+                "SELECT * FROM multi_target_rollout WHERE id = %s", (rollout_id,),
+            ).fetchone()
+            if rollout is None:
+                return None
+            return self._multi_target_rollout_view(connection, rollout)
+
+    def list_multi_target_rollouts(self, limit: int = 50) -> Sequence[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM multi_target_rollout ORDER BY created_at DESC, id DESC LIMIT %s",
+                (limit,),
+            ).fetchall()
+            return [self._multi_target_rollout_view(connection, row) for row in rows]
+
+    @staticmethod
+    def _multi_target_rollout_view(connection: Any, rollout: Mapping[str, Any]) -> dict[str, Any]:
+        rows = connection.execute(
+            """SELECT child.*, publication.status AS publication_status
+               FROM multi_target_rollout_child child JOIN gateway_publication publication
+                 ON publication.id = child.publication_id WHERE child.rollout_id = %s
+               ORDER BY child.apim_target_id""", (rollout["id"],),
+        ).fetchall()
+        children = []
+        for child in rows:
+            publication = connection.execute(
+                "SELECT * FROM gateway_publication WHERE id = %s", (child["publication_id"],),
+            ).fetchone()
+            children.append({**child, "publication": publication})
+        return {**rollout, "children": children}
 
     def create_gateway_publication(
         self,
@@ -1192,6 +1332,46 @@ class PostgreSqlPublicationRepositoryMixin:
                     raise ValueError("The model removal target changed before activation")
                 if model["is_default"]:
                     raise ValueError("The default model cannot be deleted")
+                target_id = UUID(str(publication["gateway_profile_id"]))
+                route = connection.execute(
+                    "SELECT id FROM apim_target_route_binding "
+                    "WHERE logical_model_id = %s AND apim_target_id = %s",
+                    (model_id, target_id),
+                ).fetchone()
+                if route is not None:
+                    connection.execute(
+                        "DELETE FROM apim_target_route_binding_deployment "
+                        "WHERE route_binding_id = %s",
+                        (route["id"],),
+                    )
+                    connection.execute(
+                        "DELETE FROM apim_target_route_binding WHERE id = %s", (route["id"],),
+                    )
+                remaining = connection.execute(
+                    "SELECT route.id, route.runtime_id, route.is_default_serving, "
+                    "runtime.provider_id "
+                    "FROM apim_target_route_binding route JOIN model_runtime runtime "
+                    "ON runtime.id = route.runtime_id WHERE route.logical_model_id = %s "
+                    "AND route.enabled ORDER BY route.is_default_serving DESC, "
+                    "route.apim_target_id, route.id", (model_id,),
+                ).fetchall()
+                if remaining:
+                    selected = remaining[0]
+                    connection.execute(
+                        "UPDATE apim_target_route_binding SET is_default_serving = (id = %s), "
+                        "updated_at = now() WHERE logical_model_id = %s",
+                        (selected["id"], model_id),
+                    )
+                    connection.execute(
+                        "UPDATE managed_model SET runtime_id = %s, provider_id = %s, "
+                        "updated_at = now() WHERE id = %s",
+                        (selected["runtime_id"], selected["provider_id"], model_id),
+                    )
+                    row = self._complete_gateway_activation(
+                        connection, publication, publication_id, actor,
+                    )
+                    self._invalidate_identities()
+                    return row
                 affected_users = connection.execute(
                     "SELECT user_id FROM user_model_access WHERE model_id = %s ORDER BY user_id",
                     (model_id,),
@@ -1386,16 +1566,32 @@ class PostgreSqlPublicationRepositoryMixin:
                     (runtime_id, binding["runtime_brand_key"]),
                 )
 
+            logical_value = binding.get("logical_model_id")
+            logical_id = UUID(str(logical_value)) if logical_value else None
             existing_model = connection.execute(
-                """SELECT model.id, metadata.publication_id
-                   FROM managed_model model
-                   LEFT JOIN managed_model_metadata metadata
-                     ON metadata.model_id = model.id
-                   WHERE lower(model.model_key) = lower(%s)""",
+                "SELECT model.*, metadata.family_key, metadata.assignment_required, "
+                "metadata.publication_id, COALESCE(price.price_source, 'manual') AS price_source, "
+                "price.price_reference, "
+                "price.price_discount_percent::DOUBLE PRECISION AS price_discount_percent, "
+                "price.list_input_cost_per_million::DOUBLE PRECISION "
+                "AS list_input_cost_per_million, "
+                "price.list_output_cost_per_million::DOUBLE PRECISION "
+                "AS list_output_cost_per_million, "
+                "price.list_cached_cost_per_million::DOUBLE PRECISION "
+                "AS list_cached_cost_per_million, "
+                "price.list_cache_write_cost_per_million::DOUBLE PRECISION "
+                "AS list_cache_write_cost_per_million, "
+                "COALESCE(price.context_price_tiers, '[]'::jsonb) AS context_price_tiers "
+                "FROM managed_model model LEFT JOIN managed_model_metadata metadata "
+                "ON metadata.model_id = model.id "
+                "LEFT JOIN managed_model_price price ON price.model_id = model.id "
+                "WHERE lower(model.model_key) = lower(%s)",
                 (model_spec["model_key"],),
             ).fetchone()
-            if existing_model is not None and existing_model["publication_id"] != publication_id:
-                raise ValueError("The model alias is already active")
+            if existing_model is not None:
+                same_publication = existing_model["publication_id"] == publication_id
+                if logical_id is not None or not same_publication:
+                    _require_multi_target_model_identity(existing_model, model_spec, logical_id)
             if existing_model is None:
                 model = connection.execute(
                     """INSERT INTO managed_model (

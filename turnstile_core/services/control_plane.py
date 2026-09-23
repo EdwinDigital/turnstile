@@ -6,10 +6,11 @@ import json
 import re
 import secrets
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urlsplit
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from pydantic import HttpUrl
 
@@ -58,6 +59,7 @@ from ..domain.control_plane import (
     ModelCreateTarget,
     ModelRemovalTarget,
     ModelTarget,
+    MultiTargetPublicationCreate,
     PublicationKind,
     PublicationStatus,
     StreamingMode,
@@ -86,10 +88,15 @@ from ..domain.gateway_targets import (
     GatewayReachabilityState,
     GatewayReleaseGate,
     GatewayServingDeployment,
+    MultiTargetRollout,
     SelfHostedGatewayAssociationChange,
     SelfHostedGatewayNameWrite,
     SelfHostedGatewayRemovalPreview,
     SelfHostedGatewayWrite,
+    TargetRolloutChild,
+    TargetRolloutChildStatus,
+    TargetRolloutKind,
+    derive_target_rollout_status,
     gateway_deployment_id_for,
 )
 from ..domain.image_profiles import (
@@ -144,6 +151,14 @@ _APPLICATION_PROVISIONING_UNAVAILABLE = (
     "Application subscription provisioning is not enabled in this environment"
 )
 _APPLICATION_PRODUCT_ID = "finops-ai-consumers"
+_MULTI_TARGET_ROLLOUT_NAMESPACE = UUID("29d93b9a-c811-4de7-9aad-123e67e8549e")
+_MULTI_TARGET_MODEL_NAMESPACE = UUID("f29bf413-870d-4c8b-9892-3d4bb39b6f70")
+
+
+@dataclass(frozen=True)
+class _PreparedModelPublication:
+    spec: GatewayReleaseSpec
+    credential_ciphertext: bytes | None = field(repr=False)
 
 
 class GatewayControlPlaneService:
@@ -168,6 +183,7 @@ class GatewayControlPlaneService:
         self_hosted_gateway_enabled: bool = False,
         gateway_connection_probe: GatewayConnectionProbe | None = None,
         trusted_gateway_endpoints: Mapping[UUID, HttpUrl] | None = None,
+        multi_target_rollout_enabled: bool = False,
     ) -> None:
         self._repository = repository
         self._price_catalog = price_catalog or build_default_catalog()
@@ -179,6 +195,7 @@ class GatewayControlPlaneService:
         self._deployment_scoping_enabled = deployment_scoping_enabled
         self._target_registry_enabled = target_registry_enabled
         self._onboarding_enabled = onboarding_enabled
+        self._multi_target_rollout_enabled = multi_target_rollout_enabled
         self._self_hosted_gateway_enabled = self_hosted_gateway_enabled
         self._gateway_connection_probe = gateway_connection_probe
         self._trusted_gateway_endpoints = {
@@ -2337,6 +2354,15 @@ class GatewayControlPlaneService:
     def publish(
         self, write: GatewayPublicationCreate, created_by: str
     ) -> GatewayPublication:
+        identity = uuid4() if self._target_registry_enabled else None
+        prepared = self._prepare_model_publication(write, identity)
+        return self._queue_release(
+            prepared.spec, PublicationKind.MODEL_ADD, created_by, prepared.credential_ciphertext,
+        )
+
+    def _prepare_model_publication(
+        self, write: GatewayPublicationCreate, logical_model_id: UUID | None,
+    ) -> _PreparedModelPublication:
         registry = self._repository.registry()
         gateway = self._find(registry["gateways"], write.gateway_profile_id)
         if gateway is None or not gateway["enabled"] or gateway["implementation"] != "apim":
@@ -2411,7 +2437,7 @@ class GatewayControlPlaneService:
             runtime_config=dict(binding_runtime.get("config") or {}),
             deployment_scope=scope,
             serving_deployments=serving,
-            logical_model_id=uuid4() if self._target_registry_enabled else None,
+            logical_model_id=logical_model_id,
             model=model,
         )
         bindings.append(binding)
@@ -2444,12 +2470,171 @@ class GatewayControlPlaneService:
             credential_ciphertext = self._cipher.encrypt(
                 submitted_credential.get_secret_value()
             )
-        return self._queue_release(
-            spec,
-            PublicationKind.MODEL_ADD,
-            created_by,
-            credential_ciphertext,
+        return _PreparedModelPublication(
+            spec=self._refresh_release_deployments(spec),
+            credential_ciphertext=credential_ciphertext,
         )
+
+    def publish_multi_target(
+        self, write: MultiTargetPublicationCreate, created_by: str,
+    ) -> tuple[MultiTargetRollout, list[GatewayPublication]]:
+        if not self._multi_target_rollout_enabled:
+            raise ControlPlaneUnavailableError("Multi-target APIM rollout is not enabled")
+        ordered = sorted(
+            write.children, key=lambda child: str(child.publication.gateway_profile_id),
+        )
+        request_items = []
+        for child in ordered:
+            item = child.model_dump(mode="json")
+            item["publication"]["runtime"].pop("api_key", None)
+            item["publication"]["runtime"].pop("oauth_client_secret", None)
+            request_items.append(item)
+        digest = hashlib.sha256(json.dumps(
+            request_items, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        rollout_id = uuid5(_MULTI_TARGET_ROLLOUT_NAMESPACE, digest)
+        existing = self._repository.get_multi_target_rollout(rollout_id)
+        if existing is not None:
+            return self._multi_target_rollout_view(existing)
+        logical_id = uuid5(_MULTI_TARGET_MODEL_NAMESPACE, digest)
+        identities = {
+            (str(child.publication.model.model_key).casefold(),
+             str(child.publication.model.display_name))
+            for child in ordered if child.publication.model.model_key is not None
+        }
+        if len(identities) > 1:
+            raise ControlPlaneConflictError(
+                "Explicit multi-target children must use one logical model identity"
+            )
+        prepared = [self._qualify_multi_target_runtime(
+            self._prepare_model_publication(child.publication, logical_id)
+        ) for child in ordered]
+        canonical_index = next((index for index, child in enumerate(ordered)
+                                if child.publication.model.model_key is not None), 0)
+        canonical = prepared[canonical_index].spec.bindings[-1].model
+        rows = []
+        for index, (candidate, child) in enumerate(zip(prepared, ordered, strict=True)):
+            if index != canonical_index:
+                candidate = self._canonicalize_multi_target_model(candidate, canonical)
+            payload, payload_hash = self._release_payload(candidate.spec)
+            rows.append({
+                "gateway_profile_id": candidate.spec.gateway_profile_id,
+                "desired_spec": payload, "desired_spec_sha256": payload_hash,
+                "credential_ciphertext": candidate.credential_ciphertext,
+                "required": child.required,
+            })
+        try:
+            rollout = self._repository.create_multi_target_rollout(
+                rollout_id, TargetRolloutKind.MODEL_ADD.value, logical_id, digest, created_by, rows,
+            )
+        except ValueError as error:
+            raise ControlPlaneConflictError(str(error)) from error
+        return self._multi_target_rollout_view(rollout)
+
+    @staticmethod
+    def _qualify_multi_target_runtime(
+        prepared: _PreparedModelPublication,
+    ) -> _PreparedModelPublication:
+        latest = prepared.spec.bindings[-1]
+        if latest.runtime_id is not None:
+            return prepared
+        key = hashlib.sha256(str(prepared.spec.gateway_profile_id).encode("ascii")).hexdigest()[:8]
+        suffix = f" - target-{key}"
+        bindings = [*prepared.spec.bindings[:-1], latest.model_copy(update={
+            "runtime_name": latest.runtime_name[:160 - len(suffix)] + suffix,
+        })]
+        return _PreparedModelPublication(
+            prepared.spec.model_copy(update={"bindings": bindings}), prepared.credential_ciphertext,
+        )
+
+    def _canonicalize_multi_target_model(
+        self, prepared: _PreparedModelPublication, canonical: ModelTarget,
+    ) -> _PreparedModelPublication:
+        latest = prepared.spec.bindings[-1]
+        candidate = latest.model
+        expected_format = (
+            ApiFormat.ANTHROPIC_MESSAGES if canonical.family_key is ModelFamilyKey.CLAUDE
+            else ApiFormat.OPENAI_CHAT
+        )
+        same_family = candidate.family_key is canonical.family_key
+        if not same_family or latest.api_format is not expected_format:
+            raise ControlPlaneConflictError(
+                "Every target in a model rollout must use the same model family and protocol"
+            )
+        canonical_fields = (
+            "model_key", "display_name", "family_key", "capabilities", "context_window",
+            "input_cost_per_million", "output_cost_per_million", "cached_cost_per_million",
+            "cache_write_cost_per_million", "price_source", "price_reference",
+            "price_discount_percent",
+            "context_price_references", "context_price_rule", "context_price_tiers",
+            "list_input_cost_per_million", "list_output_cost_per_million",
+            "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+            "allowed_roles", "assignment_required",
+        )
+        canonical_copy = canonical.model_copy(deep=True)
+        model = candidate.model_copy(update={
+            name: getattr(canonical_copy, name) for name in canonical_fields
+        })
+        discovery = [item for item in prepared.spec.discovery_models
+                     if item.id.casefold() != candidate.model_key.casefold()]
+        discovery.append(DiscoveryModel(
+            id=canonical.model_key, display_name=canonical.display_name,
+            api_format=latest.api_format,
+        ))
+        unique = {item.id.casefold(): item for item in discovery}
+        spec = GatewayReleaseSpec(
+            gateway_profile_id=prepared.spec.gateway_profile_id,
+            discovery_models=sorted(unique.values(), key=lambda item: item.id.casefold()),
+            bindings=[*prepared.spec.bindings[:-1], latest.model_copy(update={"model": model})],
+            gateway_deployments=prepared.spec.gateway_deployments,
+        )
+        return _PreparedModelPublication(
+            self._refresh_release_deployments(spec), prepared.credential_ciphertext,
+        )
+
+    def multi_target_rollout(
+        self, rollout_id: UUID,
+    ) -> tuple[MultiTargetRollout, list[GatewayPublication]]:
+        row = self._repository.get_multi_target_rollout(rollout_id)
+        if row is None:
+            raise ControlPlaneNotFoundError("Multi-target rollout not found")
+        return self._multi_target_rollout_view(row)
+
+    def multi_target_rollouts(self, limit: int = 50) -> list[MultiTargetRollout]:
+        return [self._multi_target_rollout_view(row)[0]
+                for row in self._repository.list_multi_target_rollouts(limit)]
+
+    @staticmethod
+    def _multi_target_rollout_view(
+        row: Mapping[str, Any],
+    ) -> tuple[MultiTargetRollout, list[GatewayPublication]]:
+        publications = []
+        children = []
+        status_map = {
+            PublicationStatus.QUEUED: TargetRolloutChildStatus.QUEUED,
+            PublicationStatus.ACTIVE: TargetRolloutChildStatus.SUCCEEDED,
+            PublicationStatus.SUPERSEDED: TargetRolloutChildStatus.SUCCEEDED,
+            PublicationStatus.FAILED: TargetRolloutChildStatus.FAILED,
+            PublicationStatus.ROLLING_BACK: TargetRolloutChildStatus.ROLLING_BACK,
+            PublicationStatus.ROLLED_BACK: TargetRolloutChildStatus.ROLLED_BACK,
+        }
+        for child in row["children"]:
+            publication = GatewayPublication.model_validate(child["publication"])
+            publications.append(publication)
+            children.append(TargetRolloutChild(
+                apim_target_id=UUID(str(child["apim_target_id"])), publication_id=publication.id,
+                required=bool(child["required"]),
+                status=status_map.get(publication.status, TargetRolloutChildStatus.IN_PROGRESS),
+            ))
+        child_tuple = tuple(children)
+        logical_id = UUID(str(row["logical_model_id"])) if row.get("logical_model_id") else None
+        rollout = MultiTargetRollout(
+            id=UUID(str(row["id"])), kind=TargetRolloutKind(str(row["rollout_kind"])),
+            logical_model_id=logical_id,
+            status=derive_target_rollout_status(child_tuple), children=child_tuple,
+            created_by=str(row["created_by"]), created_at=row["created_at"],
+        )
+        return rollout, publications
 
     def remove_model(self, model_id: UUID, created_by: str) -> GatewayPublication:
         registry = self._repository.registry()

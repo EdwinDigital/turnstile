@@ -18,6 +18,7 @@ from .gateway_targets import (
     GatewayDeploymentScope,
     GatewayDeploymentScopeMode,
     GatewayServingDeployment,
+    MultiTargetRollout,
 )
 from .image_profiles import ImageGenerationLimits, ImageGenerationProfile, validate_image_profile
 from .models import StrictModel
@@ -321,6 +322,22 @@ class GatewayPublicationCreate(StrictModel):
     model: ModelCreateTarget
 
 
+class MultiTargetPublicationChildCreate(StrictModel):
+    publication: GatewayPublicationCreate
+    required: bool = True
+
+
+class MultiTargetPublicationCreate(StrictModel):
+    children: tuple[MultiTargetPublicationChildCreate, ...] = Field(min_length=2, max_length=20)
+
+    @model_validator(mode="after")
+    def require_distinct_targets(self) -> MultiTargetPublicationCreate:
+        target_ids = [child.publication.gateway_profile_id for child in self.children]
+        if len(target_ids) != len(set(target_ids)):
+            raise ValueError("A multi-target publication cannot repeat an APIM target")
+        return self
+
+
 class GatewayPublicationRetry(StrictModel):
     api_key: SecretStr | None = None
     oauth_client_secret: SecretStr | None = Field(default=None, min_length=1, max_length=4096)
@@ -609,6 +626,26 @@ class GatewayReleaseSpec(StrictModel):
                 binding.backend_url
             ).rstrip("/"):
                 raise ValueError("the primary pool member must preserve the binding backend URL")
+        return self
+
+
+class GatewayPublicationIntent(StrictModel):
+    gateway_profile_id: UUID
+    publication_kind: PublicationKind = PublicationKind.MODEL_ADD
+    desired_spec: GatewayReleaseSpec
+
+    @model_validator(mode="after")
+    def require_operation_target(self) -> GatewayPublicationIntent:
+        if self.gateway_profile_id != self.desired_spec.gateway_profile_id:
+            raise ValueError("Publication target must match its desired gateway release")
+        if self.publication_kind is PublicationKind.MODEL_REMOVE:
+            if len(self.desired_spec.removed_models) != 1:
+                raise ValueError("A model removal publication requires one removal target")
+        elif self.desired_spec.removed_models:
+            raise ValueError("Only model removal publications can carry a removal target")
+        if self.publication_kind is not PublicationKind.MODEL_REMOVE \
+                and not self.desired_spec.bindings:
+            raise ValueError("Non-removal publications require a binding")
         return self
 
 
@@ -1057,6 +1094,12 @@ class GatewayReleaseDetail(GatewayReleaseSummary):
     protection_audit: list[GatewayReleaseProtectionAuditEvent] = Field(
         default_factory=list
     )
+
+
+class MultiTargetPublicationRequestAccepted(StrictModel):
+    rollout: MultiTargetRollout
+    publications: list[GatewayPublicationView]
+    status_url: str
 
 
 class GatewayPublicationRequestAccepted(StrictModel):
