@@ -15,6 +15,7 @@ from turnstile_core.integrations.apim_subscription_key_client import (
     AzureApimSubscriptionKeyClient,
 )
 from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
+from turnstile_core.integrations.gateway_connection_probe import GatewayConnectionProbe
 from turnstile_core.integrations.ledger import LedgerSyncService, TableStorageLedger
 from turnstile_core.pricing.catalog import CompositeCatalog, build_default_catalog
 from turnstile_core.security import CredentialCipher
@@ -85,6 +86,13 @@ def control_plane_service(repository: Repository) -> GatewayControlPlaneService:
         deployment_scoping_enabled=settings.apim_target_registry_enabled,
         target_registry_enabled=settings.apim_target_registry_enabled,
         onboarding_enabled=apim_onboarding_available(settings),
+        self_hosted_gateway_enabled=(
+            settings.apim_target_registry_enabled and settings.self_hosted_gateway_enabled
+        ),
+        gateway_connection_probe=(
+            GatewayConnectionProbe() if settings.self_hosted_gateway_enabled else None
+        ),
+        trusted_gateway_endpoints=settings.self_hosted_gateway_trusted_endpoints,
     )
 
 

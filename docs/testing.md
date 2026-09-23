@@ -102,6 +102,13 @@ their cause to the platform without evidence.
 
 ### APIM initialization
 
+Self-hosted lifecycle tests must cover strict endpoint/hosting requests, disabled capability,
+name-only acknowledgement, trusted-host checks before credential use, failed probe evidence,
+retirement blockers, re-addition identity and failed reassociation without an orphan destination.
+Validate publication/retirement locking against a separately authorized PostgreSQL database;
+in-memory tests prove state rules, not database concurrency. Actual Gateway container movement
+or deletion is outside the metadata lifecycle and is not implied by these tests.
+
 Run the onboarding model-platform tests, target-inventory API tests, Control-plane Function tests
 and OpenAPI checks. Cover exact preview binding, ownership/readback drift, permissions, suspended
 subscriptions, concrete ETag activation, authentication denial, linked retries, lease expiry and

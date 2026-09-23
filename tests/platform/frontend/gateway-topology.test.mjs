@@ -60,7 +60,7 @@ function componentHarness(exportName, props, { operation = null, mutationPending
             state.pending = true
             try {
               const result = await options.mutationFn(value)
-              await options.onSuccess?.(result)
+              await options.onSuccess?.(result, value)
               return result
             } catch (error) { state.error = error; throw error }
             finally { state.pending = false; await options.onSettled?.() }
@@ -71,12 +71,17 @@ function componentHarness(exportName, props, { operation = null, mutationPending
     "../../data-sources/apim/api": { dataSource: api },
     "../../data-sources/apim/queries": {
       finopsKeys: { apimTargets: ["targets"], gatewayReleaseOperation: id => ["operation", id] },
-      finopsQueries: { gatewayReleaseOperation: id => ({ queryKey: ["operation", id] }) },
+      finopsQueries: {
+        gatewayReleaseOperation: id => ({ queryKey: ["operation", id] }),
+        selfHostedGatewayRemoval: id => ({ queryKey: ["removal", id] }),
+      },
+      storeGatewayDeployment: async () => {},
+      storeGatewayDeploymentName: async () => {},
     },
     "../../lib/gateway-topology": gatewayTopology,
   }
   const exports = {}
-  runInNewContext(code, { exports, Set, require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }) })
+  runInNewContext(code, { exports, Set, URL, require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }) })
   const nodes = value => Array.isArray(value) ? value.flatMap(nodes)
     : value && typeof value === "object" ? [value, ...nodes(value.props?.children)] : []
   const render = () => { cursor = 0; return exports[exportName](props) }
@@ -306,6 +311,191 @@ test("initialization progress retains failure, exact retry identity and complete
   assert.equal(harness.find(node => node.props?.role === "alert").props.children, "Permission preflight failed")
   harness.props.retryingId = "another-task"
   assert.equal(harness.find(node => node.props?.["aria-label"] === "Retry initialization").props.disabled, true)
+})
+
+test("Self-hosted clients keep exact identity, minimal name payload and mutation methods", async () => {
+  const calls = []
+  const api = apiHarness(async (...args) => { calls.push(args); return {} })
+  const payload = { native_gateway_id: "edge", display_name: "Edge", endpoint_url: "https://edge.example.test" }
+  await api.addSelfHostedGateway("target/path", payload)
+  await api.renameSelfHostedGateway("edge/path", "Renamed")
+  await api.validateSelfHostedGateway("edge/path")
+  await api.selfHostedGatewayRemovalPreview("edge/path")
+  await api.removeSelfHostedGateway("edge/path")
+  const change = { ...payload, apim_target_id: "destination" }
+  await api.changeSelfHostedGatewayAssociation("edge/path", change)
+  const root = "/api/v1/model-management/self-hosted-gateways/edge%2Fpath"
+  assert.equal(calls[0][0], "/api/v1/model-management/apim-targets/target%2Fpath/self-hosted-gateways")
+  assert.equal(calls[0][1], payload)
+  assert.deepEqual(Object.keys(calls[1][1]), ["display_name"])
+  assert.equal(calls[1][1].display_name, "Renamed")
+  assert.equal(calls[1][2], "PATCH")
+  assert.deepEqual(calls.slice(1).map(call => call[0]), [root + "/name", root + "/validations", root + "/removal-preview", root, root + "/apim-association"])
+  assert.equal(calls[2][1].method, "POST")
+  assert.equal(calls[4][1].method, "DELETE")
+  assert.equal(calls[5][1], change)
+  assert.equal(calls[5][2], "PUT")
+})
+
+test("confirmed Self-hosted names and retirements survive stale topology responses", async () => {
+  const { finopsKeys, storeGatewayDeployment, storeGatewayDeploymentName } = queryHarness()
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const previous = { items: [topology({ id: "edge", apim_target_id: "first", kind: "self_hosted", display_name: "Old" })] }
+  client.setQueryData(finopsKeys.apimTargets, previous)
+  let release
+  const pending = client.fetchQuery({ queryKey: finopsKeys.apimTargets, queryFn: () => new Promise(resolve => { release = resolve }) }).catch(() => {})
+  await storeGatewayDeploymentName(client, "edge", " Confirmed ")
+  release(previous)
+  await pending
+  assert.equal(client.getQueryData(finopsKeys.apimTargets).items[0].deployments[0].deployment.display_name, "Confirmed")
+  await storeGatewayDeployment(client, null, "edge")
+  assert.equal(client.getQueryData(finopsKeys.apimTargets).items[0].deployments.length, 0)
+  assert.equal(client.getQueryData(finopsKeys.apimTargets).items[0].self_hosted_gateway_count, 0)
+  client.clear()
+})
+
+test("confirmed reassociation removes the old entry and adds only its exact destination", async () => {
+  const { finopsKeys, storeGatewayDeployment, finopsQueries } = queryHarness()
+  const client = new QueryClient()
+  const first = topology({ id: "old-edge", apim_target_id: "first", kind: "self_hosted" })
+  const second = { ...topology(), target: { ...topology().target, gateway_profile_id: "second" }, deployments: [] }
+  client.setQueryData(finopsKeys.apimTargets, { items: [first, second] })
+  const saved = { ...first.deployments[0], deployment: { ...first.deployments[0].deployment, id: "new-edge", apim_target_id: "second" } }
+  await storeGatewayDeployment(client, saved, "old-edge")
+  const items = client.getQueryData(finopsKeys.apimTargets).items
+  assert.equal(items[0].deployments.length, 0)
+  assert.equal(items[1].deployments[0].deployment.id, "new-edge")
+  assert.equal(items[1].self_hosted_gateway_count, 1)
+  assert.equal(finopsQueries.selfHostedGatewayRemoval(null).enabled, false)
+  assert.equal(finopsQueries.selfHostedGatewayRemoval("edge").staleTime, 0)
+  client.clear()
+})
+
+function selfHostedEntry() {
+  const target = topology({ id: "edge", apim_target_id: "first", kind: "self_hosted", native_gateway_id: "edge", hosting_mode: "docker", display_name: "Edge", location: "Unit" })
+  return { ...target.deployments[0], target }
+}
+
+test("Self-hosted editor validates HTTPS, preserves metadata and blocks duplicate submission", async () => {
+  let finish
+  const saves = []
+  let closes = 0
+  const target = topology()
+  const harness = componentHarness("SelfHostedGatewayEditor", {
+    targets: [target], initialTargetId: "first", available: true, busy: false, error: null,
+    onClose() { closes++ }, onSave: (...args) => { saves.push(args); return new Promise(resolve => { finish = resolve }) },
+  })
+  for (const [name, value] of Object.entries({ display_name: " Edge ", native_gateway_id: " edge ", endpoint_url: "https://user:secret@edge.example.test", location: " Unit " })) {
+    harness.find(node => node.props?.name === name).props.onChange({ target: { value } })
+  }
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  harness.find(node => node.props?.name === "endpoint_url").props.onChange({ target: { value: "https://edge.example.test/unit/llm" } })
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, false)
+  const pending = submitForm(harness)
+  await submitForm(harness)
+  harness.render().props.onOpenChange(false)
+  assert.equal(saves.length, 1)
+  assert.equal(saves[0][0], "first")
+  assert.equal(saves[0][1].display_name, "Edge")
+  assert.equal(saves[0][1].native_gateway_id, "edge")
+  assert.equal(saves[0][1].release_gate, "required")
+  assert.equal(closes, 0)
+  finish()
+  await pending
+  harness.render().props.onOpenChange(false)
+  assert.equal(closes, 1)
+})
+
+test("Self-hosted reassociation requires a fresh matching clear preview and another APIM", () => {
+  const entry = selfHostedEntry()
+  const other = { ...topology(), target: { ...topology().target, gateway_profile_id: "second", service_name: "Second" } }
+  const harness = componentHarness("SelfHostedGatewayEditor", {
+    targets: [entry.target, other], initialTargetId: "first", entry, available: true, busy: false, error: null,
+    preview: { deployment_id: "edge", removal_allowed: true, blockers: [], models: [] }, loading: false,
+    onClose() {}, onSave: async () => {},
+  })
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  harness.find(node => node.type === "Select" && node.props.value === "first").props.onValueChange("second")
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, false)
+  assert.ok(harness.find(node => node.props?.name === "native_gateway_id").props.readOnly)
+  harness.props.preview = { ...harness.props.preview, deployment_id: "other-edge" }
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  harness.props.preview = { deployment_id: "edge", removal_allowed: false, blockers: ["Publication is pending"], models: [] }
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  assert.ok(harness.find(node => node.props?.role === "alert"))
+})
+
+test("Gateway name dialog is name-only and retains draft after failure", async () => {
+  const values = []
+  const harness = componentHarness("GatewayDeploymentNameDialog", {
+    entry: selfHostedEntry(), available: true, busy: false, error: null,
+    onClose() {}, onSave: async name => { values.push(name); throw new Error("Unavailable") },
+  })
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  harness.find(node => node.type === "Input").props.onChange({ target: { value: " Renamed " } })
+  await submitForm(harness)
+  assert.deepEqual(values, ["Renamed"])
+  assert.equal(harness.find(node => node.type === "Input").props.value, " Renamed ")
+  harness.props.available = false
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+})
+
+test("Gateway retirement refuses loading, blocked and foreign previews and guards double confirmation", async () => {
+  let finish
+  let calls = 0
+  const harness = componentHarness("GatewayRetirementDialog", {
+    entry: selfHostedEntry(), preview: null, loading: true, busy: false, error: null, available: true,
+    onClose() {}, onConfirm: () => { calls++; return new Promise(resolve => { finish = resolve }) },
+  })
+  const action = () => harness.find(node => node.type === "AlertDialogAction")
+  assert.equal(harness.find(node => node.type === "AlertDialogFooter").props.className, "model-delete-footer")
+  assert.ok(harness.find(node => node.type === "AlertDialogCancel"))
+  assert.equal(action().props.disabled, true)
+  harness.props.loading = false
+  harness.props.preview = { deployment_id: "other", removal_allowed: true, models: [], blockers: [] }
+  assert.equal(action().props.disabled, true)
+  harness.props.preview.deployment_id = "edge"
+  assert.equal(action().props.disabled, false)
+  harness.props.preview.removal_allowed = false
+  assert.equal(action().props.disabled, true)
+  harness.props.preview.removal_allowed = true
+  const pending = action().props.onClick()
+  await action().props.onClick()
+  assert.equal(calls, 1)
+  finish()
+  await pending
+})
+
+test("Gateway lifecycle menus require Owner and capability; Managed entries never get lifecycle actions", () => {
+  const target = { ...topology(), published_model_count: 0, self_hosted_gateway_count: 1 }
+  target.deployments.push(selfHostedEntry())
+  const harness = componentHarness("GatewayTargetGroup", {
+    target, profile: profiles[0], canManage: false, syncAvailable: true, lifecycleAvailable: true,
+  })
+  assert.equal(harness.all().filter(node => node.props?.["aria-label"] === "Gateway actions").length, 0)
+  harness.props.canManage = true
+  assert.equal(harness.all().filter(node => node.props?.["aria-label"] === "Gateway actions").length, 1)
+  assert.equal(harness.all().filter(node => node.type === "DropdownMenuItem" && node.props.variant === "destructive").length, 1)
+  harness.props.lifecycleAvailable = false
+  assert.equal(harness.all().filter(node => node.props?.["aria-label"] === "Gateway actions").length, 0)
+})
+
+test("adding a Self-hosted Gateway uses the selected APIM and schedules one inventory sync", async () => {
+  const target = { ...topology(), published_model_count: 0, self_hosted_gateway_count: 0 }
+  const calls = []
+  const harness = componentHarness("GatewayTargetGroup", {
+    target, profile: profiles[0], canManage: true, syncAvailable: true, lifecycleAvailable: true,
+  }, { api: { addSelfHostedGateway: async (...args) => { calls.push(args); return selfHostedEntry() } } })
+  harness.find(node => node.type === "DropdownMenuItem" && node.props.children?.includes?.("Add Self-hosted Gateway")).props.onClick()
+  const editor = harness.find(node => node.type?.name === "SelfHostedGatewayEditor")
+  assert.ok(editor)
+  const value = { native_gateway_id: "edge", display_name: "Edge", endpoint_url: "https://edge.example.test" }
+  await editor.props.onSave("first", value)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][0], "first")
+  assert.equal(calls[0][1], value)
+  assert.equal(harness.find(node => node.type?.name === "SelfHostedGatewayEditor"), undefined)
+  assert.equal(harness.syncCalls.length, 1)
 })
 
 test("registration and sync clients use the exact public routes", async () => {

@@ -8,6 +8,7 @@ import type {
   ApimTargetTopology,
   ApimTargetTopologyList,
   DistributionDimension,
+  GatewayDeploymentTopology,
   GatewayReleaseOperation,
   ModelRegistry,
   PeopleBudgetFilter,
@@ -82,6 +83,7 @@ export const finopsKeys = {
   registry: ["reference", "model-registry"] as const,
   apimTargets: ["control-plane", "apim-targets"] as const,
   apimOnboarding: ["control-plane", "apim-onboarding"] as const,
+  selfHostedGatewayRemoval: (id: string) => ["control-plane", "self-hosted-removal", id] as const,
   modelBackendPool: (id: string) => ["model-platform", "model-backend-pool", id] as const,
   gatewayPublications: ["control-plane", "gateway-publications"] as const,
   gatewayPublication: (id: string) => ["control-plane", "gateway-publication", id] as const,
@@ -151,6 +153,34 @@ export async function storeApimTarget(queryClient: QueryClient, target: ApimTarg
   void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
 }
 
+export async function storeGatewayDeployment(
+  queryClient: QueryClient, updated: GatewayDeploymentTopology | null, retiredId?: string,
+) {
+  await queryClient.cancelQueries({ queryKey: finopsKeys.apimTargets })
+  queryClient.setQueryData<ApimTargetTopologyList | null>(finopsKeys.apimTargets, current => current ? {
+    ...current, items: current.items.map(item => {
+      const deployments = item.deployments.filter(entry => entry.deployment.id !== retiredId
+        && entry.deployment.id !== updated?.deployment.id)
+      if (updated?.deployment.apim_target_id === item.target.gateway_profile_id) deployments.push(updated)
+      return { ...item, deployments, self_hosted_gateway_count: deployments.filter(
+        entry => entry.deployment.kind === "self_hosted" && !entry.deployment.retired_at,
+      ).length }
+    }),
+  } : current)
+  void queryClient.invalidateQueries({ queryKey: finopsKeys.apimTargets })
+}
+
+export async function storeGatewayDeploymentName(queryClient: QueryClient, id: string, name: string) {
+  await queryClient.cancelQueries({ queryKey: finopsKeys.apimTargets })
+  queryClient.setQueryData<ApimTargetTopologyList | null>(finopsKeys.apimTargets, current => current ? {
+    ...current, items: current.items.map(item => ({
+      ...item, deployments: item.deployments.map(entry => entry.deployment.id === id
+        ? { ...entry, deployment: { ...entry.deployment, display_name: name.trim() } } : entry),
+    })),
+  } : current)
+  void queryClient.invalidateQueries({ queryKey: finopsKeys.apimTargets })
+}
+
 export async function storeApimOnboarding(queryClient: QueryClient, operation: GatewayReleaseOperation) {
   await Promise.all([
     queryClient.cancelQueries({ queryKey: finopsKeys.apimOnboarding }),
@@ -165,6 +195,11 @@ export async function storeApimOnboarding(queryClient: QueryClient, operation: G
 }
 
 export const finopsQueries = {
+  selfHostedGatewayRemoval: (id: string | null) => queryOptions({
+    queryKey: finopsKeys.selfHostedGatewayRemoval(id ?? ""),
+    queryFn: () => dataSource.selfHostedGatewayRemovalPreview(id!),
+    enabled: Boolean(id), retry: false, staleTime: 0,
+  }),
   apimOnboarding: () => queryOptions({
     queryKey: finopsKeys.apimOnboarding,
     queryFn: dataSource.apimOnboardingOperations,

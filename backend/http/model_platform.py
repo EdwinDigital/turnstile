@@ -46,6 +46,11 @@ from turnstile_core.domain.gateway_targets import (
     ApimTargetTopology,
     ApimTargetTopologyList,
     ApimTargetWrite,
+    GatewayDeploymentTopology,
+    SelfHostedGatewayAssociationChange,
+    SelfHostedGatewayNameWrite,
+    SelfHostedGatewayRemovalPreview,
+    SelfHostedGatewayWrite,
 )
 from turnstile_core.domain.images import ImageInvocationRequest, ImageInvocationResponse
 from turnstile_core.domain.runtime_models import (
@@ -264,6 +269,115 @@ def request_apim_target_inventory_sync(
 ) -> GatewayReleaseOperationAccepted:
     try:
         return service.request_target_inventory_sync(gateway_profile_id, identity.email)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@protected_router.post(
+    "/api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways",
+    response_model=GatewayDeploymentTopology, status_code=201,
+)
+def add_self_hosted_gateway(
+    gateway_profile_id: UUID, write: SelfHostedGatewayWrite,
+    service: ControlPlaneService, identity: OwnerSession,
+) -> GatewayDeploymentTopology:
+    del identity
+    try:
+        return service.add_self_hosted_gateway(gateway_profile_id, write)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@protected_router.patch(
+    "/api/v1/model-management/self-hosted-gateways/{deployment_id}/name",
+    status_code=204, response_class=Response,
+)
+def rename_self_hosted_gateway(
+    deployment_id: UUID, write: SelfHostedGatewayNameWrite,
+    service: ControlPlaneService, identity: OwnerSession,
+) -> Response:
+    del identity
+    try:
+        service.rename_self_hosted_gateway(deployment_id, write)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return Response(status_code=204)
+
+
+@protected_router.get(
+    "/api/v1/model-management/self-hosted-gateways/{deployment_id}/removal-preview",
+    response_model=SelfHostedGatewayRemovalPreview,
+)
+def preview_self_hosted_gateway_removal(
+    deployment_id: UUID, service: ControlPlaneService, identity: OwnerSession,
+) -> SelfHostedGatewayRemovalPreview:
+    del identity
+    try:
+        return service.self_hosted_gateway_removal_preview(deployment_id)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@protected_router.post(
+    "/api/v1/model-management/self-hosted-gateways/{deployment_id}/validations",
+    response_model=GatewayDeploymentTopology,
+)
+def validate_self_hosted_gateway(
+    deployment_id: UUID, service: ControlPlaneService, runtime: RuntimeService,
+    identity: OwnerSession, authorization: Authorization = None,
+) -> GatewayDeploymentTopology:
+    runtime.authorize(identity.role, authorization, manage=True)
+    try:
+        return service.validate_self_hosted_gateway(deployment_id)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@protected_router.delete(
+    "/api/v1/model-management/self-hosted-gateways/{deployment_id}",
+    response_model=SelfHostedGatewayRemovalPreview,
+)
+def remove_self_hosted_gateway(
+    deployment_id: UUID, service: ControlPlaneService, identity: OwnerSession,
+) -> SelfHostedGatewayRemovalPreview:
+    del identity
+    try:
+        return service.remove_self_hosted_gateway(deployment_id)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@protected_router.put(
+    "/api/v1/model-management/self-hosted-gateways/{deployment_id}/apim-association",
+    response_model=GatewayDeploymentTopology,
+)
+def change_self_hosted_gateway_association(
+    deployment_id: UUID, write: SelfHostedGatewayAssociationChange,
+    service: ControlPlaneService, identity: OwnerSession,
+) -> GatewayDeploymentTopology:
+    del identity
+    try:
+        return service.change_self_hosted_gateway_association(deployment_id, write)
     except ControlPlaneNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except ControlPlaneUnavailableError as error:

@@ -1,4 +1,212 @@
 paths:
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways:
+    post:
+      tags: [Model Control Plane]
+      operationId: addSelfHostedGateway
+      summary: Associate Self-hosted Gateway metadata with an APIM target
+      description: Requires an Owner session, the write-origin check and the lifecycle feature. Records customer-managed hosting metadata only. Does not create or modify an Azure Gateway or container. New or re-added entries require fresh reachability evidence.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayWrite
+      responses:
+        '201':
+          description: Saved deployment metadata and persisted inventory.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/name:
+    patch:
+      tags: [Model Control Plane]
+      operationId: renameSelfHostedGateway
+      summary: Change only the Self-hosted Gateway display name
+      description: Requires an Owner session, the write-origin check and lifecycle availability. Trims a nonblank display name. Routing, credentials, inventory and retirement state are unchanged. Returns a minimal acknowledgement without a post-write topology read.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayNameWrite
+      responses:
+        '204':
+          description: Display name saved; no response body.
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/validations:
+    post:
+      tags: [Model Control Plane]
+      operationId: validateSelfHostedGateway
+      summary: Validate a trusted Self-hosted Gateway endpoint without inference
+      description: Requires an Owner session, the write-origin check and configured management authorization. Requires present ARM declaration, API association and either a matching declared hostname or the exact trusted endpoint. Sends the target credential only after these checks. GET models follows no redirects; the timestamped result records reachability, not live health or physical migration.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Updated deployment with successful reachability evidence.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/removal-preview:
+    get:
+      tags: [Model Control Plane]
+      operationId: previewSelfHostedGatewayRemoval
+      summary: Preview metadata retirement blockers
+      description: Requires an Owner session and lifecycle availability. Lists model dependencies and in-flight publications without modifying the Gateway or its Azure resources.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Current retirement blockers and model dependencies.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayRemovalPreview
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}:
+    delete:
+      tags: [Model Control Plane]
+      operationId: retireSelfHostedGateway
+      summary: Retire a Self-hosted Gateway association while preserving history
+      description: Requires an Owner session, the write-origin check and lifecycle availability. Rechecks model and in-flight publication dependencies within persistence before retirement. No Azure resource or container is deleted. Re-adding the same target/native identity reuses its stable deployment ID and resets reachability.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Confirmed retirement with its prior dependency preview.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayRemovalPreview
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/apim-association:
+    put:
+      tags: [Model Control Plane]
+      operationId: changeSelfHostedGatewayAssociation
+      summary: Change platform association to another registered APIM target
+      description: Requires an Owner session, the write-origin check and lifecycle availability. Refuses occupied destinations, unsupported targets, model dependencies and in-flight publications. Persists the destination and retires the source atomically. This is metadata reassociation, not a container, token or Azure Gateway migration.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayAssociationChange
+      responses:
+        '200':
+          description: Destination deployment with fresh unknown reachability.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
   /api/v1/model-management/apim-onboarding:
     get:
       tags: [Model Control Plane]

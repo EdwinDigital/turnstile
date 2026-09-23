@@ -113,8 +113,8 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 85
-    assert len(schemas) == 204
+    assert len(paths) == 91
+    assert len(schemas) == 208
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -170,6 +170,23 @@ def test_onboarding_contract_has_exact_models_and_durable_owner_operations() -> 
         dict[str, dict[str, object]], documented["GatewayReleaseOperation"]["properties"],
     )
     assert "apim_onboarding" in cast(list[str], properties["operation_kind"]["enum"])
+
+
+def test_self_hosted_lifecycle_contract_preserves_minimal_names_and_metadata_boundaries() -> None:
+    paths = _documented_paths()
+    lifecycle = [(path, item) for path, item in paths.items() if "self-hosted-gateways" in path]
+    assert len(lifecycle) == 6
+    for _, item in lifecycle:
+        for operation in item.values():
+            values = cast(dict[str, object], operation)
+            assert values["security"] == [{"sessionCookie": []}]
+            assert "Owner" in str(values["description"])
+    root = "/api/v1/model-management/self-hosted-gateways/{deployment_id}"
+    rename = cast(dict[str, object], paths[root + "/name"]["patch"])
+    responses = cast(dict[str, dict[str, object]], rename["responses"])
+    assert "content" not in responses["204"]
+    removal = cast(dict[str, object], paths[root]["delete"])
+    assert "No Azure resource or container is deleted" in str(removal["description"])
 
 
 def test_gateway_name_contract_preserves_owner_only_name_write_and_minimal_response() -> None:

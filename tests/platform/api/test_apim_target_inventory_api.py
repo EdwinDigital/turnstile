@@ -10,6 +10,10 @@ from backend.api import app, control_plane_service
 from backend.http.service_dependencies import apim_onboarding_service
 from backend.http.session import SessionIdentity, require_authenticated_session
 from tests.backend.model_platform.test_apim_onboarding import onboarding_request, service_fixture
+from tests.backend.model_platform.test_apim_target_inventory import (
+    lifecycle_service,
+    self_hosted_write,
+)
 from tests.backend.model_platform.test_gateway_targets import TARGET, deployment, target
 from tests.platform.api.test_model_management_api import (
     client,
@@ -24,6 +28,90 @@ from turnstile_core.config import Settings
 from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.control_plane import GatewayControlPlaneService
+
+
+def test_self_hosted_http_lifecycle_is_metadata_only_and_name_acknowledgement_is_minimal(
+    publication_api: InMemoryRepository,
+) -> None:
+    del publication_api
+    repository, service = lifecycle_service()
+    add_path = f"/api/v1/model-management/apim-targets/{TARGET}/self-hosted-gateways"
+    values = self_hosted_write().model_dump(mode="json")
+    assert client.post(add_path, json=values).status_code == 503
+    with patch.dict(app.dependency_overrides, {control_plane_service: lambda: service}):
+        added = client.post(add_path, json=values)
+        assert added.status_code == 201
+        identity = added.json()["deployment"]["id"]
+        path = f"/api/v1/model-management/self-hosted-gateways/{identity}"
+        assert client.post(add_path, json=values).status_code == 409
+        renamed = client.patch(path + "/name", json={"display_name": "  Confirmed name  "})
+        assert renamed.status_code == 204 and not renamed.content
+        assert client.patch(path + "/name", json={"display_name": " "}).status_code == 422
+        assert client.patch(path + "/name", json={
+            "display_name": "No routing changes", "endpoint_url": "https://other.example.test",
+        }).status_code == 422
+        preview = client.get(path + "/removal-preview")
+        assert preview.status_code == 200 and preview.json()["removal_allowed"]
+        assert preview.json()["display_name"] == "Confirmed name"
+        assert client.put(path + "/apim-association", json={
+            **values, "apim_target_id": str(TARGET),
+        }).status_code == 409
+        assert client.delete(path).status_code == 200
+        assert client.get(path + "/removal-preview").status_code == 404
+        assert client.post(add_path, json=values).json()["deployment"]["id"] == identity
+    assert len(repository.gateway_deployments) == 1
+
+
+@pytest.mark.usefixtures("management_runtime_service")
+def test_self_hosted_http_validation_requires_management_auth(
+    publication_api: InMemoryRepository,
+) -> None:
+    del publication_api
+    _, service = lifecycle_service()
+    path = f"/api/v1/model-management/self-hosted-gateways/{TARGET}/validations"
+    with (
+        patch.dict(app.dependency_overrides, {control_plane_service: lambda: service}),
+        patch.object(service, "validate_self_hosted_gateway") as validate,
+    ):
+        assert client.post(path).status_code == 401
+        validate.assert_not_called()
+
+
+@pytest.mark.parametrize("access", ["anonymous", "member", "foreign-origin"])
+def test_self_hosted_http_methods_preserve_owner_and_origin_guards(
+    publication_api: InMemoryRepository, access: str,
+) -> None:
+    del publication_api
+    owner = app.dependency_overrides[require_authenticated_session]()
+    service = MagicMock()
+
+    def identity() -> SessionIdentity:
+        if access == "anonymous":
+            raise HTTPException(status_code=401, detail="Sign in required")
+        return SessionIdentity(
+            id=owner.id, email=owner.email, name=owner.name, method=owner.method,
+            role="member" if access == "member" else "owner",
+            session_expires_at=owner.session_expires_at,
+        )
+
+    path = f"/api/v1/model-management/self-hosted-gateways/{TARGET}"
+    values = self_hosted_write().model_dump(mode="json")
+    headers = {"Origin": "https://foreign.example.test"} if access == "foreign-origin" else {}
+    add_path = f"/api/v1/model-management/apim-targets/{TARGET}/self-hosted-gateways"
+    with patch.dict(app.dependency_overrides, {
+        control_plane_service: lambda: service, require_authenticated_session: identity,
+    }):
+        for method, url, body in (
+            ("POST", add_path, values),
+            ("PATCH", path + "/name", {"display_name": "Name"}),
+            ("POST", path + "/validations", {}), ("DELETE", path, {}),
+            ("PUT", path + "/apim-association", {**values, "apim_target_id": str(TARGET)}),
+        ):
+            response = client.request(method, url, json=body, headers=headers)
+            assert response.status_code == (401 if access == "anonymous" else 403)
+        if access != "foreign-origin":
+            assert client.get(path + "/removal-preview").status_code in {401, 403}
+    assert service.mock_calls == []
 
 
 @pytest.mark.usefixtures("management_runtime_service")

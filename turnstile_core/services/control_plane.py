@@ -86,6 +86,10 @@ from ..domain.gateway_targets import (
     GatewayReachabilityState,
     GatewayReleaseGate,
     GatewayServingDeployment,
+    SelfHostedGatewayAssociationChange,
+    SelfHostedGatewayNameWrite,
+    SelfHostedGatewayRemovalPreview,
+    SelfHostedGatewayWrite,
     gateway_deployment_id_for,
 )
 from ..domain.image_profiles import (
@@ -110,6 +114,10 @@ from ..domain.runtime_models import (
     model_vendor_label,
     openai_compatible_endpoint_values,
     openai_compatible_runtime_name,
+)
+from ..integrations.gateway_connection_probe import (
+    GatewayConnectionProbe,
+    GatewayConnectionProbeError,
 )
 from ..persistence.repository import QueryRepository
 from ..pricing.catalog import CompositeCatalog, build_default_catalog, parse_context_tier
@@ -157,6 +165,9 @@ class GatewayControlPlaneService:
         deployment_scoping_enabled: bool = False,
         target_registry_enabled: bool = False,
         onboarding_enabled: bool = False,
+        self_hosted_gateway_enabled: bool = False,
+        gateway_connection_probe: GatewayConnectionProbe | None = None,
+        trusted_gateway_endpoints: Mapping[UUID, HttpUrl] | None = None,
     ) -> None:
         self._repository = repository
         self._price_catalog = price_catalog or build_default_catalog()
@@ -168,6 +179,11 @@ class GatewayControlPlaneService:
         self._deployment_scoping_enabled = deployment_scoping_enabled
         self._target_registry_enabled = target_registry_enabled
         self._onboarding_enabled = onboarding_enabled
+        self._self_hosted_gateway_enabled = self_hosted_gateway_enabled
+        self._gateway_connection_probe = gateway_connection_probe
+        self._trusted_gateway_endpoints = {
+            key: str(value).rstrip("/") for key, value in (trusted_gateway_endpoints or {}).items()
+        }
         self._application_provisioning_enabled = application_provisioning_enabled
         self._application_default_token_limit = application_default_token_limit
         self._application_default_tokens_per_minute = application_default_tokens_per_minute
@@ -329,13 +345,202 @@ class GatewayControlPlaneService:
                 None if self._target_inventory_sync_enabled
                 else "APIM target inventory synchronization is not enabled"
             ),
-            resource_lifecycle_available=False,
+            resource_lifecycle_available=self._self_hosted_gateway_enabled,
             deployment_scoping_available=self._deployment_scoping_enabled,
             onboarding_available=self._onboarding_enabled,
+            self_hosted_gateway_name_edit_supported=self._self_hosted_gateway_enabled,
         )
 
     def apim_target_topology(self, gateway_profile_id: UUID) -> ApimTargetTopology:
         return self._apim_target_topology(self._active_apim_target_row(gateway_profile_id))
+
+    def _require_self_hosted_lifecycle(self) -> None:
+        if not self._self_hosted_gateway_enabled:
+            raise ControlPlaneUnavailableError("Self-hosted Gateway lifecycle is not enabled")
+
+    def add_self_hosted_gateway(
+        self, apim_target_id: UUID, write: SelfHostedGatewayWrite,
+    ) -> GatewayDeploymentTopology:
+        self._require_self_hosted_lifecycle()
+        target = self._apim_target(self._active_apim_target_row(apim_target_id))
+        if target.capabilities.self_hosted_gateway is CapabilitySupport.UNSUPPORTED:
+            raise ControlPlaneConflictError("The APIM target does not support Self-hosted Gateway")
+        return self._save_self_hosted_gateway(apim_target_id, write)
+
+    def rename_self_hosted_gateway(
+        self, deployment_id: UUID, write: SelfHostedGatewayNameWrite,
+    ) -> None:
+        deployment = self._active_self_hosted_gateway(deployment_id)
+        if deployment.display_name == write.display_name:
+            return
+        if not self._repository.rename_gateway_deployment(deployment_id, write.display_name):
+            raise ControlPlaneNotFoundError("Self-hosted Gateway not found")
+
+    def validate_self_hosted_gateway(self, deployment_id: UUID) -> GatewayDeploymentTopology:
+        deployment = self._active_self_hosted_gateway(deployment_id)
+        if self._gateway_connection_probe is None or self._cipher is None:
+            raise ControlPlaneUnavailableError("Self-hosted Gateway validation is not configured")
+        if deployment.endpoint_url is None:
+            raise ControlPlaneConflictError("The Self-hosted Gateway has no endpoint to validate")
+        inventory_row = self._repository.get_gateway_deployment_inventory(deployment.id)
+        if inventory_row is None:
+            raise ControlPlaneConflictError(
+                "Synchronize APIM inventory before validating this Gateway"
+            )
+        inventory = self._gateway_deployment_inventory(inventory_row)
+        target = self._apim_target(self._active_apim_target_row(deployment.apim_target_id))
+        associated = any(value.casefold() == target.api_id.casefold()
+                         for value in inventory.associated_api_ids)
+        if deployment.declared_state is not GatewayDeclaredState.PRESENT or not associated:
+            raise ControlPlaneConflictError(
+                "The Self-hosted Gateway is not associated with the API"
+            )
+        endpoint_host = (deployment.endpoint_url.host or "").casefold()
+        declared_hosts = {item.hostname.casefold() for item in inventory.hostname_configurations}
+        trusted = self._trusted_gateway_endpoints.get(deployment.id)
+        trusted_endpoint = trusted == str(deployment.endpoint_url).rstrip("/")
+        if endpoint_host not in declared_hosts and not trusted_endpoint:
+            raise ControlPlaneConflictError(
+                "The Gateway endpoint host is not declared in APIM inventory"
+            )
+        profile = next((row for row in self._repository.registry()["gateways"]
+                        if UUID(str(row["id"])) == deployment.apim_target_id), None)
+        if profile is None:
+            raise ControlPlaneNotFoundError("APIM target not found")
+        credential = self._cipher.decrypt(profile.get("credential_ciphertext"))
+        if credential is None:
+            raise ControlPlaneUnavailableError("The APIM target has no validation credential")
+        config = profile.get("config")
+        header_name = str(config.get("header_name") or "") if isinstance(config, Mapping) else ""
+        if not header_name:
+            raise ControlPlaneUnavailableError("The APIM target has no authentication header")
+        validated_at = datetime.now(UTC)
+        try:
+            self._gateway_connection_probe.validate(
+                deployment.endpoint_url, header_name=header_name, credential=credential,
+            )
+        except GatewayConnectionProbeError as error:
+            self._repository.upsert_gateway_deployment(deployment.model_copy(update={
+                "reachability_state": GatewayReachabilityState.UNREACHABLE,
+                "last_probe_at": validated_at,
+            }), preserve_display_name=True)
+            raise ControlPlaneConflictError(str(error)) from error
+        updated = self._gateway_deployment(self._repository.upsert_gateway_deployment(
+            deployment.model_copy(update={
+                "reachability_state": GatewayReachabilityState.REACHABLE,
+                "last_probe_at": validated_at,
+            }), preserve_display_name=True,
+        ))
+        return GatewayDeploymentTopology(
+            deployment=updated, inventory=inventory,
+            configuration_endpoint=HttpUrl(
+                f"https://{target.service_name}.configuration.azure-api.net"
+            ),
+            published_models=self._published_models_for_deployment(updated),
+        )
+
+    def self_hosted_gateway_removal_preview(
+        self, deployment_id: UUID,
+    ) -> SelfHostedGatewayRemovalPreview:
+        deployment = self._active_self_hosted_gateway(deployment_id)
+        models = self._published_models_for_deployment(deployment)
+        blockers: tuple[str, ...] = (
+            ("Remove or move the Gateway's published models first",) if models else ()
+        )
+        if any(row["status"] not in {"active", "failed", "superseded", "rolled_back"}
+               for row in self._repository.all_gateway_publications(deployment.apim_target_id)):
+            blockers += ("Wait for the APIM publication to finish before changing this Gateway",)
+        return SelfHostedGatewayRemovalPreview(
+            deployment_id=deployment.id, display_name=deployment.display_name,
+            model_count=len(models), models=models, removal_allowed=not blockers, blockers=blockers,
+        )
+
+    def remove_self_hosted_gateway(self, deployment_id: UUID) -> SelfHostedGatewayRemovalPreview:
+        preview = self.self_hosted_gateway_removal_preview(deployment_id)
+        if not preview.removal_allowed:
+            raise ControlPlaneConflictError("; ".join(preview.blockers))
+        deployment = self._active_self_hosted_gateway(deployment_id)
+        try:
+            self._repository.upsert_gateway_deployment(
+                deployment.model_copy(update={"retired_at": datetime.now(UTC)}),
+                preserve_display_name=True,
+            )
+        except ValueError as error:
+            raise ControlPlaneConflictError(str(error)) from error
+        return preview
+
+    def change_self_hosted_gateway_association(
+        self, deployment_id: UUID, write: SelfHostedGatewayAssociationChange,
+    ) -> GatewayDeploymentTopology:
+        current = self._active_self_hosted_gateway(deployment_id)
+        if current.apim_target_id == write.apim_target_id:
+            raise ControlPlaneConflictError(
+                "The Gateway is already associated with this APIM target"
+            )
+        preview = self.self_hosted_gateway_removal_preview(deployment_id)
+        if not preview.removal_allowed:
+            raise ControlPlaneConflictError("; ".join(preview.blockers))
+        target = self._apim_target(self._active_apim_target_row(write.apim_target_id))
+        if target.capabilities.self_hosted_gateway is CapabilitySupport.UNSUPPORTED:
+            raise ControlPlaneConflictError(
+                "The destination APIM does not support Self-hosted Gateway"
+            )
+        return self._save_self_hosted_gateway(
+            write.apim_target_id,
+            SelfHostedGatewayWrite.model_validate({
+                name: getattr(write, name) for name in SelfHostedGatewayWrite.model_fields
+            }), retiring_deployment=current,
+        )
+
+    def _active_self_hosted_gateway(self, deployment_id: UUID) -> GatewayDeployment:
+        self._require_self_hosted_lifecycle()
+        row = self._repository.get_gateway_deployment(deployment_id)
+        if row is None:
+            raise ControlPlaneNotFoundError("Self-hosted Gateway not found")
+        deployment = self._gateway_deployment(row)
+        if deployment.kind is not GatewayDeploymentKind.SELF_HOSTED or deployment.retired_at:
+            raise ControlPlaneNotFoundError("Self-hosted Gateway not found")
+        self._active_apim_target_row(deployment.apim_target_id)
+        return deployment
+
+    def _save_self_hosted_gateway(
+        self, apim_target_id: UUID, write: SelfHostedGatewayWrite, *,
+        retiring_deployment: GatewayDeployment | None = None,
+    ) -> GatewayDeploymentTopology:
+        deployment_id = gateway_deployment_id_for(apim_target_id, write.native_gateway_id)
+        row = self._repository.get_gateway_deployment(deployment_id)
+        existing = self._gateway_deployment(row) if row is not None else None
+        if existing is not None and not existing.retired_at and existing.endpoint_url is not None:
+            raise ControlPlaneConflictError(
+                "The Gateway is already associated with this APIM target"
+            )
+        deployment = GatewayDeployment(
+            id=deployment_id, apim_target_id=apim_target_id,
+            native_gateway_id=write.native_gateway_id,
+            kind=GatewayDeploymentKind.SELF_HOSTED, display_name=write.display_name,
+            location=write.location, endpoint_url=write.endpoint_url,
+            hosting_mode=write.hosting_mode,
+            lifecycle_ownership=GatewayLifecycleOwnership.CUSTOMER, release_gate=write.release_gate,
+            declared_state=existing.declared_state if existing else GatewayDeclaredState.UNKNOWN,
+            last_arm_sync_at=existing.last_arm_sync_at if existing else None,
+        )
+        try:
+            row = self._repository.upsert_gateway_deployment(
+                deployment, retiring_deployment=retiring_deployment,
+            )
+        except ValueError as error:
+            raise ControlPlaneConflictError(str(error)) from error
+        persisted = self._gateway_deployment(row)
+        inventory_row = self._repository.get_gateway_deployment_inventory(persisted.id)
+        target = self._apim_target(self._active_apim_target_row(apim_target_id))
+        return GatewayDeploymentTopology(
+            deployment=persisted,
+            inventory=self._gateway_deployment_inventory(inventory_row) if inventory_row else None,
+            configuration_endpoint=HttpUrl(
+                f"https://{target.service_name}.configuration.azure-api.net"
+            ),
+            published_models=self._published_models_for_deployment(persisted),
+        )
 
     @staticmethod
     def _apim_target(row: Mapping[str, Any]) -> ApimTarget:

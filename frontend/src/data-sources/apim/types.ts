@@ -554,6 +554,25 @@ export type ApimTargetTopology = {
   published_model_count: number
   published_models: GatewayPublishedModelSummary[]
 }
+export type GatewayDeploymentTopology = ApimTargetTopology["deployments"][number]
+export type SelfHostedGatewayWrite = {
+  native_gateway_id: string
+  display_name: string
+  endpoint_url: string
+  location?: string | null
+  hosting_mode?: Exclude<GatewayDeployment["hosting_mode"], "azure_managed">
+  release_gate?: GatewayDeployment["release_gate"]
+}
+export type SelfHostedGatewayAssociationChange = SelfHostedGatewayWrite & { apim_target_id: string }
+export type SelfHostedGatewayRemovalPreview = {
+  deployment_id: string
+  display_name: string
+  model_count: number
+  models: GatewayPublishedModelSummary[]
+  removal_allowed: boolean
+  blockers: string[]
+}
+
 export type ApimTargetTopologyList = {
   items: ApimTargetTopology[]
   total: number

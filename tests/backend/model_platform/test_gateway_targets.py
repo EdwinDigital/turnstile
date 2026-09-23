@@ -15,6 +15,9 @@ from turnstile_core.domain.gateway_targets import (
     GatewayDeployment,
     GatewayDeploymentScope,
     GatewayInstanceObservation,
+    SelfHostedGatewayAssociationChange,
+    SelfHostedGatewayNameWrite,
+    SelfHostedGatewayWrite,
     gateway_deployment_id_for,
 )
 
@@ -57,6 +60,36 @@ def deployment(**changes: Any) -> GatewayDeployment:
             **changes,
         }
     )
+
+
+@pytest.mark.parametrize("change", [
+    {"native_gateway_id": "MANAGED"}, {"hosting_mode": "azure_managed"},
+    {"endpoint_url": "http://edge.example.test"},
+    {"endpoint_url": "https://user:secret@edge.example.test"},
+    {"endpoint_url": "https://edge.example.test?token=unit"},
+    {"endpoint_url": "https://edge.example.test/#fragment"},
+    {"credential": "not-a-supported-field"},
+])
+def test_self_hosted_requests_reject_unsafe_or_managed_configuration(
+    change: dict[str, Any],
+) -> None:
+    values = {"native_gateway_id": "unit-edge", "display_name": "Unit edge",
+              "endpoint_url": "https://edge.example.test/unit/llm"}
+    write = SelfHostedGatewayWrite.model_validate(values)
+    assert write.hosting_mode == "other" and write.release_gate == "required"
+    assert SelfHostedGatewayAssociationChange.model_validate({
+        **values, "apim_target_id": TARGET,
+    }).apim_target_id == TARGET
+    with pytest.raises(ValueError):
+        SelfHostedGatewayWrite.model_validate({**values, **change})
+
+
+def test_self_hosted_name_write_cannot_mutate_routing_or_store_blank_names() -> None:
+    assert SelfHostedGatewayNameWrite(display_name="  Unit edge  ").display_name == "Unit edge"
+    with pytest.raises(ValueError, match="blank"):
+        SelfHostedGatewayNameWrite(display_name=" \t ")
+    with pytest.raises(ValueError):
+        SelfHostedGatewayNameWrite.model_validate({"display_name": "Unit", "endpoint_url": "other"})
 
 
 def test_gateway_defaults_do_not_claim_connectivity_or_capabilities() -> None:

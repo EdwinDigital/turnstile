@@ -1299,7 +1299,7 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
         })}
         {activeTab === "gateways" && gateways.map((gateway) => {
           const target = topology.data?.items.find(item => item.target.gateway_profile_id === gateway.id)
-          if (target) return <GatewayTargetGroup key={gateway.id} target={target} profile={gateway} canManage={user?.role === "owner"} syncAvailable={topology.data?.inventory_sync_available === true} onRename={canRenameGateway ? () => onRenameGateway(gateway) : undefined} />
+          if (target) return <GatewayTargetGroup key={gateway.id} target={target} profile={gateway} canManage={user?.role === "owner"} syncAvailable={topology.data?.inventory_sync_available === true} lifecycleAvailable={topology.data?.resource_lifecycle_available === true} targets={topology.data?.items ?? []} onRename={canRenameGateway ? () => onRenameGateway(gateway) : undefined} />
           const runtimeCount = registry.runtimes.filter((runtime) => runtime.gateway_profile_id === gateway.id).length
           const deleteDisabledReason = gateway.is_default
             ? "请先将其他网关设为默认"

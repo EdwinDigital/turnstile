@@ -189,6 +189,39 @@ class ApimTarget(StrictModel):
         return self
 
 
+class SelfHostedGatewayWrite(StrictModel):
+    native_gateway_id: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(min_length=1, max_length=120)
+    endpoint_url: HttpUrl
+    location: str | None = Field(default=None, min_length=1, max_length=128)
+    hosting_mode: GatewayHostingMode = GatewayHostingMode.OTHER
+    release_gate: GatewayReleaseGate = GatewayReleaseGate.REQUIRED
+
+    @model_validator(mode="after")
+    def require_customer_hosting(self) -> SelfHostedGatewayWrite:
+        _require_https_gateway_endpoint(self.endpoint_url)
+        if self.native_gateway_id.casefold() == "managed":
+            raise ValueError("A Self-hosted Gateway cannot use native ID 'managed'")
+        if self.hosting_mode is GatewayHostingMode.AZURE_MANAGED:
+            raise ValueError("A Self-hosted Gateway cannot use Azure-managed hosting")
+        return self
+
+
+class SelfHostedGatewayNameWrite(StrictModel):
+    display_name: str = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def require_display_name(self) -> SelfHostedGatewayNameWrite:
+        self.display_name = self.display_name.strip()
+        if not self.display_name:
+            raise ValueError("The Gateway display name cannot be blank")
+        return self
+
+
+class SelfHostedGatewayAssociationChange(SelfHostedGatewayWrite):
+    apim_target_id: UUID
+
+
 class GatewayDeployment(StrictModel):
     schema_version: Literal[1] = 1
     id: UUID
@@ -609,6 +642,15 @@ class ApimTargetTopology(StrictModel):
     self_hosted_gateway_count: int = Field(ge=0)
     published_model_count: int = Field(ge=0)
     published_models: tuple[GatewayPublishedModelSummary, ...] = ()
+
+
+class SelfHostedGatewayRemovalPreview(StrictModel):
+    deployment_id: UUID
+    display_name: str
+    model_count: int = Field(ge=0)
+    models: tuple[GatewayPublishedModelSummary, ...] = ()
+    removal_allowed: bool
+    blockers: tuple[str, ...] = ()
 
 
 class ApimTargetTopologyList(StrictModel):

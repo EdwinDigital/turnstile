@@ -1,4 +1,73 @@
 schemas:
+  SelfHostedGatewayWrite:
+    properties:
+      native_gateway_id: {type: string, maxLength: 80, minLength: 1, title: Native Gateway Id}
+      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
+      endpoint_url: {type: string, maxLength: 2083, minLength: 1, format: uri, title: Endpoint Url}
+      location:
+        anyOf:
+        - {type: string, maxLength: 128, minLength: 1}
+        - {type: 'null'}
+        title: Location
+      hosting_mode:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayHostingMode
+        default: other
+      release_gate:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGate
+        default: required
+    additionalProperties: false
+    type: object
+    required: [native_gateway_id, display_name, endpoint_url]
+    title: SelfHostedGatewayWrite
+  SelfHostedGatewayNameWrite:
+    properties:
+      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
+    additionalProperties: false
+    type: object
+    required: [display_name]
+    title: SelfHostedGatewayNameWrite
+  SelfHostedGatewayAssociationChange:
+    properties:
+      native_gateway_id: {type: string, maxLength: 80, minLength: 1, title: Native Gateway Id}
+      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
+      endpoint_url: {type: string, maxLength: 2083, minLength: 1, format: uri, title: Endpoint Url}
+      location:
+        anyOf:
+        - {type: string, maxLength: 128, minLength: 1}
+        - {type: 'null'}
+        title: Location
+      hosting_mode:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayHostingMode
+        default: other
+      release_gate:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGate
+        default: required
+      apim_target_id: {type: string, format: uuid, title: Apim Target Id}
+    additionalProperties: false
+    type: object
+    required: [native_gateway_id, display_name, endpoint_url, apim_target_id]
+    title: SelfHostedGatewayAssociationChange
+  SelfHostedGatewayRemovalPreview:
+    properties:
+      deployment_id: {type: string, format: uuid, title: Deployment Id}
+      display_name: {type: string, title: Display Name}
+      model_count: {type: integer, minimum: 0, title: Model Count}
+      models:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayPublishedModelSummary
+        type: array
+        title: Models
+        default: []
+      removal_allowed: {type: boolean, title: Removal Allowed}
+      blockers:
+        items: {type: string}
+        type: array
+        title: Blockers
+        default: []
+    additionalProperties: false
+    type: object
+    required: [deployment_id, display_name, model_count, removal_allowed]
+    title: SelfHostedGatewayRemovalPreview
   ApimOnboardingRequest:
     properties:
       tenant_id: {type: string, format: uuid, title: Tenant Id}

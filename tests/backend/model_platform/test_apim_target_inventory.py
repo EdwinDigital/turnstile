@@ -24,6 +24,9 @@ from turnstile_core.domain.gateway_targets import (
     GatewayDeploymentInventory,
     GatewayDeploymentScope,
     GatewayDeploymentScopeMode,
+    SelfHostedGatewayAssociationChange,
+    SelfHostedGatewayNameWrite,
+    SelfHostedGatewayWrite,
     gateway_deployment_id_for,
 )
 from turnstile_core.integrations.apim_control_plane_contract import ResolvedApimPublisherClient
@@ -39,6 +42,126 @@ from turnstile_core.services.control_plane import (
     GatewayControlPlaneService,
 )
 from turnstile_core.services.gateway_release_operation_worker import GatewayReleaseOperationWorker
+
+
+def self_hosted_write(**changes: Any) -> SelfHostedGatewayWrite:
+    return SelfHostedGatewayWrite.model_validate({
+        "native_gateway_id": "unit-edge", "display_name": "Unit edge",
+        "endpoint_url": "https://edge.example.test/unit/llm", "hosting_mode": "docker",
+        **changes,
+    })
+
+
+def lifecycle_service() -> tuple[InMemoryRepository, GatewayControlPlaneService]:
+    repository = InMemoryRepository()
+    repository.models = []
+    repository.upsert_apim_target(target(capabilities={"self_hosted_gateway": "supported"}))
+    return repository, GatewayControlPlaneService(
+        repository, TEST_CIPHER, self_hosted_gateway_enabled=True,
+    )
+
+
+def test_self_hosted_lifecycle_preserves_identity_and_unknown_reachability() -> None:
+    repository, service = lifecycle_service()
+    write = self_hosted_write()
+    with pytest.raises(ControlPlaneUnavailableError, match="not enabled"):
+        GatewayControlPlaneService(repository).add_self_hosted_gateway(TARGET, write)
+    saved = service.add_self_hosted_gateway(TARGET, write)
+    identity = saved.deployment.id
+    assert saved.deployment.declared_state == "unknown"
+    assert saved.deployment.reachability_state == "unknown"
+    with pytest.raises(ControlPlaneConflictError, match="already associated"):
+        service.add_self_hosted_gateway(TARGET, write)
+    service.rename_self_hosted_gateway(
+        identity, SelfHostedGatewayNameWrite(display_name=" Renamed "),
+    )
+    row = repository.get_gateway_deployment(identity)
+    assert row is not None and row["display_name"] == "Renamed"
+    assert row["endpoint_url"] == str(write.endpoint_url)
+    assert service.self_hosted_gateway_removal_preview(identity).removal_allowed
+    service.remove_self_hosted_gateway(identity)
+    retired = repository.get_gateway_deployment(identity)
+    assert retired is not None and retired["retired_at"] is not None
+    with pytest.raises(ControlPlaneNotFoundError):
+        service.rename_self_hosted_gateway(
+            identity, SelfHostedGatewayNameWrite(display_name="Late"),
+        )
+    readded = service.add_self_hosted_gateway(TARGET, write)
+    assert readded.deployment.id == identity and readded.deployment.retired_at is None
+    assert readded.deployment.reachability_state == "unknown"
+    assert service.apim_target_topologies().resource_lifecycle_available
+
+
+@pytest.mark.parametrize("trusted,problem", [
+    (False, None), (True, None), (False, "host"), (True, "association"),
+    (False, "credential"), (False, "probe"),
+])
+def test_self_hosted_validation_never_sends_credentials_to_an_unbound_host(
+    trusted: bool, problem: str | None,
+) -> None:
+    repository, service = lifecycle_service()
+    saved = service.add_self_hosted_gateway(TARGET, self_hosted_write())
+    identity = saved.deployment.id
+    row = repository.gateway_deployments[identity]
+    row.update(declared_state="present", last_arm_sync_at=NOW)
+    repository.upsert_gateway_deployment_inventory(GatewayDeploymentInventory.model_validate({
+        "deployment_id": identity, "source_api_version": "2024-05-01", "synced_at": NOW,
+        "associated_api_ids": ["other-api" if problem == "association" else "UNIT-API"],
+        "hostname_configurations": [] if trusted or problem == "host" else [{
+            "configuration_id": "unit-host", "name": "Unit hostname",
+            "hostname": "edge.example.test",
+        }],
+    }))
+    profile = next(item for item in repository.gateways if item["id"] == TARGET)
+    profile["credential_ciphertext"] = None if problem == "credential" else TEST_CIPHER.encrypt(
+        "unit-validation-key"
+    )
+    profile["config"] = {"header_name": "Ocp-Apim-Subscription-Key"}
+    probe = Mock(spec=GatewayConnectionProbe)
+    if problem == "probe":
+        probe.validate.side_effect = GatewayConnectionProbeError(
+            "Gateway validation returned HTTP 503"
+        )
+    service = GatewayControlPlaneService(
+        repository, TEST_CIPHER, self_hosted_gateway_enabled=True, gateway_connection_probe=probe,
+        trusted_gateway_endpoints={identity: self_hosted_write().endpoint_url} if trusted else {},
+    )
+    if problem is None:
+        result = service.validate_self_hosted_gateway(identity)
+        assert result.deployment.reachability_state == "reachable"
+        assert result.deployment.last_probe_at is not None
+        assert result.deployment.observation_state == "unknown"
+    else:
+        with pytest.raises((ControlPlaneConflictError, ControlPlaneUnavailableError)):
+            service.validate_self_hosted_gateway(identity)
+        if problem != "probe":
+            probe.validate.assert_not_called()
+        expected = "unreachable" if problem == "probe" else "unknown"
+        assert repository.gateway_deployments[identity]["reachability_state"] == expected
+
+
+def test_self_hosted_reassociation_retires_source_and_refuses_occupied_destination() -> None:
+    repository, service = lifecycle_service()
+    source = service.add_self_hosted_gateway(TARGET, self_hosted_write()).deployment
+    other_id = UUID(int=91)
+    repository.gateways.append({**repository.gateways[0], "id": other_id})
+    repository.upsert_apim_target(target(
+        gateway_profile_id=other_id, service_name="other-service",
+        arm_resource_id=target().arm_resource_id.replace("unit-service", "other-service"),
+    ))
+    change = SelfHostedGatewayAssociationChange(
+        **self_hosted_write().model_dump(), apim_target_id=other_id,
+    )
+    occupied = service.add_self_hosted_gateway(other_id, self_hosted_write())
+    with pytest.raises(ControlPlaneConflictError, match="already associated"):
+        service.change_self_hosted_gateway_association(source.id, change)
+    assert repository.gateway_deployments[source.id]["retired_at"] is None
+    service.remove_self_hosted_gateway(occupied.deployment.id)
+    moved = service.change_self_hosted_gateway_association(source.id, change)
+    assert moved.deployment.apim_target_id == other_id
+    assert moved.deployment.id == occupied.deployment.id
+    assert repository.gateway_deployments[source.id]["retired_at"] is not None
+    assert moved.deployment.reachability_state == "unknown"
 
 
 @pytest.mark.parametrize("scope_error", [None, "feature-off", "foreign", "association", "required"])

@@ -68,6 +68,36 @@ and persists whitelisted API associations, hostnames and CA metadata. A declared
 not necessarily reachable or observed; missing evidence stays unknown. Retired deployments and
 confirmed names survive later inventory refreshes.
 
+### Self-hosted Gateway metadata lifecycle
+
+`SELF_HOSTED_GATEWAY_ENABLED` defaults to false and requires `APIM_TARGET_REGISTRY_ENABLED`.
+When enabled, an Owner can add customer-managed Gateway metadata beneath an existing APIM,
+rename it, synchronize inventory, validate its endpoint, retire it or change its APIM association.
+The platform does not create, delete, move or reconfigure Azure Gateways, containers or tokens.
+An APIM capability of `unsupported` blocks addition. Unknown capabilities remain unknown and
+cannot satisfy publication readiness.
+
+Addition records the exact native Gateway ID, display name, HTTPS endpoint, optional location,
+hosting mode and required/optional release gate. An inventory-discovered unconfigured row can
+be completed; a live configured association cannot be overwritten. Retirement retains its stable
+ID and history. Re-addition reuses the ID but resets connection evidence. Name updates change
+only the trimmed nonblank display name and return `204`.
+
+Validation first requires a present ARM declaration and association with the target API. Before
+sending the encrypted target credential, the endpoint hostname must appear in that Gateway's
+persisted APIM hostname inventory. Alternatively, `SELF_HOSTED_GATEWAY_TRUSTED_ENDPOINTS` may
+explicitly map that deployment UUID to its exact credential-free HTTPS endpoint, including path.
+Treat this mapping as a security-sensitive operator allowlist, not a connectivity workaround.
+The request is a non-inference `GET /v1/models` with no redirects and normal management
+authorization; its timestamp proves a past probe, not current runtime health.
+
+Retirement and reassociation are blocked by serving models and in-flight publications. Reassociation
+requires a different enabled registered destination, preserves the old record as retired, and
+creates or reuses the destination in one persistence transaction. New evidence is required after
+reassociation. A metadata change alone does not revoke an Azure subscription, reconfigure a
+container or prove budget-protocol membership. Synchronize inventory and verify protocol readiness
+before allowing the changed Gateway to serve traffic.
+
 ### Initialize an existing APIM
 
 Initialization is a separate Owner workflow under `/api/v1/model-management/apim-onboarding`.

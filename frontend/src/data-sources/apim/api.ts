@@ -1,4 +1,8 @@
 import type {
+  GatewayDeploymentTopology,
+  SelfHostedGatewayAssociationChange,
+  SelfHostedGatewayRemovalPreview,
+  SelfHostedGatewayWrite,
   ApimOnboardingOperations,
   ApimOnboardingPlan,
   ApimOnboardingRequest,
@@ -360,6 +364,24 @@ export const dataSource = {
   syncApimTarget: (id: string) => request<GatewayReleaseOperationAccepted>(
     `/api/v1/model-management/apim-targets/${encodeURIComponent(id)}/inventory-sync`,
     { method: "POST" },
+  ),
+  addSelfHostedGateway: (targetId: string, value: SelfHostedGatewayWrite) => writeJson<GatewayDeploymentTopology>(
+    `/api/v1/model-management/apim-targets/${encodeURIComponent(targetId)}/self-hosted-gateways`, value,
+  ),
+  renameSelfHostedGateway: (id: string, name: string) => writeJson<void>(
+    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/name`, { display_name: name }, "PATCH",
+  ),
+  validateSelfHostedGateway: (id: string) => request<GatewayDeploymentTopology>(
+    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/validations`, { method: "POST" },
+  ),
+  selfHostedGatewayRemovalPreview: (id: string) => request<SelfHostedGatewayRemovalPreview>(
+    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/removal-preview`,
+  ),
+  removeSelfHostedGateway: (id: string) => request<SelfHostedGatewayRemovalPreview>(
+    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}`, { method: "DELETE" },
+  ),
+  changeSelfHostedGatewayAssociation: (id: string, value: SelfHostedGatewayAssociationChange) => writeJson<GatewayDeploymentTopology>(
+    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/apim-association`, value, "PUT",
   ),
   saveGateway: (value: Record<string, unknown>, id?: string) => saveRegistry("/api/v1/model-management/gateways", value, id),
   renameGateway: (id: string, name: string) => request<ModelRegistry | undefined>(

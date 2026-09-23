@@ -48,6 +48,18 @@ tags:
 - name: Model Router
   description: User-scoped model routing drafts, validation, version publication, and lifecycle.
 paths:
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1self-hosted-gateways
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/name:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1name
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/validations:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1validations
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/removal-preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1removal-preview
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/apim-association:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1apim-association
   /api/v1/model-management/apim-onboarding:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-onboarding
   /api/v1/model-management/apim-onboarding/preview:
@@ -267,6 +279,14 @@ components:
     ErrorResponse:
       $ref: ./openapi/components/common.yaml#/responses/ErrorResponse
   schemas:
+    SelfHostedGatewayWrite:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayWrite
+    SelfHostedGatewayNameWrite:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayNameWrite
+    SelfHostedGatewayAssociationChange:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayAssociationChange
+    SelfHostedGatewayRemovalPreview:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayRemovalPreview
     ApimOnboardingRequest:
       $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingRequest
     ApimOnboardingPlan:
