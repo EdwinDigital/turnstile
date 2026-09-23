@@ -5,6 +5,7 @@ import { resolveTimezone } from "../../lib/timezone"
 import { dataSource, usageWindow } from "./api"
 import type {
   DistributionDimension,
+  ModelRegistry,
   PeopleBudgetFilter,
   TrendDimension,
   UsageFilters,
@@ -113,6 +114,14 @@ export const finopsKeys = {
     offset: number,
     limit: number,
   ) => ["finops", "budgets", "people", period, departmentId, query, status, offset, limit] as const,
+}
+
+export async function storeRegistry(
+  queryClient: QueryClient,
+  update: ModelRegistry | ((current: ModelRegistry | undefined) => ModelRegistry | undefined),
+) {
+  await queryClient.cancelQueries({ queryKey: finopsKeys.registry })
+  queryClient.setQueryData<ModelRegistry>(finopsKeys.registry, update)
 }
 
 export const finopsQueries = {

@@ -1,5 +1,9 @@
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
+import { createRequire } from "node:module"
 import test from "node:test"
+import { fileURLToPath } from "node:url"
+import { runInNewContext } from "node:vm"
 
 import {
   isDatabricksWorkspaceUrl,
@@ -10,6 +14,85 @@ import {
   publicationConnections,
   publicationConnectionTarget,
 } from "../../../frontend/src/components/model-management/model-publication-connections.ts"
+
+const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
+const queryLibrary = frontendRequire("@tanstack/react-query")
+const { rolldown } = await import(frontendRequire.resolve("rolldown"))
+const queriesEntry = fileURLToPath(new URL("../../../frontend/src/data-sources/apim/queries.ts", import.meta.url))
+const queriesBundle = await rolldown({ input: queriesEntry, external: id => id !== queriesEntry, treeshake: false })
+let queriesCode
+try { queriesCode = (await queriesBundle.generate({ format: "cjs" })).output[0].code }
+finally { await queriesBundle.close() }
+
+function registryCacheHarness(readRegistry) {
+  const exports = {}
+  const imports = {
+    "@tanstack/react-query": queryLibrary,
+    "../../api/cache-policies": { cachePolicies: { aggregate: {}, reference: {} } },
+    "../../lib/timezone": { resolveTimezone: () => "UTC" },
+    "./api": { dataSource: { registry: readRegistry } },
+  }
+  runInNewContext(queriesCode, { exports, require: name => {
+    assert.ok(name in imports, `Unexpected queries import: ${name}`)
+    return imports[name]
+  } })
+  return exports
+}
+
+for (const partial of [false, true]) test(`committed registry survives an older response (partial=${partial})`, async () => {
+  let releaseRead
+  let markStarted
+  const started = new Promise(resolve => { markStarted = resolve })
+  const original = registry()
+  const harness = registryCacheHarness(async () => {
+    markStarted()
+    return new Promise(resolve => { releaseRead = resolve })
+  })
+  const client = new queryLibrary.QueryClient({ defaultOptions: { queries: { retry: false } } })
+  try {
+    client.setQueryData(harness.finopsKeys.registry, original)
+    const pending = client.fetchQuery(harness.finopsQueries.registry()).catch(error => error)
+    await started
+    await harness.storeRegistry(client, partial
+      ? current => ({ ...current, runtimes: current.runtimes.map(runtime => ({ ...runtime, health_status: "available" })) })
+      : registry({ models: [{ id: "saved-model" }] }))
+    releaseRead(original)
+    await pending
+    const actual = client.getQueryData(harness.finopsKeys.registry)
+    if (partial) {
+      assert.equal(actual.runtimes[0].health_status, "available")
+      assert.deepEqual(actual.gateways, original.gateways)
+    } else assert.equal(actual.models[0].id, "saved-model")
+  } finally { client.clear() }
+})
+
+test("failed background refresh retains the committed registry", async () => {
+  const harness = registryCacheHarness(async () => { throw new Error("registry unavailable") })
+  const client = new queryLibrary.QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const saved = registry({ models: [{ id: "saved-model" }] })
+  try {
+    await harness.storeRegistry(client, saved)
+    await assert.rejects(client.fetchQuery(harness.finopsQueries.registry()), /registry unavailable/)
+    assert.deepEqual(client.getQueryData(harness.finopsKeys.registry), saved)
+  } finally { client.clear() }
+})
+
+test("registry writers await cancellation and use the shared cache boundary", async () => {
+  let releaseCancel
+  const calls = []
+  const client = {
+    cancelQueries() { calls.push("cancel"); return new Promise(resolve => { releaseCancel = resolve }) },
+    setQueryData() { calls.push("write") },
+  }
+  const saving = registryCacheHarness(() => {}).storeRegistry(client, registry())
+  assert.deepEqual(calls, ["cancel"])
+  releaseCancel()
+  await saving
+  assert.deepEqual(calls, ["cancel", "write"])
+  const page = readFileSync(new URL("../../../frontend/src/pages/model-management-page.tsx", import.meta.url), "utf8")
+  assert.doesNotMatch(page, /client\.setQueryData(?:<ModelRegistry>)?\(finopsKeys\.registry/)
+  assert.equal((page.match(/await storeRegistry\(client,/g) ?? []).length, 6)
+})
 
 function gateway(id, overrides = {}) {
   return { id, implementation: "apim", enabled: true, ...overrides }

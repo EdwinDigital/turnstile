@@ -86,7 +86,7 @@ import { Textarea } from "../components/ui/textarea"
 import { ResizableGridTable } from "../components/ui/resizable-table"
 import { getIntlLocale } from "../locales/index"
 import { hasModelPrices, priceRequests } from "../lib/pricing"
-import { finopsKeys, finopsQueries } from "../data-sources/apim/queries"
+import { finopsKeys, finopsQueries, storeRegistry } from "../data-sources/apim/queries"
 import { assistantSettingsKey } from "../components/assistant/queries"
 import { useTimezone } from "../providers/timezone-provider"
 import {
@@ -408,8 +408,8 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
       if (kind === "provider") return dataSource.saveProvider(value, id)
       return dataSource.saveGateway(value, id)
     },
-    onSuccess: (registry) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry) => {
+      await storeRegistry(client, registry)
       setEditor(null)
       setEditingModel(null)
       setNotice({ text: "配置已保存", ok: true })
@@ -420,9 +420,8 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
       if (!data) throw new Error("模型目录尚未加载")
       return probeRuntimeHealth(runtime, data)
     },
-    onSuccess: (result) => {
-      setNotice({ text: result.message, ok: result.status === "available" })
-      client.setQueryData<ModelRegistry>(finopsKeys.registry, (current) => current ? {
+    onSuccess: async (result) => {
+      await storeRegistry(client, (current) => current ? {
         ...current,
         runtimes: current.runtimes.map((runtime) => runtime.id === result.runtime_id ? {
           ...runtime,
@@ -431,13 +430,14 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
           last_checked_at: result.checked_at,
         } : runtime),
       } : current)
+      setNotice({ text: result.message, ok: result.status === "available" })
       void client.invalidateQueries({ queryKey: ["finops", "requests"] })
     },
   })
   const saveConnection = useMutation({
     mutationFn: dataSource.saveConnection,
-    onSuccess: (registry) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry) => {
+      await storeRegistry(client, registry)
       setConnectionOpen(false)
       setEditingConnection(null)
       setNotice({ text: "连接已添加", detail: "添加首个模型后将通过候选 Revision 验证", ok: true })
@@ -455,8 +455,8 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   })
   const updateConnection = useMutation({
     mutationFn: ({ runtime, value }: { runtime: ModelRuntime; value: ModelConnectionUpdate }) => dataSource.updateConnection(runtime.id, value),
-    onSuccess: (registry) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry) => {
+      await storeRegistry(client, registry)
       setConnectionOpen(false)
       setEditingConnection(null)
       setNotice({ text: "连接已更新", ok: true })
@@ -464,16 +464,16 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   })
   const deleteConnection = useMutation({
     mutationFn: (runtime: ModelRuntime) => dataSource.deleteConnection(runtime.id),
-    onSuccess: (registry, runtime) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry, runtime) => {
+      await storeRegistry(client, registry)
       setDeletingConnection(null)
       setNotice({ context: runtime.name, text: "连接已删除", ok: true })
     },
   })
   const deleteGateway = useMutation({
     mutationFn: (gateway: GatewayProfile) => dataSource.deleteGateway(gateway.id),
-    onSuccess: (registry, gateway) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry, gateway) => {
+      await storeRegistry(client, registry)
       setDeletingGateway(null)
       setNotice({ context: gateway.name, text: "网关记录已删除", ok: true })
     },
