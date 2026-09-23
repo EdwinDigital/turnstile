@@ -34,6 +34,40 @@ Set `AZURE_SUBSCRIPTION_ID`, `APIM_RESOURCE_GROUP`, `APIM_SERVICE_NAME`, `APIM_P
 
 `APIM_REGRESSION_MODEL_KEY` has no default. Set it only after onboarding a model that can be used for publication probes.
 
+### Registered APIM targets
+
+Apply migration `011_gateway_targets` before upgrading the API and Control-plane packages.
+It is additive and does not register an Azure resource, activate a protocol or rewrite usage.
+Keep `APIM_TARGET_REGISTRY_ENABLED=false` until target-specific identity, permissions and
+connection checks are ready. With the flag off, the existing single-target publisher remains
+unchanged. This feature does not create APIM instances, Gateway containers or role assignments.
+
+When enabled, an Owner can register an existing APIM through
+`POST /api/v1/model-management/apim-targets`; normal management authorization and the write-origin
+check still apply. The request carries a matching ARM endpoint, tenant/subscription/resource-group/
+service/API identity, Gateway endpoint and subscription identifiers, not key values. The backend
+discovers ARM inventory, obtains or reuses the encrypted dashboard credential and requires a
+non-inference `GET /v1/models` connection check before registration succeeds.
+
+`APIM_GATEWAY_PROFILE_ID` explicitly binds the legacy global configuration to one registered
+profile. When that ID is absent, a complete global APIM resource identity must match exactly one
+registered target before a global Observer or explicit legacy compatibility mode can be used.
+`APIM_LEGACY_TARGET_COMPATIBILITY_ENABLED` defaults to false; enable it only for the exact legacy
+target whose subscription, service, API, principal and Gateway URL still match. New target
+publications capture an identity fingerprint and refuse changed identities during retries.
+
+Use `APIM_USAGE_OBSERVERS` for a JSON object keyed by registered profile UUID. Each value has
+`url` (an HTTPS origin) and `key_named_value` (the existing APIM Named Value name). Global
+`APIM_USAGE_OBSERVER_URL` and `APIM_USAGE_OBSERVER_KEY_NAMED_VALUE` apply only to the bound legacy
+profile. Neither Observer credentials nor probe subscription keys are inherited by other targets.
+
+Inventory synchronization requires the target-registry and Release Worker flags in the API and
+the corresponding worker configuration in the Function. The Owner synchronization endpoint
+returns `202` with the existing release-operation status URL. It performs read-only ARM discovery
+and persists whitelisted API associations, hostnames and CA metadata. A declared deployment is
+not necessarily reachable or observed; missing evidence stays unknown. Retired deployments and
+confirmed names survive later inventory refreshes.
+
 ### OpenAI-compatible connections
 
 Register an OpenAI-compatible Connection with an HTTPS Base URL and optional API-provider display metadata. URLs must not contain credentials, query parameters, or fragments. A trailing `/chat/completions` is normalized into the provider path; the public gateway path remains `/chat/completions`.

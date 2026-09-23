@@ -61,6 +61,34 @@ def test_disabled_publication_timer_does_not_build_dependencies(monkeypatch: Any
     function_app.publish_gateway_changes(None)
 
 
+def test_target_mode_does_not_construct_a_global_publisher(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings.model_construct(apim_target_registry_enabled=True)
+    repository, configs, resolver = MagicMock(), MagicMock(), MagicMock()
+    config_factory = MagicMock(return_value=configs)
+    global_factory = MagicMock(side_effect=AssertionError("global client is forbidden"))
+    monkeypatch.setattr(function_app, "apim_target_client_config_resolver", config_factory)
+    monkeypatch.setattr(function_app, "AzureApimPublisherClientResolver", lambda actual: resolver)
+    monkeypatch.setattr(function_app, "AzureApimPublisherClient", global_factory)
+    assert function_app._publisher_clients(repository, settings) == (resolver, configs)
+    config_factory.assert_called_once_with(repository, settings)
+    global_factory.assert_not_called()
+
+
+def test_budget_fence_uses_resolved_target_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    gateway_id = UUID(int=17)
+    global_settings = Settings.model_construct(apim_service_name="default-service")
+    scoped = Settings.model_construct(apim_service_name="target-service")
+    configs = MagicMock()
+    configs.resolve.return_value.settings = scoped
+    read = MagicMock(return_value={"gateway_profile_id": str(gateway_id)})
+    monkeypatch.setattr(function_app, "_budget_configuration", read)
+    assert function_app._target_budget_configuration(gateway_id, global_settings, configs) == {
+        "gateway_profile_id": str(gateway_id),
+    }
+    configs.resolve.assert_called_once_with(gateway_id)
+    read.assert_called_once_with(gateway_id, scoped)
+
+
 @pytest.mark.parametrize("provisioning_enabled", (False, True))
 @pytest.mark.parametrize("fails", (False, True))
 def test_release_timer_never_constructs_publication_worker(

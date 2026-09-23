@@ -14,6 +14,7 @@ from tests.support.paths import FRONTEND_SOURCE, REPOSITORY_ROOT, read_frontend_
         "model-publication-connections.test.mjs",
         "openai-compatible.test.mjs",
         "vite-proxy.test.mjs",
+        "gateway-topology.test.mjs",
     ),
 )
 def test_model_form_unit_cases(suite_name: str) -> None:

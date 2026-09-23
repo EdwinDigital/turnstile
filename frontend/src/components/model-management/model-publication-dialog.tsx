@@ -5,6 +5,7 @@ import { Check, Circle, Copy, Eye, EyeOff, LoaderCircle, Plug, Rocket, ShieldChe
 import { dataSource } from "../../data-sources/apim/api"
 import { finopsKeys, finopsQueries } from "../../data-sources/apim/queries"
 import { translateForLocale, useLocale } from "../../locales/index"
+import { gatewayPublicationChoices, resolveGatewaySelection } from "../../lib/gateway-topology"
 import type {
   GatewayPublication,
   GatewayPublicationCreate,
@@ -239,6 +240,7 @@ export function ModelPublicationDialog({
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
+  const topology = useQuery({ ...finopsQueries.apimTargets(), enabled: !publicationId })
   const apimGateways = registry.gateways.filter(
     (gateway) => gateway.implementation === "apim" && gateway.enabled,
   )
@@ -248,6 +250,12 @@ export function ModelPublicationDialog({
       ?? "",
   )
   const selectedGateway = apimGateways.find((gateway) => gateway.id === gatewayId)
+  const [deploymentId, setDeploymentId] = useState<string | null>(null)
+  const scopedPublication = topology.data?.deployment_scoping_available === true
+  const gatewayChoices = gatewayPublicationChoices(apimGateways, topology.data ?? null, scopedPublication)
+  const deploymentSelection = resolveGatewaySelection(apimGateways, gatewayChoices, {
+    targetId: gatewayId, deploymentId,
+  })
   const apimRuntimes = publicationConnections(registry, gatewayId)
   const [runtimeId, setRuntimeId] = useState(
     preferredPublicationConnection(apimRuntimes)?.id ?? "",
@@ -330,6 +338,7 @@ export function ModelPublicationDialog({
     if (publishing || !id || id === gatewayId || !apimGateways.some((gateway) => gateway.id === id)) return
     const nextConnections = publicationConnections(registry, id)
     setGatewayId(id)
+    setDeploymentId(null)
     setRuntimeId(preferredPublicationConnection(nextConnections, runtimeId)?.id ?? "")
     clearConnectionInputs()
   }
@@ -341,7 +350,12 @@ export function ModelPublicationDialog({
   }
 
   const validate = () => {
+    if (topology.isPending) return "Gateway inventory is loading"
+    if (topology.error) return "Gateway inventory could not be loaded"
     if (!selectedGateway) return "没有可用的 Azure API Management 网关。"
+    if (scopedPublication && !deploymentSelection.choice?.selectable) {
+      return deploymentSelection.choice?.reason ?? "Select an available Gateway deployment"
+    }
     if (!selectedRuntime || !selectedProvider) return "请选择当前网关下的可用连接。"
     if (requiredCredentialMissing) return selectedRuntimeUsesOAuth
       ? "请输入该连接首次发布所需的 OAuth Secret。" : "请输入该连接首次发布所需的一次性 API Key。"
@@ -384,6 +398,9 @@ export function ModelPublicationDialog({
     try {
       const request: GatewayPublicationCreate = {
         ...publicationConnectionTarget(registry, selectedGateway.id, selectedRuntime.id, providerApiKey),
+        ...(scopedPublication && deploymentSelection.choice?.deploymentId ? {
+          deployment_scope: { mode: "selected" as const, deployment_ids: [deploymentSelection.choice.deploymentId] },
+        } : {}),
         model: {
           operation: imageGeneration ? "image_generation" : undefined,
           deployment_name: foundry ? foundryDeployment.trim() : undefined,
@@ -565,6 +582,22 @@ export function ModelPublicationDialog({
               <span className="registry-field-label">目标网关</span>
               <span className="registry-option"><GatewayBrandLogo brand={gatewayBrandFromIdentity(`${selectedGateway.name} ${selectedGateway.implementation}`)} size={15} /><span data-no-localize>{selectedGateway.name}</span></span>
             </div> : <div className="registry-error" role="alert">没有可用的 Azure API Management 网关。</div>}
+            {scopedPublication && <div className="registry-field">
+              <span className="registry-field-label">Gateway deployment</span>
+              <Select value={deploymentSelection.choice?.value ?? ""} disabled={publishing} onValueChange={value => {
+                const choice = deploymentSelection.targetChoices.find(item => item.value === value)
+                if (!publishing && choice?.selectable) setDeploymentId(choice.deploymentId)
+              }}>
+                <SelectTrigger className="registry-select-trigger" aria-label="Gateway deployment"><SelectValue>{deploymentSelection.choice?.name ?? "Select a Gateway deployment"}</SelectValue></SelectTrigger>
+                <SelectContent align="start" alignItemWithTrigger={false}>
+                  {deploymentSelection.targetChoices.map(choice => <SelectItem key={choice.value} value={choice.value} disabled={!choice.selectable} title={choice.reason ?? choice.endpoint ?? undefined}>
+                    <span>{choice.name} ({choice.kind === "managed" ? "Managed" : "Self-hosted"})</span>
+                  </SelectItem>)}
+                </SelectContent>
+              </Select>
+              {!deploymentSelection.choice?.selectable && <div className="registry-error" role="alert">{deploymentSelection.choice?.reason ?? "Select an available Gateway deployment"}</div>}
+            </div>}
+            {topology.error && <div className="registry-error" role="alert">{topology.error.message}<Button type="button" variant="ghost" size="xs" onClick={() => void topology.refetch()}>Retry</Button></div>}
           </section>
 
           {selectedGateway && <>

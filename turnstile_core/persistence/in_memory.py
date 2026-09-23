@@ -28,6 +28,7 @@ from .in_memory_applications import InMemoryApplicationRepositoryMixin
 from .in_memory_assistant import InMemoryAssistantRepositoryMixin
 from .in_memory_billable_requests import InMemoryBillableRequestRepositoryMixin
 from .in_memory_budgets import InMemoryBudgetRepositoryMixin
+from .in_memory_gateway_targets import InMemoryGatewayTargetRepositoryMixin
 from .in_memory_publications import InMemoryPublicationRepositoryMixin
 from .in_memory_registry import InMemoryRegistryRepositoryMixin
 from .repository import (
@@ -87,9 +88,15 @@ class InMemoryRepository(
     InMemoryAssistantRepositoryMixin,
     InMemoryBudgetRepositoryMixin,
     InMemoryBillableRequestRepositoryMixin,
+    InMemoryGatewayTargetRepositoryMixin,
     QueryRepository,
 ):
     def __init__(self) -> None:
+        self.apim_targets: dict[UUID, dict[str, Any]] = {}
+        self.gateway_deployments: dict[UUID, dict[str, Any]] = {}
+        self.apim_target_route_bindings: dict[UUID, dict[str, Any]] = {}
+        self.gateway_deployment_inventories: dict[UUID, dict[str, Any]] = {}
+        self.gateway_instance_observations: dict[tuple[UUID, str], dict[str, Any]] = {}
         self.billable_request_lock = threading.RLock()
         self.budget_evidence_received_at: dict[str, datetime] = {}
         self.budget_evidence_conflicts: set[tuple[str, str, str, int, int]] = set()

@@ -196,7 +196,7 @@ class BudgetPublicationContracts(StrictModel):
                 raise ValueError("Budget model identity is ambiguous")
             model_id = UUID(str(matches[0]["id"])) if matches else None
             if model_id is None and new_model:
-                model_id = publication_model_id(publication.id, alias)
+                model_id = binding.logical_model_id or publication_model_id(publication.id, alias)
             if model_id is None:
                 raise ValueError("Budget model identity is unavailable")
             digest = cls.binding_digest(binding)

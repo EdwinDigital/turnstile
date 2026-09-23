@@ -18,6 +18,7 @@ from uuid import UUID
 from xml.etree import ElementTree
 
 import httpx
+from pydantic import HttpUrl
 
 from ..config import Settings
 from ..domain.application_access import (
@@ -37,6 +38,16 @@ from ..domain.control_plane import (
     GatewayReleaseDependencies,
     PublicationKind,
     publication_model_id,
+)
+from ..domain.gateway_targets import (
+    ApimTargetArmInventory,
+    ApimTargetCapabilitySnapshot,
+    ApimTierFamily,
+    CapabilitySupport,
+    GatewayArmInventory,
+    GatewayCertificateAuthorityInventory,
+    GatewayEndpointProbeResult,
+    GatewayHostnameConfigurationInventory,
 )
 from ..domain.image_profiles import ImageGenerationProfile, validate_image_profile
 from ..integrations.reconciliation import ManagedIdentityTokenProvider
@@ -158,6 +169,140 @@ class AzureApimPublisherClient:
                 "APIM management failed: " + json.dumps(diagnostic, sort_keys=True)
             )
         return response
+
+    def discover_apim_target_inventory(self, gateway_profile_id: UUID) -> ApimTargetArmInventory:
+        discovered_at = datetime.now(UTC)
+        service = self._request("GET", "").json()
+        service_id = str(service.get("id") or "")
+        if service_id.casefold() != self._resource_id_base.casefold():
+            raise PolicyCompilationError("APIM service inventory returned another resource identity")
+        sku = service.get("sku")
+        if not isinstance(sku, Mapping):
+            raise PolicyCompilationError("APIM service inventory returned no SKU")
+        tier = str(sku.get("name") or "").strip()
+        location = str(service.get("location") or "").strip()
+        if not tier or not location:
+            raise PolicyCompilationError("APIM inventory returned incomplete tier or location")
+        tier_family = ApimTierFamily.V2 if tier.casefold().endswith("v2") else ApimTierFamily.CLASSIC
+        self_hosted_support = (
+            CapabilitySupport.SUPPORTED
+            if tier_family is ApimTierFamily.CLASSIC and tier.casefold() in {"developer", "premium"}
+            else CapabilitySupport.UNSUPPORTED
+        )
+        identity = service.get("identity")
+        principal = identity.get("principalId") if isinstance(identity, Mapping) else None
+        try:
+            principal_id = UUID(str(principal)) if principal else None
+            subscription_id = UUID(str(self._settings.azure_subscription_id))
+        except ValueError as error:
+            raise PolicyCompilationError("APIM service inventory returned an invalid identity") from error
+        api = self._request("GET", f"/apis/{quote(self._settings.apim_api_id, safe='')}").json()
+        if self._resource_path(api).casefold() != f"/apis/{self._settings.apim_api_id}".casefold():
+            raise PolicyCompilationError("APIM inventory returned another API identity")
+        properties = api.get("properties")
+        if not isinstance(properties, Mapping):
+            raise PolicyCompilationError("APIM inventory returned no API properties")
+        api_path = str(properties.get("path") or "").strip("/")
+        revision = str(properties.get("apiRevision") or "").strip()
+        if not api_path or not revision:
+            raise PolicyCompilationError("APIM inventory returned incomplete API path or Revision")
+        native_gateways = (
+            self._list_all("/gateways") if self_hosted_support is CapabilitySupport.SUPPORTED else []
+        )
+        gateways = []
+        for gateway in native_gateways:
+            native_id = self._resource_name(gateway)
+            gateway_path = self._resource_path(gateway)
+            if gateway_path.casefold() != f"/gateways/{native_id}".casefold():
+                raise PolicyCompilationError("APIM Gateway inventory returned an unexpected path")
+            properties = gateway.get("properties")
+            if not isinstance(properties, Mapping):
+                properties = {}
+            location_data = properties.get("locationData")
+            if not isinstance(location_data, Mapping):
+                location_data = {}
+            encoded = quote(native_id, safe="")
+            associated = []
+            for item in self._list_all(f"/gateways/{encoded}/apis"):
+                if not self._resource_path(item).casefold().startswith(
+                    f"/gateways/{native_id}/apis/".casefold()
+                ):
+                    raise PolicyCompilationError("APIM API association returned another Gateway")
+                associated.append(self._resource_name(item))
+            hostnames = tuple(sorted((
+                self._hostname_inventory(native_id, item)
+                for item in self._list_all(f"/gateways/{encoded}/hostnameConfigurations")
+            ), key=lambda item: item.name.casefold()))
+            authorities = tuple(sorted((
+                self._certificate_authority_inventory(native_id, item)
+                for item in self._list_all(f"/gateways/{encoded}/certificateAuthorities")
+            ), key=lambda item: item.name.casefold()))
+            gateways.append(GatewayArmInventory(
+                native_gateway_id=native_id, arm_resource_id=service_id + gateway_path,
+                description=self._optional_inventory_string(properties.get("description")),
+                location_name=self._optional_inventory_string(location_data.get("name")),
+                city=self._optional_inventory_string(location_data.get("city")),
+                district=self._optional_inventory_string(location_data.get("district")),
+                country_or_region=self._optional_inventory_string(location_data.get("countryOrRegion")),
+                associated_api_ids=tuple(sorted(set(associated), key=str.casefold)),
+                hostname_configurations=hostnames, certificate_authorities=authorities,
+            ))
+        return ApimTargetArmInventory(
+            gateway_profile_id=gateway_profile_id, arm_resource_id=service_id,
+            subscription_id=subscription_id, resource_group=str(self._settings.apim_resource_group),
+            service_name=str(self._settings.apim_service_name), api_id=self._settings.apim_api_id,
+            api_path=api_path, api_revision=revision, service_tier=tier, tier_family=tier_family,
+            service_location=location, principal_id=principal_id,
+            managed_gateway_url=HttpUrl(str(self._settings.apim_gateway_url)),
+            capabilities=ApimTargetCapabilitySnapshot(
+                self_hosted_gateway=self_hosted_support, source_api_version=self._API_VERSION,
+                observed_at=discovered_at,
+            ),
+            gateways=tuple(sorted(gateways, key=lambda item: item.native_gateway_id.casefold())),
+            source_api_version=self._API_VERSION, discovered_at=discovered_at,
+        )
+
+    def _hostname_inventory(
+        self, native_gateway_id: str, value: Mapping[str, Any],
+    ) -> GatewayHostnameConfigurationInventory:
+        resource_path = self._resource_path(value)
+        if not resource_path.casefold().startswith(
+            f"/gateways/{native_gateway_id}/hostnameConfigurations/".casefold()
+        ):
+            raise PolicyCompilationError("APIM hostname inventory returned another Gateway")
+        properties = value.get("properties")
+        if not isinstance(properties, Mapping) or not str(properties.get("hostname") or "").strip():
+            raise PolicyCompilationError("APIM hostname inventory returned no hostname")
+        certificate_id = self._optional_inventory_string(properties.get("certificateId"))
+        if certificate_id is not None and not self._resource_path({"id": certificate_id}).casefold().startswith("/certificates/"):
+            raise PolicyCompilationError("APIM hostname returned an unexpected certificate identity")
+        return GatewayHostnameConfigurationInventory(
+            configuration_id=self._resource_id_base + resource_path,
+            name=self._resource_name(value), hostname=str(properties["hostname"]).strip(),
+            certificate_id=certificate_id,
+            negotiate_client_certificate=bool(properties.get("negotiateClientCertificate", False)),
+        )
+
+    def _certificate_authority_inventory(
+        self, native_gateway_id: str, value: Mapping[str, Any],
+    ) -> GatewayCertificateAuthorityInventory:
+        resource_path = self._resource_path(value)
+        if not resource_path.casefold().startswith(
+            f"/gateways/{native_gateway_id}/certificateAuthorities/".casefold()
+        ):
+            raise PolicyCompilationError("APIM certificate authority returned another Gateway")
+        properties = value.get("properties")
+        if not isinstance(properties, Mapping):
+            raise PolicyCompilationError("APIM certificate authority returned no properties")
+        return GatewayCertificateAuthorityInventory(
+            authority_id=self._resource_id_base + resource_path, name=self._resource_name(value),
+            is_trusted=bool(properties.get("isTrusted", False)),
+        )
+
+    @staticmethod
+    def _optional_inventory_string(value: object) -> str | None:
+        text = str(value).strip() if value is not None else ""
+        return text or None
 
     def ensure_backend(self, backend: BackendResource) -> None:
         path = f"/backends/{quote(backend.id, safe='')}"
@@ -640,10 +785,10 @@ class AzureApimPublisherClient:
         publication: GatewayPublication,
         *,
         journal: ImageProbeJournal | None = None,
-    ) -> None:
+    ) -> tuple[GatewayEndpointProbeResult, ...]:
         token = self._probe_journal.set(journal)
         try:
-            self._probe_revision(revision, publication)
+            return self._probe_revision(revision, publication)
         finally:
             self._probe_journal.reset(token)
 
@@ -652,10 +797,55 @@ class AzureApimPublisherClient:
         if journal is not None:
             journal.heartbeat()
 
-    def _probe_revision(self, revision: str, publication: GatewayPublication) -> None:
+    def _probe_revision(
+        self, revision: str, publication: GatewayPublication,
+    ) -> tuple[GatewayEndpointProbeResult, ...]:
+        deployments = publication.desired_spec.gateway_deployments
+        if not deployments:
+            self._probe_revision_endpoint(
+                str(self._settings.apim_gateway_url).rstrip("/"), revision, publication,
+                native_gateway_id=None,
+            )
+            return ()
+        results = []
+        for deployment in deployments:
+            self._probe_heartbeat()
+            required = deployment.release_gate.value == "required"
+            try:
+                self._probe_revision_endpoint(
+                    str(deployment.endpoint_url).rstrip("/"), revision, publication,
+                    native_gateway_id=deployment.native_gateway_id,
+                )
+            except Exception as error:
+                if required:
+                    raise
+                results.append(GatewayEndpointProbeResult(
+                    deployment_id=deployment.deployment_id,
+                    native_gateway_id=deployment.native_gateway_id, required=False,
+                    status="optional_pending", error_code=type(error).__name__,
+                    error_message="Optional Gateway endpoint probe did not pass",
+                ))
+            else:
+                results.append(GatewayEndpointProbeResult(
+                    deployment_id=deployment.deployment_id,
+                    native_gateway_id=deployment.native_gateway_id, required=required,
+                    status="succeeded",
+                ))
+        return tuple(results)
+
+    @staticmethod
+    def _binding_serves_gateway(binding: GatewayModelBinding, native_gateway_id: str | None) -> bool:
+        return native_gateway_id is None or binding.deployment_scope.mode.value == "all" or any(
+            item.native_gateway_id.casefold() == native_gateway_id.casefold()
+            for item in binding.serving_deployments
+        )
+
+    def _probe_revision_endpoint(
+        self, base: str, revision: str, publication: GatewayPublication,
+        *, native_gateway_id: str | None,
+    ) -> None:
         if not self._settings.apim_probe_subscription_key:
             raise RuntimeError("APIM_PROBE_SUBSCRIPTION_KEY is required for verification")
-        base = str(self._settings.apim_gateway_url).rstrip("/")
         headers = {
             "Content-Type": "application/json",
             "Ocp-Apim-Subscription-Key": (
@@ -701,11 +891,19 @@ class AzureApimPublisherClient:
             )
         models.raise_for_status()
         discovered = {str(item.get("id")) for item in (models.json().get("data") or [])}
-        expected = {item.id for item in publication.desired_spec.discovery_models}
+        binding_by_alias = {item.model.model_key.casefold(): item
+                    for item in publication.desired_spec.bindings}
+        expected_models = [item for item in publication.desired_spec.discovery_models
+                   if (binding := binding_by_alias.get(item.id.casefold())) is None
+                   or self._binding_serves_gateway(binding, native_gateway_id)]
+        expected = {item.id for item in expected_models}
         if not expected.issubset(discovered):
             raise RetryablePublicationError(
                 "Candidate revision model discovery is incomplete"
             )
+        out_of_scope = {item.id for item in publication.desired_spec.discovery_models} - expected
+        if discovered & out_of_scope:
+            raise RetryablePublicationError("Candidate advertises a model outside this Gateway scope")
         removed = publication.desired_spec.removed_models
         removed_aliases = {item.model_key for item in removed}
         target_binding = (
@@ -722,14 +920,14 @@ class AzureApimPublisherClient:
         regression = next(
             (
                 item
-                for item in publication.desired_spec.discovery_models
+                for item in expected_models
                 if item.api_format is not ApiFormat.OPENAI_IMAGES
                 if item.id.casefold() == self._settings.apim_regression_model_key.casefold()
             ),
             next(
                 (
                     item
-                    for item in publication.desired_spec.discovery_models
+                    for item in expected_models
                     if item.api_format is not ApiFormat.OPENAI_IMAGES
                 ),
                 None,
@@ -781,9 +979,11 @@ class AzureApimPublisherClient:
                 target.model_key,
                 target.api_format,
             )
-        else:
+        elif publication.desired_spec.bindings:
             binding = publication.desired_spec.bindings[-1]
             if (
+            self._binding_serves_gateway(binding, native_gateway_id)
+            and
                 binding.runtime_config.get("apim_backend_pool") is None
                 and binding.api_format is not ApiFormat.OPENAI_IMAGES
             ):
@@ -810,6 +1010,7 @@ class AzureApimPublisherClient:
                 item
                 for item in publication.desired_spec.bindings
                 if ApimPolicyCompiler._responses_backend_path(item) is not None
+                and self._binding_serves_gateway(item, native_gateway_id)
             ]
             for responses_binding in responses_bindings:
                 if (
@@ -861,7 +1062,7 @@ class AzureApimPublisherClient:
             baseline_pool_ids: dict[ApiFormat, set[str]] = {}
             for pooled_binding in publication.desired_spec.bindings:
                 pool = pooled_binding.backend_pool
-                if pool is None:
+                if pool is None or not self._binding_serves_gateway(pooled_binding, native_gateway_id):
                     continue
                 if (
                     baseline_path is not None
@@ -959,7 +1160,8 @@ class AzureApimPublisherClient:
                     )
 
         for image_binding in publication.desired_spec.bindings:
-            if image_binding.api_format is not ApiFormat.OPENAI_IMAGES:
+            if (image_binding.api_format is not ApiFormat.OPENAI_IMAGES
+                    or not self._binding_serves_gateway(image_binding, native_gateway_id)):
                 continue
             profile = validate_image_profile(image_binding.model.image_profile)
             journal = self._probe_journal.get()
@@ -979,6 +1181,7 @@ class AzureApimPublisherClient:
                     image_binding,
                     profile,
                 ),
+                **({"gateway_endpoint": revision_path} if native_gateway_id is not None else {}),
             )
 
     @staticmethod
@@ -989,12 +1192,16 @@ class AzureApimPublisherClient:
                         if item.model.model_key.casefold() == model_key.casefold()), None)
         removed = next((item for item in publication.desired_spec.removed_models
                         if item.model_key.casefold() == model_key.casefold()), None)
-        model_id = model_key
-        if removed is not None:
-            model_id = str(removed.model_id)
-        elif (binding is not None and publication.publication_kind is PublicationKind.MODEL_ADD
-              and binding is publication.desired_spec.bindings[-1]):
-            model_id = str(publication_model_id(publication.id, model_key))
+        new_model = (
+            binding is not None and publication.publication_kind is PublicationKind.MODEL_ADD
+            and binding is publication.desired_spec.bindings[-1]
+        )
+        model_id = (
+            str(removed.model_id) if removed is not None
+            else str(binding.logical_model_id) if binding and binding.logical_model_id
+            else str(publication_model_id(publication.id, model_key)) if new_model
+            else model_key
+        )
         model_headers = {
             **headers, "x-model-id": model_id, "x-hive-model": model_key,
             "x-hive-run-id": str(publication.id),

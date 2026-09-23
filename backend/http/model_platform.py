@@ -5,6 +5,7 @@ from collections.abc import Callable, Coroutine
 from typing import Annotated, Any, TypeVar
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
@@ -37,6 +38,11 @@ from turnstile_core.domain.enterprise import (
     merge_application_owners,
     merge_observed_users,
 )
+from turnstile_core.domain.gateway_targets import (
+    ApimTargetTopology,
+    ApimTargetTopologyList,
+    ApimTargetWrite,
+)
 from turnstile_core.domain.images import ImageInvocationRequest, ImageInvocationResponse
 from turnstile_core.domain.runtime_models import (
     DatabricksConnectionAdopt,
@@ -59,12 +65,15 @@ from turnstile_core.domain.runtime_models import (
     TrafficGenerationRequest,
     TrafficGenerationResult,
 )
+from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
+from turnstile_core.integrations.gateway_connection_probe import GatewayConnectionProbeError
 from turnstile_core.services.control_plane import (
     ControlPlaneConflictError,
     ControlPlaneNotFoundError,
     ControlPlaneUnavailableError,
 )
 
+from ..services.gateway_targets import register_existing_apim_target
 from ..services.traffic import TrafficGenerator
 from .dependencies import Repository
 from .publication_auth import PublicationOwner
@@ -119,6 +128,72 @@ def get_model_registry(
 ) -> RegistryResponse:
     service.authorize(identity.role, authorization, manage=False)
     return service.registry()
+
+
+@protected_router.get(
+    "/api/v1/model-management/apim-targets", response_model=ApimTargetTopologyList,
+)
+def list_apim_target_topologies(
+    service: ControlPlaneService, identity: CurrentSession,
+) -> ApimTargetTopologyList:
+    del identity
+    return service.apim_target_topologies()
+
+
+@protected_router.get(
+    "/api/v1/model-management/apim-targets/{gateway_profile_id}",
+    response_model=ApimTargetTopology,
+)
+def get_apim_target_topology(
+    gateway_profile_id: UUID, service: ControlPlaneService, identity: CurrentSession,
+) -> ApimTargetTopology:
+    del identity
+    try:
+        return service.apim_target_topology(gateway_profile_id)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@protected_router.post(
+    "/api/v1/model-management/apim-targets", response_model=ApimTargetTopology, status_code=201,
+)
+def register_apim_target_topology(
+    write: ApimTargetWrite, repository: Repository, runtime: RuntimeService,
+    identity: OwnerSession, authorization: Authorization = None,
+) -> ApimTargetTopology:
+    runtime.authorize(identity.role, authorization, manage=True)
+    settings = get_settings()
+    if not settings.apim_target_registry_enabled:
+        raise HTTPException(status_code=503, detail="APIM target registration is not enabled")
+    try:
+        return register_existing_apim_target(write, settings=settings, repository=repository)
+    except httpx.HTTPStatusError as error:
+        raise HTTPException(status_code=502, detail=(
+            f"APIM registration dependency returned HTTP {error.response.status_code}"
+        )) from error
+    except (httpx.HTTPError, GatewayConnectionProbeError, PolicyCompilationError) as error:
+        raise HTTPException(
+            status_code=502, detail="APIM registration validation failed"
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@protected_router.post(
+    "/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync",
+    response_model=GatewayReleaseOperationAccepted, status_code=202,
+)
+def request_apim_target_inventory_sync(
+    gateway_profile_id: UUID, service: ControlPlaneService, identity: OwnerSession,
+) -> GatewayReleaseOperationAccepted:
+    try:
+        return service.request_target_inventory_sync(gateway_profile_id, identity.email)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @protected_router.post("/api/v1/model-management/gateways", response_model=RegistryResponse)

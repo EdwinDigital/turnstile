@@ -97,6 +97,7 @@ import {
 } from "../components/model-management/model-publication-dialog"
 import { ConnectionDialog } from "../components/model-management/connection-dialog"
 import { ModelEditDialog } from "../components/model-management/model-edit-dialog"
+import { GatewayRegistrationAction, GatewayTargetGroup } from "../components/model-management/gateway-targets"
 import type {
   GatewayPublication,
   GatewayProfile,
@@ -1093,6 +1094,8 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
   onRenameGateway: (gateway: GatewayProfile) => void
 }) {
   const activeTab: ModelTableTab = tab
+  const { user } = useAuth()
+  const topology = useQuery({ ...finopsQueries.apimTargets(), enabled: activeTab === "gateways" })
   const [search, setSearch] = useState("")
   const [providerFilter, setProviderFilter] = useState("all")
   const [connectionHealthFilter, setConnectionHealthFilter] = useState<"active" | RuntimeHealthState>("active")
@@ -1187,6 +1190,7 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
     <header className="smh-page-header">
       <div><Button type="button" variant="ghost" size="icon-sm" className="model-mobile-sidebar-toggle" aria-label="切换导航栏" title="切换导航栏" onClick={onToggleSidebar}><PanelLeft size={16} /></Button><span className="smh-header-icon"><Cpu size={17} /></span><h1>模型管理</h1><span>{registry.models.length}</span></div>
       {activeTab !== "gateways" && <div className="smh-header-actions"><button onClick={() => onAdd(kind)}><Plus size={14} />添加{addLabel}</button></div>}
+      {activeTab === "gateways" && user?.role === "owner" && topology.data?.inventory_sync_available && <div className="smh-header-actions"><GatewayRegistrationAction /></div>}
     </header>
     <div className="model-toolbar">
       <ButtonGroup className="model-tabs usage-metric-segment" aria-label="模型管理类型">{tabs.map((value) => <button key={value} className={activeTab === value ? "active" : ""} aria-pressed={activeTab === value} onClick={() => onTabChange(value)}>{value === "models" ? "模型" : value === "connections" ? "连接" : "网关"}<span>{value === "connections" ? scopedConnections.length : registry[value].length}</span></button>)}</ButtonGroup>
@@ -1222,6 +1226,8 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
         <span data-no-localize title={String(error)}>{String(error)}</span>
       </div>
     </div>}
+    {activeTab === "gateways" && topology.isPending && <div className="gateway-operation-state" role="status">Loading Gateway inventory</div>}
+    {activeTab === "gateways" && topology.error && <div className="registry-error gateway-operation-state" role="alert"><span>{topology.error.message}</span><Button variant="ghost" size="icon-sm" title="Retry inventory" aria-label="Retry inventory" onClick={() => void topology.refetch()}><RefreshCw size={14} /></Button></div>}
     <ResizableGridTable className={`model-table ${activeTab}`} role="table" aria-label={`${addLabel}列表`} headerSelector=".model-table-head" minWidths={MODEL_TABLE_COLUMN_MIN_WIDTHS} columnGap={12} horizontalPadding={32} resizeAtAllWidths>
       <div className="model-table-head" role="row">
         {columnHeaders.map((label, index) => <span className="model-table-heading" role="columnheader" aria-label={label} key={label}>
@@ -1263,6 +1269,8 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
           </section>
         })}
         {activeTab === "gateways" && gateways.map((gateway) => {
+          const target = topology.data?.items.find(item => item.target.gateway_profile_id === gateway.id)
+          if (target) return <GatewayTargetGroup key={gateway.id} target={target} profile={gateway} canManage={user?.role === "owner"} syncAvailable={topology.data?.inventory_sync_available === true} onRename={canRenameGateway ? () => onRenameGateway(gateway) : undefined} />
           const runtimeCount = registry.runtimes.filter((runtime) => runtime.gateway_profile_id === gateway.id).length
           const deleteDisabledReason = gateway.is_default
             ? "请先将其他网关设为默认"

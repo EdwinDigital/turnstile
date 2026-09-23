@@ -142,6 +142,34 @@
 }
 .model-row-actions > button:hover:not(.toggle) { background: var(--muted); color: var(--foreground); }
 .model-row-actions button:disabled { opacity: .4; cursor: not-allowed; }
+.gateway-target-heading { background: color-mix(in oklch, var(--muted) 38%, transparent); }
+.gateway-target-expand { min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.gateway-target-expand > span:last-child { min-width: 0; display: grid; gap: 4px; }
+.gateway-target-expand b, .gateway-target-expand small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gateway-target-expand small { color: var(--muted-foreground); font-size: 11px; }
+.gateway-target-expand > svg { flex: 0 0 14px; transition: transform 120ms ease; }
+.gateway-target-expand > svg.gateway-expanded { transform: rotate(90deg); }
+.gateway-deployment-row .model-primary-cell { padding-left: 18px; }
+.gateway-deployment-row .model-list-icon { flex-shrink: 0; }
+.gateway-target-group .model-row-actions > button:not(.toggle) { display: grid; }
+.gateway-operation-state { display: flex; align-items: center; gap: 8px; padding: 8px 16px; font-size: 12px; overflow-wrap: anywhere; }
+.gateway-inventory-dialog, .gateway-registration-dialog { width: min(680px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); }
+.gateway-registration-dialog form { display: flex; flex-direction: column; min-height: 0; max-height: calc(100dvh - 48px); }
+.gateway-registration-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.gateway-registration-fields .registry-field { min-width: 0; }
+.gateway-registration-error { margin: 12px 16px; max-height: 120px; overflow-y: auto; }
+.gateway-inventory-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; margin: 0; }
+.gateway-inventory-dialog .registry-editor-body { display: block; }
+.gateway-inventory-fields > div { min-width: 0; }
+.gateway-inventory-fields dt { color: var(--muted-foreground); font-size: 11px; }
+.gateway-inventory-fields dd { margin: 4px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.gateway-inventory-dialog h3 { font-size: 13px; margin: 18px 0 8px; }
+.gateway-inventory-dialog ul { margin: 0; padding-left: 18px; font-size: 12px; }
+.gateway-inventory-dialog li { overflow-wrap: anywhere; }
+.gateway-inventory-dialog li small { display: block; color: var(--muted-foreground); }
+@media (max-width: 640px) {
+	.gateway-registration-fields, .gateway-inventory-fields { grid-template-columns: minmax(0, 1fr); }
+}
 .runtime-detail-workspace { width: 100%; max-width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--background); }
 .runtime-detail-breadcrumb {
 	flex: 0 0 48px;

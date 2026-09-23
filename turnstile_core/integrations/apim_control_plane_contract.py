@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from ..domain.application_access import (
@@ -15,6 +16,7 @@ from ..domain.control_plane import (
     GatewayPublication,
     GatewayReleaseDependencies,
 )
+from ..domain.gateway_targets import GatewayEndpointProbeResult
 from ..domain.runtime_models import OAuthClientCredentialsConfig
 
 
@@ -38,6 +40,45 @@ class AuthorizationRequiredError(RuntimeError):
         self.billable_outcome = billable_outcome
 
 
+@dataclass(frozen=True)
+class ResolvedApimPublisherClient:
+    gateway_profile_id: UUID
+    target_identity_sha256: str
+    enforce_identity_snapshot: bool
+    client: ApimPublisherClient
+    usage_observer: tuple[str | None, str | None] | None = None
+
+
+class ApimPublisherClientResolver(Protocol):
+    def resolve(self, gateway_profile_id: UUID) -> ResolvedApimPublisherClient: ...
+
+
+class ApimSubscriptionKeyClientResolver(Protocol):
+    def resolve(self, gateway_profile_id: UUID) -> ApimSubscriptionKeyClient: ...
+
+
+class FixedApimPublisherClientResolver:
+    def __init__(self, client: ApimPublisherClient) -> None:
+        self._client = client
+
+    def resolve(self, gateway_profile_id: UUID) -> ResolvedApimPublisherClient:
+        return ResolvedApimPublisherClient(
+            gateway_profile_id=gateway_profile_id,
+            target_identity_sha256=hashlib.sha256(
+                f"fixed-client:{gateway_profile_id}".encode()
+            ).hexdigest(),
+            enforce_identity_snapshot=False, client=self._client,
+        )
+
+
+def coerce_apim_publisher_client_resolver(
+    value: ApimPublisherClient | ApimPublisherClientResolver,
+) -> ApimPublisherClientResolver:
+    if callable(getattr(value, "resolve", None)):
+        return cast(ApimPublisherClientResolver, value)
+    return FixedApimPublisherClientResolver(cast(ApimPublisherClient, value))
+
+
 class ImageProbeJournal(Protocol):
     def heartbeat(self) -> None: ...
 
@@ -47,6 +88,8 @@ class ImageProbeJournal(Protocol):
         revision: str,
         body: Mapping[str, Any],
         send: Callable[[str, str], dict[str, Any]],
+        *,
+        gateway_endpoint: str | None = None,
     ) -> None: ...
 
 
@@ -164,7 +207,7 @@ class ApimPublisherClient(Protocol):
         publication: GatewayPublication,
         *,
         journal: ImageProbeJournal | None = None,
-    ) -> None: ...
+    ) -> tuple[GatewayEndpointProbeResult, ...] | None: ...
 
     def promote_revision(self, revision: str, release_name: str) -> None: ...
 

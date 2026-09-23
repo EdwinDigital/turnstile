@@ -17,9 +17,19 @@ from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
     AzureApimPublisherClient,
 )
+from turnstile_core.integrations.apim_control_plane_contract import (
+    ApimPublisherClient,
+    ApimPublisherClientResolver,
+)
+from turnstile_core.integrations.apim_target_client_factory import (
+    ApimTargetClientConfigResolver,
+    AzureApimPublisherClientResolver,
+    apim_target_client_config_resolver,
+)
 from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
 from turnstile_core.integrations.ledger import TableStorageLedger
 from turnstile_core.persistence.factory import repository_session
+from turnstile_core.persistence.repository_contract import QueryRepository
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.application_provisioning_ledger import prepare_application_ledger
 from turnstile_core.services.budget_settlement import BudgetScopeRepository, BudgetScopeService
@@ -30,6 +40,24 @@ from turnstile_core.services.gateway_release_operation_worker import (
 
 app = func.FunctionApp()
 logger = logging.getLogger(__name__)
+
+
+def _publisher_clients(
+    repository: QueryRepository, settings: Settings,
+) -> tuple[
+    ApimPublisherClient | ApimPublisherClientResolver, ApimTargetClientConfigResolver | None,
+]:
+    if getattr(settings, "apim_target_registry_enabled", False):
+        targets = apim_target_client_config_resolver(repository, settings)
+        return AzureApimPublisherClientResolver(targets), targets
+    return AzureApimPublisherClient(settings), None
+
+
+def _target_budget_configuration(
+    gateway_id: UUID, settings: Settings, targets: ApimTargetClientConfigResolver | None,
+) -> dict[str, object]:
+    scoped = targets.resolve(gateway_id).settings if targets is not None else settings
+    return _budget_configuration(gateway_id, scoped)
 
 
 def _budget_parent_overrides(source: str, settings: Settings) -> dict[UUID, str]:
@@ -81,7 +109,7 @@ def publish_gateway_changes(timer: func.TimerRequest) -> None:
     ):
         return
     with repository_session(settings) as repository:
-        publisher = AzureApimPublisherClient(settings)
+        publisher, targets = _publisher_clients(repository, settings)
         worker_id = os.environ.get("WEBSITE_INSTANCE_ID", "control-plane-local")[:128]
         policy_path = Path(
             os.environ.get(
@@ -98,8 +126,8 @@ def publish_gateway_changes(timer: func.TimerRequest) -> None:
             if overrides:
                 budget_options = {
                     "parent_policy_overrides": overrides,
-                    "budget_configuration": lambda gateway_id: _budget_configuration(
-                        gateway_id, settings,
+                    "budget_configuration": lambda gateway_id: _target_budget_configuration(
+                        gateway_id, settings, targets,
                     ),
                 }
             worker = GatewayPublicationWorker(
@@ -148,7 +176,7 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
     ):
         return
     with repository_session(settings) as repository:
-        publisher = AzureApimPublisherClient(settings)
+        publisher, _ = _publisher_clients(repository, settings)
         worker_id = os.environ.get("WEBSITE_INSTANCE_ID", "control-plane-local")[:128]
 
         def project_application(gateway_id: UUID, application_id: UUID) -> None:

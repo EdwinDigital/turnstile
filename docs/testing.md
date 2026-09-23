@@ -22,7 +22,13 @@ git diff --check
 
 ## Database validation
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, and `010_budget_execution_protocol`), then run the command again and verify that no migration is reapplied.
+Migration `011_gateway_targets` adds registered APIM identities, deployment inventory and
+logical-model route bindings. It does not register live targets or rewrite legacy models or usage.
+Validate cross-target foreign keys, the unique enabled default route, preserved retired history,
+and transactional inventory replacement against a separately authorized PostgreSQL environment.
+Local domain and SQL-source tests are not evidence that a migration has been applied.
+
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, and `011_gateway_targets`), then run the command again and verify that no migration is reapplied.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 

@@ -468,6 +468,117 @@ export type GatewayProfile = {
   updated_at: string
 }
 
+export type CapabilitySupport = "unknown" | "supported" | "unsupported"
+export type GatewayDeployment = {
+  schema_version: 1
+  id: string
+  apim_target_id: string
+  native_gateway_id: string
+  kind: "managed" | "self_hosted"
+  display_name: string
+  location: string | null
+  endpoint_url: string | null
+  hosting_mode: "azure_managed" | "aks" | "kubernetes" | "arc" | "container_apps" | "docker" | "other"
+  lifecycle_ownership: "customer" | "turnstile_iac" | "external"
+  release_gate: "required" | "optional"
+  declared_state: "unknown" | "present" | "absent" | "unsupported"
+  reachability_state: "unknown" | "reachable" | "unreachable"
+  observation_state: "unknown" | "observed" | "stale"
+  runtime_version_support: CapabilitySupport
+  rate_limit_synchronization: CapabilitySupport
+  last_arm_sync_at: string | null
+  last_probe_at: string | null
+  last_observed_at: string | null
+  retired_at: string | null
+}
+export type GatewayPublishedModelSummary = { id: string; model_key: string; display_name: string }
+export type GatewayDeploymentInventory = {
+  deployment_id: string
+  associated_api_ids: string[]
+  hostname_configurations: Array<{
+    configuration_id: string; name: string; hostname: string
+    certificate_id: string | null; negotiate_client_certificate: boolean
+  }>
+  certificate_authorities: Array<{ authority_id: string; name: string; is_trusted: boolean }>
+  source_api_version: string
+  synced_at: string
+}
+export type ApimTarget = {
+  schema_version: 1
+  gateway_profile_id: string
+  arm_resource_id: string
+  tenant_id: string
+  subscription_id: string
+  resource_group: string
+  service_name: string
+  api_id: string
+  api_path: string
+  service_tier: string
+  tier_family: "classic" | "v2"
+  service_location: string
+  principal_id: string | null
+  management_auth_profile_ref: string | null
+  probe_subscription_id: string | null
+  probe_secret_ref: string | null
+  ownership_mode: "turnstile_managed" | "adopted" | "read_only"
+  capabilities: {
+    schema_version: 1
+    self_hosted_gateway: CapabilitySupport
+    backend_pools: CapabilitySupport
+    managed_identity_policy: CapabilitySupport
+    event_hub_logger: CapabilitySupport
+    table_ledger: CapabilitySupport
+    responses: CapabilitySupport
+    anthropic_messages: CapabilitySupport
+    response_observer: CapabilitySupport
+    source_api_version: string | null
+    observed_at: string | null
+  }
+  last_inventory_sync_at: string | null
+  last_validated_at: string | null
+  drift_state: "unknown" | "in_sync" | "drifted"
+}
+export type ApimTargetTopology = {
+  target: ApimTarget
+  deployments: Array<{
+    deployment: GatewayDeployment
+    inventory: GatewayDeploymentInventory | null
+    configuration_endpoint: string
+    published_models: GatewayPublishedModelSummary[]
+  }>
+  management_endpoint: string
+  gateway_endpoint: string | null
+  configuration_endpoint: string
+  connection_state: "unknown" | "connected" | "unavailable"
+  self_hosted_gateway_count: number
+  published_model_count: number
+  published_models: GatewayPublishedModelSummary[]
+}
+export type ApimTargetTopologyList = {
+  items: ApimTargetTopology[]
+  total: number
+  inventory_sync_available: boolean
+  inventory_sync_unavailable_reason: string | null
+  resource_lifecycle_available: boolean
+  deployment_scoping_available: boolean
+  onboarding_available: boolean
+  self_hosted_gateway_name_edit_supported: boolean
+}
+export type ApimTargetWrite = {
+  gateway_profile_id?: string
+  name: string
+  management_endpoint: string
+  tenant_id: string
+  subscription_id: string
+  resource_group: string
+  service_name: string
+  api_id: string
+  gateway_endpoint: string
+  management_auth_profile_ref?: "system_managed_identity"
+  dashboard_subscription_id?: string
+  probe_subscription_id?: string
+}
+
 export type ModelProvider = {
   id: string
   name: string
@@ -698,6 +809,7 @@ export type GatewayPublicationStatus = "queued" | "validating" | "provisioning" 
 
 export type GatewayPublicationCreate = {
   gateway_profile_id: string
+  deployment_scope?: { mode: "all" | "selected"; deployment_ids: string[] }
   provider: {
     existing_id?: string
     template?: "amazon_bedrock" | "microsoft_foundry" | "openai_compatible" | "azure_databricks"
@@ -981,7 +1093,7 @@ export type GatewayReleaseGcPlan = {
 export type GatewayReleaseOperation = {
   id: string
   gateway_profile_id: string
-  operation_kind: "rollback" | "integrity_check" | "gc_plan" | "application_sync" | "application_provision"
+  operation_kind: "rollback" | "integrity_check" | "gc_plan" | "application_sync" | "application_provision" | "target_inventory_sync"
   target_release_id: string | null
   prior_release_id: string | null
   status: GatewayReleaseOperationStatus

@@ -4,6 +4,8 @@ import { cachePolicies } from "../../api/cache-policies"
 import { resolveTimezone } from "../../lib/timezone"
 import { dataSource, usageWindow } from "./api"
 import type {
+  ApimTargetTopology,
+  ApimTargetTopologyList,
   DistributionDimension,
   ModelRegistry,
   PeopleBudgetFilter,
@@ -76,6 +78,7 @@ export const finopsKeys = {
   all: ["finops"] as const,
   entities: ["reference", "enterprise-entities"] as const,
   registry: ["reference", "model-registry"] as const,
+  apimTargets: ["control-plane", "apim-targets"] as const,
   modelBackendPool: (id: string) => ["model-platform", "model-backend-pool", id] as const,
   gatewayPublications: ["control-plane", "gateway-publications"] as const,
   gatewayPublication: (id: string) => ["control-plane", "gateway-publication", id] as const,
@@ -134,7 +137,24 @@ export async function storeGatewayName(queryClient: QueryClient, id: string, nam
   void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
 }
 
+export async function storeApimTarget(queryClient: QueryClient, target: ApimTargetTopology) {
+  await queryClient.cancelQueries({ queryKey: finopsKeys.apimTargets })
+  queryClient.setQueryData<ApimTargetTopologyList | null>(finopsKeys.apimTargets, current => {
+    if (!current) return current
+    const items = [...current.items.filter(item => item.target.gateway_profile_id !== target.target.gateway_profile_id), target]
+    return { ...current, items, total: items.length }
+  })
+  void queryClient.invalidateQueries({ queryKey: finopsKeys.apimTargets })
+  void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
+}
+
 export const finopsQueries = {
+  apimTargets: () => queryOptions({
+    queryKey: finopsKeys.apimTargets,
+    queryFn: dataSource.apimTargets,
+    retry: false,
+    ...cachePolicies.aggregate,
+  }),
   entities: () => queryOptions({
     queryKey: finopsKeys.entities,
     queryFn: dataSource.entities,

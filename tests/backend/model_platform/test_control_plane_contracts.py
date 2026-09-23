@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -73,6 +75,21 @@ from turnstile_core.services.control_plane import (
     ControlPlaneConflictError,
     ControlPlaneUnavailableError,
 )
+
+
+def test_legacy_publication_hash_omits_only_empty_deployment_fields() -> None:
+    repository = InMemoryRepository()
+    repository.models = []
+    service = GatewayControlPlaneService(repository)
+    publication = service.publish(bedrock_publication(), "unit-owner")
+    payload, digest = service._release_payload(publication.desired_spec)
+    assert "gateway_deployments" not in payload
+    assert all("deployment_scope" not in binding and "serving_deployments" not in binding
+               and "logical_model_id" not in binding for binding in payload["bindings"])
+    expected = hashlib.sha256(json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    assert digest == expected == publication.desired_spec_sha256
 
 
 @pytest.mark.parametrize("change", [

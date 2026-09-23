@@ -8,6 +8,7 @@ import { runInNewContext } from "node:vm"
 import * as connections from "../../../frontend/src/components/model-management/model-publication-connections.ts"
 import * as compatible from "../../../frontend/src/components/model-management/openai-compatible.ts"
 import * as pricing from "../../../frontend/src/components/model-management/model-edit-form.ts"
+import * as gatewayTopology from "../../../frontend/src/lib/gateway-topology.ts"
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
@@ -43,11 +44,12 @@ function text(value) {
   return value == null || typeof value === "boolean" ? "" : String(value)
 }
 
-function harness(rawRegistry = registry(), publication, publishFailure) {
+function harness(rawRegistry = registry(), publication, publishFailure, targets = null) {
   const slots = []
   let cursor = 0
   const writes = []
   const queued = []
+  const topology = { data: targets, isPending: false, error: null, refetch() {} }
   const props = { registry: normalizeRegistry(rawRegistry), publicationId: publication?.id ?? null,
     onPublicationQueued: id => queued.push(id), onManageConnections() {}, onClose() {} }
   const primitives = new Proxy({}, { get: (_target, name) => name })
@@ -64,12 +66,13 @@ function harness(rawRegistry = registry(), publication, publishFailure) {
   const exports = {}
   const imports = {
     react: hooks, "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
-    "@tanstack/react-query": { useQuery: () => ({ data: publication }), useQueryClient: () => queryClient },
+    "@tanstack/react-query": { useQuery: options => options.queryKey?.[0] === "targets" ? topology : ({ data: publication }), useQueryClient: () => queryClient },
     "../../data-sources/apim/api": { dataSource: {
       publishModel: async request => { writes.push(request); if (publishFailure) throw publishFailure; return { publication: { id: "accepted" } } },
       retryGatewayPublication: async (...args) => { writes.push(args); return { id: publication.id } },
     } },
-    "../../data-sources/apim/queries": { finopsKeys: { gatewayPublication: id => [id] }, finopsQueries: { gatewayPublication: () => ({}) } },
+    "../../data-sources/apim/queries": { finopsKeys: { gatewayPublication: id => [id] }, finopsQueries: { gatewayPublication: () => ({}), apimTargets: () => ({ queryKey: ["targets"] }) } },
+    "../../lib/gateway-topology": gatewayTopology,
     "../../locales/index": { useLocale: () => ({ locale: "zh-CN" }), translateForLocale: async value => value },
     "./model-publication-connections": connections, "./openai-compatible": compatible,
     "./model-edit-form": pricing,
@@ -92,8 +95,51 @@ function harness(rawRegistry = registry(), publication, publishFailure) {
     find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
     await Promise.resolve()
   }
-  return { props, writes, queued, render, find, input, select, submit }
+  return { props, topology, writes, queued, render, find, input, select, submit }
 }
+
+function readyTopology() {
+  return { deployment_scoping_available: true, items: [{
+    target: { gateway_profile_id: "gateway", service_name: "unit-apim", api_id: "unit-api",
+      drift_state: "in_sync", capabilities: { self_hosted_gateway: "supported" } },
+    deployments: ["managed", "edge"].map(identity => ({
+      deployment: { id: identity, native_gateway_id: identity, display_name: identity,
+        kind: identity === "managed" ? "managed" : "self_hosted", retired_at: null,
+        declared_state: "present", reachability_state: "reachable", release_gate: "required",
+        endpoint_url: `https://${identity}.example.test/unit/llm` },
+      inventory: { associated_api_ids: ["unit-api"] },
+    })),
+  }] }
+}
+
+test("explicit deployment choice submits only its target and selected scope", async () => {
+  const view = harness(registry(), undefined, undefined, readyTopology())
+  view.select("gateway:managed", "gateway:edge")
+  view.input("foundry-deployment", "unit-model")
+  await view.submit()
+  assert.equal(view.writes.length, 1)
+  assert.equal(view.writes[0].gateway_profile_id, "gateway")
+  assert.equal(view.writes[0].deployment_scope.mode, "selected")
+  assert.deepEqual(Array.from(view.writes[0].deployment_scope.deployment_ids), ["edge"])
+})
+
+test("a removed explicit deployment blocks publication without choosing another", async () => {
+  const view = harness(registry(), undefined, undefined, readyTopology())
+  view.select("gateway:managed", "gateway:edge")
+  view.input("foundry-deployment", "unit-model")
+  view.topology.data.items[0].deployments.pop()
+  await view.submit()
+  assert.equal(view.writes.length, 0)
+  assert.ok(text(view.render()).includes("Select an available Gateway deployment"))
+})
+
+test("disabled target scoping preserves the legacy publication payload", async () => {
+  const view = harness(registry(), undefined, undefined, { deployment_scoping_available: false, items: [] })
+  view.input("foundry-deployment", "unit-model")
+  await view.submit()
+  assert.equal(view.writes.length, 1)
+  assert.equal("deployment_scope" in view.writes[0], false)
+})
 
 test("publication errors use the existing notice layout without shrinking long messages", async () => {
   const failure = new Error(`API 422: ${"price_source is not supported. ".repeat(30)}`)

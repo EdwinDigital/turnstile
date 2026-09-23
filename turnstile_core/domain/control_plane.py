@@ -14,6 +14,11 @@ from pydantic import (
     model_validator,
 )
 
+from .gateway_targets import (
+    GatewayDeploymentScope,
+    GatewayDeploymentScopeMode,
+    GatewayServingDeployment,
+)
 from .image_profiles import ImageGenerationLimits, ImageGenerationProfile, validate_image_profile
 from .models import StrictModel
 from .runtime_models import (
@@ -91,6 +96,7 @@ class GatewayReleaseOperationKind(StrEnum):
     GC_PLAN = "gc_plan"
     APPLICATION_SYNC = "application_sync"
     APPLICATION_PROVISION = "application_provision"
+    TARGET_INVENTORY_SYNC = "target_inventory_sync"
 
 
 class GatewayReleaseOperationStatus(StrEnum):
@@ -308,6 +314,7 @@ class ModelCreateTarget(StrictModel):
 
 class GatewayPublicationCreate(StrictModel):
     gateway_profile_id: UUID
+    deployment_scope: GatewayDeploymentScope = Field(default_factory=GatewayDeploymentScope)
     provider: ProviderTarget
     runtime: RuntimeTarget
     model: ModelCreateTarget
@@ -495,6 +502,9 @@ class GatewayModelBinding(StrictModel):
     managed_identity_resource: str | None = None
     streaming_mode: StreamingMode
     runtime_config: dict[str, object] = Field(default_factory=dict)
+    deployment_scope: GatewayDeploymentScope = Field(default_factory=GatewayDeploymentScope)
+    serving_deployments: tuple[GatewayServingDeployment, ...] = ()
+    logical_model_id: UUID | None = None
     model: ModelTarget
 
     @property
@@ -518,6 +528,13 @@ class GatewayModelBinding(StrictModel):
 
     @model_validator(mode="after")
     def require_managed_backend_details(self) -> GatewayModelBinding:
+        serving_ids = [item.deployment_id for item in self.serving_deployments]
+        native_ids = [item.native_gateway_id.casefold() for item in self.serving_deployments]
+        if len(serving_ids) != len(set(serving_ids)) or len(native_ids) != len(set(native_ids)):
+            raise ValueError("A model binding cannot repeat a serving Gateway deployment")
+        if (self.deployment_scope.mode is GatewayDeploymentScopeMode.SELECTED
+                and set(serving_ids) != set(self.deployment_scope.deployment_ids)):
+            raise ValueError("Selected deployment scope must match immutable serving deployments")
         if self.auth_strategy is AuthStrategy.OAUTH_CLIENT_CREDENTIALS:
             oauth = self.oauth
             if (
@@ -546,10 +563,16 @@ class GatewayReleaseSpec(StrictModel):
     gateway_profile_id: UUID
     discovery_models: list[DiscoveryModel]
     bindings: list[GatewayModelBinding]
+    gateway_deployments: tuple[GatewayServingDeployment, ...] = ()
     removed_models: list[ModelRemovalTarget] = Field(default_factory=list, max_length=1)
 
     @model_validator(mode="after")
     def require_unique_aliases(self) -> GatewayReleaseSpec:
+        release_ids = {item.deployment_id for item in self.gateway_deployments}
+        native_ids = {item.native_gateway_id.casefold() for item in self.gateway_deployments}
+        if (len(release_ids) != len(self.gateway_deployments)
+            or len(native_ids) != len(self.gateway_deployments)):
+            raise ValueError("A Gateway release cannot repeat a serving deployment")
         aliases = [item.id.casefold() for item in self.discovery_models]
         if len(aliases) != len(set(aliases)):
             raise ValueError("model aliases must be unique within a gateway release")
@@ -562,6 +585,8 @@ class GatewayReleaseSpec(StrictModel):
         if set(removed_aliases) & (set(aliases) | set(binding_aliases)):
             raise ValueError("a removed model cannot remain active in the gateway release")
         for binding in self.bindings:
+            if not {item.deployment_id for item in binding.serving_deployments} <= release_ids:
+                raise ValueError("Binding serving deployments must belong to the Gateway release")
             pool = binding.backend_pool
             if pool is None:
                 continue

@@ -113,8 +113,8 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 79
-    assert len(schemas) == 175
+    assert len(paths) == 82
+    assert len(schemas) == 200
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -126,6 +126,28 @@ def test_openapi_root_is_a_small_domain_index() -> None:
         "model-platform.yaml",
         "observability.yaml",
     }
+
+
+def test_gateway_target_contract_matches_actual_structures_and_owner_operations() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    generated = _yaml_document(CONTRACT.parent / "openapi/schemas/gateway-targets.yaml")
+    for name in cast(dict[str, object], generated["schemas"]):
+        assert documented[name] == actual[name]
+    write = documented["ApimTargetWrite"]
+    assert write["additionalProperties"] is False
+    publication = documented["GatewayPublicationCreate"]
+    assert "deployment_scope" not in cast(list[str], publication["required"])
+    publication_properties = cast(dict[str, object], publication["properties"])
+    assert publication_properties["deployment_scope"] == {
+        "$ref": "#/components/schemas/GatewayDeploymentScope",
+    }
+    paths = _documented_paths()
+    registration = paths["/api/v1/model-management/apim-targets"]["post"]
+    assert cast(dict[str, object], registration)["security"] == [{"sessionCookie": []}]
+    sync = paths["/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync"]
+    operation = cast(dict[str, object], sync["post"])
+    assert "202" in cast(dict[str, object], operation["responses"])
 
 
 def test_gateway_name_contract_preserves_owner_only_name_write_and_minimal_response() -> None:

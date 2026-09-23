@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from typing import Any
+from contextvars import ContextVar
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -14,10 +15,16 @@ from ..domain.control_plane import (
     GatewayReleaseOperationKind,
     GatewayReleaseRetentionPolicy,
 )
+from ..domain.gateway_targets import ApimTargetArmInventory
 from ..integrations.apim_control_plane import (
     ApimPublisherClient,
     PolicyCompilationError,
     RetryablePublicationError,
+)
+from ..integrations.apim_control_plane_contract import (
+    ApimPublisherClientResolver,
+    ResolvedApimPublisherClient,
+    coerce_apim_publisher_client_resolver,
 )
 from ..integrations.apim_policy_components import parse_policy, validate_parent_readback
 from ..persistence.repository import QueryRepository
@@ -34,7 +41,7 @@ class GatewayReleaseOperationWorker:
     def __init__(
         self,
         repository: QueryRepository,
-        client: ApimPublisherClient,
+        client: ApimPublisherClient | ApimPublisherClientResolver,
         retention_policy: GatewayReleaseRetentionPolicy | None = None,
         application_default_token_limit: int = 100_000,
         application_default_tokens_per_minute: int = 100_000,
@@ -44,7 +51,12 @@ class GatewayReleaseOperationWorker:
         parent_policy_overrides: Mapping[UUID, str] | None = None,
     ) -> None:
         self._repository = repository
-        self._client = client
+        self._client_resolver = coerce_apim_publisher_client_resolver(client)
+        self._active_client: ContextVar[ApimPublisherClient | None] = ContextVar(
+            "release-operation-client",
+            default=(None if callable(getattr(client, "resolve", None))
+                     else cast(ApimPublisherClient, client)),
+        )
         self._cipher = cipher
         self._application_projector = application_projector
         self._parent_policy = parent_policy
@@ -59,6 +71,33 @@ class GatewayReleaseOperationWorker:
             default_token_limit=application_default_token_limit,
             default_tokens_per_minute=application_default_tokens_per_minute,
         )
+
+    @property
+    def _client(self) -> ApimPublisherClient:
+        client = self._active_client.get()
+        if client is None:
+            raise RuntimeError("Release operation has no resolved APIM target")
+        return client
+
+    def _validate_operation_target_identity(
+        self, row: Mapping[str, Any], resolved: ResolvedApimPublisherClient,
+    ) -> None:
+        gateway_id = UUID(str(row["gateway_profile_id"]))
+        if resolved.gateway_profile_id != gateway_id:
+            raise ControlPlaneConflictError("APIM client resolved another Release operation target")
+        for field in ("target_release_id", "prior_release_id"):
+            if row.get(field) is None:
+                continue
+            publication = self._service.publication(UUID(str(row[field])))
+            if publication.gateway_profile_id != gateway_id:
+                raise ControlPlaneConflictError("Release operation references another APIM target")
+            snapshot = publication.resource_manifest.get("apim_target_identity_sha256")
+            if snapshot is not None and snapshot != resolved.target_identity_sha256:
+                raise ControlPlaneConflictError(
+                    "APIM target identity changed after Release creation"
+                )
+            if snapshot is None and resolved.enforce_identity_snapshot:
+                raise ControlPlaneConflictError("APIM target identity snapshot is missing")
 
     def run_once(
         self, worker_id: str, lease_seconds: int = 180, max_attempts: int = 30
@@ -83,7 +122,13 @@ class GatewayReleaseOperationWorker:
                 ),
                 lease_seconds,
             ):
-                self._advance(row, worker_id)
+                resolved = self._client_resolver.resolve(UUID(str(row["gateway_profile_id"])))
+                self._validate_operation_target_identity(row, resolved)
+                token = self._active_client.set(resolved.client)
+                try:
+                    self._advance(row, worker_id)
+                finally:
+                    self._active_client.reset(token)
         except (RetryablePublicationError, httpx.TransportError) as error:
             self._retry(row, error, worker_id)
         except Exception as error:
@@ -102,6 +147,40 @@ class GatewayReleaseOperationWorker:
             self._advance_application_sync(row, worker_id)
         elif kind is GatewayReleaseOperationKind.APPLICATION_PROVISION:
             self._advance_application_provision(row, worker_id)
+        elif kind is GatewayReleaseOperationKind.TARGET_INVENTORY_SYNC:
+            self._advance_target_inventory_sync(row, worker_id)
+
+    def _advance_target_inventory_sync(self, row: Mapping[str, Any], worker_id: str) -> None:
+        if row["status"] == "queued":
+            self._transition(row, "validating_dependencies", {}, worker_id)
+            return
+        if row["status"] != "validating_dependencies":
+            return
+        discovery = getattr(self._client, "discover_apim_target_inventory", None)
+        if not callable(discovery):
+            raise PolicyCompilationError("APIM client does not support target inventory")
+        inventory = ApimTargetArmInventory.model_validate(
+            discovery(UUID(str(row["gateway_profile_id"])))
+        )
+        if not self._repository.renew_gateway_release_operation_lease(
+            UUID(str(row["id"])), worker_id, 180,
+        ):
+            raise RetryablePublicationError("Worker lease is no longer owned")
+        topology = self._service.apply_target_inventory(inventory)
+        self._transition(row, "succeeded", {"checkpoint": {
+            "read_only_arm_discovery": True, "service_tier": inventory.service_tier,
+            "gateway_count": len(topology.deployments),
+            "self_hosted_gateway_count": len(inventory.gateways),
+            "associated_api_count": sum(
+                len(item.associated_api_ids) for item in inventory.gateways
+            ),
+            "hostname_configuration_count": sum(
+                len(item.hostname_configurations) for item in inventory.gateways
+            ),
+            "certificate_authority_count": sum(
+                len(item.certificate_authorities) for item in inventory.gateways
+            ),
+        }}, worker_id)
 
     def _advance_integrity(
         self, row: Mapping[str, Any], worker_id: str

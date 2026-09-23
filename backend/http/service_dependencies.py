@@ -74,6 +74,11 @@ def control_plane_service(repository: Repository) -> GatewayControlPlaneService:
         image_generation_defaults=settings.image_generation_defaults,
         databricks_oauth_enabled=settings.databricks_oauth_enabled,
         price_catalog=price_catalog(),
+        target_inventory_sync_enabled=(
+            settings.apim_target_registry_enabled and settings.gateway_release_worker_enabled
+        ),
+        deployment_scoping_enabled=settings.apim_target_registry_enabled,
+        target_registry_enabled=settings.apim_target_registry_enabled,
     )
 
 

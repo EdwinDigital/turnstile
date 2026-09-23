@@ -1,4 +1,116 @@
 paths:
+  /api/v1/model-management/apim-targets:
+    get:
+      tags: [Model Control Plane]
+      operationId: listApimTargetTopologies
+      summary: List persisted APIM targets and Gateway deployments
+      description: Requires an authenticated session. Reads persisted inventory without ARM or inference requests. Declared, reachable and observed states are independent.
+      security:
+      - sessionCookie: []
+      responses:
+        '200':
+          description: Enabled registered APIM targets and their active deployments.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopologyList
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+    post:
+      tags: [Model Control Plane]
+      operationId: registerApimTarget
+      summary: Register an existing APIM target
+      description: Requires an Owner session, the write-origin check, configured management authorization and the target-registry gate. Validates ARM identity and a credentialed GET models probe before persisting the profile. Does not create Azure resources or issue inference requests.
+      security:
+      - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ApimTargetWrite
+      responses:
+        '201':
+          description: Registered APIM target and persisted inventory.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopology
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '502':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/apim-targets/{gateway_profile_id}:
+    get:
+      tags: [Model Control Plane]
+      operationId: getApimTargetTopology
+      summary: Read one persisted APIM target topology
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Registered target topology.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopology
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync:
+    post:
+      tags: [Model Control Plane]
+      operationId: requestApimTargetInventorySync
+      summary: Queue a durable APIM inventory synchronization
+      description: Requires an Owner session, the write-origin check and an enabled inventory worker. ARM discovery is read-only; the worker persists validated inventory and independent deployment states. A duplicate active operation is rejected.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '202':
+          description: Persisted operation and status URL.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
   /api/v1/model-management/gateways/{item_id}/name:
     patch:
       tags: [Model Control Plane]

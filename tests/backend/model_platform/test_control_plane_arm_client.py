@@ -31,6 +31,7 @@ from turnstile_core.domain.control_plane import (
     RuntimeTarget,
     publication_model_id,
 )
+from turnstile_core.domain.gateway_targets import GatewayDeploymentScope, GatewayServingDeployment
 from turnstile_core.domain.runtime_models import OAuthClientCredentialsConfig, ProviderTarget
 from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
@@ -49,6 +50,114 @@ from turnstile_core.integrations.apim_control_plane_contract import (
     OperationResource,
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
+
+
+@pytest.mark.parametrize("out_of_scope", [False, True])
+def test_candidate_probe_uses_each_gateway_scope_and_records_optional_failure(
+    out_of_scope: bool,
+) -> None:
+    repository = InMemoryRepository()
+    repository.models = []
+    publication = GatewayControlPlaneService(repository).publish(
+        bedrock_publication(), "unit-owner",
+    )
+    endpoints = tuple(GatewayServingDeployment.model_validate({
+        "deployment_id": str(UUID(int=index + 1)), "native_gateway_id": name,
+        "kind": "managed" if name == "managed" else "self_hosted",
+        "endpoint_url": f"https://{name}.example.test/unit/llm", "release_gate": gate,
+    }) for index, (name, gate) in enumerate((("managed", "required"), ("edge", "required"),
+                                           ("optional", "optional"))))
+    binding = publication.desired_spec.bindings[-1].model_copy(update={
+        "logical_model_id": UUID(int=80),
+        "deployment_scope": GatewayDeploymentScope.model_validate({
+            "mode": "selected", "deployment_ids": [endpoints[1].deployment_id],
+        }), "serving_deployments": (endpoints[1],),
+    })
+    spec = publication.desired_spec.model_copy(update={
+        "bindings": [binding], "gateway_deployments": endpoints,
+    })
+    publication = publication.model_copy(update={"desired_spec": spec})
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "optional.example.test":
+            return httpx.Response(503)
+        if request.method == "GET":
+            serves_model = request.url.host == "edge.example.test" or out_of_scope
+            ids = [binding.model.model_key] if serves_model else []
+            return httpx.Response(200, json={"data": [{"id": identity} for identity in ids]})
+        assert request.url.host == "edge.example.test"
+        assert request.headers["x-model-id"] == str(binding.logical_model_id)
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}],
+                                        "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    settings = publisher_settings().model_copy(update={
+        "apim_probe_subscription_key": SecretStr("unit-probe-key"),
+    })
+    client = AzureApimPublisherClient(settings, cast(Any, StubTokenProvider()),
+                                     httpx.Client(transport=httpx.MockTransport(handler)))
+    if out_of_scope:
+        with pytest.raises(RetryablePublicationError, match="outside this Gateway scope"):
+            client.probe_revision("unit-revision", publication)
+        assert len(requests) == 1
+    else:
+        results = client.probe_revision("unit-revision", publication)
+        assert [item.status for item in results] == ["succeeded", "succeeded", "optional_pending"]
+        assert results[-1].error_code == "RetryablePublicationError"
+        assert {request.url.host for request in requests} == {
+            "managed.example.test", "edge.example.test", "optional.example.test",
+        }
+
+
+@pytest.mark.parametrize("tier", ["Developer", "StandardV2"])
+def test_target_inventory_is_read_only_and_whitelists_gateway_fields(tier: str) -> None:
+    settings = publisher_settings().model_copy(update={"azure_subscription_id": str(UUID(int=2))})
+    base = (
+        f"/subscriptions/{settings.azure_subscription_id}"
+        f"/resourceGroups/{settings.apim_resource_group}"
+        f"/providers/Microsoft.ApiManagement/service/{settings.apim_service_name}"
+    )
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        path = request.url.path.removeprefix(base)
+        requests.append(path)
+        if not path:
+            return httpx.Response(200, json={
+                "id": base, "sku": {"name": tier}, "location": "eastus",
+            })
+        if path == f"/apis/{settings.apim_api_id}":
+            return httpx.Response(200, json={"id": base + path,
+                                           "properties": {"path": "unit/llm", "apiRevision": "1"}})
+        if path == "/gateways":
+            return httpx.Response(200, json={"value": [{"id": base + "/gateways/edge",
+                "properties": {"locationData": {"name": "Unit edge"}, "key": "not-in-inventory"}}]})
+        return httpx.Response(200, json={"value": []})
+
+    client = AzureApimPublisherClient(settings, cast(Any, StubTokenProvider()),
+                                     httpx.Client(transport=httpx.MockTransport(handler)))
+    inventory = client.discover_apim_target_inventory(APIM_ID)
+    assert inventory.api_path == "unit/llm"
+    assert "not-in-inventory" not in inventory.model_dump_json()
+    assert inventory.capabilities.table_ledger == "unknown"
+    assert ("/gateways" in requests) == (tier == "Developer")
+    assert len(inventory.gateways) == int(tier == "Developer")
+
+
+def test_target_inventory_rejects_foreign_service_before_any_child_requests() -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "/subscriptions/foreign/service/other"})
+
+    client = AzureApimPublisherClient(publisher_settings(), cast(Any, StubTokenProvider()),
+                                     httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(PolicyCompilationError, match="another resource identity"):
+        client.discover_apim_target_inventory(APIM_ID)
+    assert len(requests) == 1
 
 
 def test_databricks_oauth_provisions_owned_resources_without_secret_readback() -> None:

@@ -10,10 +10,14 @@ from ..domain.control_plane import (
     publication_materialized_named_values,
     publication_model_id,
 )
+from ..domain.gateway_targets import apim_target_route_binding_id_for
 from .repository_support import _activation_runtime_config
 
 
 class InMemoryPublicationRepositoryMixin:
+    apim_targets: dict[UUID, dict[str, Any]]
+    apim_target_route_bindings: dict[UUID, dict[str, Any]]
+    gateway_deployments: dict[UUID, dict[str, Any]]
     gateway_release_operation_secrets: dict[UUID, bytes]
 
     assistant_setting: dict[str, Any]
@@ -955,6 +959,57 @@ class InMemoryPublicationRepositoryMixin:
         row.update(lease_expires_at=now + timedelta(seconds=lease_seconds), updated_at=now)
         return True
 
+    def _sync_active_route_bindings(self, publication: Mapping[str, Any]) -> None:
+        target_id = UUID(str(publication["gateway_profile_id"]))
+        if target_id not in self.apim_targets:
+            return
+        staged = dict(self.apim_target_route_bindings)
+        now = datetime.now(UTC)
+        for binding in publication["desired_spec"].get("bindings", []):
+            logical_id = binding.get("logical_model_id")
+            model = next((row for row in self.models if (
+                row["id"] == UUID(str(logical_id)) if logical_id
+                else str(row["model_key"]).casefold() == binding["model"]["model_key"].casefold()
+            )), None)
+            if (model is None or str(model["model_key"]).casefold()
+                    != binding["model"]["model_key"].casefold()):
+                raise ValueError("An active release binding has no matching logical model")
+            runtime_id = binding.get("runtime_id")
+            runtime = next((row for row in self.runtimes if (
+                row["id"] == UUID(str(runtime_id)) if runtime_id else
+                row.get("gateway_profile_id") == target_id
+                and str(row["name"]).casefold() == binding["runtime_name"].casefold()
+            )), None)
+            if runtime is None or runtime.get("gateway_profile_id") != target_id:
+                raise ValueError("An active release binding has no target Runtime")
+            scope = binding.get("deployment_scope") or {"mode": "all", "deployment_ids": []}
+            selected_ids = tuple(UUID(str(value)) for value in scope.get("deployment_ids", []))
+            for identity in selected_ids:
+                deployment = self.gateway_deployments.get(identity)
+                if (deployment is None or deployment["apim_target_id"] != target_id
+                        or deployment["retired_at"] is not None):
+                    raise ValueError("Selected Gateway deployment no longer belongs to APIM target")
+            is_default = model["runtime_id"] == runtime["id"]
+            if is_default:
+                for identity, row in tuple(staged.items()):
+                    same_model = row["logical_model_id"] == model["id"]
+                    other_target = row["apim_target_id"] != target_id
+                    if same_model and other_target:
+                        staged[identity] = {**row, "is_default_serving": False, "updated_at": now}
+            route_id = apim_target_route_binding_id_for(model["id"], target_id)
+            previous = staged.get(route_id)
+            staged[route_id] = {
+                "schema_version": 1, "id": route_id, "logical_model_id": model["id"],
+                "apim_target_id": target_id, "runtime_id": runtime["id"], "enabled": True,
+                "is_default_serving": is_default, "current_publication_id": publication["id"],
+                "deployment_scope": {"mode": scope.get("mode", "all"),
+                                     "deployment_ids": selected_ids},
+                "capability_state": "supported",
+                "created_at": previous["created_at"] if previous is not None else now,
+                "updated_at": now,
+            }
+        self.apim_target_route_bindings = staged
+
     def activate_gateway_publication(
         self, publication_id: UUID, actor: str
     ) -> dict[str, Any]:
@@ -983,6 +1038,8 @@ class InMemoryPublicationRepositoryMixin:
             raise ValueError("Publication activation requires the current worker lease")
         if publication["status"] != "promoting":
             raise ValueError("Only a promoted gateway publication can be activated")
+        if publication["publication_kind"] in {"route_reconcile", "credential_rotation"}:
+            self._sync_active_route_bindings(publication)
         if publication["publication_kind"] == "model_remove":
             target = publication["desired_spec"]["removed_models"][0]
             model_id = UUID(str(target["model_id"]))
@@ -1022,7 +1079,12 @@ class InMemoryPublicationRepositoryMixin:
                     updated_at=changed_at,
                     updated_by=changed_by,
                 )
+            self.apim_target_route_bindings = {
+                identity: row for identity, row in self.apim_target_route_bindings.items()
+                if row["logical_model_id"] != model_id
+            }
             self.models.remove(model)
+            self._sync_active_route_bindings(publication)
             previous_release_id = self.effective_gateway_releases.get(
                 publication["gateway_profile_id"]
             )
@@ -1199,7 +1261,8 @@ class InMemoryPublicationRepositoryMixin:
         model = self.create_registry_item(
             "model",
             {
-                "id": publication_model_id(publication_id, model_spec["model_key"]),
+                "id": UUID(str(binding["logical_model_id"])) if binding.get("logical_model_id")
+                else publication_model_id(publication_id, model_spec["model_key"]),
                 "provider_id": provider["id"],
                 "runtime_id": runtime["id"],
                 "model_key": model_spec["model_key"],
@@ -1234,6 +1297,7 @@ class InMemoryPublicationRepositoryMixin:
             },
         )
         model["publication_id"] = publication_id
+        self._sync_active_route_bindings(publication)
         previous_release_id = self.effective_gateway_releases.get(
             publication["gateway_profile_id"]
         )

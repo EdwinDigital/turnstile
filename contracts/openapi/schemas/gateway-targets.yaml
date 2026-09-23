@@ -1,0 +1,688 @@
+schemas:
+  GatewayDeploymentScope:
+    additionalProperties: false
+    properties:
+      mode:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentScopeMode
+        default: all
+      deployment_ids:
+        default: []
+        items: {format: uuid, type: string}
+        title: Deployment Ids
+        type: array
+    title: GatewayDeploymentScope
+    type: object
+  GatewayDeploymentScopeMode:
+    enum: [all, selected]
+    title: GatewayDeploymentScopeMode
+    type: string
+  ApimTarget:
+    properties:
+      schema_version:
+        type: integer
+        const: 1
+        title: Schema Version
+        default: 1
+      gateway_profile_id:
+        type: string
+        format: uuid
+        title: Gateway Profile Id
+      arm_resource_id:
+        type: string
+        maxLength: 2048
+        minLength: 1
+        title: Arm Resource Id
+      tenant_id:
+        type: string
+        format: uuid
+        title: Tenant Id
+      subscription_id:
+        type: string
+        format: uuid
+        title: Subscription Id
+      resource_group:
+        type: string
+        maxLength: 90
+        minLength: 1
+        title: Resource Group
+      service_name:
+        type: string
+        maxLength: 50
+        minLength: 1
+        title: Service Name
+      api_id:
+        type: string
+        maxLength: 256
+        minLength: 1
+        title: Api Id
+      api_path:
+        type: string
+        maxLength: 400
+        minLength: 1
+        title: Api Path
+      service_tier:
+        type: string
+        maxLength: 64
+        minLength: 1
+        title: Service Tier
+      tier_family:
+        $ref: ../../openapi.yaml#/components/schemas/ApimTierFamily
+      service_location:
+        type: string
+        maxLength: 128
+        minLength: 1
+        title: Service Location
+      principal_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Principal Id
+      management_auth_profile_ref:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+        title: Management Auth Profile Ref
+      probe_subscription_id:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+        title: Probe Subscription Id
+      probe_secret_ref:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        title: Probe Secret Ref
+      ownership_mode:
+        $ref: ../../openapi.yaml#/components/schemas/ApimTargetOwnershipMode
+      capabilities:
+        $ref: ../../openapi.yaml#/components/schemas/ApimTargetCapabilitySnapshot
+      last_inventory_sync_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Last Inventory Sync At
+      last_validated_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Last Validated At
+      drift_state:
+        $ref: ../../openapi.yaml#/components/schemas/ApimTargetDriftState
+        default: unknown
+    additionalProperties: false
+    type: object
+    required:
+    - gateway_profile_id
+    - arm_resource_id
+    - tenant_id
+    - subscription_id
+    - resource_group
+    - service_name
+    - api_id
+    - api_path
+    - service_tier
+    - tier_family
+    - service_location
+    - ownership_mode
+    title: ApimTarget
+  ApimTargetCapabilitySnapshot:
+    properties:
+      schema_version:
+        type: integer
+        const: 1
+        title: Schema Version
+        default: 1
+      self_hosted_gateway:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      backend_pools:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      managed_identity_policy:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      event_hub_logger:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      table_ledger:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      responses:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      anthropic_messages:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      response_observer:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      source_api_version:
+        anyOf:
+        - type: string
+          maxLength: 64
+          minLength: 1
+        - type: 'null'
+        title: Source Api Version
+      observed_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Observed At
+    additionalProperties: false
+    type: object
+    title: ApimTargetCapabilitySnapshot
+  ApimTargetConnectionState:
+    type: string
+    enum:
+    - unknown
+    - connected
+    - unavailable
+    title: ApimTargetConnectionState
+  ApimTargetDriftState:
+    type: string
+    enum:
+    - unknown
+    - in_sync
+    - drifted
+    title: ApimTargetDriftState
+  ApimTargetOwnershipMode:
+    type: string
+    enum:
+    - turnstile_managed
+    - adopted
+    - read_only
+    title: ApimTargetOwnershipMode
+  ApimTargetTopology:
+    properties:
+      target:
+        $ref: ../../openapi.yaml#/components/schemas/ApimTarget
+      deployments:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
+        type: array
+        title: Deployments
+      management_endpoint:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Management Endpoint
+      gateway_endpoint:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        title: Gateway Endpoint
+      configuration_endpoint:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Configuration Endpoint
+      connection_state:
+        $ref: ../../openapi.yaml#/components/schemas/ApimTargetConnectionState
+      self_hosted_gateway_count:
+        type: integer
+        minimum: 0.0
+        title: Self Hosted Gateway Count
+      published_model_count:
+        type: integer
+        minimum: 0.0
+        title: Published Model Count
+      published_models:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayPublishedModelSummary
+        type: array
+        title: Published Models
+        default: []
+    additionalProperties: false
+    type: object
+    required:
+    - target
+    - deployments
+    - management_endpoint
+    - configuration_endpoint
+    - connection_state
+    - self_hosted_gateway_count
+    - published_model_count
+    title: ApimTargetTopology
+  ApimTargetTopologyList:
+    properties:
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopology
+        type: array
+        title: Items
+      total:
+        type: integer
+        minimum: 0.0
+        title: Total
+      inventory_sync_available:
+        type: boolean
+        title: Inventory Sync Available
+      inventory_sync_unavailable_reason:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Inventory Sync Unavailable Reason
+      resource_lifecycle_available:
+        type: boolean
+        title: Resource Lifecycle Available
+      deployment_scoping_available:
+        type: boolean
+        title: Deployment Scoping Available
+        default: false
+      onboarding_available:
+        type: boolean
+        title: Onboarding Available
+        default: false
+      self_hosted_gateway_name_edit_supported:
+        type: boolean
+        title: Self Hosted Gateway Name Edit Supported
+        default: false
+    additionalProperties: false
+    type: object
+    required:
+    - items
+    - total
+    - inventory_sync_available
+    - resource_lifecycle_available
+    title: ApimTargetTopologyList
+  ApimTargetWrite:
+    properties:
+      gateway_profile_id:
+        type: string
+        format: uuid
+        title: Gateway Profile Id
+      name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Name
+      management_endpoint:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Management Endpoint
+      tenant_id:
+        type: string
+        format: uuid
+        title: Tenant Id
+      subscription_id:
+        type: string
+        format: uuid
+        title: Subscription Id
+      resource_group:
+        type: string
+        maxLength: 90
+        minLength: 1
+        title: Resource Group
+      service_name:
+        type: string
+        maxLength: 50
+        minLength: 1
+        title: Service Name
+      api_id:
+        type: string
+        maxLength: 256
+        minLength: 1
+        title: Api Id
+      gateway_endpoint:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Gateway Endpoint
+      management_auth_profile_ref:
+        type: string
+        const: system_managed_identity
+        title: Management Auth Profile Ref
+        default: system_managed_identity
+      dashboard_subscription_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Dashboard Subscription Id
+        default: turnstile-dashboard
+      probe_subscription_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Probe Subscription Id
+        default: turnstile-publisher-probe
+    additionalProperties: false
+    type: object
+    required:
+    - name
+    - management_endpoint
+    - tenant_id
+    - subscription_id
+    - resource_group
+    - service_name
+    - api_id
+    - gateway_endpoint
+    title: ApimTargetWrite
+  ApimTierFamily:
+    type: string
+    enum:
+    - classic
+    - v2
+    title: ApimTierFamily
+  CapabilitySupport:
+    type: string
+    enum:
+    - unknown
+    - supported
+    - unsupported
+    title: CapabilitySupport
+  GatewayCertificateAuthorityInventory:
+    properties:
+      authority_id:
+        type: string
+        maxLength: 2048
+        minLength: 1
+        title: Authority Id
+      name:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Name
+      is_trusted:
+        type: boolean
+        title: Is Trusted
+    additionalProperties: false
+    type: object
+    required:
+    - authority_id
+    - name
+    - is_trusted
+    title: GatewayCertificateAuthorityInventory
+  GatewayDeclaredState:
+    type: string
+    enum:
+    - unknown
+    - present
+    - absent
+    - unsupported
+    title: GatewayDeclaredState
+  GatewayDeployment:
+    properties:
+      schema_version:
+        type: integer
+        const: 1
+        title: Schema Version
+        default: 1
+      id:
+        type: string
+        format: uuid
+        title: Id
+      apim_target_id:
+        type: string
+        format: uuid
+        title: Apim Target Id
+      native_gateway_id:
+        type: string
+        maxLength: 80
+        minLength: 1
+        title: Native Gateway Id
+      kind:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentKind
+      display_name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Display Name
+      location:
+        anyOf:
+        - type: string
+          maxLength: 128
+          minLength: 1
+        - type: 'null'
+        title: Location
+      endpoint_url:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        title: Endpoint Url
+      hosting_mode:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayHostingMode
+      lifecycle_ownership:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayLifecycleOwnership
+      release_gate:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGate
+        default: required
+      declared_state:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayDeclaredState
+        default: unknown
+      reachability_state:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReachabilityState
+        default: unknown
+      observation_state:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayObservationState
+        default: unknown
+      runtime_version_support:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      rate_limit_synchronization:
+        $ref: ../../openapi.yaml#/components/schemas/CapabilitySupport
+        default: unknown
+      last_arm_sync_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Last Arm Sync At
+      last_probe_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Last Probe At
+      last_observed_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Last Observed At
+      retired_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Retired At
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - apim_target_id
+    - native_gateway_id
+    - kind
+    - display_name
+    - hosting_mode
+    - lifecycle_ownership
+    title: GatewayDeployment
+  GatewayDeploymentInventory:
+    properties:
+      deployment_id:
+        type: string
+        format: uuid
+        title: Deployment Id
+      associated_api_ids:
+        items:
+          type: string
+        type: array
+        title: Associated Api Ids
+        default: []
+      hostname_configurations:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayHostnameConfigurationInventory
+        type: array
+        title: Hostname Configurations
+        default: []
+      certificate_authorities:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayCertificateAuthorityInventory
+        type: array
+        title: Certificate Authorities
+        default: []
+      source_api_version:
+        type: string
+        maxLength: 64
+        minLength: 1
+        title: Source Api Version
+      synced_at:
+        type: string
+        format: date-time
+        title: Synced At
+    additionalProperties: false
+    type: object
+    required:
+    - deployment_id
+    - source_api_version
+    - synced_at
+    title: GatewayDeploymentInventory
+  GatewayDeploymentKind:
+    type: string
+    enum:
+    - managed
+    - self_hosted
+    title: GatewayDeploymentKind
+  GatewayDeploymentTopology:
+    properties:
+      deployment:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayDeployment
+      inventory:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentInventory
+        - type: 'null'
+      configuration_endpoint:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Configuration Endpoint
+      published_models:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayPublishedModelSummary
+        type: array
+        title: Published Models
+        default: []
+    additionalProperties: false
+    type: object
+    required:
+    - deployment
+    - configuration_endpoint
+    title: GatewayDeploymentTopology
+  GatewayHostingMode:
+    type: string
+    enum:
+    - azure_managed
+    - aks
+    - kubernetes
+    - arc
+    - container_apps
+    - docker
+    - other
+    title: GatewayHostingMode
+  GatewayHostnameConfigurationInventory:
+    properties:
+      configuration_id:
+        type: string
+        maxLength: 2048
+        minLength: 1
+        title: Configuration Id
+      name:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Name
+      hostname:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Hostname
+      certificate_id:
+        anyOf:
+        - type: string
+          maxLength: 2048
+          minLength: 1
+        - type: 'null'
+        title: Certificate Id
+      negotiate_client_certificate:
+        type: boolean
+        title: Negotiate Client Certificate
+        default: false
+    additionalProperties: false
+    type: object
+    required:
+    - configuration_id
+    - name
+    - hostname
+    title: GatewayHostnameConfigurationInventory
+  GatewayLifecycleOwnership:
+    type: string
+    enum:
+    - customer
+    - turnstile_iac
+    - external
+    title: GatewayLifecycleOwnership
+  GatewayObservationState:
+    type: string
+    enum:
+    - unknown
+    - observed
+    - stale
+    title: GatewayObservationState
+  GatewayPublishedModelSummary:
+    properties:
+      id:
+        type: string
+        format: uuid
+        title: Id
+      model_key:
+        type: string
+        maxLength: 160
+        minLength: 1
+        title: Model Key
+      display_name:
+        type: string
+        maxLength: 160
+        minLength: 1
+        title: Display Name
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - model_key
+    - display_name
+    title: GatewayPublishedModelSummary
+  GatewayReachabilityState:
+    type: string
+    enum:
+    - unknown
+    - reachable
+    - unreachable
+    title: GatewayReachabilityState
+  GatewayReleaseGate:
+    type: string
+    enum:
+    - required
+    - optional
+    title: GatewayReleaseGate

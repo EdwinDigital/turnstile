@@ -400,6 +400,8 @@ schemas:
       gateway_profile_id:
         type: string
         format: uuid
+      deployment_scope:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentScope
       provider:
         $ref: ../../openapi.yaml#/components/schemas/GatewayProviderTarget
       runtime:
@@ -1685,6 +1687,7 @@ schemas:
         - gc_plan
         - application_sync
         - application_provision
+        - target_inventory_sync
       target_release_id:
         type:
         - string

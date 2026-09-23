@@ -8,6 +8,13 @@ from uuid import UUID
 
 from ..domain.application_access import GatewayApplicationLedgerState, UsageApplicationAttribution
 from ..domain.billable_requests import BillableRequestAttempt, BillableRequestPlan
+from ..domain.gateway_targets import (
+    ApimTarget,
+    ApimTargetRouteBinding,
+    GatewayDeployment,
+    GatewayDeploymentInventory,
+    GatewayInstanceObservation,
+)
 from ..domain.ledger import (
     BudgetReservationAdmission,
     BudgetReservationFinalization,
@@ -51,6 +58,74 @@ class OpsDbProxy(Protocol):
 
 
 class QueryRepository(ABC):
+    @abstractmethod
+    def upsert_gateway_instance_observation(
+        self, observation: GatewayInstanceObservation,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def list_gateway_instance_observations(
+        self, deployment_id: UUID, *, limit: int = 100,
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def upsert_gateway_deployment_inventory(
+        self, inventory: GatewayDeploymentInventory,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_gateway_deployment_inventory(self, deployment_id: UUID) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_gateway_deployment_inventories(
+        self, deployment_ids: Sequence[UUID],
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def upsert_gateway_deployment(
+        self, deployment: GatewayDeployment, *, preserve_display_name: bool = False,
+        retiring_deployment: GatewayDeployment | None = None,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def rename_gateway_deployment(self, deployment_id: UUID, display_name: str) -> bool: ...
+
+    @abstractmethod
+    def get_gateway_deployment(self, deployment_id: UUID) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_gateway_deployments(
+        self, apim_target_id: UUID, *, include_retired: bool = False,
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def list_gateway_deployments_for_targets(
+        self, apim_target_ids: Sequence[UUID], *, include_retired: bool = False,
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def upsert_apim_target_route_binding(
+        self, binding: ApimTargetRouteBinding,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_apim_target_route_binding(self, binding_id: UUID) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_apim_target_route_bindings(
+        self, *, logical_model_id: UUID | None = None, apim_target_id: UUID | None = None,
+        apim_target_ids: Sequence[UUID] | None = None,
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def upsert_apim_target(self, target: ApimTarget) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_apim_target(self, gateway_profile_id: UUID) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_apim_targets(self) -> Sequence[dict[str, Any]]: ...
+
     @abstractmethod
     def renew_gateway_publication_lease(
         self,

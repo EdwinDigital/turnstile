@@ -48,6 +48,12 @@ tags:
 - name: Model Router
   description: User-scoped model routing drafts, validation, version publication, and lifecycle.
 paths:
+  /api/v1/model-management/apim-targets:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets
+  /api/v1/model-management/apim-targets/{gateway_profile_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1inventory-sync
   /api/v1/model-gateway/images/generations:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-gateway~1images~1generations
   /api/v1/application-access/applications:
@@ -367,6 +373,56 @@ components:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelRegistry
     GatewayProfileNameWrite:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayProfileNameWrite
+    ApimTarget:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTarget
+    ApimTargetCapabilitySnapshot:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetCapabilitySnapshot
+    ApimTargetConnectionState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetConnectionState
+    ApimTargetDriftState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetDriftState
+    ApimTargetOwnershipMode:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetOwnershipMode
+    ApimTargetTopology:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetTopology
+    ApimTargetTopologyList:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetTopologyList
+    ApimTargetWrite:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetWrite
+    ApimTierFamily:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTierFamily
+    CapabilitySupport:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/CapabilitySupport
+    GatewayCertificateAuthorityInventory:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayCertificateAuthorityInventory
+    GatewayDeclaredState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeclaredState
+    GatewayDeployment:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeployment
+    GatewayDeploymentInventory:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentInventory
+    GatewayDeploymentKind:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentKind
+    GatewayDeploymentTopology:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentTopology
+    GatewayHostingMode:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayHostingMode
+    GatewayHostnameConfigurationInventory:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayHostnameConfigurationInventory
+    GatewayLifecycleOwnership:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayLifecycleOwnership
+    GatewayObservationState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayObservationState
+    GatewayPublishedModelSummary:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayPublishedModelSummary
+    GatewayReachabilityState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayReachabilityState
+    GatewayReleaseGate:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayReleaseGate
+    GatewayDeploymentScope:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentScope
+    GatewayDeploymentScopeMode:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentScopeMode
     StoredContextPriceTier:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/StoredContextPriceTier
     ContextPriceRule:

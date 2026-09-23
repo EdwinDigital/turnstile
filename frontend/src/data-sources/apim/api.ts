@@ -1,6 +1,9 @@
 import type {
   AnomalyRule,
   AnomalyRuleWrite,
+  ApimTargetTopology,
+  ApimTargetTopologyList,
+  ApimTargetWrite,
   AuditFinding,
   AuditStatus,
   BudgetScopeType,
@@ -324,6 +327,20 @@ export const dataSource = {
     workflow: string; label: string; notes: string; occurred_at: string; comparison_window_days: number
   }) => writeJson<OptimizationEvent>("/api/v1/observability/optimization-events", value),
   registry: () => request<ModelRegistry>("/api/v1/model-management").then(normalizeRegistry),
+  apimTargets: async (): Promise<ApimTargetTopologyList | null> => {
+    try { return await request<ApimTargetTopologyList>("/api/v1/model-management/apim-targets") }
+    catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+  },
+  registerApimTarget: (value: ApimTargetWrite) => writeJson<ApimTargetTopology>(
+    "/api/v1/model-management/apim-targets", value,
+  ),
+  syncApimTarget: (id: string) => request<GatewayReleaseOperationAccepted>(
+    `/api/v1/model-management/apim-targets/${encodeURIComponent(id)}/inventory-sync`,
+    { method: "POST" },
+  ),
   saveGateway: (value: Record<string, unknown>, id?: string) => saveRegistry("/api/v1/model-management/gateways", value, id),
   renameGateway: (id: string, name: string) => request<ModelRegistry | undefined>(
     `/api/v1/model-management/gateways/${encodeURIComponent(id)}/name`,

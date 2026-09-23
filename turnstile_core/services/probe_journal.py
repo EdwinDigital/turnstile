@@ -51,6 +51,8 @@ class PersistentProbeJournal:
         revision: str,
         body: Mapping[str, Any],
         send: Callable[[str, str], dict[str, Any]],
+        *,
+        gateway_endpoint: str | None = None,
     ) -> None:
         self.heartbeat()
         profile = validate_image_profile(binding.model.image_profile)
@@ -61,11 +63,16 @@ class PersistentProbeJournal:
         )
         if model_id is None:
             raise PolicyCompilationError("Image probe model identity is unavailable")
+        operation_key = self._operation_key + ":" + binding.model.model_key
+        plan_context = dict(self._plan_context)
+        if gateway_endpoint is not None:
+            operation_key += ":gateway:" + hashlib.sha256(gateway_endpoint.encode()).hexdigest()
+            plan_context["gateway_endpoint"] = gateway_endpoint
         now = datetime.now(UTC)
         try:
             attempt = self._repository.begin_billable_request(
                 BillableRequestPlan(
-                    operation_key=self._operation_key + ":" + binding.model.model_key,
+                    operation_key=operation_key,
                     plan_sha256=hashlib.sha256(
                         json.dumps(
                             {
@@ -73,7 +80,7 @@ class PersistentProbeJournal:
                                 "model_id": model_id,
                                 "revision": revision,
                                 "body": body,
-                                "context": self._plan_context,
+                                "context": plan_context,
                             },
                             sort_keys=True,
                         ).encode()

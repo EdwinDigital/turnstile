@@ -13,6 +13,7 @@ from ..domain.control_plane import (
     publication_materialized_named_values,
     publication_model_id,
 )
+from ..domain.gateway_targets import apim_target_route_binding_id_for
 from .repository_support import _activation_runtime_config
 
 
@@ -1061,6 +1062,83 @@ class PostgreSqlPublicationRepositoryMixin:
                 is not None
             )
 
+    @staticmethod
+    def _sync_active_route_bindings(connection: Any, publication: Mapping[str, Any]) -> None:
+        target_id = UUID(str(publication["gateway_profile_id"]))
+        target = connection.execute(
+            "SELECT gateway_profile_id FROM apim_target_metadata WHERE gateway_profile_id = %s",
+            (target_id,),
+        ).fetchone()
+        if target is None:
+            return
+        for binding in dict(publication["desired_spec"]).get("bindings", []):
+            model_spec = dict(binding["model"])
+            logical_id = binding.get("logical_model_id")
+            lookup = (
+                "SELECT id, runtime_id, model_key FROM managed_model WHERE id = %s"
+                if logical_id else
+                "SELECT id, runtime_id, model_key FROM managed_model "
+                "WHERE lower(model_key) = lower(%s)"
+            )
+            identity = UUID(str(logical_id)) if logical_id else model_spec["model_key"]
+            model = connection.execute(lookup, (identity,)).fetchone()
+            if model is None:
+                raise ValueError("An active release binding has no matching logical model")
+            expected_alias = str(model_spec["model_key"]).casefold()
+            if str(model["model_key"]).casefold() != expected_alias:
+                raise ValueError("An active release binding has no matching logical model")
+            runtime_id = binding.get("runtime_id")
+            runtime = connection.execute(
+                "SELECT id, gateway_profile_id FROM model_runtime WHERE id = %s"
+                if runtime_id else
+                """SELECT id, gateway_profile_id FROM model_runtime
+                   WHERE gateway_profile_id = %s AND lower(name) = lower(%s)""",
+                (UUID(str(runtime_id)),) if runtime_id else (target_id, binding["runtime_name"]),
+            ).fetchone()
+            if runtime is None or runtime["gateway_profile_id"] != target_id:
+                raise ValueError("An active release binding has no target Runtime")
+            is_default = model["runtime_id"] == runtime["id"]
+            if is_default:
+                connection.execute(
+                    """UPDATE apim_target_route_binding SET is_default_serving = FALSE,
+                       updated_at = now() WHERE logical_model_id = %s
+                       AND apim_target_id <> %s AND is_default_serving""",
+                    (model["id"], target_id),
+                )
+            scope = dict(binding.get("deployment_scope") or {})
+            route = connection.execute(
+                """INSERT INTO apim_target_route_binding (
+                   id, logical_model_id, apim_target_id, runtime_id, enabled, is_default_serving,
+                   deployment_scope_mode, current_publication_id, capability_state
+                   ) VALUES (%s, %s, %s, %s, TRUE, %s, %s, %s, 'supported')
+                   ON CONFLICT (logical_model_id, apim_target_id) DO UPDATE SET
+                   runtime_id = EXCLUDED.runtime_id, enabled = TRUE,
+                   is_default_serving = EXCLUDED.is_default_serving,
+                   deployment_scope_mode = EXCLUDED.deployment_scope_mode,
+                   current_publication_id = EXCLUDED.current_publication_id,
+                   capability_state = EXCLUDED.capability_state, updated_at = now() RETURNING id""",
+                (apim_target_route_binding_id_for(model["id"], target_id), model["id"], target_id,
+                 runtime["id"], is_default, scope.get("mode", "all"), publication["id"]),
+            ).fetchone()
+            connection.execute(
+                "DELETE FROM apim_target_route_binding_deployment WHERE route_binding_id = %s",
+                (route["id"],),
+            )
+            for identity in scope.get("deployment_ids", []):
+                deployment_id = UUID(str(identity))
+                deployment = connection.execute(
+                    """SELECT id FROM gateway_deployment WHERE id = %s AND apim_target_id = %s
+                       AND retired_at IS NULL FOR SHARE""", (deployment_id, target_id),
+                ).fetchone()
+                if deployment is None:
+                    raise ValueError("Selected Gateway deployment no longer belongs to APIM target")
+                connection.execute(
+                    """INSERT INTO apim_target_route_binding_deployment
+                       (route_binding_id, apim_target_id, gateway_deployment_id)
+                       VALUES (%s, %s, %s)""",
+                    (route["id"], target_id, deployment_id),
+                )
+
     def activate_gateway_publication(
         self, publication_id: UUID, actor: str
     ) -> dict[str, Any]:
@@ -1131,6 +1209,17 @@ class PostgreSqlPublicationRepositoryMixin:
                     """UPDATE assistant_setting SET model_id = NULL, updated_at = now(),
                            updated_by = %s WHERE model_id = %s""",
                     (publication["created_by"], model_id),
+                )
+                connection.execute(
+                    """DELETE FROM apim_target_route_binding_deployment selected
+                       USING apim_target_route_binding route
+                                             WHERE selected.route_binding_id = route.id
+                                                 AND route.logical_model_id = %s""",
+                    (model_id,),
+                )
+                connection.execute(
+                    "DELETE FROM apim_target_route_binding WHERE logical_model_id = %s",
+                    (model_id,),
                 )
                 connection.execute("DELETE FROM managed_model WHERE id = %s", (model_id,))
                 row = self._complete_gateway_activation(
@@ -1302,7 +1391,8 @@ class PostgreSqlPublicationRepositoryMixin:
                            %s, %s, %s, %s, %s
                        ) RETURNING id""",
                     (
-                        publication_model_id(publication_id, model_spec["model_key"]),
+                        UUID(str(binding["logical_model_id"])) if binding.get("logical_model_id")
+                        else publication_model_id(publication_id, model_spec["model_key"]),
                         provider_id,
                         runtime_id,
                         model_spec["model_key"],
@@ -1364,6 +1454,7 @@ class PostgreSqlPublicationRepositoryMixin:
         publication_id: UUID,
         actor: str,
     ) -> dict[str, Any]:
+        PostgreSqlPublicationRepositoryMixin._sync_active_route_bindings(connection, publication)
         previous = connection.execute(
             """SELECT publication_id FROM effective_gateway_release
                WHERE gateway_profile_id = %s""",

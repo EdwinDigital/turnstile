@@ -32,6 +32,7 @@ from turnstile_core.domain.control_plane import (
     ModelCreateTarget,
     RuntimeTarget,
 )
+from turnstile_core.domain.gateway_targets import GatewayDeploymentScope, GatewayServingDeployment
 from turnstile_core.domain.runtime_models import ProviderTarget, databricks_connection_config
 from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
 from turnstile_core.integrations.apim_control_plane import (
@@ -51,6 +52,59 @@ from turnstile_core.integrations.apim_policy_components import (
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.gateway_release_operation_worker import GatewayReleaseOperationWorker
+
+
+@pytest.mark.parametrize("operation", ["chat", "messages", "image"])
+def test_scoped_models_are_gated_in_operation_policy_and_discovery(operation: str) -> None:
+    from tests.backend.model_platform.test_image_publication import image_publication
+
+    repository = InMemoryRepository()
+    repository.models = []
+    request = (image_publication(repository) if operation == "image"
+               else bedrock_publication() if operation == "messages" else foundry_publication())
+    if operation == "chat":
+        request.provider = ProviderTarget(existing_id=next(
+            row["id"] for row in repository.providers if row["brand_key"] == "microsoft_foundry"
+        ))
+    publication = GatewayControlPlaneService(
+        repository, apim_principal_id="unit-principal",
+    ).publish(request, "unit-owner")
+    serving = GatewayServingDeployment.model_validate({
+        "deployment_id": str(UUID(int=24)), "native_gateway_id": "unit-edge",
+        "kind": "self_hosted", "endpoint_url": "https://edge.example.test/unit/llm",
+        "release_gate": "required",
+    })
+    binding = publication.desired_spec.bindings[-1].model_copy(update={
+        "deployment_scope": GatewayDeploymentScope.model_validate({
+            "mode": "selected", "deployment_ids": [serving.deployment_id],
+        }), "serving_deployments": (serving,),
+    })
+    spec = publication.desired_spec.model_copy(update={
+        "bindings": [binding], "gateway_deployments": (serving,),
+    })
+    publication = publication.model_copy(update={"desired_spec": spec})
+    compiled = ApimPolicyCompiler().compile(publication)
+    policies = ([compiled.images_generations_policy] if operation == "image"
+                else [compiled.messages_policy, compiled.count_tokens_policy]
+                if operation == "messages"
+                else [compiled.chat_completions_policy, compiled.responses_policy,
+                      compiled.responses_compact_policy])
+    for policy in policies:
+        assert policy is not None
+        root = ElementTree.fromstring(policy)
+        known = root.find("./inbound/set-variable[@name='selectedModelKnown']")
+        assert known is not None and "context.Deployment.Gateway.Id" in known.attrib["value"]
+        for branch in root.findall("./inbound/choose/when"):
+            if binding.model.model_key in branch.attrib.get("condition", ""):
+                assert "unit-edge" in branch.attrib["condition"]
+    discovery = ElementTree.fromstring(compiled.models_policy)
+    scoped = discovery.find("./inbound/choose/when")
+    assert scoped is not None and "unit-edge" in scoped.attrib["condition"]
+    scoped_body = scoped.find("./return-response/set-body")
+    fallback_body = discovery.find("./inbound/choose/otherwise/return-response/set-body")
+    assert scoped_body is not None and fallback_body is not None
+    assert json.loads(scoped_body.text or "")["data"][0]["id"] == binding.model.model_key
+    assert json.loads(fallback_body.text or "")["data"] == []
 
 
 def test_budget_rollback_rejects_legacy_parent_before_probing() -> None:

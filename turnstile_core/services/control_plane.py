@@ -64,6 +64,30 @@ from ..domain.control_plane import (
     publication_materialized_named_values,
     publication_retry_requires_credential,
 )
+from ..domain.gateway_targets import (
+    ApimTarget,
+    ApimTargetArmInventory,
+    ApimTargetConnectionState,
+    ApimTargetDriftState,
+    ApimTargetRouteBinding,
+    ApimTargetTopology,
+    ApimTargetTopologyList,
+    CapabilitySupport,
+    GatewayDeclaredState,
+    GatewayDeployment,
+    GatewayDeploymentInventory,
+    GatewayDeploymentKind,
+    GatewayDeploymentScope,
+    GatewayDeploymentScopeMode,
+    GatewayDeploymentTopology,
+    GatewayHostingMode,
+    GatewayLifecycleOwnership,
+    GatewayPublishedModelSummary,
+    GatewayReachabilityState,
+    GatewayReleaseGate,
+    GatewayServingDeployment,
+    gateway_deployment_id_for,
+)
 from ..domain.image_profiles import (
     ImageGenerationLimits,
     create_image_profile,
@@ -129,6 +153,9 @@ class GatewayControlPlaneService:
         image_generation_defaults: ImageGenerationLimits | None = None,
         databricks_oauth_enabled: bool = False,
         price_catalog: CompositeCatalog | None = None,
+        target_inventory_sync_enabled: bool = False,
+        deployment_scoping_enabled: bool = False,
+        target_registry_enabled: bool = False,
     ) -> None:
         self._repository = repository
         self._price_catalog = price_catalog or build_default_catalog()
@@ -136,6 +163,9 @@ class GatewayControlPlaneService:
         self._apim_principal_id = apim_principal_id
         self._databricks_oauth_enabled = databricks_oauth_enabled
         self._release_worker_enabled = release_worker_enabled
+        self._target_inventory_sync_enabled = target_inventory_sync_enabled
+        self._deployment_scoping_enabled = deployment_scoping_enabled
+        self._target_registry_enabled = target_registry_enabled
         self._application_provisioning_enabled = application_provisioning_enabled
         self._application_default_token_limit = application_default_token_limit
         self._application_default_tokens_per_minute = application_default_tokens_per_minute
@@ -146,6 +176,290 @@ class GatewayControlPlaneService:
             retained_days=180,
             failed_retained_days=30,
             protected_labels=["milestone", "rollback"],
+        )
+
+    def request_target_inventory_sync(
+        self, gateway_profile_id: UUID, actor: str,
+    ) -> GatewayReleaseOperationAccepted:
+        self._require_release_worker()
+        if not self._target_inventory_sync_enabled:
+            raise ControlPlaneUnavailableError(
+                "APIM target inventory synchronization is not enabled"
+            )
+        self._active_apim_target_row(gateway_profile_id)
+        try:
+            row = self._repository.create_gateway_release_operation(
+                gateway_profile_id, GatewayReleaseOperationKind.TARGET_INVENTORY_SYNC.value, actor,
+            )
+        except ValueError as error:
+            raise ControlPlaneConflictError(str(error)) from error
+        operation = self._operation_view(row)
+        return GatewayReleaseOperationAccepted(
+            operation=operation,
+            status_url=f"/api/v1/model-management/release-operations/{operation.id}",
+        )
+
+    def apply_target_inventory(self, inventory: ApimTargetArmInventory) -> ApimTargetTopology:
+        row = self._repository.get_apim_target(inventory.gateway_profile_id)
+        if row is None:
+            raise ControlPlaneNotFoundError("APIM target not found")
+        current = self._apim_target(row)
+        if (current.last_inventory_sync_at is not None
+                and inventory.discovered_at < current.last_inventory_sync_at):
+            return self.apim_target_topology(inventory.gateway_profile_id)
+        identity_fields = ("arm_resource_id", "resource_group", "service_name", "api_id")
+        if (any(str(getattr(current, name)).casefold() != str(getattr(inventory, name)).casefold()
+                for name in identity_fields)
+                or current.subscription_id != inventory.subscription_id
+                or current.api_path != inventory.api_path
+                or current.principal_id != inventory.principal_id):
+            self._repository.upsert_apim_target(current.model_copy(update={
+                "drift_state": ApimTargetDriftState.DRIFTED,
+                "last_inventory_sync_at": inventory.discovered_at,
+            }))
+            raise ControlPlaneConflictError(
+                "APIM inventory does not match the immutable target identity"
+            )
+        updated = current.model_copy(update={
+            "service_tier": inventory.service_tier, "tier_family": inventory.tier_family,
+            "service_location": inventory.service_location, "principal_id": inventory.principal_id,
+            "capabilities": inventory.capabilities,
+            "last_inventory_sync_at": inventory.discovered_at,
+            "last_validated_at": inventory.discovered_at,
+            "drift_state": ApimTargetDriftState.IN_SYNC,
+        })
+        existing = {str(item["native_gateway_id"]).casefold(): self._gateway_deployment(item)
+                    for item in self._repository.list_gateway_deployments(
+                        inventory.gateway_profile_id, include_retired=True,
+                    )}
+        managed = existing.get("managed") or GatewayDeployment(
+            id=gateway_deployment_id_for(inventory.gateway_profile_id, "managed"),
+            apim_target_id=inventory.gateway_profile_id, native_gateway_id="managed",
+            kind=GatewayDeploymentKind.MANAGED, display_name="Azure-managed Gateway",
+            endpoint_url=inventory.managed_gateway_url,
+            hosting_mode=GatewayHostingMode.AZURE_MANAGED,
+            lifecycle_ownership=GatewayLifecycleOwnership.EXTERNAL,
+            release_gate=GatewayReleaseGate.REQUIRED,
+        )
+        managed = managed.model_copy(update={
+            "display_name": "Azure-managed Gateway", "location": inventory.service_location,
+            "endpoint_url": inventory.managed_gateway_url,
+            "declared_state": GatewayDeclaredState.PRESENT,
+            "last_arm_sync_at": inventory.discovered_at, "retired_at": None,
+        })
+        self._repository.upsert_gateway_deployment(managed)
+        self._repository.upsert_gateway_deployment_inventory(GatewayDeploymentInventory(
+            deployment_id=managed.id, associated_api_ids=(inventory.api_id,),
+            source_api_version=inventory.source_api_version, synced_at=inventory.discovered_at,
+        ))
+        observed = {"managed"}
+        for gateway in inventory.gateways:
+            native_id = gateway.native_gateway_id.casefold()
+            observed.add(native_id)
+            deployment = existing.get(native_id) or GatewayDeployment(
+                id=gateway_deployment_id_for(
+                    inventory.gateway_profile_id, gateway.native_gateway_id
+                ),
+                apim_target_id=inventory.gateway_profile_id,
+                native_gateway_id=gateway.native_gateway_id,
+                kind=GatewayDeploymentKind.SELF_HOSTED,
+                display_name=gateway.location_name or gateway.native_gateway_id,
+                location=gateway.location_name, hosting_mode=GatewayHostingMode.OTHER,
+                lifecycle_ownership=GatewayLifecycleOwnership.CUSTOMER,
+                release_gate=GatewayReleaseGate.OPTIONAL,
+            )
+            deployment = deployment.model_copy(update={
+                "location": gateway.location_name or deployment.location,
+                "declared_state": GatewayDeclaredState.PRESENT,
+                "last_arm_sync_at": inventory.discovered_at,
+            })
+            self._repository.upsert_gateway_deployment(deployment, preserve_display_name=True)
+            self._repository.upsert_gateway_deployment_inventory(GatewayDeploymentInventory(
+                deployment_id=deployment.id, associated_api_ids=gateway.associated_api_ids,
+                hostname_configurations=gateway.hostname_configurations,
+                certificate_authorities=gateway.certificate_authorities,
+                source_api_version=inventory.source_api_version, synced_at=inventory.discovered_at,
+            ))
+        for native_id, deployment in existing.items():
+            if deployment.kind is GatewayDeploymentKind.SELF_HOSTED and native_id not in observed:
+                self._repository.upsert_gateway_deployment(deployment.model_copy(update={
+                    "declared_state": GatewayDeclaredState.ABSENT,
+                    "last_arm_sync_at": inventory.discovered_at,
+                }), preserve_display_name=True)
+        self._repository.upsert_apim_target(updated)
+        return self.apim_target_topology(inventory.gateway_profile_id)
+
+    def apim_target_topologies(
+        self, registry: Mapping[str, Sequence[dict[str, Any]]] | None = None,
+    ) -> ApimTargetTopologyList:
+        if registry is None:
+            registry = self._repository.registry()
+        active_ids = {
+            UUID(str(row["id"])) for row in registry["gateways"]
+            if row["implementation"] == "apim" and row["enabled"]
+        }
+        targets = [row for row in self._repository.list_apim_targets()
+                   if UUID(str(row["gateway_profile_id"])) in active_ids]
+        target_ids = [UUID(str(row["gateway_profile_id"])) for row in targets]
+        bindings = self._repository.list_apim_target_route_bindings(apim_target_ids=target_ids)
+        deployments = self._repository.list_gateway_deployments_for_targets(target_ids)
+        inventories = self._repository.list_gateway_deployment_inventories(
+            [UUID(str(row["id"])) for row in deployments]
+        )
+        bindings_by_target: dict[UUID, list[dict[str, Any]]] = {}
+        deployments_by_target: dict[UUID, list[dict[str, Any]]] = {}
+        for row in bindings:
+            bindings_by_target.setdefault(UUID(str(row["apim_target_id"])), []).append(row)
+        for row in deployments:
+            deployments_by_target.setdefault(UUID(str(row["apim_target_id"])), []).append(row)
+        items = [
+            self._apim_target_topology(
+                row, registry=registry, route_bindings=bindings_by_target.get(target_id, []),
+                deployment_rows=deployments_by_target.get(target_id, []),
+                inventory_rows=inventories,
+            )
+            for row, target_id in zip(targets, target_ids, strict=True)
+        ]
+        return ApimTargetTopologyList(
+            items=items, total=len(items),
+            inventory_sync_available=self._target_inventory_sync_enabled,
+            inventory_sync_unavailable_reason=(
+                None if self._target_inventory_sync_enabled
+                else "APIM target inventory synchronization is not enabled"
+            ),
+            resource_lifecycle_available=False,
+            deployment_scoping_available=self._deployment_scoping_enabled,
+        )
+
+    def apim_target_topology(self, gateway_profile_id: UUID) -> ApimTargetTopology:
+        return self._apim_target_topology(self._active_apim_target_row(gateway_profile_id))
+
+    @staticmethod
+    def _apim_target(row: Mapping[str, Any]) -> ApimTarget:
+        return ApimTarget.model_validate({name: row[name] for name in ApimTarget.model_fields})
+
+    @staticmethod
+    def _gateway_deployment(row: Mapping[str, Any]) -> GatewayDeployment:
+        return GatewayDeployment.model_validate(
+            {name: row[name] for name in GatewayDeployment.model_fields}
+        )
+
+    @staticmethod
+    def _gateway_deployment_inventory(row: Mapping[str, Any]) -> GatewayDeploymentInventory:
+        return GatewayDeploymentInventory.model_validate(
+            {name: row[name] for name in GatewayDeploymentInventory.model_fields}
+        )
+
+    def _active_apim_target_row(self, gateway_profile_id: UUID) -> Mapping[str, Any]:
+        row = self._repository.get_apim_target(gateway_profile_id)
+        gateway = next((item for item in self._repository.registry()["gateways"]
+                        if UUID(str(item["id"])) == gateway_profile_id
+                        and item["implementation"] == "apim" and item["enabled"]), None)
+        if row is None or gateway is None:
+            raise ControlPlaneNotFoundError("APIM target not found")
+        return row
+
+    def _published_models_for_deployment(
+        self, deployment: GatewayDeployment, *,
+        registry: Mapping[str, Sequence[dict[str, Any]]] | None = None,
+        route_bindings: Sequence[dict[str, Any]] | None = None,
+    ) -> tuple[GatewayPublishedModelSummary, ...]:
+        if registry is None:
+            registry = self._repository.registry()
+        if route_bindings is None:
+            route_bindings = self._repository.list_apim_target_route_bindings(
+                apim_target_id=deployment.apim_target_id
+            )
+        runtime_ids = {UUID(str(row["id"])) for row in registry["runtimes"]
+                       if row.get("gateway_profile_id") == deployment.apim_target_id}
+        bindings = {
+            UUID(str(row["logical_model_id"])): ApimTargetRouteBinding.model_validate(
+                {name: row[name] for name in ApimTargetRouteBinding.model_fields}
+            ) for row in route_bindings
+        }
+        models = []
+        for row in registry["models"]:
+            model_id = UUID(str(row["id"]))
+            binding = bindings.get(model_id)
+            if binding is None and UUID(str(row["runtime_id"])) not in runtime_ids:
+                continue
+            if binding is not None and (not binding.enabled or (
+                binding.deployment_scope.mode is GatewayDeploymentScopeMode.SELECTED
+                and deployment.id not in binding.deployment_scope.deployment_ids
+            )):
+                continue
+            models.append(GatewayPublishedModelSummary(
+                id=model_id, model_key=str(row["model_key"]), display_name=str(row["display_name"]),
+            ))
+        return tuple(sorted(models, key=lambda item: (item.display_name.casefold(), str(item.id))))
+
+    def _published_models_for_target(
+        self, apim_target_id: UUID, *,
+        registry: Mapping[str, Sequence[dict[str, Any]]] | None = None,
+    ) -> tuple[GatewayPublishedModelSummary, ...]:
+        if registry is None:
+            registry = self._repository.registry()
+        runtime_ids = {UUID(str(row["id"])) for row in registry["runtimes"]
+                       if row.get("gateway_profile_id") == apim_target_id}
+        return tuple(sorted((
+            GatewayPublishedModelSummary(
+                id=UUID(str(row["id"])), model_key=str(row["model_key"]),
+                display_name=str(row["display_name"]),
+            ) for row in registry["models"] if UUID(str(row["runtime_id"])) in runtime_ids
+        ), key=lambda item: (item.display_name.casefold(), str(item.id))))
+
+    def _apim_target_topology(
+        self, target_row: Mapping[str, Any], *,
+        registry: Mapping[str, Sequence[dict[str, Any]]] | None = None,
+        route_bindings: Sequence[dict[str, Any]] | None = None,
+        deployment_rows: Sequence[dict[str, Any]] | None = None,
+        inventory_rows: Sequence[dict[str, Any]] | None = None,
+    ) -> ApimTargetTopology:
+        target = self._apim_target(target_row)
+        if registry is None:
+            registry = self._repository.registry()
+        if route_bindings is None:
+            route_bindings = self._repository.list_apim_target_route_bindings(
+                apim_target_id=target.gateway_profile_id
+            )
+        if deployment_rows is None:
+            deployment_rows = self._repository.list_gateway_deployments(target.gateway_profile_id)
+        deployments = [self._gateway_deployment(row) for row in deployment_rows]
+        if inventory_rows is None:
+            inventory_rows = self._repository.list_gateway_deployment_inventories(
+                [deployment.id for deployment in deployments]
+            )
+        inventories = {UUID(str(row["deployment_id"])): self._gateway_deployment_inventory(row)
+                       for row in inventory_rows}
+        configuration_endpoint = HttpUrl(
+            f"https://{target.service_name}.configuration.azure-api.net"
+        )
+        managed = next((deployment for deployment in deployments
+                        if deployment.kind is GatewayDeploymentKind.MANAGED), None)
+        published_models = self._published_models_for_target(
+            target.gateway_profile_id, registry=registry
+        )
+        return ApimTargetTopology(
+            target=target,
+            deployments=[GatewayDeploymentTopology(
+                deployment=deployment, inventory=inventories.get(deployment.id),
+                configuration_endpoint=configuration_endpoint,
+                published_models=self._published_models_for_deployment(
+                    deployment, registry=registry, route_bindings=route_bindings,
+                ),
+            ) for deployment in deployments],
+            management_endpoint=HttpUrl(f"https://management.azure.com{target.arm_resource_id}"),
+            gateway_endpoint=managed.endpoint_url if managed is not None else None,
+            configuration_endpoint=configuration_endpoint,
+            connection_state=(ApimTargetConnectionState.CONNECTED
+                              if target.drift_state is ApimTargetDriftState.IN_SYNC
+                              else ApimTargetConnectionState.UNAVAILABLE
+                              if target.drift_state is ApimTargetDriftState.DRIFTED
+                              else ApimTargetConnectionState.UNKNOWN),
+            self_hosted_gateway_count=sum(deployment.kind is GatewayDeploymentKind.SELF_HOSTED
+                                          and deployment.retired_at is None
+                                          for deployment in deployments),
+            published_model_count=len(published_models), published_models=published_models,
         )
 
     def publications(
@@ -1718,6 +2032,100 @@ class GatewayControlPlaneService:
             )
         return GatewayPublication.model_validate(row)
 
+    def _resolve_publication_deployments(
+        self, gateway_profile_id: UUID, scope: GatewayDeploymentScope,
+    ) -> tuple[
+        GatewayDeploymentScope, tuple[GatewayServingDeployment, ...],
+        tuple[GatewayServingDeployment, ...],
+    ]:
+        if not self._deployment_scoping_enabled:
+            if scope.mode is not GatewayDeploymentScopeMode.ALL:
+                raise ControlPlaneUnavailableError("Gateway deployment scoping is not enabled")
+            return scope, (), ()
+        target_row = self._repository.get_apim_target(gateway_profile_id)
+        if target_row is None:
+            raise ControlPlaneConflictError("APIM target metadata is unavailable")
+        target = self._apim_target(target_row)
+        if target.drift_state is not ApimTargetDriftState.IN_SYNC:
+            raise ControlPlaneConflictError("APIM target inventory is not validated and in sync")
+        deployments = [self._gateway_deployment(row)
+                       for row in self._repository.list_gateway_deployments(gateway_profile_id)]
+        inventories = {UUID(str(row["deployment_id"])): self._gateway_deployment_inventory(row)
+                       for row in self._repository.list_gateway_deployment_inventories(
+                           [item.id for item in deployments]
+                       )}
+        ready: dict[UUID, GatewayServingDeployment] = {}
+        selected_ids = set(scope.deployment_ids)
+        for deployment in deployments:
+            if deployment.declared_state is not GatewayDeclaredState.PRESENT:
+                if deployment.release_gate is GatewayReleaseGate.REQUIRED:
+                    raise ControlPlaneConflictError("Required Gateway deployment is not present")
+                continue
+            if deployment.endpoint_url is None:
+                if deployment.release_gate is GatewayReleaseGate.REQUIRED:
+                    raise ControlPlaneConflictError("Required Gateway deployment has no endpoint")
+                continue
+            if (deployment.release_gate is GatewayReleaseGate.REQUIRED
+                    and deployment.reachability_state is not GatewayReachabilityState.REACHABLE):
+                raise ControlPlaneConflictError("Required Gateway deployment is not reachable")
+            inventory = inventories.get(deployment.id)
+            if deployment.kind is GatewayDeploymentKind.SELF_HOSTED:
+                associated = inventory is not None and any(
+                    identity.casefold() == target.api_id.casefold()
+                    for identity in inventory.associated_api_ids
+                )
+                if not associated:
+                    if (deployment.id in selected_ids
+                            or deployment.release_gate is GatewayReleaseGate.REQUIRED):
+                        raise ControlPlaneConflictError(
+                            "Turnstile API is not associated with Gateway"
+                        )
+                    continue
+                if target.capabilities.self_hosted_gateway is not CapabilitySupport.SUPPORTED:
+                    raise ControlPlaneConflictError("APIM does not support Self-hosted Gateway")
+            ready[deployment.id] = GatewayServingDeployment(
+                deployment_id=deployment.id, native_gateway_id=deployment.native_gateway_id,
+                kind=deployment.kind, endpoint_url=deployment.endpoint_url,
+                release_gate=deployment.release_gate,
+            )
+        snapshots = tuple(sorted(
+            ready.values(), key=lambda item: item.native_gateway_id.casefold()
+        ))
+        if not snapshots:
+            raise ControlPlaneConflictError(
+                "APIM has no declared Gateway deployment with an endpoint"
+            )
+        if scope.mode is GatewayDeploymentScopeMode.ALL:
+            return scope, (), snapshots
+        if selected_ids - set(ready):
+            raise ControlPlaneConflictError(
+                "Selected Gateway deployments are not ready for publication"
+            )
+        selected = tuple(item for item in snapshots if item.deployment_id in selected_ids)
+        return scope, selected, snapshots
+
+    def _refresh_release_deployments(self, spec: GatewayReleaseSpec) -> GatewayReleaseSpec:
+        if not self._deployment_scoping_enabled:
+            return spec
+        _, _, snapshots = self._resolve_publication_deployments(
+            spec.gateway_profile_id, GatewayDeploymentScope(),
+        )
+        available = {item.deployment_id for item in snapshots}
+        bindings = []
+        for binding in spec.bindings:
+            selected_ids = set(binding.deployment_scope.deployment_ids)
+            if selected_ids - available:
+                raise ControlPlaneConflictError(
+                    "A scoped model references an unavailable deployment"
+                )
+            bindings.append(binding.model_copy(update={"serving_deployments": tuple(
+                item for item in snapshots if item.deployment_id in selected_ids
+            )}))
+        return GatewayReleaseSpec.model_validate({
+            **spec.model_dump(mode="python"), "bindings": bindings,
+            "gateway_deployments": snapshots,
+        })
+
     def publish(
         self, write: GatewayPublicationCreate, created_by: str
     ) -> GatewayPublication:
@@ -1726,6 +2134,9 @@ class GatewayControlPlaneService:
         if gateway is None or not gateway["enabled"] or gateway["implementation"] != "apim":
             raise ControlPlaneConflictError("The selected APIM gateway is unavailable")
 
+        scope, serving, deployments = self._resolve_publication_deployments(
+            write.gateway_profile_id, write.deployment_scope,
+        )
         provider = self._resolve_provider(write, registry["providers"])
         runtime = self._resolve_runtime(write, provider, registry["runtimes"])
         self._validate_connection(provider, runtime)
@@ -1790,6 +2201,9 @@ class GatewayControlPlaneService:
             managed_identity_resource=binding_runtime.get("managed_identity_resource"),
             streaming_mode=binding_runtime["streaming_mode"],
             runtime_config=dict(binding_runtime.get("config") or {}),
+            deployment_scope=scope,
+            serving_deployments=serving,
+            logical_model_id=uuid4() if self._target_registry_enabled else None,
             model=model,
         )
         bindings.append(binding)
@@ -1810,6 +2224,9 @@ class GatewayControlPlaneService:
             gateway_profile_id=write.gateway_profile_id,
             discovery_models=sorted(unique_discovery.values(), key=lambda item: item.id),
             bindings=bindings,
+            gateway_deployments=deployments or (
+                previous_spec.gateway_deployments if previous_spec is not None else ()
+            ),
         )
         credential_ciphertext = None
         submitted_credential = write.runtime.api_key or write.runtime.oauth_client_secret
@@ -1870,6 +2287,7 @@ class GatewayControlPlaneService:
             gateway_profile_id=gateway_id,
             discovery_models=sorted(remaining.values(), key=lambda item: item.id),
             bindings=bindings,
+            gateway_deployments=previous.desired_spec.gateway_deployments if previous else (),
             removed_models=[
                 ModelRemovalTarget(
                     model_id=model["id"],
@@ -2070,6 +2488,7 @@ class GatewayControlPlaneService:
         created_by: str,
         credential_ciphertext: bytes | None,
     ) -> GatewayPublication:
+        spec = self._refresh_release_deployments(spec)
         payload, digest = self._release_payload(spec)
         try:
             row = self._repository.create_gateway_publication(
@@ -2087,6 +2506,15 @@ class GatewayControlPlaneService:
     @staticmethod
     def _release_payload(spec: GatewayReleaseSpec) -> tuple[dict[str, Any], str]:
         payload = spec.model_dump(mode="json")
+        if not payload["gateway_deployments"]:
+            payload.pop("gateway_deployments")
+        for binding in payload["bindings"]:
+            if binding["deployment_scope"] == {"mode": "all", "deployment_ids": []}:
+                binding.pop("deployment_scope")
+            if not binding["serving_deployments"]:
+                binding.pop("serving_deployments")
+            if binding["logical_model_id"] is None:
+                binding.pop("logical_model_id")
         canonical = json.dumps(
             payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
         )

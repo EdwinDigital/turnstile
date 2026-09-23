@@ -24,6 +24,11 @@ from ..integrations.apim_control_plane import (
     PolicyCompilationError,
     RetryablePublicationError,
 )
+from ..integrations.apim_control_plane_contract import (
+    ApimPublisherClientResolver,
+    ResolvedApimPublisherClient,
+    coerce_apim_publisher_client_resolver,
+)
 from ..integrations.apim_policy_components import (
     component_digest,
     parse_policy,
@@ -49,7 +54,7 @@ class GatewayPublicationWorker:
     def __init__(
         self,
         repository: QueryRepository,
-        client: ApimPublisherClient,
+        client: ApimPublisherClient | ApimPublisherClientResolver,
         parent_policy: str,
         compiler: ApimPolicyCompiler | None = None,
         cipher: CredentialCipher | None = None,
@@ -63,7 +68,7 @@ class GatewayPublicationWorker:
         budget_configuration: Callable[[UUID], Mapping[str, object]] | None = None,
     ) -> None:
         self._repository = repository
-        self._client = client
+        self._client_resolver = coerce_apim_publisher_client_resolver(client)
         self._parent_policy = parent_policy
         self._parent_policy_overrides = dict(parent_policy_overrides or {})
         self._budget_configuration = budget_configuration
@@ -84,11 +89,23 @@ class GatewayPublicationWorker:
         if claimed is None:
             return None
         publication = GatewayPublication.model_validate(claimed)
+        try:
+            resolved = self._client_resolver.resolve(publication.gateway_profile_id)
+            self._validate_target_identity(publication, resolved)
+        except Exception as error:
+            failed = self._repository.transition_gateway_publication(
+                publication.id, publication.status.value, "failed", {
+                    "error_code": type(error).__name__,
+                    "error_message": str(error).replace("\n", " ")[:1000],
+                }, worker_id,
+            )
+            return GatewayPublication.model_validate(failed) if failed else publication
+        client = resolved.client
         if publication.attempt_count > max_attempts:
             promoted_but_not_recorded = (
                 publication.status.value == "promoting"
                 and publication.apim_revision is not None
-                and self._client.current_revision() == publication.apim_revision
+                and client.current_revision() == publication.apim_revision
             )
             if promoted_but_not_recorded:
                 with WorkerLease(
@@ -97,7 +114,7 @@ class GatewayPublicationWorker:
                     ),
                     lease_seconds,
                 ) as lease:
-                    return self._advance(publication, worker_id, lease.heartbeat)
+                    return self._advance(publication, worker_id, resolved, lease.heartbeat)
             failed = self._repository.transition_gateway_publication(
                 publication.id,
                 publication.status.value,
@@ -116,7 +133,7 @@ class GatewayPublicationWorker:
                 ),
                 lease_seconds,
             ) as lease:
-                return self._advance(publication, worker_id, lease.heartbeat)
+                return self._advance(publication, worker_id, resolved, lease.heartbeat)
         except AuthorizationRequiredError:
             waiting = self._repository.transition_gateway_publication(
                 publication.id,
@@ -146,7 +163,7 @@ class GatewayPublicationWorker:
             if (
                 publication.status.value == "promoting"
                 and publication.apim_revision is not None
-                and self._client.current_revision() == publication.apim_revision
+                and client.current_revision() == publication.apim_revision
             ):
                 queued = self._repository.transition_gateway_publication(
                     publication.id,
@@ -165,12 +182,43 @@ class GatewayPublicationWorker:
             )
             return GatewayPublication.model_validate(failed) if failed else publication
 
+    @staticmethod
+    def _validate_target_identity(
+        publication: GatewayPublication, resolved: ResolvedApimPublisherClient,
+    ) -> None:
+        if resolved.gateway_profile_id != publication.gateway_profile_id:
+            raise PolicyCompilationError("APIM client resolved another publication target")
+        snapshot = publication.resource_manifest.get("apim_target_identity_sha256")
+        if snapshot is not None and snapshot != resolved.target_identity_sha256:
+            raise PolicyCompilationError(
+                "APIM target identity changed after publication was queued"
+            )
+        if (snapshot is None and resolved.enforce_identity_snapshot
+                and publication.status.value != "queued"):
+            raise PolicyCompilationError("APIM target identity snapshot is missing in flight")
+
+    def _compiler_for(
+        self, publication: GatewayPublication, resolved: ResolvedApimPublisherClient,
+    ) -> ApimPolicyCompiler:
+        compiler = self._compiler
+        row = self._repository.get_apim_target(publication.gateway_profile_id)
+        if row is not None and row.get("probe_subscription_id"):
+            compiler = compiler.with_probe_subscription(str(row["probe_subscription_id"]))
+        if resolved.usage_observer is not None:
+            return compiler.with_usage_observer(*resolved.usage_observer)
+        if (row is not None
+            and (row.get("capabilities") or {}).get("response_observer") == "unsupported"):
+            return compiler.without_usage_observer()
+        return compiler
+
     def _advance(
         self,
         publication: GatewayPublication,
         worker_id: str,
+        resolved: ResolvedApimPublisherClient,
         heartbeat: Callable[[], None] | None = None,
     ) -> GatewayPublication:
+        client = resolved.client
         registry = self._repository.registry()
         status = publication.status.value
         canonical_parent = self._parent_policy_overrides.get(
@@ -223,7 +271,8 @@ class GatewayPublicationWorker:
             )
         elif publication.resource_manifest.get("budget_contracts") is not None:
             raise PolicyCompilationError("Budget contract publication requires an execution parent")
-        compiled = self._compiler.compile(routed_publication)
+        compiler = self._compiler_for(publication, resolved)
+        compiled = compiler.compile(routed_publication)
         if (execution_enabled and status in {"verifying", "promoting"}
                 and publication.policy_sha256 != compiled.policy_sha256):
             raise PolicyCompilationError("Candidate policy no longer matches the active compiler")
@@ -235,14 +284,15 @@ class GatewayPublicationWorker:
         image_release = compiled.images_generations_policy is not None
         updates: dict[str, Any] = {}
         if status == "queued":
-            base_revision, live_policy = self._client.current_api_policy()
+            base_revision, live_policy = client.current_api_policy()
             if execution_enabled or image_release or "imageGenerationPolicyVersion" in live_policy:
                 validate_parent_policy(live_policy, canonical_parent, profiles)
             else:
-                self._compiler.patch_parent_policy(canonical_parent)
-                self._compiler.patch_parent_policy(live_policy)
+                compiler.patch_parent_policy(canonical_parent)
+                compiler.patch_parent_policy(live_policy)
             updates["resource_manifest"] = {
                 **publication.resource_manifest,
+                "apim_target_identity_sha256": resolved.target_identity_sha256,
                 "base_apim_revision": base_revision,
                 "base_policy_sha256": hashlib.sha256(live_policy.encode("utf-8")).hexdigest(),
             }
@@ -268,18 +318,18 @@ class GatewayPublicationWorker:
                     if credential is not None and latest_oauth == oauth.config
                     else oauth
                 )
-                self._client.ensure_oauth_credential(materialized_oauth)
+                client.ensure_oauth_credential(materialized_oauth)
             for named_value in compiled.named_values:
                 materialized = (
                     replace(named_value, value=credential)
                     if credential is not None and named_value.id == latest_named_value
                     else named_value
                 )
-                self._client.ensure_named_value(materialized)
+                client.ensure_named_value(materialized)
             if encrypted is not None:
                 self._repository.delete_gateway_publication_credential(publication.id)
             for backend in compiled.backends:
-                self._client.ensure_backend(backend)
+                client.ensure_backend(backend)
             updates["resource_manifest"] = {
                 **publication.resource_manifest,
                 "backends": [backend.id for backend in compiled.backends],
@@ -290,15 +340,15 @@ class GatewayPublicationWorker:
             }
         elif status == "provisioning":
             revision = f"turnstile-{publication.generation}-{publication.id.hex[:8]}"
-            self._client.ensure_revision(revision, f"Turnstile publication {publication.id}")
+            client.ensure_revision(revision, f"Turnstile publication {publication.id}")
             updates["apim_revision"] = revision
         elif status == "building_revision":
             if not publication.apim_revision:
                 raise RuntimeError("Publication is missing its APIM revision")
-            self._client.ensure_revision(
+            client.ensure_revision(
                 publication.apim_revision, f"Turnstile publication {publication.id}"
             )
-            base_revision, live_policy = self._client.current_api_policy()
+            base_revision, live_policy = client.current_api_policy()
             manifest = publication.resource_manifest
             live_hash = hashlib.sha256(live_policy.encode("utf-8")).hexdigest()
             if (
@@ -312,43 +362,43 @@ class GatewayPublicationWorker:
                 validate_parent_policy(live_policy, canonical_parent, profiles)
                 if (execution_enabled or image_release
                     or "imageGenerationPolicyVersion" in live_policy)
-                else self._compiler.patch_parent_policy(live_policy)
+                else compiler.patch_parent_policy(live_policy)
             )
-            self._client.put_api_policy(publication.apim_revision, parent)
+            client.put_api_policy(publication.apim_revision, parent)
             for operation in compiled.operations:
-                self._client.ensure_operation(publication.apim_revision, operation)
-            self._client.put_operation_policy(
+                client.ensure_operation(publication.apim_revision, operation)
+            client.put_operation_policy(
                 publication.apim_revision,
                 self._chat_completions_operation_id,
                 compiled.chat_completions_policy,
             )
-            self._client.put_operation_policy(
+            client.put_operation_policy(
                 publication.apim_revision,
                 self._responses_operation_id,
                 compiled.responses_policy,
             )
-            self._client.put_operation_policy(
+            client.put_operation_policy(
                 publication.apim_revision,
                 self._responses_compact_operation_id,
                 compiled.responses_compact_policy,
             )
-            self._client.put_operation_policy(
+            client.put_operation_policy(
                 publication.apim_revision,
                 self._messages_operation_id,
                 compiled.messages_policy,
             )
-            self._client.put_operation_policy(
+            client.put_operation_policy(
                 publication.apim_revision,
                 self._count_tokens_operation_id,
                 compiled.count_tokens_policy,
             )
-            self._client.put_operation_policy(
+            client.put_operation_policy(
                 publication.apim_revision,
                 self._models_operation_id,
                 compiled.models_policy,
             )
             if compiled.images_generations_policy is not None:
-                self._client.put_operation_policy(
+                client.put_operation_policy(
                     publication.apim_revision,
                     "images-generations",
                     compiled.images_generations_policy,
@@ -373,7 +423,7 @@ class GatewayPublicationWorker:
                 raise RuntimeError("Publication is missing its APIM revision")
             if image_release or execution_enabled:
                 validate_parent_readback(
-                    self._client.revision_api_policy(publication.apim_revision),
+                    client.revision_api_policy(publication.apim_revision),
                     canonical_parent,
                     profiles,
                     expected_contract=publication.resource_manifest.get(
@@ -389,8 +439,11 @@ class GatewayPublicationWorker:
                 )
                 planned = {}
                 if publication.publication_kind is PublicationKind.MODEL_ADD:
-                    model = publication.desired_spec.bindings[-1].model
-                    planned[model.model_key] = publication_model_id(publication.id, model.model_key)
+                    binding = publication.desired_spec.bindings[-1]
+                    model = binding.model
+                    planned[model.model_key] = binding.logical_model_id or publication_model_id(
+                        publication.id, model.model_key
+                    )
                 journal = PersistentProbeJournal(
                     self._repository,
                     f"publication:{publication.id}",
@@ -406,11 +459,16 @@ class GatewayPublicationWorker:
                     },
                     planned_model_ids=planned,
                 )
-                self._client.probe_revision(
+                outcomes = client.probe_revision(
                     publication.apim_revision, routed_publication, journal=journal
                 )
             else:
-                self._client.probe_revision(publication.apim_revision, routed_publication)
+                outcomes = client.probe_revision(publication.apim_revision, routed_publication)
+            if outcomes:
+                updates["resource_manifest"] = {
+                    **publication.resource_manifest,
+                    "gateway_probe_results": [item.model_dump(mode="json") for item in outcomes],
+                }
         elif status == "promoting":
             if not publication.apim_revision:
                 raise RuntimeError("Publication is missing its APIM revision")
@@ -418,7 +476,7 @@ class GatewayPublicationWorker:
                 heartbeat()
             if image_release or execution_enabled:
                 validate_parent_readback(
-                    self._client.revision_api_policy(publication.apim_revision),
+                    client.revision_api_policy(publication.apim_revision),
                     canonical_parent,
                     profiles,
                     expected_contract=publication.resource_manifest.get(
@@ -426,11 +484,11 @@ class GatewayPublicationWorker:
                     ),
                     expected_raw=publication.resource_manifest.get("parent_policy_sha256"),
                 )
-            if self._client.current_revision() != publication.apim_revision:
-                self._client.promote_revision(
+            if client.current_revision() != publication.apim_revision:
+                client.promote_revision(
                     publication.apim_revision, f"turnstile-{publication.id.hex[:12]}"
                 )
-                if self._client.current_revision() != publication.apim_revision:
+                if client.current_revision() != publication.apim_revision:
                     raise RetryablePublicationError(
                         "APIM did not report the promoted revision as current"
                     )

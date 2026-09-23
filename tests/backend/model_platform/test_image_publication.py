@@ -190,6 +190,32 @@ def test_probe_journal_reuses_only_same_verified_plan() -> None:
     assert len(requests) == 1
 
 
+def test_image_probe_journal_keeps_each_gateway_endpoint_evidence_separate() -> None:
+    repository = InMemoryRepository()
+    publication = GatewayControlPlaneService(
+        repository, apim_principal_id="unit-principal",
+    ).publish(image_publication(repository), "unit-owner")
+    binding = publication.desired_spec.bindings[-1]
+    planned = publication_model_id(publication.id, binding.model.model_key)
+    journal = PersistentProbeJournal(
+        repository, "unit-deployments", uuid4(),
+        planned_model_ids={binding.model.model_key: planned},
+    )
+    requests = []
+
+    def send(request_id: str, model_id: str) -> dict[str, object]:
+        requests.append((request_id, model_id))
+        return {"total_tokens": 30, "correlation_id": request_id, "image_validated": True}
+
+    for endpoint in ("https://managed.example.test/api;rev=1",
+                     "https://edge.example.test/api;rev=1"):
+        journal.run(binding, "1", {"prompt": "unit"}, send, gateway_endpoint=endpoint)
+        journal.run(binding, "1", {"prompt": "unit"}, send, gateway_endpoint=endpoint)
+    assert len(requests) == 2 and len({request[0] for request in requests}) == 2
+    assert all(request[1] == str(planned) for request in requests)
+    assert len(repository.billable_requests) == 2
+
+
 @pytest.mark.parametrize("status,limit,available", [
     ("queued", 1, False), ("failed", 1, True), ("failed", 31, True),
     ("failed", 32, False), ("failed", 0, False), ("failed", True, False),

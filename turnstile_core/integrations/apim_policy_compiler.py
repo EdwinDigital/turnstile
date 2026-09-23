@@ -36,7 +36,7 @@ from .apim_control_plane_contract import (
         PolicyCompilationError,
 )
 from .apim_image_policy import IMAGE_OPERATION_ID, IMAGE_POLICY_VERSION, image_request_validation
-from .apim_policy_components import upgrade_application_tpm_policy
+from .apim_policy_components import parse_policy, serialize_policy, upgrade_application_tpm_policy
 
 
 def _chat_completions_policy(publication: GatewayPublication) -> str:
@@ -98,6 +98,19 @@ class ApimPolicyCompiler:
             raise ValueError("Usage observer key Named Value is invalid")
         self._usage_observer_url = observer_url or None
         self._usage_observer_key_named_value = observer_key or None
+
+    def with_probe_subscription(self, probe_subscription_id: str) -> ApimPolicyCompiler:
+        return ApimPolicyCompiler(
+            probe_subscription_id, self._usage_observer_url, self._usage_observer_key_named_value,
+        )
+
+    def with_usage_observer(
+        self, url: str | None, key_named_value: str | None,
+    ) -> ApimPolicyCompiler:
+        return ApimPolicyCompiler(self._probe_subscription_id, url, key_named_value)
+
+    def without_usage_observer(self) -> ApimPolicyCompiler:
+        return self.with_usage_observer(None, None)
 
     def compile(self, publication: GatewayPublication) -> CompiledGatewayRelease:
         if publication.resource_manifest.get("budget_contracts") is not None:
@@ -964,6 +977,7 @@ class ApimPolicyCompiler:
                 if item.api_format is ApiFormat.OPENAI_CHAT
             ],
             "dynamicChatModel",
+            publication.desired_spec.bindings,
         )
         return f"""<policies>
   <inbound>
@@ -1002,7 +1016,7 @@ class ApimPolicyCompiler:
             if binding.api_format is ApiFormat.OPENAI_IMAGES and binding.routing_managed
         ]
         known = self._condition(
-            [binding.model.model_key for binding in bindings], "dynamicImageModel"
+            [binding.model.model_key for binding in bindings], "dynamicImageModel", bindings
         )
         profiles = {
             binding.model.model_key: validate_image_profile(binding.model.image_profile)
@@ -1010,7 +1024,7 @@ class ApimPolicyCompiler:
         }
         validation = (
             "\n".join(
-                f'<when condition="@({self._condition([binding.model.model_key], "dynamicImageModel")})">'
+                f'<when condition="@({self._model_condition(binding, "dynamicImageModel")})">'
                 + image_request_validation(profiles[binding.model.model_key])
                 + "</when>"
                 for binding in bindings
@@ -1097,8 +1111,11 @@ class ApimPolicyCompiler:
                 if item.api_format is ApiFormat.ANTHROPIC_MESSAGES
             ],
             "dynamicRequestedModel",
+            publication.desired_spec.bindings,
         )
-        buffered_condition = self._condition(buffered_aliases, "dynamicRequestedModel")
+        buffered_condition = self._condition(
+            buffered_aliases, "dynamicRequestedModel", publication.desired_spec.bindings
+        )
         return f"""<policies>
   <inbound>
     <set-variable name="dynamicRequestedModel" value="@{{
@@ -1193,6 +1210,7 @@ class ApimPolicyCompiler:
         known_condition = self._condition(
             [binding.model.model_key for binding, _ in bindings],
             "dynamicResponsesModel",
+            [binding for binding, _ in bindings],
         )
         return f"""<policies>
   <inbound>
@@ -1263,7 +1281,7 @@ class ApimPolicyCompiler:
             contract_metadata = "\n        " + ElementTree.tostring(ElementTree.Element(
                 "set-variable", {"name": "selectedBudgetCountContract", "value": encoded},
             ), encoding="unicode")
-        return f"""      <when condition="@((string)context.Variables[&quot;{model_variable}&quot;] == &quot;{alias}&quot;)">
+        return f"""      <when condition="@({self._model_condition(binding, model_variable)})">
         <set-header name="x-hive-runtime" exists-action="override"><value>{runtime}</value></set-header>
         <set-variable name="selectedProviderName" value="{provider}" />
         <set-variable name="selectedBudgetModelKey" value="{alias}" />{contract_metadata}
@@ -1316,7 +1334,6 @@ class ApimPolicyCompiler:
         include_chat_stream_usage: bool = True,
         probe_backend_ids: tuple[str, ...] = (),
     ) -> str:
-        alias = escape(binding.model.model_key)
         upstream = escape(binding.model.upstream_model_id)
         path = escape(
             (backend_path or binding.backend_path).replace("{upstream_model_id}", upstream)
@@ -1366,7 +1383,7 @@ class ApimPolicyCompiler:
         <set-header name="Accept-Encoding" exists-action="override"><value>identity</value></set-header>"""
         observer_headers = self._observer_headers(binding, observer_api_format)
         backend_selection = self._backend_selection(backend_id, probe_backend_ids)
-        return f"""      <when condition="@((string)context.Variables[&quot;{model_variable}&quot;] == &quot;{alias}&quot;)">
+        return f"""      <when condition="@({self._model_condition(binding, model_variable)})">
     {backend_selection}
         <rewrite-uri template="{path}" copy-unmatched-params="false" />
     {auth}{provider_headers}{response_encoding}{observer_headers}{transform}
@@ -1401,8 +1418,9 @@ class ApimPolicyCompiler:
           </otherwise>
         </choose>"""
 
-    @staticmethod
+    @classmethod
     def _backend_policy(
+        cls,
         bindings: Any,
         model_variable: str,
         api_format: ApiFormat | None = None,
@@ -1417,7 +1435,7 @@ class ApimPolicyCompiler:
         if not pooled:
             return "  <backend><base /></backend>"
         branches = "\n".join(
-            f"""      <when condition="@((string)context.Variables[&quot;{model_variable}&quot;] == &quot;{escape(binding.model.model_key)}&quot;)">
+            f"""      <when condition="@({cls._model_condition(binding, model_variable)})">
                 <choose>
                     <when condition="@(context.Variables.ContainsKey(&quot;executionReceiptHeader&quot;))">
                         <forward-request timeout="{pool.rate_limit.backend_timeout_seconds}" buffer-request-body="true" buffer-response="false" />
@@ -1592,8 +1610,10 @@ class ApimPolicyCompiler:
             for item in publication.desired_spec.discovery_models
             if item.api_format is ApiFormat.ANTHROPIC_MESSAGES
         ]
-        buffered_condition = self._condition(buffered, "dynamicCountModel")
-        known_condition = self._condition(known, "dynamicCountModel")
+        buffered_condition = self._condition(
+            buffered, "dynamicCountModel", publication.desired_spec.bindings
+        )
+        known_condition = self._condition(known, "dynamicCountModel", publication.desired_spec.bindings)
         return f"""<policies>
   <inbound>
     <set-variable name="dynamicCountModel" value="@{{
@@ -1628,8 +1648,45 @@ class ApimPolicyCompiler:
   <on-error><base /></on-error>
 </policies>"""
 
+    @classmethod
+    def _models_policy(cls, publication: GatewayPublication) -> str:
+        by_alias = {item.model.model_key.casefold(): item for item in publication.desired_spec.bindings}
+        native_ids = sorted({
+            deployment.native_gateway_id for binding in publication.desired_spec.bindings
+            if binding.deployment_scope.mode.value == "selected"
+            for deployment in binding.serving_deployments
+        }, key=str.casefold)
+        if not native_ids:
+            return cls._models_payload_policy(publication.desired_spec.discovery_models)
+        fallback = [item for item in publication.desired_spec.discovery_models
+                if (binding := by_alias.get(item.id.casefold())) is None
+                or binding.deployment_scope.mode.value == "all"]
+        root = parse_policy(cls._models_payload_policy(fallback))
+        inbound = root.find("inbound")
+        assert inbound is not None
+        fallback_response = inbound.find("return-response")
+        assert fallback_response is not None
+        inbound.remove(fallback_response)
+        choose = ElementTree.SubElement(inbound, "choose")
+        for native_id in native_ids:
+            models = [item for item in publication.desired_spec.discovery_models if (
+                (binding := by_alias.get(item.id.casefold())) is None
+                or binding.deployment_scope.mode.value == "all"
+                or any(deployment.native_gateway_id.casefold() == native_id.casefold()
+                       for deployment in binding.serving_deployments)
+            )]
+            response = parse_policy(cls._models_payload_policy(models)).find("./inbound/return-response")
+            assert response is not None
+            branch = ElementTree.fromstring(
+                f'<when condition="@({cls._gateway_id_condition(native_id)})" />'
+            )
+            branch.append(response)
+            choose.append(branch)
+        ElementTree.SubElement(choose, "otherwise").append(fallback_response)
+        return serialize_policy(root)
+
     @staticmethod
-    def _models_policy(publication: GatewayPublication) -> str:
+    def _models_payload_policy(discovery_models: Any) -> str:
         data = [
             {
                 "type": "model",
@@ -1637,7 +1694,7 @@ class ApimPolicyCompiler:
                 "display_name": item.display_name,
                 "created_at": "2026-01-01T00:00:00Z",
             }
-            for item in publication.desired_spec.discovery_models
+            for item in discovery_models
         ]
         payload = json.dumps(
             {
@@ -1663,14 +1720,37 @@ class ApimPolicyCompiler:
   <on-error><base /></on-error>
 </policies>"""
 
-    @staticmethod
-    def _condition(aliases: list[str], variable: str) -> str:
+    @classmethod
+    def _condition(cls, aliases: list[str], variable: str, bindings: Any = ()) -> str:
         if not aliases:
             return "false"
+        by_alias = {binding.model.model_key.casefold(): binding for binding in bindings}
         return " || ".join(
+            cls._model_condition(by_alias[alias.casefold()], variable, alias=alias.casefold())
+            if alias.casefold() in by_alias else
             f"(string)context.Variables[&quot;{variable}&quot;] == &quot;{escape(alias.casefold())}&quot;"
             for alias in aliases
         )
+
+    @classmethod
+    def _model_condition(
+        cls, binding: GatewayModelBinding, variable: str, *, alias: str | None = None,
+    ) -> str:
+        condition = (f"(string)context.Variables[&quot;{variable}&quot;] == "
+                     f"&quot;{escape(alias or binding.model.model_key)}&quot;")
+        if binding.deployment_scope.mode.value == "all":
+            return condition
+        if not binding.serving_deployments:
+            raise PolicyCompilationError("Selected Gateway scope has no immutable native IDs")
+        gateways = " || ".join(cls._gateway_id_condition(item.native_gateway_id)
+                               for item in binding.serving_deployments)
+        return f"({condition} &amp;&amp; ({gateways}))"
+
+    @staticmethod
+    def _gateway_id_condition(native_gateway_id: str) -> str:
+        literal = escape(json.dumps(native_gateway_id, ensure_ascii=True)[1:-1], {'"': "&quot;"})
+        return ("string.Equals(context.Deployment.Gateway.Id, "
+                f"&quot;{literal}&quot;, StringComparison.OrdinalIgnoreCase)")
 
     @staticmethod
     def _buffered_sse_body() -> str:

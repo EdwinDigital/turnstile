@@ -6,11 +6,38 @@ from pathlib import Path
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .domain.budget_delegation import BudgetDelegationTarget, BudgetDelegationTrust
 from .domain.image_profiles import ImageGenerationLimits
+
+
+class ApimUsageObserverConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: HttpUrl
+    key_named_value: str = Field(
+        min_length=1, max_length=127, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+
+    @model_validator(mode="after")
+    def require_secure_endpoint(self) -> ApimUsageObserverConfig:
+        if (
+            self.url.scheme != "https" or self.url.username is not None
+            or self.url.password is not None or self.url.query is not None
+            or self.url.fragment is not None or self.url.path not in {None, "", "/"}
+        ):
+            raise ValueError("APIM usage observer must be a credential-free HTTPS origin")
+        return self
 
 
 class Settings(BaseSettings):
@@ -60,6 +87,12 @@ class Settings(BaseSettings):
     # and grants its managed identity narrowly scoped APIM rights. None of these settings
     # is read on the inference path.
     control_plane_enabled: bool = False
+    apim_target_registry_enabled: bool = False
+    apim_legacy_target_compatibility_enabled: bool = False
+    apim_gateway_profile_id: UUID | None = None
+    self_hosted_gateway_enabled: bool = False
+    self_hosted_gateway_trusted_endpoints: dict[UUID, HttpUrl] = Field(default_factory=dict)
+    multi_apim_target_rollout_enabled: bool = False
     gateway_publication_worker_enabled: bool = False
     gateway_release_worker_enabled: bool = False
     gateway_application_provisioning_enabled: bool = False
@@ -84,6 +117,7 @@ class Settings(BaseSettings):
     apim_regression_model_key: str = ""
     apim_usage_observer_url: str | None = None
     apim_usage_observer_key_named_value: str | None = None
+    apim_usage_observers: dict[UUID, ApimUsageObserverConfig] = Field(default_factory=dict)
     control_plane_lease_seconds: int = Field(default=180, ge=30, le=900)
     # A normal publication advances through six leased steps. Thirty leaves propagation
     # headroom while still bounding a pathological crash loop.
@@ -157,9 +191,52 @@ class Settings(BaseSettings):
             raise ValueError(
                 "APIM usage observer URL and key Named Value must be configured together"
             )
-        if self.control_plane_enabled and not observer_url:
+        if self.control_plane_enabled and not observer_url and not self.apim_usage_observers:
             raise ValueError("The enabled control plane requires an APIM usage observer")
         return self
+
+    @model_validator(mode="after")
+    def require_target_registry_for_extended_gateway_features(self) -> Settings:
+        if not self.apim_target_registry_enabled and (
+            self.self_hosted_gateway_enabled or self.multi_apim_target_rollout_enabled
+            or self.self_hosted_gateway_trusted_endpoints or self.apim_usage_observers
+        ):
+            raise ValueError("Extended Gateway features require the APIM target registry")
+        if (self.apim_target_registry_enabled and self.apim_gateway_profile_id is None
+                and (self.apim_usage_observer_url or self.apim_legacy_target_compatibility_enabled)
+                and self.legacy_apim_identity is None):
+            raise ValueError("Legacy APIM configuration requires an explicit target identity")
+        for endpoint in self.self_hosted_gateway_trusted_endpoints.values():
+            if (endpoint.scheme != "https" or endpoint.username is not None
+                    or endpoint.password is not None or endpoint.query is not None
+                    or endpoint.fragment is not None):
+                raise ValueError("Trusted Gateway endpoints must be credential-free HTTPS URLs")
+        return self
+
+    @property
+    def legacy_apim_identity(self) -> tuple[str, str, str, str] | None:
+        values = tuple((value or "").strip().casefold() for value in (
+            self.apim_resource_group, self.apim_service_name, self.apim_api_id,
+        ))
+        if not all(values):
+            return None
+        try:
+            subscription_id = str(UUID((self.azure_subscription_id or "").strip()))
+        except ValueError:
+            return None
+        return subscription_id, values[0], values[1], values[2]
+
+    def usage_observer_for(self, gateway_profile_id: UUID) -> tuple[str | None, str | None]:
+        observer = self.apim_usage_observers.get(gateway_profile_id)
+        if (observer is None and gateway_profile_id == self.apim_gateway_profile_id
+                and (self.apim_usage_observer_url or "").strip()):
+            observer = ApimUsageObserverConfig.model_validate({
+                "url": self.apim_usage_observer_url,
+                "key_named_value": self.apim_usage_observer_key_named_value,
+            })
+        if observer is None:
+            return None, None
+        return str(observer.url).rstrip("/"), observer.key_named_value
 
     @model_validator(mode="after")
     def require_budget_execution_dependencies(self) -> Settings:

@@ -106,7 +106,24 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         route for route in copilot_protected.routes if isinstance(route, APIRoute)
     ]
 
-    assert len(apim_routes) == 86
+    assert len(apim_routes) == 91
+    target_operations = {
+        (route.path, method) for route in apim_routes
+        if route.path.startswith("/api/v1/model-management/apim-targets")
+        for method in (route.methods or set())
+    }
+    assert target_operations == {
+        ("/api/v1/model-management/apim-targets", "GET"),
+        ("/api/v1/model-management/apim-targets", "POST"),
+        ("/api/v1/model-management/apim-targets/{gateway_profile_id}", "GET"),
+        ("/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync", "POST"),
+    }
+    for route in apim_routes:
+        target_write = route.path.startswith("/api/v1/model-management/apim-targets")
+        name_write = route.path == "/api/v1/model-management/gateways/{item_id}/name"
+        if (target_write or name_write) and (route.methods or set()) & {"POST", "PATCH"}:
+            assert any(dependency.call is require_owner_session
+                       for dependency in route.dependant.dependencies)
     adoption = next(
         route for route in apim_routes
         if route.path == "/api/v1/model-management/connections/{runtime_id}/adopt"
