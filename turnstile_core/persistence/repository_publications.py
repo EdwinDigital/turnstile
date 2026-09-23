@@ -14,10 +14,23 @@ from ..domain.control_plane import (
     publication_model_id,
 )
 from ..domain.gateway_targets import apim_target_route_binding_id_for
-from .repository_support import _activation_runtime_config
+from .repository_support import _activation_runtime_config, _validate_gateway_deployment_snapshots
 
 
 class PostgreSqlPublicationRepositoryMixin:
+    @staticmethod
+    def _validate_publication_deployments(
+        connection: Any, gateway_profile_id: UUID, desired_spec: Mapping[str, Any],
+    ) -> None:
+        snapshots = desired_spec.get("gateway_deployments") or ()
+        if snapshots:
+            rows = connection.execute(
+                """SELECT id, apim_target_id, native_gateway_id, endpoint_url, retired_at
+                   FROM gateway_deployment WHERE id = ANY(%s)""",
+                ([UUID(str(item["deployment_id"])) for item in snapshots],),
+            ).fetchall()
+            _validate_gateway_deployment_snapshots(gateway_profile_id, desired_spec, rows)
+
     def _connection(self) -> AbstractContextManager[Any]:
         raise NotImplementedError
 
@@ -99,6 +112,7 @@ class PostgreSqlPublicationRepositoryMixin:
             ).fetchone()
             if in_flight is not None:
                 raise ValueError("Another gateway publication is already in progress")
+            self._validate_publication_deployments(connection, gateway_profile_id, desired_spec)
             generation = connection.execute(
                 """SELECT COALESCE(MAX(generation), 0) + 1 AS generation
                    FROM gateway_publication WHERE gateway_profile_id = %s""",
@@ -201,6 +215,10 @@ class PostgreSqlPublicationRepositoryMixin:
         ).fetchone()
         if in_flight is not None:
             raise ValueError("Another gateway publication is already in progress")
+        PostgreSqlPublicationRepositoryMixin._validate_publication_deployments(
+            connection, UUID(str(publication["gateway_profile_id"])),
+            publication["desired_spec"] if desired_spec is None else desired_spec,
+        )
         provisioning_completed = connection.execute(
             """SELECT 1 FROM gateway_publication_audit
                WHERE publication_id = %s

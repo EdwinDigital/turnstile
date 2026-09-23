@@ -11,7 +11,7 @@ from ..domain.control_plane import (
     publication_model_id,
 )
 from ..domain.gateway_targets import apim_target_route_binding_id_for
-from .repository_support import _activation_runtime_config
+from .repository_support import _activation_runtime_config, _validate_gateway_deployment_snapshots
 
 
 class InMemoryPublicationRepositoryMixin:
@@ -123,6 +123,9 @@ class InMemoryPublicationRepositoryMixin:
             for item in self.gateway_publications
         ):
             raise ValueError("Another gateway publication is already in progress")
+        _validate_gateway_deployment_snapshots(
+            gateway_profile_id, desired_spec, list(self.gateway_deployments.values()),
+        )
         now = datetime.now(UTC)
         publication = {
             "id": uuid4(),
@@ -215,6 +218,11 @@ class InMemoryPublicationRepositoryMixin:
             for item in self.gateway_publications
         ):
             raise ValueError("Another gateway publication is already in progress")
+        _validate_gateway_deployment_snapshots(
+            UUID(str(publication["gateway_profile_id"])),
+            publication["desired_spec"] if desired_spec is None else desired_spec,
+            list(self.gateway_deployments.values()),
+        )
         now = datetime.now(UTC)
         materialized = publication_materialized_named_values(
             GatewayPublication.model_validate(publication),

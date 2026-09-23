@@ -4,6 +4,25 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import UUID
+
+
+def _validate_gateway_deployment_snapshots(
+    gateway_profile_id: UUID, desired_spec: Mapping[str, Any],
+    deployments: Sequence[Mapping[str, Any]],
+) -> None:
+    by_id = {str(row["id"]): row for row in deployments}
+    for snapshot in desired_spec.get("gateway_deployments") or ():
+        current = by_id.get(str(snapshot["deployment_id"]))
+        if (
+            current is None or current.get("retired_at") is not None
+            or str(current["apim_target_id"]) != str(gateway_profile_id)
+            or str(current["native_gateway_id"]).casefold()
+            != str(snapshot["native_gateway_id"]).casefold()
+            or str(current.get("endpoint_url") or "").rstrip("/")
+            != str(snapshot["endpoint_url"]).rstrip("/")
+        ):
+            raise ValueError("Gateway deployment changed before publication; refresh and retry")
 
 
 def _activation_runtime_config(binding: Mapping[str, Any]) -> dict[str, Any]:
