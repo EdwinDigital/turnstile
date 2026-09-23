@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -13,7 +15,7 @@ from pydantic import SecretStr
 
 from tests.backend.model_platform.control_plane_support import TEST_CIPHER, StubTokenProvider
 from tests.backend.model_platform.test_application_provisioning import AdmissionRows
-from tests.backend.model_platform.test_gateway_targets import deployment, target
+from tests.backend.model_platform.test_gateway_targets import NOW, deployment, target
 from tests.support.paths import REPOSITORY_ROOT
 from turnstile_core.config import Settings
 from turnstile_core.domain.application_access import application_id_for
@@ -22,6 +24,8 @@ from turnstile_core.domain.gateway_targets import (
     ApimOnboardingPlan,
     ApimOnboardingRequest,
     ApimOnboardingStart,
+    ApimTargetArmInventory,
+    gateway_deployment_id_for,
 )
 from turnstile_core.integrations.apim_control_plane_contract import (
     PolicyCompilationError,
@@ -38,7 +42,11 @@ from turnstile_core.integrations.apim_onboarding_policy import (
     onboarding_policy_configuration_digest,
     render_onboarding_parent,
 )
-from turnstile_core.integrations.apim_policy_components import parse_policy, validate_parent_policy
+from turnstile_core.integrations.apim_policy_components import (
+    parse_policy,
+    serialize_policy,
+    validate_parent_policy,
+)
 from turnstile_core.integrations.ledger import TableStorageLedger, application_partition_key
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
@@ -49,9 +57,375 @@ from turnstile_core.services.apim_onboarding import (
     initialized_apim_targets,
     onboarding_template_path,
 )
-from turnstile_core.services.apim_onboarding_ledger import project_onboarding_ledger
-from turnstile_core.services.control_plane import ControlPlaneConflictError
+from turnstile_core.services.apim_onboarding_ledger import (
+    enroll_self_hosted_gateway_protocol,
+    project_onboarding_ledger,
+)
+from turnstile_core.services.control_plane import (
+    ControlPlaneConflictError,
+    GatewayControlPlaneService,
+)
 from turnstile_core.services.gateway_release_operation_worker import GatewayReleaseOperationWorker
+
+
+def protocol_fixture() -> tuple[
+    InMemoryRepository, ApimTargetArmInventory, dict[str, Any], MagicMock, str
+]:
+    request = onboarding_request()
+    repository = InMemoryRepository()
+    repository.gateways.append({**repository.gateways[0], "id": request.gateway_profile_id})
+    metadata = target(
+        gateway_profile_id=request.gateway_profile_id,
+        tenant_id=request.tenant_id,
+        subscription_id=request.subscription_id,
+        resource_group=request.resource_group,
+        service_name=request.service_name,
+        arm_resource_id=request.resource_id,
+        api_id=request.api_id,
+        api_path=request.api_path,
+        principal_id=UUID(int=47),
+        capabilities={"self_hosted_gateway": "supported"},
+    )
+    repository.upsert_apim_target(metadata)
+    repository.upsert_gateway_deployment(
+        deployment(
+            id=gateway_deployment_id_for(request.gateway_profile_id, "edge"),
+            apim_target_id=request.gateway_profile_id,
+            native_gateway_id="edge",
+            kind="self_hosted",
+            hosting_mode="docker",
+            endpoint_url="https://edge.example.test/unit/llm",
+        )
+    )
+    inventory = ApimTargetArmInventory.model_validate(
+        {
+            **{
+                name: value
+                for name, value in metadata.model_dump().items()
+                if name in ApimTargetArmInventory.model_fields
+            },
+            "api_revision": "1",
+            "managed_gateway_url": "https://unit-service.azure-api.net",
+            "source_api_version": "2024-05-01",
+            "discovered_at": NOW,
+            "gateways": [
+                {
+                    "native_gateway_id": "edge",
+                    "arm_resource_id": request.resource_id + "/gateways/edge",
+                    "associated_api_ids": [request.api_id],
+                }
+            ],
+        }
+    )
+    GatewayControlPlaneService(repository).apply_target_inventory(inventory)
+    source = (REPOSITORY_ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    config = governance_configuration()
+    canonical = onboarding_canonical_parent(source, request.api_id, config)
+    client = MagicMock()
+    client.current_api_policy.return_value = (
+        "1",
+        render_onboarding_parent(request, config, source),
+    )
+    client.current_revision.return_value = "1"
+    fence: dict[str, Any] = {
+        "protocol_version": 2,
+        "epoch": str(UUID(int=72)),
+        "mode": "active",
+        "gateway_profile_id": str(request.gateway_profile_id),
+        "api_id": request.api_id,
+        "apim_service_id": request.service_name,
+        "gateways": {"managed": ["1", "previous"]},
+        "model_contracts": {"unit-model": {"counting": "strict"}},
+        "extension": {"keep": True},
+    }
+    return repository, inventory, fence, client, canonical
+
+
+class ProtocolFenceRows:
+    def __init__(self, fence: dict[str, Any]) -> None:
+        self.document = deepcopy(fence)
+        self.version = 1
+        self.writes: list[dict[str, Any]] = []
+        self.reads = 0
+        self.before_replace: Callable[[dict[str, Any]], bool] | None = None
+
+    def read_versioned_entity(self, partition: str, row_key: str) -> tuple[dict[str, Any], str]:
+        assert partition.startswith("budget-protocol|") and row_key == "F"
+        self.reads += 1
+        return {
+            "Document": json.dumps(self.document),
+            "Preserved": "unit",
+            "Timestamp": "old",
+            "odata.etag": "metadata-only",
+        }, f'W/"{self.version}"'
+
+    def replace_if_match(
+        self,
+        partition: str,
+        row_key: str,
+        entity: dict[str, Any],
+        etag: str,
+    ) -> bool:
+        assert partition.startswith("budget-protocol|") and row_key == "F"
+        assert etag == f'W/"{self.version}"'
+        assert set(entity) == {"Document", "Preserved"} and entity["Preserved"] == "unit"
+        self.writes.append(deepcopy(entity))
+        if self.before_replace is not None and not self.before_replace(entity):
+            return False
+        self.document = json.loads(entity["Document"])
+        self.version += 1
+        return True
+
+
+@pytest.mark.parametrize("retired", [False, True])
+def test_gateway_protocol_changes_only_membership_and_is_idempotent(retired: bool) -> None:
+    repository, inventory, fence, client, canonical = protocol_fixture()
+    if retired:
+        fence["gateways"]["edge"] = ["1"]
+        repository.gateway_deployments[
+            gateway_deployment_id_for(
+                inventory.gateway_profile_id,
+                "edge",
+            )
+        ]["retired_at"] = NOW
+    store = ProtocolFenceRows(fence)
+    before_write = MagicMock()
+    for _ in range(2):
+        result = enroll_self_hosted_gateway_protocol(
+            repository,
+            cast(TableStorageLedger, store),
+            inventory,
+            fence,
+            client,
+            canonical,
+            before_write=before_write,
+        )
+        assert result == (() if retired else ("edge",))
+    assert len(store.writes) == 1
+    before_write.assert_called_once()
+    assert store.document["gateways"]["managed"] == ["1", "previous"]
+    assert ("edge" in store.document["gateways"]) is not retired
+    assert {key: value for key, value in store.document.items() if key != "gateways"} == {
+        key: value for key, value in fence.items() if key != "gateways"
+    }
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_gateway_protocol_unknown_write_reads_back_without_replaying(committed: bool) -> None:
+    repository, inventory, fence, client, canonical = protocol_fixture()
+    store = ProtocolFenceRows(fence)
+
+    def lost_response(entity: dict[str, Any]) -> bool:
+        if committed:
+            store.document = json.loads(entity["Document"])
+            store.version += 1
+        raise httpx.ReadTimeout("Unknown conditional write outcome")
+
+    store.before_replace = lost_response
+    if committed:
+        assert enroll_self_hosted_gateway_protocol(
+            repository,
+            cast(TableStorageLedger, store),
+            inventory,
+            fence,
+            client,
+            canonical,
+        ) == ("edge",)
+    else:
+        with pytest.raises(RetryablePublicationError, match="outcome is uncertain"):
+            enroll_self_hosted_gateway_protocol(
+                repository,
+                cast(TableStorageLedger, store),
+                inventory,
+                fence,
+                client,
+                canonical,
+            )
+    assert len(store.writes) == 1 and store.reads == 2
+
+
+def test_gateway_protocol_conflict_preserves_concurrent_additions_and_rechecks_lease() -> None:
+    repository, inventory, fence, client, canonical = protocol_fixture()
+    store = ProtocolFenceRows(fence)
+
+    def conflict(_: dict[str, Any]) -> bool:
+        store.document["gateways"]["concurrent"] = ["1"]
+        store.version += 1
+        store.before_replace = None
+        return False
+
+    store.before_replace = conflict
+    before_write = MagicMock()
+    assert enroll_self_hosted_gateway_protocol(
+        repository,
+        cast(TableStorageLedger, store),
+        inventory,
+        fence,
+        client,
+        canonical,
+        before_write=before_write,
+    ) == ("edge",)
+    assert before_write.call_count == 2
+    assert store.document["gateways"] == {
+        "managed": ["1", "previous"],
+        "concurrent": ["1"],
+        "edge": ["1"],
+    }
+
+
+@pytest.mark.parametrize(
+    "change", ["epoch", "contracts", "revision", "target", "deployment", "lease"]
+)
+def test_gateway_protocol_rechecks_protected_state_before_conditional_write(
+    change: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, inventory, fence, client, canonical = protocol_fixture()
+    store = ProtocolFenceRows(fence)
+    callback = None
+    if change == "epoch":
+        store.document["epoch"] = str(UUID(int=73))
+    elif change == "contracts":
+        store.document["model_contracts"] = {}
+    elif change == "revision":
+        client.current_revision.return_value = "2"
+    elif change == "target":
+        original = repository.get_apim_target(inventory.gateway_profile_id)
+        assert original is not None
+        monkeypatch.setattr(repository, "get_apim_target", MagicMock(
+            side_effect=[original, {**original, "api_path": "other"}]
+        ))
+    elif change == "deployment":
+        monkeypatch.setattr(repository, "get_gateway_deployment", MagicMock(return_value=None))
+    else:
+        callback = MagicMock(side_effect=RetryablePublicationError("Lease expired"))
+    with pytest.raises((PolicyCompilationError, RetryablePublicationError)):
+        enroll_self_hosted_gateway_protocol(
+            repository,
+            cast(TableStorageLedger, store),
+            inventory,
+            fence,
+            client,
+            canonical,
+            before_write=callback,
+        )
+    assert store.writes == []
+
+
+@pytest.mark.parametrize(
+    "change,message",
+    [
+        ("stale", "latest inventory"),
+        ("missing", "missing from Azure inventory"),
+        ("foreign", "foreign Gateway"),
+        ("association", "not associated"),
+        ("unsupported", "does not support"),
+        ("revision", "current API revision changed"),
+    ],
+)
+def test_gateway_protocol_rejects_unproven_inventory(change: str, message: str) -> None:
+    repository, inventory, fence, client, canonical = protocol_fixture()
+    store = ProtocolFenceRows(fence)
+    values = inventory.model_dump()
+    if change == "stale":
+        values["discovered_at"] = NOW - timedelta(seconds=1)
+    elif change == "missing":
+        values["gateways"] = []
+    elif change == "foreign":
+        values["gateways"][0]["arm_resource_id"] += "/foreign"
+    elif change == "association":
+        values["gateways"][0]["associated_api_ids"] = ["foreign-api"]
+    elif change == "unsupported":
+        values["capabilities"]["self_hosted_gateway"] = "unsupported"
+    else:
+        client.current_api_policy.return_value = ("2", client.current_api_policy.return_value[1])
+    with pytest.raises((PolicyCompilationError, RetryablePublicationError), match=message):
+        enroll_self_hosted_gateway_protocol(
+            repository,
+            cast(TableStorageLedger, store),
+            ApimTargetArmInventory.model_validate(values),
+            fence,
+            client,
+            canonical,
+        )
+    assert store.writes == [] and store.reads == 0
+
+
+@pytest.mark.parametrize(
+    "change,message",
+    [
+        ("mode", "active target fence"),
+        ("epoch", "valid epoch"),
+        ("protocol", "active target fence"),
+        ("identity", "active target fence"),
+        ("revision", "changed concurrently"),
+        ("case", "different casing"),
+    ],
+)
+def test_gateway_protocol_refuses_fence_identity_and_existing_membership_drift(
+    change: str,
+    message: str,
+) -> None:
+    repository, inventory, fence, client, canonical = protocol_fixture()
+    if change == "mode":
+        fence["mode"] = "paused"
+    elif change == "epoch":
+        fence["epoch"] = "not-an-epoch"
+    elif change == "protocol":
+        fence["protocol_version"] = True
+    elif change == "identity":
+        fence["gateway_profile_id"] = str(UUID(int=99))
+    store = ProtocolFenceRows(fence)
+    if change == "revision":
+        store.document["gateways"]["managed"] = ["different"]
+    elif change == "case":
+        store.document["gateways"]["EDGE"] = ["1"]
+    with pytest.raises(PolicyCompilationError, match=message):
+        enroll_self_hosted_gateway_protocol(
+            repository,
+            cast(TableStorageLedger, store),
+            inventory,
+            fence,
+            client,
+            canonical,
+        )
+    assert store.writes == []
+
+
+def test_gateway_protocol_conditional_conflicts_have_a_fixed_retry_bound() -> None:
+    repository, inventory, fence, client, canonical = protocol_fixture()
+    store = ProtocolFenceRows(fence)
+    store.before_replace = lambda _: False
+    with pytest.raises(RetryablePublicationError, match="fresh conditional retry"):
+        enroll_self_hosted_gateway_protocol(
+            repository,
+            cast(TableStorageLedger, store),
+            inventory,
+            fence,
+            client,
+            canonical,
+        )
+    assert len(store.writes) == 3 and store.reads == 4
+    assert store.document == fence
+
+
+def test_gateway_protocol_refuses_parent_policy_drift_before_reading_fence() -> None:
+    repository, inventory, fence, client, canonical = protocol_fixture()
+    store = ProtocolFenceRows(fence)
+    policy = parse_policy(client.current_api_policy.return_value[1])
+    version = policy.find("./inbound/set-variable[@name='budgetExecutionVersion']")
+    assert version is not None
+    version.set("value", "@(1)")
+    client.current_api_policy.return_value = ("1", serialize_policy(policy))
+    with pytest.raises(PolicyCompilationError):
+        enroll_self_hosted_gateway_protocol(
+            repository,
+            cast(TableStorageLedger, store),
+            inventory,
+            fence,
+            client,
+            canonical,
+        )
+    assert store.reads == 0 and store.writes == []
 
 
 def service_fixture() -> tuple[ApimOnboardingService, InMemoryRepository, MagicMock, MagicMock]:

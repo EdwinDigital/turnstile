@@ -15,6 +15,8 @@ from tests.backend.model_platform.test_apim_onboarding import (
     governance_configuration,
     onboarding_request,
 )
+from tests.backend.model_platform.test_apim_target_inventory import arm_inventory
+from tests.backend.model_platform.test_gateway_targets import TARGET
 from tests.support.paths import REPOSITORY_ROOT
 from turnstile_core.config import Settings
 from turnstile_core.integrations.apim_onboarding_policy import render_onboarding_parent
@@ -53,6 +55,54 @@ def test_budget_fence_is_read_only_from_exact_configured_target(
     ledger.read_entity.assert_called_once_with(partition, "F")
     ledger.__exit__.assert_called_once()
     ledger.upsert.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["off", "unselected", "selected", "initialized", "missing_policy"])
+def test_protocol_enrollment_only_uses_enabled_target_configuration(
+    monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    settings = Settings.model_construct(
+        budget_execution_enabled=mode != "off", apim_target_registry_enabled=True,
+        budget_execution_target_ids=[TARGET] if mode in {"selected", "missing_policy"} else [],
+        ledger_table_endpoint="https://unitledger.table.core.windows.net",
+    )
+    repository, client, targets = MagicMock(), MagicMock(), MagicMock()
+    before_write, ledger = MagicMock(), MagicMock()
+    ledger.__enter__.return_value = ledger
+    fence = {"epoch": "unit-epoch"}
+    reader = MagicMock(return_value=fence)
+    enroll = MagicMock(return_value=("edge",))
+    ledger_factory = MagicMock(return_value=ledger)
+    monkeypatch.setattr(
+        function_app, "initialized_apim_targets",
+        lambda _: {TARGET: onboarding_request()} if mode == "initialized" else {},
+    )
+    monkeypatch.setattr(function_app, "_target_budget_configuration", reader)
+    monkeypatch.setattr(function_app, "AtomicTableLedger", ledger_factory)
+    monkeypatch.setattr(function_app, "enroll_self_hosted_gateway_protocol", enroll)
+    inventory = arm_inventory()
+    if mode == "missing_policy":
+        with pytest.raises(ValueError, match="canonical policy"):
+            function_app._enroll_gateway_protocol(
+                inventory, client, repository, settings, targets, None, before_write,
+            )
+        enroll.assert_not_called()
+        return
+    result = function_app._enroll_gateway_protocol(
+        inventory, client, repository, settings, targets, "canonical-policy", before_write,
+    )
+    if mode in {"off", "unselected"}:
+        assert result == ()
+        reader.assert_not_called()
+        ledger_factory.assert_not_called()
+    else:
+        assert result == ("edge",)
+        reader.assert_called_once_with(TARGET, settings, targets, repository)
+        enroll.assert_called_once_with(
+            repository, ledger, inventory, fence, client, "canonical-policy",
+            before_write=before_write,
+        )
+        ledger.__exit__.assert_called_once()
 
 
 def test_disabled_publication_timer_does_not_build_dependencies(monkeypatch: Any) -> None:

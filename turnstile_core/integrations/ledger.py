@@ -51,6 +51,7 @@ from ..domain.ledger import (
 from ..domain.models import ReconciledUsage, ReservationTerminalEvidence
 from ..persistence.repository import QueryRepository
 from .reconciliation import ManagedIdentityTokenProvider, ReservationTerminalLog
+from .table_batch import exact_etag
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +287,33 @@ class TableStorageLedger:
             return None
         response.raise_for_status()
         return dict(response.json())
+
+    def read_versioned_entity(
+        self, partition: str, row_key: str,
+    ) -> tuple[dict[str, Any], str] | None:
+        response = self._request("GET", self._entity_url(partition, row_key))
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return dict(response.json()), exact_etag(response.headers.get("ETag"))
+
+    def replace_if_match(
+        self, partition: str, row_key: str, entity: dict[str, Any], etag: str | None,
+    ) -> bool:
+        version = exact_etag(etag) if etag is not None else None
+        response = self._request(
+            "POST" if version is None else "PUT",
+            f"{self._endpoint}/{self._table}" if version is None
+            else self._entity_url(partition, row_key),
+            {"If-Match": version} if version is not None else None,
+            json={**entity, "PartitionKey": partition, "RowKey": row_key},
+        )
+        if response.status_code in {409, 412} or (
+            version is not None and response.status_code == 404
+        ):
+            return False
+        response.raise_for_status()
+        return True
 
     def list_reservations(self, partition: str) -> list[LedgerReservation]:
         """List every reservation in one partition, following Table continuation tokens."""

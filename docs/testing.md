@@ -109,6 +109,13 @@ Validate publication/retirement locking against a separately authorized PostgreS
 in-memory tests prove state rules, not database concurrency. Actual Gateway container movement
 or deletion is outside the metadata lifecycle and is not implied by these tests.
 
+Protocol membership tests additionally cover exact response ETags, conditional conflict limits,
+preserved concurrent additions, retired-only revocation, current revision/epoch and canonical
+policy checks, lease loss immediately before a write, and lost responses both before and after
+server commit. Unknown outcomes must not cause an unconditional replay or overwrite unrelated
+F fields. The Table transport and repository doubles do not establish real Azure CAS or lease
+timing; verify those on separately authorized targets.
+
 Run the onboarding model-platform tests, target-inventory API tests, Control-plane Function tests
 and OpenAPI checks. Cover exact preview binding, ownership/readback drift, permissions, suspended
 subscriptions, concrete ETag activation, authentication denial, linked retries, lease expiry and

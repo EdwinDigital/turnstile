@@ -37,6 +37,66 @@ PERIOD_START = datetime(2026, 7, 1, tzinfo=UTC)
 USER = "test.user01@contoso.com"
 
 
+@pytest.mark.parametrize("etag", [None, "", " ", "*", '"unit"\r\nInjected: true', 'W/"unit"'])
+def test_table_versioned_read_requires_exact_response_etag(etag: str | None) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and "RowKey='F'" in str(request.url)
+        return httpx.Response(200, headers={"ETag": etag} if etag is not None else {},
+                              json={"Document": "unit"})
+
+    store = TableStorageLedger(
+        "https://ledger.example.test", "UnitLedger", FakeTokenProvider(),
+        httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    if etag == 'W/"unit"':
+        assert store.read_versioned_entity("unit-partition", "F") == ({"Document": "unit"}, etag)
+    else:
+        with pytest.raises(ValueError, match="exact ETag"):
+            store.read_versioned_entity("unit-partition", "F")
+
+
+@pytest.mark.parametrize("status", [204, 404, 409, 412, 500])
+@pytest.mark.parametrize("etag", [None, 'W/"unit-version"'])
+def test_table_conditional_replace_never_falls_back_to_wildcard(
+    status: int, etag: str | None,
+) -> None:
+    calls = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        assert request.method == ("POST" if etag is None else "PUT")
+        assert request.headers.get("If-Match") == etag
+        assert json.loads(request.content) == {
+            "PartitionKey": "exact-partition", "RowKey": "F", "Document": "retained",
+        }
+        return httpx.Response(status)
+
+    store = TableStorageLedger(
+        "https://ledger.example.test", "UnitLedger", FakeTokenProvider(),
+        httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    if status == 500 or (status == 404 and etag is None):
+        with pytest.raises(httpx.HTTPStatusError):
+            store.replace_if_match("exact-partition", "F", {"Document": "retained"}, etag)
+    else:
+        assert store.replace_if_match("exact-partition", "F", {"Document": "retained"}, etag) \
+            is (status == 204)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("etag", ["", " ", "*", "version\nInjected"])
+def test_table_conditional_replace_rejects_unsafe_tokens_before_request(etag: str) -> None:
+    def reject(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("Invalid ETag reached transport")
+
+    store = TableStorageLedger(
+        "https://ledger.example.test", "UnitLedger", FakeTokenProvider(),
+        httpx.Client(transport=httpx.MockTransport(reject)),
+    )
+    with pytest.raises(ValueError, match="exact ETag"):
+        store.replace_if_match("unit", "F", {}, etag)
+
+
 def _finalization(**overrides: Any) -> BudgetReservationFinalization:
     return BudgetReservationFinalization.model_validate(
         {

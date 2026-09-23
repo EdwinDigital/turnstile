@@ -98,6 +98,17 @@ reassociation. A metadata change alone does not revoke an Azure subscription, re
 container or prove budget-protocol membership. Synchronize inventory and verify protocol readiness
 before allowing the changed Gateway to serve traffic.
 
+For an explicitly enabled budget-execution target, inventory synchronization also reconciles
+the existing F document's `gateways` membership. It adds only configured, present, API-associated
+Self-hosted Gateways and removes only explicitly retired members. Other members, revision lists,
+model contracts, epoch and document extensions are preserved. It verifies the current canonical
+budget policy, target identity and latest inventory, then rechecks the API revision, target,
+deployment records and worker lease before every exact-ETag replacement. Conditional conflicts
+have a bounded retry count; an uncertain transport outcome permits readback but no blind replay
+within that attempt. A missing or changed fence is not recreated. Successful tasks include
+`protocol_enrolled_gateways` in their checkpoint. ARM discovery remains read-only; the Table
+membership update is a distinct mutation.
+
 ### Initialize an existing APIM
 
 Initialization is a separate Owner workflow under `/api/v1/model-management/apim-onboarding`.

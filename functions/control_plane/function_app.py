@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -12,6 +13,7 @@ import azure.functions as func
 
 from turnstile_core.config import Settings, get_settings
 from turnstile_core.domain.control_plane import GatewayReleaseRetentionPolicy
+from turnstile_core.domain.gateway_targets import ApimTargetArmInventory
 from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
 from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
@@ -20,6 +22,7 @@ from turnstile_core.integrations.apim_control_plane import (
 from turnstile_core.integrations.apim_control_plane_contract import (
     ApimPublisherClient,
     ApimPublisherClientResolver,
+    PolicyCompilationError,
 )
 from turnstile_core.integrations.apim_onboarding_policy import onboarding_canonical_parent
 from turnstile_core.integrations.apim_target_client_factory import (
@@ -36,6 +39,7 @@ from turnstile_core.services.apim_onboarding import (
     build_apim_onboarding_service,
     initialized_apim_targets,
 )
+from turnstile_core.services.apim_onboarding_ledger import enroll_self_hosted_gateway_protocol
 from turnstile_core.services.application_provisioning_ledger import prepare_application_ledger
 from turnstile_core.services.budget_settlement import BudgetScopeRepository, BudgetScopeService
 from turnstile_core.services.gateway_publication_worker import GatewayPublicationWorker
@@ -127,6 +131,38 @@ def _budget_configuration(
     return fence
 
 
+def _enroll_gateway_protocol(
+    inventory: ApimTargetArmInventory, client: ApimPublisherClient,
+    repository: QueryRepository, settings: Settings,
+    targets: ApimTargetClientConfigResolver | None, canonical_parent: str | None,
+    before_write: Callable[[], None],
+) -> tuple[str, ...]:
+    if not settings.budget_execution_enabled:
+        return ()
+    initialized = (
+        initialized_apim_targets(repository) if settings.apim_target_registry_enabled else {}
+    )
+    if (
+        inventory.gateway_profile_id not in settings.budget_execution_target_ids
+        and inventory.gateway_profile_id not in initialized
+    ):
+        return ()
+    if not settings.ledger_table_endpoint or canonical_parent is None:
+        raise PolicyCompilationError(
+            "Gateway registration requires its ledger and canonical policy"
+        )
+    fence = _target_budget_configuration(
+        inventory.gateway_profile_id, settings, targets, repository,
+    )
+    with AtomicTableLedger(
+        settings.ledger_table_endpoint, settings.ledger_table_name, timeout=2,
+    ) as ledger:
+        return enroll_self_hosted_gateway_protocol(
+            repository, ledger, inventory, fence, client, canonical_parent,
+            before_write=before_write,
+        )
+
+
 @app.timer_trigger(
     arg_name="timer",
     schedule="*/30 * * * * *",
@@ -209,7 +245,7 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
     ):
         return
     with repository_session(settings) as repository:
-        publisher, _ = _publisher_clients(repository, settings)
+        publisher, targets = _publisher_clients(repository, settings)
         worker_id = os.environ.get("WEBSITE_INSTANCE_ID", "control-plane-local")[:128]
 
         def project_application(gateway_id: UUID, application_id: UUID) -> None:
@@ -241,6 +277,16 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
         )
         parent_policy = policy_path.read_text(encoding="utf-8") if policy_path.is_file() else None
         overrides = _budget_parent_overrides(parent_policy or "", settings, repository)
+
+        def enroll_gateway(
+            inventory: ApimTargetArmInventory, client: ApimPublisherClient,
+            before_write: Callable[[], None],
+        ) -> tuple[str, ...]:
+            return _enroll_gateway_protocol(
+                inventory, client, repository, settings, targets,
+                overrides.get(inventory.gateway_profile_id, parent_policy), before_write,
+            )
+
         release_options: dict[str, Any] = {}
         if overrides:
             release_options["parent_policy_overrides"] = overrides
@@ -248,6 +294,8 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
             release_options["onboarding_handler"] = build_apim_onboarding_service(
                 repository, settings,
             ).advance
+        if getattr(settings, "budget_execution_enabled", False):
+            release_options["gateway_protocol_enrollment"] = enroll_gateway
         release_worker = GatewayReleaseOperationWorker(
             repository,
             publisher,

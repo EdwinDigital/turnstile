@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 from unittest.mock import Mock, patch
@@ -29,7 +30,10 @@ from turnstile_core.domain.gateway_targets import (
     SelfHostedGatewayWrite,
     gateway_deployment_id_for,
 )
-from turnstile_core.integrations.apim_control_plane_contract import ResolvedApimPublisherClient
+from turnstile_core.integrations.apim_control_plane_contract import (
+    ApimPublisherClient,
+    ResolvedApimPublisherClient,
+)
 from turnstile_core.integrations.gateway_connection_probe import (
     GatewayConnectionProbe,
     GatewayConnectionProbeError,
@@ -236,6 +240,42 @@ def test_inventory_queue_resolves_exact_target_and_persists_checkpoint(wrong_tar
         assert result.checkpoint["read_only_arm_discovery"] is True
         client.discover_apim_target_inventory.assert_called_once_with(TARGET)
     assert worker._active_client.get() is None
+
+
+@pytest.mark.parametrize("lose_lease", [False, True])
+def test_inventory_worker_renews_lease_immediately_before_protocol_write(lose_lease: bool) -> None:
+    repository = InMemoryRepository()
+    repository.upsert_apim_target(target())
+    service = GatewayControlPlaneService(repository, target_inventory_sync_enabled=True)
+    accepted = service.request_target_inventory_sync(TARGET, "unit-owner")
+    client = Mock(spec=FakeApimClient)
+    client.discover_apim_target_inventory = Mock(return_value=arm_inventory())
+    writes = []
+
+    def enroll(
+        inventory: ApimTargetArmInventory, actual_client: ApimPublisherClient,
+        before_write: Callable[[], None],
+    ) -> tuple[str, ...]:
+        assert inventory.gateway_profile_id == TARGET and actual_client is client
+        assert repository.apim_targets[TARGET]["last_inventory_sync_at"] == inventory.discovered_at
+        if lose_lease:
+            with patch.object(
+                repository, "renew_gateway_release_operation_lease", return_value=False,
+            ):
+                before_write()
+        before_write()
+        writes.append(inventory.gateway_profile_id)
+        return ("edge",)
+
+    worker = GatewayReleaseOperationWorker(repository, client, gateway_protocol_enrollment=enroll)
+    initial = worker.run_once("unit-worker")
+    assert initial is not None and initial.status == "validating_dependencies"
+    result = worker.run_once("unit-worker")
+    assert result is not None and result.id == accepted.operation.id
+    assert result.status == ("validating_dependencies" if lose_lease else "succeeded")
+    assert writes == ([] if lose_lease else [TARGET])
+    if not lose_lease:
+        assert result.checkpoint["protocol_enrolled_gateways"] == ["edge"]
 
 
 @pytest.mark.parametrize("probe_fails", [False, True])

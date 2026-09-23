@@ -50,6 +50,9 @@ class GatewayReleaseOperationWorker:
         parent_policy: str | None = None,
         parent_policy_overrides: Mapping[UUID, str] | None = None,
         onboarding_handler: Callable[[Mapping[str, Any], str], None] | None = None,
+        gateway_protocol_enrollment: Callable[
+            [ApimTargetArmInventory, ApimPublisherClient, Callable[[], None]], tuple[str, ...]
+        ] | None = None,
     ) -> None:
         self._repository = repository
         self._client_resolver = coerce_apim_publisher_client_resolver(client)
@@ -61,6 +64,7 @@ class GatewayReleaseOperationWorker:
         self._cipher = cipher
         self._application_projector = application_projector
         self._onboarding_handler = onboarding_handler
+        self._gateway_protocol_enrollment = gateway_protocol_enrollment
         self._parent_policy = parent_policy
         self._parent_policy_overrides = dict(parent_policy_overrides or {})
         self._service = GatewayControlPlaneService(
@@ -169,11 +173,18 @@ class GatewayReleaseOperationWorker:
         inventory = ApimTargetArmInventory.model_validate(
             discovery(UUID(str(row["gateway_profile_id"])))
         )
-        if not self._repository.renew_gateway_release_operation_lease(
-            UUID(str(row["id"])), worker_id, 180,
-        ):
-            raise RetryablePublicationError("Worker lease is no longer owned")
+
+        def before_write() -> None:
+            if not self._repository.renew_gateway_release_operation_lease(
+                UUID(str(row["id"])), worker_id, 180,
+            ):
+                raise RetryablePublicationError("Worker lease is no longer owned")
+
+        before_write()
         topology = self._service.apply_target_inventory(inventory)
+        enrolled = self._gateway_protocol_enrollment(
+            inventory, self._client, before_write,
+        ) if self._gateway_protocol_enrollment is not None else None
         self._transition(row, "succeeded", {"checkpoint": {
             "read_only_arm_discovery": True, "service_tier": inventory.service_tier,
             "gateway_count": len(topology.deployments),
@@ -187,6 +198,7 @@ class GatewayReleaseOperationWorker:
             "certificate_authority_count": sum(
                 len(item.certificate_authorities) for item in inventory.gateways
             ),
+            **({"protocol_enrolled_gateways": list(enrolled)} if enrolled is not None else {}),
         }}, worker_id)
 
     def _advance_integrity(
