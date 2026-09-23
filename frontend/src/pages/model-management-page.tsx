@@ -22,6 +22,7 @@ import {
   Send,
   Server,
   ShieldCheck,
+  TextCursorInput,
   Trash2,
   TriangleAlert,
   Wifi,
@@ -86,9 +87,10 @@ import { Textarea } from "../components/ui/textarea"
 import { ResizableGridTable } from "../components/ui/resizable-table"
 import { getIntlLocale } from "../locales/index"
 import { hasModelPrices, priceRequests } from "../lib/pricing"
-import { finopsKeys, finopsQueries, storeRegistry } from "../data-sources/apim/queries"
+import { finopsKeys, finopsQueries, storeGatewayName, storeRegistry } from "../data-sources/apim/queries"
 import { assistantSettingsKey } from "../components/assistant/queries"
 import { useTimezone } from "../providers/timezone-provider"
+import { useAuth } from "../providers/auth-provider"
 import {
   ModelPublicationDialog,
   publicationStatusLabel,
@@ -284,6 +286,7 @@ function modelManagementTabFromUrl(): Tab {
 
 export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () => void }) {
   const client = useQueryClient()
+  const { user } = useAuth()
   const { data, isLoading, error } = useQuery(finopsQueries.registry())
   const [tab, setTab] = useState<Tab>(modelManagementTabFromUrl)
   const [editor, setEditor] = useState<{ kind: Exclude<RegistryKind, "model">; item?: RegistryItem } | null>(null)
@@ -298,6 +301,7 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   const [deletingModel, setDeletingModel] = useState<ManagedModel | null>(null)
   const [deletingConnection, setDeletingConnection] = useState<ModelRuntime | null>(null)
   const [deletingGateway, setDeletingGateway] = useState<GatewayProfile | null>(null)
+  const [renamingGateway, setRenamingGateway] = useState<GatewayProfile | null>(null)
   const publications = useQuery(finopsQueries.gatewayPublications())
   const trackedPublication = useQuery(finopsQueries.gatewayPublication(publicationId))
   // The outcome travels with the text. It used to be a bare string rendered by a banner
@@ -478,6 +482,16 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
       setNotice({ context: gateway.name, text: "网关记录已删除", ok: true })
     },
   })
+  const renameGateway = useMutation({
+    retry: false,
+    mutationFn: ({ id, name }: { id: string; name: string }) => dataSource.renameGateway(id, name),
+    onSuccess: async (registry, { id, name }) => {
+      if (registry) await storeRegistry(client, registry)
+      else await storeGatewayName(client, id, name)
+      setRenamingGateway(null)
+      setNotice({ text: "配置已保存", ok: true })
+    },
+  })
   const rotationCredential = useRef("")
   const rotateCredential = useMutation({
     retry: false,
@@ -575,6 +589,7 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   }
 
   const overlays = <>
+    {renamingGateway && <GatewayNameDialog key={renamingGateway.id} gateway={renamingGateway} available={user?.role === "owner" && data.gateway_name_edit_supported === true} busy={renameGateway.isPending} error={renameGateway.error ? String(renameGateway.error) : null} onClose={() => { if (!renameGateway.isPending) setRenamingGateway(null) }} onSave={name => renameGateway.mutate({ id: renamingGateway.id, name })} />}
     {editor && <RegistryEditor registry={data} kind={editor.kind} item={editor.item} busy={save.isPending} onClose={() => setEditor(null)} onSave={(value) => save.mutate({ kind: editor.kind, id: editor.item?.id, value })} />}
     {editingModel && <ModelEditDialog key={editingModel.id} registry={data} model={editingModel} busy={save.isPending} error={save.error ? String(save.error) : null} onClose={() => { if (!save.isPending) setEditingModel(null) }} onSave={(value) => save.mutate({ kind: "model", id: editingModel.id, value })} />}
     {consoleOpen && <GatewayConsole registry={data} onClose={() => setConsoleOpen(false)} />}
@@ -617,7 +632,9 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
       tab={tab}
       notice={notice}
       error={save.error}
-      busy={save.isPending || health.isPending || deleteModel.isPending || deleteConnection.isPending || deleteGateway.isPending}
+      busy={save.isPending || health.isPending || deleteModel.isPending || deleteConnection.isPending || deleteGateway.isPending || renameGateway.isPending}
+      canRenameGateway={user?.role === "owner" && data.gateway_name_edit_supported === true}
+      onRenameGateway={gateway => { renameGateway.reset(); setRenamingGateway(gateway) }}
       checkingRuntimeId={health.isPending ? health.variables.id : null}
       loadingRuntimeHealthIds={loadingRuntimeHealthIds}
       removingModelKey={removingModelKey}
@@ -968,6 +985,33 @@ function ConnectionDeleteDialog({ runtime, busy, error, onClose, onConfirm }: {
   </AlertDialog>
 }
 
+export function GatewayNameDialog({ gateway, available, busy, error, onClose, onSave }: {
+  gateway: GatewayProfile
+  available: boolean
+  busy: boolean
+  error: string | null
+  onClose: () => void
+  onSave: (name: string) => void
+}) {
+  const [name, setName] = useState(gateway.name)
+  const fieldId = useId()
+  const trimmed = name.trim()
+  const valid = available && !busy && trimmed.length > 0 && name.length <= 120 && trimmed !== gateway.name
+  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}>
+    <DialogContent className="registry-dialog">
+      <form onSubmit={event => { event.preventDefault(); if (valid) onSave(trimmed) }}>
+        <DialogHeader><DialogTitle>名称</DialogTitle><DialogDescription>{gateway.name}</DialogDescription></DialogHeader>
+        <label className="registry-field" htmlFor={fieldId}><span>名称</span><Input id={fieldId} value={name} maxLength={120} disabled={busy || !available} autoFocus onChange={event => setName(event.target.value)} /></label>
+        {error && <div className="registry-error" role="alert">{error}</div>}
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={busy} onClick={onClose}>取消</Button>
+          <Button type="submit" disabled={!valid}><Save size={14} />保存</Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  </Dialog>
+}
+
 function GatewayDeleteDialog({ gateway, busy, error, onClose, onConfirm }: {
   gateway: GatewayProfile
   busy: boolean
@@ -1018,12 +1062,13 @@ function CredentialRotationDialog({ model, oauth = false, busy, error, onClose, 
   </Dialog>
 }
 
-function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId, loadingRuntimeHealthIds, removingModelKey, publications, onTabChange, onDismissNotice, onNoticeAction, onToggleSidebar, onAdd, onEdit, onToggleModel, onRotateCredential, onDeleteModel, onOpenPublication, onToggleRuntime, onDefaultRuntime, onCheckRuntime, onDeleteConnection, onToggleGateway, onDefaultGateway, onDeleteGateway }: {
+function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, checkingRuntimeId, loadingRuntimeHealthIds, removingModelKey, publications, onTabChange, onDismissNotice, onNoticeAction, onToggleSidebar, onAdd, onEdit, onToggleModel, onRotateCredential, onDeleteModel, onOpenPublication, onToggleRuntime, onDefaultRuntime, onCheckRuntime, onDeleteConnection, onToggleGateway, onDefaultGateway, onDeleteGateway, onRenameGateway }: {
   registry: ModelRegistry
   tab: Tab
   notice: Notice | null
   error: Error | null
   busy: boolean
+  canRenameGateway: boolean
   checkingRuntimeId: string | null
   loadingRuntimeHealthIds: Set<string>
   removingModelKey: string | null
@@ -1045,6 +1090,7 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
   onToggleGateway: (gateway: GatewayProfile) => void
   onDefaultGateway: (gateway: GatewayProfile) => void
   onDeleteGateway: (gateway: GatewayProfile) => void
+  onRenameGateway: (gateway: GatewayProfile) => void
 }) {
   const activeTab: ModelTableTab = tab
   const [search, setSearch] = useState("")
@@ -1223,7 +1269,7 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
             : runtimeCount > 0
               ? "请先移除该网关下的全部连接"
               : null
-          return <GatewayRow key={gateway.id} gateway={gateway} runtimeCount={runtimeCount} busy={busy} deleteDisabledReason={deleteDisabledReason} onEdit={() => onEdit("gateway", gateway)} onToggle={() => onToggleGateway(gateway)} onDefault={() => onDefaultGateway(gateway)} onDelete={() => onDeleteGateway(gateway)} />
+          return <GatewayRow key={gateway.id} gateway={gateway} runtimeCount={runtimeCount} busy={busy} deleteDisabledReason={deleteDisabledReason} onEdit={() => onEdit("gateway", gateway)} onToggle={() => onToggleGateway(gateway)} onDefault={() => onDefaultGateway(gateway)} onDelete={() => onDeleteGateway(gateway)} onRename={canRenameGateway ? () => onRenameGateway(gateway) : undefined} />
         })}
         {((activeTab === "models" && !models.length) || (activeTab === "connections" && !connectionGroups.length) || (activeTab === "gateways" && !gateways.length)) && <div className="smh-empty"><Search size={28} /><b>没有找到{addLabel}</b><span>尝试调整搜索条件。</span></div>}
       </div>
@@ -1353,14 +1399,14 @@ function ConnectionRow({ runtime, models, busy, checking, onEdit, onToggle, onDe
   </article>
 }
 
-function GatewayRow({ gateway, runtimeCount, busy, deleteDisabledReason, onEdit, onToggle, onDefault, onDelete }: { gateway: GatewayProfile; runtimeCount: number; busy: boolean; deleteDisabledReason: string | null; onEdit: () => void; onToggle: () => void; onDefault: () => void; onDelete: () => void }) {
+function GatewayRow({ gateway, runtimeCount, busy, deleteDisabledReason, onEdit, onToggle, onDefault, onDelete, onRename }: { gateway: GatewayProfile; runtimeCount: number; busy: boolean; deleteDisabledReason: string | null; onEdit: () => void; onToggle: () => void; onDefault: () => void; onDelete: () => void; onRename?: () => void }) {
   const brand = gatewayBrand(gateway)
   return <article className="model-list-row" role="row">
     <div className="model-primary-cell"><span className="model-list-icon" data-model-family={brand} title={gatewayBrandLabel(brand)}><GatewayBrandLogo brand={brand} /></span><div><b>{gateway.name}</b><span>{runtimeCount} 个运行时</span></div>{gateway.is_default && <em>默认</em>}</div>
     <div className="model-runtime-cell"><b>{gateway.implementation.toUpperCase()}</b><span>{gateway.auth_type}</span></div>
     <div className="model-pricing-cell"><b>{gateway.credential_configured ? "凭据已配置" : gateway.auth_type === "none" ? "无需凭据" : "未配置凭据"}</b><span>{gateway.base_url ?? "尚未配置 Base URL"}</span></div>
     <div className="model-status-cell"><Health status={gateway.enabled ? "available" : "unavailable"} enabled={gateway.enabled} /></div>
-    <div className="model-row-actions"><button className="model-edit-action" title="编辑" disabled={busy} onClick={onEdit}><Edit3 size={14} /></button><button className="model-delete-action" title={deleteDisabledReason ?? "删除网关记录"} disabled={busy || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button>{!gateway.is_default && <button title="设为默认" disabled={busy || !gateway.enabled} onClick={onDefault}><Check size={14} /></button>}<Toggle checked={gateway.enabled} disabled={busy} onChange={onToggle} /></div>
+    <div className="model-row-actions">{onRename && <button type="button" className="model-edit-action" title="名称" aria-label="名称" disabled={busy} onClick={onRename}><TextCursorInput size={14} /></button>}<button className="model-edit-action" title="编辑" disabled={busy} onClick={onEdit}><Edit3 size={14} /></button><button className="model-delete-action" title={deleteDisabledReason ?? "删除网关记录"} disabled={busy || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button>{!gateway.is_default && <button title="设为默认" disabled={busy || !gateway.enabled} onClick={onDefault}><Check size={14} /></button>}<Toggle checked={gateway.enabled} disabled={busy} onChange={onToggle} /></div>
   </article>
 }
 

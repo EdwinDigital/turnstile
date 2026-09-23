@@ -24,6 +24,104 @@ let queriesCode
 try { queriesCode = (await queriesBundle.generate({ format: "cjs" })).output[0].code }
 finally { await queriesBundle.close() }
 
+const apiEntry = fileURLToPath(new URL("../../../frontend/src/data-sources/apim/api.ts", import.meta.url))
+const apiBundle = await rolldown({ input: apiEntry, external: id => id !== apiEntry, treeshake: false })
+let apiCode
+try { apiCode = (await apiBundle.generate({ format: "cjs" })).output[0].code }
+finally { await apiBundle.close() }
+
+const pageSource = readFileSync(new URL("../../../frontend/src/pages/model-management-page.tsx", import.meta.url), "utf8")
+const dialogSource = pageSource.slice(pageSource.indexOf("export function GatewayNameDialog("), pageSource.indexOf("\nfunction GatewayDeleteDialog("))
+assert.ok(dialogSource.startsWith("export function GatewayNameDialog("))
+const dialogBundle = await rolldown({
+  input: "name-dialog.tsx", transform: { jsx: { runtime: "automatic" } },
+  external: ["react", "react/jsx-runtime", "primitives"],
+  plugins: [{ name: "production-name-dialog", resolveId: id => id === "name-dialog.tsx" ? id : null,
+    load: id => id === "name-dialog.tsx" ? `import { useState, useId } from "react";
+      import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Input, Button, Save } from "primitives";
+      ${dialogSource}` : null }],
+})
+let dialogCode
+try { dialogCode = (await dialogBundle.generate({ format: "cjs" })).output[0].code }
+finally { await dialogBundle.close() }
+
+function gatewayNameHarness(overrides = {}) {
+  let draft = "Original name"
+  const saved = []
+  const closed = []
+  const exports = {}
+  const imports = {
+    react: { useId: () => "gateway-name", useState: () => [draft, value => { draft = value }] },
+    "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
+    primitives: new Proxy({}, { get: (_target, key) => key }),
+  }
+  runInNewContext(dialogCode, { exports, require: name => imports[name] })
+  const props = { gateway: { id: "unit", name: draft }, available: true, busy: false, error: null,
+    onSave: value => saved.push(value), onClose: () => closed.push(true), ...overrides }
+  const nodes = value => Array.isArray(value) ? value.flatMap(nodes)
+    : value && typeof value === "object" ? [value, ...nodes(value.props?.children)] : []
+  const find = predicate => nodes(exports.GatewayNameDialog(props)).find(predicate)
+  return { props, saved, closed, find,
+    input(value) { find(node => node.type === "Input").props.onChange({ target: { value } }) },
+    submit() { find(node => node.type === "form").props.onSubmit({ preventDefault() {} }) },
+  }
+}
+
+test("name dialog submits only a trimmed changed name and keeps failed drafts", () => {
+  const harness = gatewayNameHarness()
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  for (const value of ["   ", "x".repeat(121), " Original name "]) {
+    harness.input(value)
+    harness.submit()
+    assert.equal(harness.saved.length, 0)
+  }
+  harness.input("  Finance  ")
+  harness.props.error = "Request failed"
+  assert.equal(harness.find(node => node.type === "Input").props.value, "  Finance  ")
+  assert.equal(harness.find(node => node.props?.role === "alert").props.children, "Request failed")
+  harness.submit()
+  assert.deepEqual(harness.saved, ["Finance"])
+})
+
+test("name dialog prevents writes when unsupported or pending and blocks pending close", () => {
+  for (const overrides of [{ busy: true }, { available: false }]) {
+    const harness = gatewayNameHarness(overrides)
+    harness.input("Finance")
+    harness.submit()
+    assert.equal(harness.saved.length, 0)
+    assert.equal(harness.find(node => node.type === "Input").props.disabled, true)
+    assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  }
+  const harness = gatewayNameHarness({ busy: true })
+  harness.find(node => node.type === "Dialog").props.onOpenChange(false)
+  assert.equal(harness.closed.length, 0)
+  harness.props.busy = false
+  harness.find(node => node.type === "Dialog").props.onOpenChange(false)
+  assert.equal(harness.closed.length, 1)
+})
+
+for (const minimal of [false, true]) test(`name API supports minimal and full replies (minimal=${minimal})`, async () => {
+  const exports = {}
+  const requests = []
+  const imports = {
+    "../../api/client": { request: async (path, options) => {
+      requests.push({ path, options })
+      return minimal ? undefined : registry({ gateway_name_edit_supported: true })
+    } },
+    "../../locales/index": {},
+    "../../components/model-management/openai-compatible": {},
+  }
+  runInNewContext(apiCode, { exports, require: name => imports[name] })
+  const result = await exports.dataSource.renameGateway("unit/gateway", "Finance")
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].path, "/api/v1/model-management/gateways/unit%2Fgateway/name")
+  assert.equal(requests[0].options.method, "PATCH")
+  assert.equal(requests[0].options.headers.Prefer, "return=minimal")
+  assert.deepEqual(JSON.parse(requests[0].options.body), { name: "Finance" })
+  if (minimal) assert.equal(result, undefined)
+  else assert.equal(result.gateway_name_edit_supported, true)
+})
+
 function registryCacheHarness(readRegistry) {
   const exports = {}
   const imports = {
@@ -91,7 +189,24 @@ test("registry writers await cancellation and use the shared cache boundary", as
   assert.deepEqual(calls, ["cancel", "write"])
   const page = readFileSync(new URL("../../../frontend/src/pages/model-management-page.tsx", import.meta.url), "utf8")
   assert.doesNotMatch(page, /client\.setQueryData(?:<ModelRegistry>)?\(finopsKeys\.registry/)
-  assert.equal((page.match(/await storeRegistry\(client,/g) ?? []).length, 6)
+  assert.equal((page.match(/await storeRegistry\(client,/g) ?? []).length, 7)
+})
+
+test("minimal name acknowledgement updates only the selected gateway and its runtime labels", async () => {
+  const harness = registryCacheHarness(async () => { throw new Error("registry unavailable") })
+  const client = new queryLibrary.QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const original = registry({ gateways: [gateway("gateway-a", { name: "Original" }), gateway("gateway-b", { name: "Other" })] })
+  try {
+    client.setQueryData(harness.finopsKeys.registry, original)
+    await harness.storeGatewayName(client, "gateway-a", "  Finance  ")
+    const saved = client.getQueryData(harness.finopsKeys.registry)
+    assert.equal(saved.gateways[0].name, "Finance")
+    assert.deepEqual(saved.gateways[1], original.gateways[1])
+    assert.ok(saved.runtimes.filter(runtime => runtime.gateway_profile_id === "gateway-a").every(runtime => runtime.gateway_name === "Finance"))
+    assert.deepEqual(saved.runtimes.filter(runtime => runtime.gateway_profile_id !== "gateway-a"), original.runtimes.filter(runtime => runtime.gateway_profile_id !== "gateway-a"))
+    await assert.rejects(client.fetchQuery(harness.finopsQueries.registry()), /registry unavailable/)
+    assert.equal(client.getQueryData(harness.finopsKeys.registry).gateways[0].name, "Finance")
+  } finally { client.clear() }
 })
 
 function gateway(id, overrides = {}) {

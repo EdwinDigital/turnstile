@@ -113,8 +113,8 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 78
-    assert len(schemas) == 174
+    assert len(paths) == 79
+    assert len(schemas) == 175
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -126,6 +126,24 @@ def test_openapi_root_is_a_small_domain_index() -> None:
         "model-platform.yaml",
         "observability.yaml",
     }
+
+
+def test_gateway_name_contract_preserves_owner_only_name_write_and_minimal_response() -> None:
+    schema = _documented_schemas()["GatewayProfileNameWrite"]
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["name"]
+    properties = cast(dict[str, dict[str, object]], schema["properties"])
+    assert set(properties) == {"name"} and properties["name"]["maxLength"] == 120
+    operation = cast(dict[str, object], _documented_paths()[
+        "/api/v1/model-management/gateways/{item_id}/name"
+    ]["patch"])
+    assert operation["security"] == [{"sessionCookie": []}]
+    responses = cast(dict[str, dict[str, object]], operation["responses"])
+    assert {"200", "204", "401", "403", "404", "422"} <= set(responses)
+    assert "content" not in responses["204"]
+    actual = app.openapi()["components"]["schemas"]
+    assert actual["GatewayProfileNameWrite"]["additionalProperties"] is False
+    assert "gateway_name_edit_supported" in actual["RegistryResponse"]["properties"]
 
 
 def test_publication_contract_describes_catalog_prices_and_discounts() -> None:

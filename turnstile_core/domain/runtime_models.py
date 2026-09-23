@@ -276,6 +276,17 @@ class GatewayProfileWrite(StrictModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class GatewayProfileNameWrite(StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def normalize_name(self) -> GatewayProfileNameWrite:
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("The display name cannot be blank")
+        return self
+
+
 class GatewayProfile(GatewayProfileWrite):
     id: UUID
     created_at: datetime
@@ -709,6 +720,7 @@ class RegistryResponse(StrictModel):
     gateways: list[GatewayProfile]
     runtimes: list[Runtime]
     models: list[ManagedModel]
+    gateway_name_edit_supported: bool = False
     context_pricing_supported: bool = False
     context_price_rules_supported: bool = False
     backend_pool_session_affinity_supported: bool = False

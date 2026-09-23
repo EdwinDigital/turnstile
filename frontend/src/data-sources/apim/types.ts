@@ -656,6 +656,7 @@ export type PriceSyncResponse = {
 }
 
 export type ModelRegistry = {
+  gateway_name_edit_supported?: boolean
   context_pricing_supported?: boolean
   context_price_rules_supported?: boolean
   backend_pool_session_affinity_supported?: boolean

@@ -106,6 +106,8 @@ paths:
     $ref: ./openapi/paths/github-copilot.yaml#/paths/~1api~1v1~1copilot~1assistant~1conversations~1{conversation_id}~1title
   /api/v1/model-management/connections:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections
+  /api/v1/model-management/gateways/{item_id}/name:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{item_id}~1name
   /api/v1/model-management/connections/{runtime_id}:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections~1{runtime_id}
   /api/v1/model-management/connections/{runtime_id}/adopt:
@@ -363,6 +365,8 @@ components:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/DatabricksConnectionAdopt
     ModelRegistry:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelRegistry
+    GatewayProfileNameWrite:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayProfileNameWrite
     StoredContextPriceTier:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/StoredContextPriceTier
     ContextPriceRule:

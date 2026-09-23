@@ -124,6 +124,16 @@ export async function storeRegistry(
   queryClient.setQueryData<ModelRegistry>(finopsKeys.registry, update)
 }
 
+export async function storeGatewayName(queryClient: QueryClient, id: string, name: string) {
+  await storeRegistry(queryClient, current => current ? {
+    ...current,
+    gateways: current.gateways.map(gateway => gateway.id === id ? { ...gateway, name: name.trim() } : gateway),
+    runtimes: current.runtimes.map(runtime => runtime.gateway_profile_id === id
+      ? { ...runtime, gateway_name: name.trim() } : runtime),
+  } : undefined)
+  void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
+}
+
 export const finopsQueries = {
   entities: () => queryOptions({
     queryKey: finopsKeys.entities,

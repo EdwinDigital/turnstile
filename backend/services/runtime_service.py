@@ -25,6 +25,7 @@ from turnstile_core.domain.runtime_models import (
     ConnectionAuthMode,
     GatewayKind,
     GatewayProfile,
+    GatewayProfileNameWrite,
     GatewayProfileWrite,
     InvocationUsage,
     ManagedModel,
@@ -265,6 +266,7 @@ class ModelRuntimeService:
         ]
         runtime_ids = {row["id"] for row in runtimes}
         return RegistryResponse(
+            gateway_name_edit_supported=True,
             context_pricing_supported=True,
             context_price_rules_supported=True,
             backend_pool_session_affinity_supported=True,
@@ -309,6 +311,22 @@ class ModelRuntimeService:
         values = self._secret_values(write, creating=item_id is None)
         self._save("gateway", values, item_id)
         return self.registry()
+
+    def rename_gateway(
+        self, gateway_id: UUID, write: GatewayProfileNameWrite, *, include_registry: bool = True,
+    ) -> RegistryResponse | None:
+        registry = self.registry() if include_registry else None
+        saved = self._save("gateway", {"name": write.name}, gateway_id)
+        if registry is None:
+            return None
+        for gateway in registry.gateways:
+            if gateway.id == gateway_id:
+                gateway.name = write.name
+                gateway.updated_at = saved["updated_at"]
+        for runtime in registry.runtimes:
+            if runtime.gateway_profile_id == gateway_id:
+                runtime.gateway_name = write.name
+        return registry
 
     def delete_gateway(self, gateway_id: UUID) -> RegistryResponse:
         registry = self._repository.registry()
@@ -1407,12 +1425,14 @@ class ModelRuntimeService:
             },
         }
 
-    def _save(self, kind: str, values: dict[str, Any], item_id: UUID | None) -> None:
+    def _save(self, kind: str, values: dict[str, Any], item_id: UUID | None) -> dict[str, Any]:
         try:
             if item_id is None:
-                self._repository.create_registry_item(kind, values)
-            elif self._repository.update_registry_item(kind, item_id, values) is None:
+                return self._repository.create_registry_item(kind, values)
+            saved = self._repository.update_registry_item(kind, item_id, values)
+            if saved is None:
                 raise HTTPException(status_code=404, detail=f"Unknown {kind}: {item_id}")
+            return saved
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 

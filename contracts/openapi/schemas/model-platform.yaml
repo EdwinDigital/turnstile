@@ -1,4 +1,10 @@
 schemas:
+  GatewayProfileNameWrite:
+    type: object
+    additionalProperties: false
+    required: [name]
+    properties:
+      name: {type: string, minLength: 1, maxLength: 120, pattern: '\S'}
   ImageGenerationLimits:
     type: object
     additionalProperties: false
@@ -254,6 +260,10 @@ schemas:
     - runtimes
     - models
     properties:
+      gateway_name_edit_supported:
+        type: boolean
+        default: false
+        description: Owner name-only PATCH and minimal acknowledgement are available.
       context_pricing_supported:
         type: boolean
         default: false

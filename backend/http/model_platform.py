@@ -5,7 +5,7 @@ from collections.abc import Callable, Coroutine
 from typing import Annotated, Any, TypeVar
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 
@@ -40,6 +40,7 @@ from turnstile_core.domain.enterprise import (
 from turnstile_core.domain.images import ImageInvocationRequest, ImageInvocationResponse
 from turnstile_core.domain.runtime_models import (
     DatabricksConnectionAdopt,
+    GatewayProfileNameWrite,
     GatewayProfileWrite,
     ManagedModelWrite,
     ModelConnectionCreate,
@@ -143,6 +144,25 @@ def update_gateway_profile(
 ) -> RegistryResponse:
     service.authorize(identity.role, authorization, manage=True)
     return service.save_gateway(write, item_id)
+
+
+@protected_router.patch(
+    "/api/v1/model-management/gateways/{item_id}/name", response_model=RegistryResponse,
+    responses={204: {"description": "Display name saved without an inventory response"}},
+)
+def rename_gateway_profile(
+    item_id: UUID,
+    write: GatewayProfileNameWrite,
+    service: RuntimeService,
+    identity: OwnerSession,
+    prefer: Annotated[str | None, Header()] = None,
+) -> RegistryResponse | Response:
+    del identity
+    minimal = prefer is not None and prefer.strip().casefold() == "return=minimal"
+    registry = service.rename_gateway(item_id, write, include_registry=not minimal)
+    if registry is None:
+        return Response(status_code=204, headers={"Preference-Applied": "return=minimal"})
+    return registry
 
 
 @protected_router.delete(

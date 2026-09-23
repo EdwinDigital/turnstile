@@ -128,6 +128,7 @@ function normalizeRegistry(registry: ModelRegistry): ModelRegistry {
   )
   const runtimeIds = new Set(runtimes.map((runtime) => runtime.id))
   return {
+    gateway_name_edit_supported: registry.gateway_name_edit_supported === true,
     context_pricing_supported: registry.context_pricing_supported === true,
     context_price_rules_supported: registry.context_price_rules_supported === true,
     backend_pool_session_affinity_supported: registry.backend_pool_session_affinity_supported === true,
@@ -324,6 +325,10 @@ export const dataSource = {
   }) => writeJson<OptimizationEvent>("/api/v1/observability/optimization-events", value),
   registry: () => request<ModelRegistry>("/api/v1/model-management").then(normalizeRegistry),
   saveGateway: (value: Record<string, unknown>, id?: string) => saveRegistry("/api/v1/model-management/gateways", value, id),
+  renameGateway: (id: string, name: string) => request<ModelRegistry | undefined>(
+    `/api/v1/model-management/gateways/${encodeURIComponent(id)}/name`,
+    { method: "PATCH", headers: { "content-type": "application/json", Prefer: "return=minimal" }, body: JSON.stringify({ name }) },
+  ).then(value => value ? normalizeRegistry(value) : undefined),
   deleteGateway: (id: string) => request<ModelRegistry>(
     `/api/v1/model-management/gateways/${encodeURIComponent(id)}`,
     { method: "DELETE" },

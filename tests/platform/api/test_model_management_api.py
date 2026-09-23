@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import cast
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -94,6 +96,99 @@ def management_runtime_service(
     app.dependency_overrides[runtime_service] = lambda: service
     yield service
     app.dependency_overrides.pop(runtime_service, None)
+
+
+@pytest.mark.parametrize("minimal", [False, True])
+def test_gateway_name_save_is_name_only_and_does_not_read_after_write(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+    minimal: bool,
+) -> None:
+    gateway = publication_api.gateways[0]
+    original = deepcopy(gateway)
+    path = f"/api/v1/model-management/gateways/{gateway['id']}/name"
+    headers = {"Prefer": "return=minimal"} if minimal else {}
+    snapshot = management_runtime_service.registry()
+    with patch.object(management_runtime_service, "registry", side_effect=(
+        AssertionError("No inventory read is allowed") if minimal
+        else [snapshot, AssertionError("No inventory read after write")]
+    )) as read:
+        response = client.patch(path, json={"name": "  Finance Gateway  "}, headers=headers)
+    assert response.status_code == (204 if minimal else 200)
+    assert read.call_count == (0 if minimal else 1)
+    assert gateway["name"] == "Finance Gateway"
+    assert {key: value for key, value in gateway.items() if key not in {"name", "updated_at"}} == {
+        key: value for key, value in original.items() if key not in {"name", "updated_at"}
+    }
+    if minimal:
+        assert not response.content and response.headers["Preference-Applied"] == "return=minimal"
+    else:
+        registry = response.json()
+        assert registry["gateway_name_edit_supported"] is True
+        assert next(item for item in registry["gateways"] if item["id"] == str(gateway["id"]))[
+            "name"
+        ] == "Finance Gateway"
+        assert all(runtime["gateway_name"] == "Finance Gateway" for runtime in registry["runtimes"]
+                   if runtime["gateway_profile_id"] == str(gateway["id"]))
+
+
+@pytest.mark.parametrize("payload", [
+    {"name": "   "}, {"name": "x" * 121}, {"name": "New", "enabled": False},
+    {"name": "New", "credential": "never-accepted"},
+])
+def test_gateway_name_rejects_extra_fields_and_invalid_names(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+    payload: dict[str, object],
+) -> None:
+    del management_runtime_service
+    original = deepcopy(publication_api.gateways)
+    path = f"/api/v1/model-management/gateways/{original[0]['id']}/name"
+    response = client.patch(path, json=payload, headers={"Prefer": "return=minimal"})
+    assert response.status_code == 422
+    assert publication_api.gateways == original
+    assert "never-accepted" not in response.text
+
+
+@pytest.mark.parametrize("access", ["anonymous", "member", "foreign-origin"])
+def test_gateway_name_preserves_session_owner_and_origin_guards(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+    access: str,
+) -> None:
+    del management_runtime_service
+    original = deepcopy(publication_api.gateways)
+    owner = app.dependency_overrides[require_authenticated_session]()
+
+    def identity() -> SessionIdentity:
+        if access == "anonymous":
+            raise HTTPException(status_code=401, detail="Sign in required")
+        return SessionIdentity(
+            id=owner.id, email=owner.email, name=owner.name,
+            role="member" if access == "member" else "owner", method=owner.method,
+            session_expires_at=owner.session_expires_at,
+        )
+
+    with patch.dict(app.dependency_overrides, {require_authenticated_session: identity}):
+        response = client.patch(
+            f"/api/v1/model-management/gateways/{original[0]['id']}/name",
+            json={"name": "Not saved"},
+            headers=(
+                {"Origin": "https://foreign.example.test"} if access == "foreign-origin" else {}
+            ),
+        )
+    assert response.status_code == (401 if access == "anonymous" else 403)
+    assert publication_api.gateways == original
+
+
+def test_gateway_name_missing_record_returns_404_without_management_key(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+) -> None:
+    del management_runtime_service
+    original = deepcopy(publication_api.gateways)
+    response = client.patch(
+        f"/api/v1/model-management/gateways/{UUID(int=900)}/name",
+        json={"name": "Missing"}, headers={"Prefer": "return=minimal"},
+    )
+    assert response.status_code == 404
+    assert publication_api.gateways == original
 
 
 def test_default_backend_advertises_and_accepts_image_models(

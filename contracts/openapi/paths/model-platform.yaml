@@ -1,4 +1,49 @@
 paths:
+  /api/v1/model-management/gateways/{item_id}/name:
+    patch:
+      tags: [Model Control Plane]
+      operationId: renameGatewayProfile
+      summary: Update only a gateway display name
+      description: Requires an Owner session and the write-origin check. Routing, credentials and defaults are unchanged. No APIM mutation is performed.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      - name: Prefer
+        in: header
+        schema: {type: string, enum: ['return=minimal']}
+        description: Request a 204 acknowledgement without reading inventory after the write.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/GatewayProfileNameWrite
+      responses:
+        '200':
+          description: Registry snapshot prepared before the write with the confirmed name applied.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ModelRegistry
+        '204':
+          description: Name saved without an inventory response.
+          headers:
+            Preference-Applied:
+              schema: {type: string, const: 'return=minimal'}
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
   /api/v1/model-gateway/images/generations:
     post:
       tags: [Model Gateway]
