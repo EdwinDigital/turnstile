@@ -39,6 +39,7 @@ function useResizableColumns({
   resizeAtAllWidths?: boolean
 }): ResizeState {
   const [headerCells, setHeaderCells] = useState<HTMLElement[]>([])
+  const [portalContainers, setPortalContainers] = useState<Map<HTMLElement, HTMLSpanElement>>(() => new Map())
   const [widths, setWidths] = useState<number[] | null>(null)
   const [activeColumn, setActiveColumn] = useState<number | null>(null)
   const defaultWidthsRef = useRef<number[] | null>(null)
@@ -57,7 +58,7 @@ function useResizableColumns({
     setHeaderCells((current) => current.length === nextCells.length && current.every((cell, index) => cell === nextCells[index])
       ? current
       : nextCells)
-    if (signatureChanged || (widths && widths.length !== nextCells.length)) {
+    if (signatureChanged || (cellsChanged && headerCells.length > 0) || (widths && widths.length !== nextCells.length)) {
       setWidths(null)
       defaultWidthsRef.current = null
       lastVisibleWidthsRef.current = null
@@ -66,19 +67,26 @@ function useResizableColumns({
   })
 
   useLayoutEffect(() => {
+    const containers = new Map<HTMLElement, HTMLSpanElement>()
     const restorations = headerCells.map((cell) => {
       const previousPosition = cell.style.position
       const previousRole = cell.getAttribute("role")
       if (getComputedStyle(cell).position === "static") cell.style.position = "relative"
       if (cell.tagName !== "TH" && !previousRole) cell.setAttribute("role", "columnheader")
       cell.classList.add("resizable-column-header")
+      const container = document.createElement("span")
+      container.style.display = "contents"
+      cell.appendChild(container)
+      containers.set(cell, container)
       return () => {
+        container.remove()
         cell.classList.remove("resizable-column-header")
         cell.style.position = previousPosition
         if (previousRole) cell.setAttribute("role", previousRole)
         else cell.removeAttribute("role")
       }
     })
+    setPortalContainers(containers)
     return () => restorations.forEach((restore) => restore())
   }, [headerCells])
 
@@ -136,10 +144,10 @@ function useResizableColumns({
     const { pointerId } = event
     let dragging = false
 
-    setActiveColumn(index)
     const handlePointerMove = (pointerEvent: PointerEvent) => {
       const delta = pointerEvent.clientX - startX
       if (!dragging && Math.abs(delta) < RESIZE_THRESHOLD) return
+      if (!dragging) setActiveColumn(index)
       dragging = true
       const nextWidths = [...measured]
       nextWidths[index] = clampWidth(index, startWidth + delta)
@@ -169,7 +177,7 @@ function useResizableColumns({
       const defaultWidths = defaultWidthsRef.current
       if (!current || !defaultWidths || defaultWidths[index] == null) return current
       const nextWidths = [...current]
-      nextWidths[index] = defaultWidths[index]
+      nextWidths[index] = clampWidth(index, defaultWidths[index])
       return nextWidths
     })
   }
@@ -194,6 +202,8 @@ function useResizableColumns({
 
   const portals = enabled ? headerCells.map((cell, index) => {
     const label = cell.textContent?.trim()
+    const container = portalContainers.get(cell)
+    if (!container || container.parentElement !== cell) return null
     return createPortal(
       <span
         className="table-column-resizer"
@@ -202,7 +212,7 @@ function useResizableColumns({
         aria-orientation="vertical"
         aria-valuemin={minWidths[index] ?? DEFAULT_MIN_COLUMN_WIDTH}
         aria-valuemax={MAX_COLUMN_WIDTH}
-        aria-valuenow={widths?.[index] ?? Math.round(cell.getBoundingClientRect().width)}
+        aria-valuenow={clampWidth(index, widths?.[index] ?? cell.getBoundingClientRect().width)}
         aria-keyshortcuts="ArrowLeft ArrowRight Enter Space"
         data-active={activeColumn === index || undefined}
         data-resize-at-all-widths={resizeAtAllWidths || undefined}
@@ -216,7 +226,7 @@ function useResizableColumns({
         }}
         onKeyDown={(event) => resizeWithKeyboard(index, event)}
       />,
-      cell,
+      container,
       `column-resizer-${index}`,
     )
   }) : null
@@ -226,7 +236,7 @@ function useResizableColumns({
     enabled,
     overlay: activeColumn === null ? null : <div className="table-column-resize-overlay" data-resize-at-all-widths={resizeAtAllWidths || undefined} aria-hidden="true" />,
     portals,
-    widths,
+    widths: widths?.map((width, index) => clampWidth(index, width)) ?? null,
   }
 }
 
