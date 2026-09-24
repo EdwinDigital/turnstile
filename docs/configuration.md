@@ -8,7 +8,7 @@ Copy `.env.example` to `.env` for the API and `frontend/.env.example` to `fronte
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL 16+ connection string. Require TLS outside a developer machine. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Encrypts provider and integration credentials at rest. |
-| `MANAGEMENT_API_KEY` | Protects management automation where session authentication is unavailable. |
+| `MANAGEMENT_API_KEY` | Additional bearer credential for management writes that require it; session and role checks still apply. |
 
 ## Authentication
 
@@ -48,6 +48,15 @@ check still apply. The request carries a matching ARM endpoint, tenant/subscript
 service/API identity, Gateway endpoint and subscription identifiers, not key values. The backend
 discovers ARM inventory, obtains or reuses the encrypted dashboard credential and requires a
 non-inference `GET /v1/models` connection check before registration succeeds.
+
+The Register APIM and initialization dialogs accept the configured `MANAGEMENT_API_KEY` in
+the masked Management credential field. Initialization retry and Self-hosted connection
+validation request the same credential in a confirmation dialog. It is sent only in the
+`Authorization: Bearer` header, never in the target JSON, URL, browser storage or React Query
+mutation variables. Registration, retry and validation clear it after each attempt; initialization
+retains it only in the open dialog between preview and confirmation and clears it on failure or
+submission. The existing Owner session and write-origin checks remain required. No management
+credential is compiled into the frontend or obtained automatically by the browser.
 
 `APIM_GATEWAY_PROFILE_ID` explicitly binds the legacy global configuration to one registered
 profile. When that ID is absent, a complete global APIM resource identity must match exactly one

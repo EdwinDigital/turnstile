@@ -23,12 +23,14 @@ const apiCode = await compile("../../../frontend/src/data-sources/apim/api.ts")
 const queryCode = await compile("../../../frontend/src/data-sources/apim/queries.ts")
 const componentCode = await compile("../../../frontend/src/components/model-management/gateway-targets.tsx")
 const onboardingCode = await compile("../../../frontend/src/components/model-management/apim-onboarding-dialog.tsx")
+const credentialCode = await compile("../../../frontend/src/components/model-management/management-credential.tsx")
 
 function componentHarness(exportName, props, { operation = null, mutationPending = false, code = componentCode, api = {} } = {}) {
   const slots = []
   let cursor = 0
   const effects = []
   const syncCalls = []
+  const mutationVariables = []
   const queryClient = { setQueryData() {}, invalidateQueries() { return Promise.resolve() } }
   const imports = {
     react: {
@@ -58,8 +60,9 @@ function componentHarness(exportName, props, { operation = null, mutationPending
           mutate: () => { syncCalls.push(options); options.onSuccess?.({ operation: { id: "unit-operation" } }) },
           async mutateAsync(value) {
             state.pending = true
+            mutationVariables.push(value)
             try {
-              const result = await options.mutationFn(value)
+              const result = await options.mutationFn(value, { client: queryClient })
               await options.onSuccess?.(result, value)
               return result
             } catch (error) { state.error = error; throw error }
@@ -77,6 +80,7 @@ function componentHarness(exportName, props, { operation = null, mutationPending
       },
       storeGatewayDeployment: async () => {},
       storeGatewayDeploymentName: async () => {},
+      storeApimTarget: async () => {},
     },
     "../../lib/gateway-topology": gatewayTopology,
   }
@@ -85,7 +89,7 @@ function componentHarness(exportName, props, { operation = null, mutationPending
   const nodes = value => Array.isArray(value) ? value.flatMap(nodes)
     : value && typeof value === "object" ? [value, ...nodes(value.props?.children)] : []
   const render = () => { cursor = 0; return exports[exportName](props) }
-  return { props, syncCalls, effects, nodes, render, all: () => nodes(render()), find: predicate => nodes(render()).find(predicate) }
+  return { props, syncCalls, effects, mutationVariables, nodes, render, all: () => nodes(render()), find: predicate => nodes(render()).find(predicate) }
 }
 
 class ApiError extends Error {
@@ -181,11 +185,40 @@ test("initialization clients use exact URLs and preserve authorization errors", 
   await api.startApimOnboarding(start)
   await api.retryApimOnboarding("first/second")
   assert.equal(calls[0][0], "/api/v1/model-management/apim-onboarding/preview")
-  assert.equal(calls[0][1], request)
+  assert.deepEqual(JSON.parse(calls[0][1].body), request)
+  assert.equal(calls[0][1].headers.Authorization, undefined)
   assert.equal(calls[1][0], "/api/v1/model-management/apim-onboarding")
-  assert.equal(calls[1][1], start)
+  assert.deepEqual(JSON.parse(calls[1][1].body), start)
   assert.equal(calls[2][0], "/api/v1/model-management/apim-onboarding/first%2Fsecond/retry")
   assert.equal(calls[2][1].method, "POST")
+})
+
+test("management credentials stay in request headers for protected Gateway actions", async () => {
+  const calls = []
+  const api = apiHarness(async (...args) => { calls.push(args); return {} })
+  const credential = "unit-management-credential"
+  const target = { name: "Unit APIM" }
+  const preview = { tenant_id: "unit-tenant", resource_id: "unit-resource" }
+  const start = { request: preview, confirmation_sha256: "a".repeat(64) }
+  await api.registerApimTarget(target, credential)
+  await api.previewApimOnboarding(preview, credential)
+  await api.startApimOnboarding(start, credential)
+  await api.retryApimOnboarding("first/second", credential)
+  await api.validateSelfHostedGateway("first/second", credential)
+  assert.equal(calls.length, 5)
+  for (const [path, init] of calls) {
+    assert.equal(init.method, "POST")
+    assert.equal(init.headers.Authorization, `Bearer ${credential}`)
+    assert.equal(path.includes(credential), false)
+    assert.equal((init.body ?? "").includes(credential), false)
+  }
+  assert.deepEqual(JSON.parse(calls[0][1].body), target)
+  assert.deepEqual(JSON.parse(calls[1][1].body), preview)
+  assert.deepEqual(JSON.parse(calls[2][1].body), start)
+  assert.equal(calls[3][1].body, undefined)
+  assert.equal(calls[4][1].body, undefined)
+  assert.ok(calls[3][0].includes("first%2Fsecond"))
+  assert.ok(calls[4][0].includes("first%2Fsecond"))
 })
 
 test("initialization polls only active tasks and replaces stale attempts after accepted retry", async () => {
@@ -235,6 +268,40 @@ function onboardingHarness(api, extra = {}) {
 }
 const submitForm = harness => harness.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
 
+test("management credential field is masked and one-shot dialogs clear it after failure", async () => {
+  const field = componentHarness("ManagementCredentialField", {
+    value: "", disabled: false, onChange() {},
+  }, { code: credentialCode })
+  const input = field.find(node => node.type === "Input")
+  assert.equal(input.props.type, "password")
+  assert.equal(input.props.autoComplete, "off")
+  const submitted = []
+  const dialog = componentHarness("ManagementCredentialDialog", {
+    title: "Validate connection", targetName: "Unit", submitLabel: "Validate",
+    busy: false, available: true, error: null, onClose() {},
+    async onConfirm(credential) { submitted.push(credential); throw new Error("HTTP 401") },
+  }, { code: credentialCode })
+  dialog.find(node => node.type.name === "ManagementCredentialField").props.onChange("unit-secret")
+  await submitForm(dialog)
+  assert.deepEqual(submitted, ["unit-secret"])
+  assert.equal(dialog.find(node => node.type.name === "ManagementCredentialField").props.value, "")
+})
+
+test("registration keeps management credentials out of mutation variables", async () => {
+  const calls = []
+  const harness = componentHarness("GatewayRegistrationAction", {}, { api: {
+    async registerApimTarget(value, credential) { calls.push({ value, credential }); return topology() },
+  } })
+  harness.find(node => node.type === "Button").props.onClick()
+  const dialog = harness.find(node => node.type.name === "GatewayRegistrationDialog")
+  const payload = { name: "Unit APIM" }
+  await dialog.props.onSave(payload, "unit-management-credential")
+  assert.equal(calls[0].credential, "unit-management-credential")
+  assert.equal(calls[0].value, payload)
+  assert.deepEqual(harness.mutationVariables, [payload])
+  assert.equal(JSON.stringify(harness.mutationVariables).includes("unit-management-credential"), false)
+})
+
 test("initialization uses the confirmed server plan and invalidates it on Back", async () => {
   const plan = initializationPlan()
   const calls = []
@@ -269,6 +336,21 @@ test("blocked initialization plans can recheck but never start", async () => {
   assert.equal(checks, 2)
 })
 
+test("initialization credentials remain dialog-local across preview and clear after submission", async () => {
+  const calls = []
+  const harness = onboardingHarness({
+    previewApimOnboarding: async (value, credential) => { calls.push({ value, credential }); return initializationPlan() },
+    startApimOnboarding: async (value, credential) => { calls.push({ value, credential }); return { operation: { id: "unit-operation" } } },
+  })
+  harness.find(node => node.type === "ManagementCredentialField").props.onChange("unit-management-credential")
+  await submitForm(harness)
+  assert.equal(harness.find(node => node.type === "ManagementCredentialField").props.value, "unit-management-credential")
+  await submitForm(harness)
+  assert.deepEqual(calls.map(call => call.credential), ["unit-management-credential", "unit-management-credential"])
+  assert.equal(harness.find(node => node.type === "ManagementCredentialField").props.value, "")
+  assert.equal(JSON.stringify(harness.mutationVariables).includes("unit-management-credential"), false)
+})
+
 test("initialization prevents duplicate submission and dismissal until preview settles", async () => {
   let finish
   let calls = 0
@@ -299,18 +381,36 @@ test("initialization error preserves the confirmed plan and disables unavailable
   assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
 })
 
-test("initialization progress retains failure, exact retry identity and completed steps", () => {
+test("initialization progress retains failure, exact retry identity and completed steps", async () => {
   const retries = []
   const operation = { id: "failed-task", semantic_preview: initializationPlan(), status: "failed", worker_available: true,
     checkpoint: { completed_steps: ["validate_target", "create_api"], retry_of: "previous-task" }, error_message: "Permission preflight failed" }
-  const harness = componentHarness("ApimOnboardingRow", { operation, available: true, retryingId: null, onRetry: id => retries.push(id) }, { code: onboardingCode })
+  const harness = componentHarness("ApimOnboardingRow", { operation, available: true, retryingId: null, onRetry: async (id, credential) => { retries.push({ id, credential }) } }, { code: onboardingCode })
   assert.equal(harness.all().filter(node => node.props?.["data-complete"] === true).length, 2)
   harness.find(node => node.props?.["aria-label"] === "Retry initialization").props.onClick()
-  assert.deepEqual(retries, ["failed-task"])
+  assert.deepEqual(retries, [])
+  await harness.find(node => node.type === "ManagementCredentialDialog").props.onConfirm("unit-management-credential")
+  assert.deepEqual(retries, [{ id: "failed-task", credential: "unit-management-credential" }])
   harness.find(node => node.props?.["aria-label"] === "Initialization progress").props.onClick()
   assert.equal(harness.find(node => node.props?.role === "alert").props.children, "Permission preflight failed")
   harness.props.retryingId = "another-task"
   assert.equal(harness.find(node => node.props?.["aria-label"] === "Retry initialization").props.disabled, true)
+})
+
+test("Self-hosted validation prompts before requesting and never caches the credential", async () => {
+  const calls = []
+  const target = topology({ id: "edge", apim_target_id: "first", kind: "self_hosted" })
+  const harness = componentHarness("GatewayTargetGroup", {
+    target, profile: profiles[0], canManage: true, syncAvailable: true, lifecycleAvailable: true,
+  }, { api: {
+    async validateSelfHostedGateway(id, credential) { calls.push({ id, credential }); return target.deployments[0] },
+  } })
+  harness.find(node => node.type === "DropdownMenuItem" && node.props.children?.includes?.("Validate connection")).props.onClick()
+  assert.deepEqual(calls, [])
+  await harness.find(node => node.type === "ManagementCredentialDialog").props.onConfirm("unit-management-credential")
+  assert.deepEqual(calls, [{ id: "edge", credential: "unit-management-credential" }])
+  assert.deepEqual(harness.mutationVariables, ["edge"])
+  assert.equal(harness.find(node => node.type === "ManagementCredentialDialog"), undefined)
 })
 
 test("Self-hosted clients keep exact identity, minimal name payload and mutation methods", async () => {
@@ -540,7 +640,8 @@ test("registration and sync clients use the exact public routes", async () => {
   await api.registerApimTarget(payload)
   await api.syncApimTarget("first/second")
   assert.equal(calls[0][0], "/api/v1/model-management/apim-targets")
-  assert.equal(calls[0][1], payload)
+  assert.deepEqual(JSON.parse(calls[0][1].body), payload)
+  assert.equal(calls[0][1].headers.Authorization, undefined)
   assert.equal(calls[1][0], "/api/v1/model-management/apim-targets/first%2Fsecond/inventory-sync")
   assert.equal(calls[1][1].method, "POST")
 })

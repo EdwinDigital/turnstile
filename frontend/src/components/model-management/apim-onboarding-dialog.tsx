@@ -3,11 +3,12 @@ import { useMutation } from "@tanstack/react-query"
 import { ArrowLeft, CheckCircle2, ChevronRight, Circle, CircleAlert, Play, RefreshCw } from "lucide-react"
 
 import { dataSource } from "../../data-sources/apim/api"
-import type { ApimOnboardingPlan, ApimOnboardingRequest, GatewayReleaseOperation } from "../../data-sources/apim/types"
+import type { ApimOnboardingPlan, ApimOnboardingRequest, ApimOnboardingStart, GatewayReleaseOperation } from "../../data-sources/apim/types"
 import { GatewayBrandLogo } from "../brand-logos"
 import { Button } from "../ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog"
 import { Input } from "../ui/input"
+import { ManagementCredentialDialog, ManagementCredentialField } from "./management-credential"
 
 const steps: Record<string, string> = {
   validate_target: "Validate instance",
@@ -45,11 +46,13 @@ export function ApimOnboardingDialog({ available, onClose, onAccepted, onSettled
 }) {
   const prefix = useId()
   const submitting = useRef(false)
+  const credentialForRequest = useRef("")
+  const [managementCredential, setManagementCredential] = useState("")
   const [value, setValue] = useState<ApimOnboardingRequest>({ tenant_id: "", resource_id: "", name: "" })
   const [plan, setPlan] = useState<ApimOnboardingPlan | null>(null)
-  const preview = useMutation({ mutationFn: dataSource.previewApimOnboarding, onSuccess: setPlan })
+  const preview = useMutation({ mutationFn: (request: ApimOnboardingRequest) => dataSource.previewApimOnboarding(request, credentialForRequest.current), onSuccess: setPlan })
   const start = useMutation({
-    mutationFn: dataSource.startApimOnboarding,
+    mutationFn: (request: ApimOnboardingStart) => dataSource.startApimOnboarding(request, credentialForRequest.current),
     onSuccess: accepted => onAccepted(accepted.operation),
     onSettled,
   })
@@ -69,17 +72,19 @@ export function ApimOnboardingDialog({ available, onClose, onAccepted, onSettled
         event.preventDefault()
         if (busy || submitting.current || !available || !valid) return
         submitting.current = true
+        credentialForRequest.current = managementCredential
         try {
           if (plan?.ready) {
             await start.mutateAsync({ request: plan.request, confirmation_sha256: plan.confirmation_sha256 })
+            setManagementCredential("")
           } else {
             await preview.mutateAsync({
               tenant_id: value.tenant_id.trim(), resource_id: value.resource_id.trim(),
               ...(value.name?.trim() ? { name: value.name.trim() } : {}),
             })
           }
-        } catch {}
-        finally { submitting.current = false }
+        } catch { setManagementCredential("") }
+        finally { credentialForRequest.current = ""; submitting.current = false }
       }}>
         <DialogHeader className="registry-editor-header"><DialogTitle>Initialize APIM</DialogTitle><DialogDescription>Managed Gateway initialization</DialogDescription></DialogHeader>
         <div className="registry-editor-body">
@@ -102,6 +107,7 @@ export function ApimOnboardingDialog({ available, onClose, onAccepted, onSettled
             <ol className="apim-onboarding-steps">{plan.steps.map(step => <li key={step}><Circle size={13} /><span>{steps[step] ?? step}</span></li>)}</ol>
             {plan.blockers.length > 0 && <ul className="registry-error apim-onboarding-blockers" role="alert">{plan.blockers.map(blocker => <li key={blocker}>{blockers[blocker] ?? blocker}</li>)}</ul>}
           </section>}
+          <ManagementCredentialField value={managementCredential} disabled={busy} onChange={setManagementCredential} />
           {!available && <div className="registry-error" role="status">Initialization is unavailable</div>}
         </div>
         {error && <div className="registry-error gateway-registration-error" role="alert">{error.message}</div>}
@@ -115,13 +121,15 @@ export function ApimOnboardingDialog({ available, onClose, onAccepted, onSettled
   </Dialog>
 }
 
-export function ApimOnboardingRow({ operation, available, retryingId, onRetry }: {
+export function ApimOnboardingRow({ operation, available, retryingId, retryError = null, onRetry }: {
   operation: GatewayReleaseOperation
   available: boolean
   retryingId: string | null
-  onRetry: (id: string) => void
+  retryError?: string | null
+  onRetry: (id: string, credential: string) => Promise<unknown>
 }) {
   const [expanded, setExpanded] = useState(true)
+  const [confirmRetry, setConfirmRetry] = useState(false)
   const detailsId = useId()
   const failed = operation.status === "failed"
   const succeeded = operation.status === "succeeded"
@@ -139,12 +147,16 @@ export function ApimOnboardingRow({ operation, available, retryingId, onRetry }:
       <div className="model-runtime-cell"><b>Managed Gateway</b><span>{typeof plan.api_id === "string" ? plan.api_id : ""}</span></div>
       <div className="model-pricing-cell"><b>{completed.size} / {Object.keys(steps).length}</b><span>{activeStep ? steps[activeStep] : "Complete"}</span></div>
       <div className="model-status-cell"><span className={`registry-health ${failed ? "unavailable" : succeeded ? "available" : "unchecked"}`} role="status"><i />{status}</span></div>
-      <div className="model-row-actions">{failed && <button type="button" title="Retry initialization" aria-label="Retry initialization" disabled={!available || retryingId !== null} onClick={() => onRetry(operation.id)}><RefreshCw size={14} className={retryingId === operation.id ? "spin" : ""} /></button>}</div>
+      <div className="model-row-actions">{failed && <button type="button" title="Retry initialization" aria-label="Retry initialization" disabled={!available || retryingId !== null} onClick={() => setConfirmRetry(true)}><RefreshCw size={14} className={retryingId === operation.id ? "spin" : ""} /></button>}</div>
     </article>
     <div id={detailsId} hidden={!expanded} className="apim-onboarding-progress">
       <ol className="apim-onboarding-steps">{Object.entries(steps).map(([step, label]) => <li key={step} data-complete={completed.has(step)} data-failed={failed && step === activeStep} aria-current={step === activeStep ? "step" : undefined}>{completed.has(step) ? <CheckCircle2 size={13} /> : failed && step === activeStep ? <CircleAlert size={13} /> : <Circle size={13} />}<span>{label}</span></li>)}</ol>
       {typeof operation.checkpoint.retry_of === "string" && <p className="apim-onboarding-retry-link">Retry of {operation.checkpoint.retry_of}</p>}
     </div>
     {(failed || operation.error_message) && <div className="registry-error gateway-operation-state" role="alert">{operation.error_message ?? "Initialization failed"}</div>}
+    {confirmRetry && <ManagementCredentialDialog title="Retry initialization" targetName={apimOnboardingOperationName(operation)} submitLabel="Retry" busy={retryingId !== null} available={available && failed} error={retryError} onClose={() => setConfirmRetry(false)} onConfirm={async credential => {
+      await onRetry(operation.id, credential)
+      setConfirmRetry(false)
+    }} />}
   </section>
 }

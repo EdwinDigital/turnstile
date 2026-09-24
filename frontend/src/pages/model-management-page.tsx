@@ -1100,8 +1100,9 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
   const queryClient = useQueryClient()
   const onboarding = useQuery({ ...finopsQueries.apimOnboarding(), enabled: activeTab === "gateways" && user?.role === "owner" })
   const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const onboardingRetryCredential = useRef("")
   const retryOnboarding = useMutation({
-    mutationFn: dataSource.retryApimOnboarding,
+    mutationFn: (id: string) => dataSource.retryApimOnboarding(id, onboardingRetryCredential.current),
     onSuccess: accepted => storeApimOnboarding(queryClient, accepted.operation),
     onSettled: () => { void queryClient.invalidateQueries({ queryKey: finopsKeys.apimOnboarding }) },
   })
@@ -1263,7 +1264,11 @@ function ModelWorkspace({ registry, tab, notice, error, busy, canRenameGateway, 
           <span>{(retryOnboarding.error ?? onboarding.error)?.message}</span>
           <Button type="button" variant="ghost" size="icon-sm" title="Refresh initialization" aria-label="Refresh initialization" onClick={() => { retryOnboarding.reset(); void onboarding.refetch() }}><RefreshCw size={14} /></Button>
         </div>}
-        {activeTab === "gateways" && visibleOnboardings.map(operation => <ApimOnboardingRow key={operation.id} operation={operation} available={onboarding.data?.available === true} retryingId={retryOnboarding.isPending ? retryOnboarding.variables ?? null : null} onRetry={id => retryOnboarding.mutate(id)} />)}
+        {activeTab === "gateways" && visibleOnboardings.map(operation => <ApimOnboardingRow key={operation.id} operation={operation} available={onboarding.data?.available === true} retryingId={retryOnboarding.isPending ? retryOnboarding.variables ?? null : null} retryError={retryOnboarding.error?.message ?? null} onRetry={async (id, credential) => {
+          onboardingRetryCredential.current = credential
+          try { return await retryOnboarding.mutateAsync(id) }
+          finally { onboardingRetryCredential.current = "" }
+        }} />)}
         {activeTab === "models" && models.map((model) => {
           const provider = registry.providers.find((item) => item.id === model.provider_id)
           const runtime = registry.runtimes.find((item) => item.id === model.runtime_id)

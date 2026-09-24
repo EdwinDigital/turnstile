@@ -13,6 +13,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu"
 import { Input } from "../ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
+import { ManagementCredentialDialog, ManagementCredentialField } from "./management-credential"
 
 const terminalStatuses = new Set(["succeeded", "failed", "restored"])
 
@@ -147,6 +148,8 @@ export function GatewayTargetGroup({ target, profile, canManage, syncAvailable, 
   const [editing, setEditing] = useState<{ entry?: GatewayEntry } | null>(null)
   const [renaming, setRenaming] = useState<GatewayEntry | null>(null)
   const [retiring, setRetiring] = useState<GatewayEntry | null>(null)
+  const [validating, setValidating] = useState<GatewayEntry | null>(null)
+  const validationCredential = useRef("")
   const queryClient = useQueryClient()
   const operation = useQuery(finopsQueries.gatewayReleaseOperation(operationId))
   const preview = useQuery(finopsQueries.selfHostedGatewayRemoval(
@@ -178,8 +181,8 @@ export function GatewayTargetGroup({ target, profile, canManage, syncAvailable, 
     },
   })
   const validate = useMutation({
-    mutationFn: dataSource.validateSelfHostedGateway,
-    onSuccess: result => storeGatewayDeployment(queryClient, result),
+    mutationFn: (id: string) => dataSource.validateSelfHostedGateway(id, validationCredential.current),
+    onSuccess: async result => { await storeGatewayDeployment(queryClient, result); setValidating(null) },
     onSettled: () => { void queryClient.invalidateQueries({ queryKey: finopsKeys.apimTargets }) },
   })
   const retire = useMutation({
@@ -240,7 +243,7 @@ export function GatewayTargetGroup({ target, profile, canManage, syncAvailable, 
             <DropdownMenuTrigger render={<button type="button" />} title="Gateway actions" aria-label="Gateway actions" disabled={busy}><MoreHorizontal size={14} /></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="gateway-actions-menu">
               <DropdownMenuItem onClick={() => { rename.reset(); setRenaming(entry) }}><TextCursorInput size={14} />Gateway name</DropdownMenuItem>
-              <DropdownMenuItem disabled={!entry.deployment.endpoint_url} onClick={() => validate.mutate(entry.deployment.id)}><Wifi size={14} />Validate connection</DropdownMenuItem>
+              <DropdownMenuItem disabled={!entry.deployment.endpoint_url} onClick={() => { validate.reset(); setValidating(entry) }}><Wifi size={14} />Validate connection</DropdownMenuItem>
               <DropdownMenuItem disabled={!syncAvailable} onClick={() => sync.mutate()}><RefreshCw size={14} />Synchronize inventory</DropdownMenuItem>
               <DropdownMenuItem onClick={() => { saveGateway.reset(); setEditing({ entry }) }}><ArrowRightLeft size={14} />Change APIM association</DropdownMenuItem>
               <DropdownMenuItem variant="destructive" onClick={() => { retire.reset(); setRetiring(entry) }}><Trash2 size={14} />Retire Gateway</DropdownMenuItem>
@@ -250,6 +253,11 @@ export function GatewayTargetGroup({ target, profile, canManage, syncAvailable, 
       </article>
     })}
     {details && <GatewayInventoryDialog entry={details} onClose={() => setDetails(null)} />}
+    {validating && <ManagementCredentialDialog title="Validate connection" targetName={validating.deployment.display_name} submitLabel="Validate" busy={validate.isPending} available={canManage && lifecycleAvailable && entryAvailable(validating)} error={validate.error?.message ?? null} onClose={() => setValidating(null)} onConfirm={async credential => {
+      validationCredential.current = credential
+      try { return await validate.mutateAsync(validating.deployment.id) }
+      finally { validationCredential.current = "" }
+    }} />}
     {editing && <SelfHostedGatewayEditor targets={targets.length ? targets : [target]} initialTargetId={profile.id} entry={editing.entry} preview={preview.data ?? null} loading={preview.isFetching} available={canManage && lifecycleAvailable && (!editing.entry || entryAvailable(editing.entry) && !preview.error)} busy={saveGateway.isPending} error={saveGateway.error?.message ?? preview.error?.message ?? null} onClose={() => setEditing(null)} onSave={(targetId, value) => saveGateway.mutateAsync({ targetId, value, previousId: editing.entry?.deployment.id })} />}
     {renaming && <GatewayDeploymentNameDialog entry={renaming} available={canManage && lifecycleAvailable && entryAvailable(renaming)} busy={rename.isPending} error={rename.error?.message ?? null} onClose={() => setRenaming(null)} onSave={name => rename.mutateAsync({ id: renaming.deployment.id, name })} />}
     {retiring && <GatewayRetirementDialog entry={retiring} preview={preview.data ?? null} loading={preview.isFetching} available={canManage && lifecycleAvailable && entryAvailable(retiring) && !preview.error} busy={retire.isPending} error={retire.error?.message ?? preview.error?.message ?? null} onClose={() => setRetiring(null)} onConfirm={() => retire.mutateAsync(retiring.deployment.id)} />}
@@ -284,23 +292,29 @@ export function GatewayInventoryDialog({ entry, onClose }: { entry: GatewayEntry
 
 export function GatewayRegistrationAction() {
   const [open, setOpen] = useState(false)
+  const managementCredential = useRef("")
   const queryClient = useQueryClient()
   const save = useMutation({
-    mutationFn: dataSource.registerApimTarget,
+    mutationFn: (value: ApimTargetWrite) => dataSource.registerApimTarget(value, managementCredential.current),
     onSuccess: async target => { await storeApimTarget(queryClient, target); setOpen(false) },
   })
   return <>
     <Button type="button" onClick={() => { save.reset(); setOpen(true) }}><Plus size={14} />Register APIM</Button>
-    {open && <GatewayRegistrationDialog busy={save.isPending} error={save.error?.message ?? null} onClose={() => setOpen(false)} onSave={value => save.mutateAsync(value)} />}
+    {open && <GatewayRegistrationDialog busy={save.isPending} error={save.error?.message ?? null} onClose={() => setOpen(false)} onSave={async (value, credential) => {
+      managementCredential.current = credential
+      try { return await save.mutateAsync(value) }
+      finally { managementCredential.current = "" }
+    }} />}
   </>
 }
 
 export function GatewayRegistrationDialog({ busy, error, onClose, onSave }: {
   busy: boolean; error: string | null; onClose: () => void
-  onSave: (value: ApimTargetWrite) => Promise<unknown>
+  onSave: (value: ApimTargetWrite, credential: string) => Promise<unknown>
 }) {
   const prefix = useId()
   const submitting = useRef(false)
+  const [managementCredential, setManagementCredential] = useState("")
   const [draft, setDraft] = useState({
     name: "", management_endpoint: "", tenant_id: "", subscription_id: "", resource_group: "",
     service_name: "", api_id: "", gateway_endpoint: "",
@@ -319,15 +333,16 @@ export function GatewayRegistrationDialog({ busy, error, onClose, onSave }: {
         event.preventDefault()
         if (busy || submitting.current || !valid) return
         submitting.current = true
-        try { await onSave(Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, value.trim()])) as typeof draft) }
+        try { await onSave(Object.fromEntries(Object.entries(draft).map(([key, value]) => [key, value.trim()])) as typeof draft, managementCredential) }
         catch {}
-        finally { submitting.current = false }
+        finally { setManagementCredential(""); submitting.current = false }
       }}>
         <DialogHeader className="registry-editor-header"><DialogTitle>Register APIM</DialogTitle><DialogDescription>Existing APIM instance</DialogDescription></DialogHeader>
         <div className="registry-editor-body"><div className="gateway-registration-fields">
           {(Object.keys(draft) as Array<keyof typeof draft>).map(key => <label className="registry-field" key={key} htmlFor={`${prefix}-${key}`}>
             <span className="registry-field-label">{labels[key]}</span><Input id={`${prefix}-${key}`} name={key} value={draft[key]} required disabled={busy} type={key.endsWith("endpoint") ? "url" : "text"} maxLength={key.endsWith("endpoint") ? 2048 : key === "name" ? 120 : 256} onChange={event => setDraft(current => ({ ...current, [key]: event.target.value }))} />
           </label>)}
+          <ManagementCredentialField value={managementCredential} disabled={busy} onChange={setManagementCredential} />
         </div></div>
         {error && <div className="registry-error gateway-registration-error" role="alert">{error}</div>}
         <DialogFooter className="registry-editor-footer"><Button variant="outline" type="button" disabled={busy} onClick={() => { if (!submitting.current) onClose() }}>Cancel</Button><Button type="submit" disabled={busy || !valid}><Save size={14} />{busy ? "Registering" : "Register"}</Button></DialogFooter>
