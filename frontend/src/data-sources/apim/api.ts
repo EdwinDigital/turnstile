@@ -10,6 +10,7 @@ import type {
   AnomalyRule,
   AnomalyRuleWrite,
   ApimTargetTopology,
+  ApimTargetRemovalPreview,
   ApimTargetTopologyList,
   ApimTargetWrite,
   AuditFinding,
@@ -144,6 +145,8 @@ function normalizeRegistry(registry: ModelRegistry): ModelRegistry {
   const runtimeIds = new Set(runtimes.map((runtime) => runtime.id))
   return {
     gateway_name_edit_supported: registry.gateway_name_edit_supported === true,
+    apim_target_topology_available: registry.apim_target_topology_available === true,
+    self_hosted_gateway_enabled: registry.self_hosted_gateway_enabled === true,
     context_pricing_supported: registry.context_pricing_supported === true,
     context_price_rules_supported: registry.context_price_rules_supported === true,
     backend_pool_session_affinity_supported: registry.backend_pool_session_affinity_supported === true,
@@ -217,15 +220,6 @@ const pivotTrend = (response: TrendApiResponse, metric: TrendMetric) => {
   }
   return [...rows.values()]
 }
-
-const managementRequest = <T,>(path: string, credential?: string, value?: unknown) => request<T>(path, {
-  method: "POST",
-  headers: {
-    ...(value === undefined ? {} : { "content-type": "application/json" }),
-    ...(credential ? { Authorization: `Bearer ${credential}` } : {}),
-  },
-  body: value === undefined ? undefined : JSON.stringify(value),
-})
 
 export const dataSource = {
   mode: "api" as const,
@@ -355,14 +349,14 @@ export const dataSource = {
       throw error
     }
   },
-  previewApimOnboarding: (value: ApimOnboardingRequest, credential?: string) => managementRequest<ApimOnboardingPlan>(
-    "/api/v1/model-management/apim-onboarding/preview", credential, value,
+  previewApimOnboarding: (value: ApimOnboardingRequest) => writeJson<ApimOnboardingPlan>(
+    "/api/v1/model-management/apim-onboarding/preview", value,
   ),
-  startApimOnboarding: (value: ApimOnboardingStart, credential?: string) => managementRequest<GatewayReleaseOperationAccepted>(
-    "/api/v1/model-management/apim-onboarding", credential, value,
+  startApimOnboarding: (value: ApimOnboardingStart) => writeJson<GatewayReleaseOperationAccepted>(
+    "/api/v1/model-management/apim-onboarding", value,
   ),
-  retryApimOnboarding: (id: string, credential?: string) => managementRequest<GatewayReleaseOperationAccepted>(
-    `/api/v1/model-management/apim-onboarding/${encodeURIComponent(id)}/retry`, credential,
+  retryApimOnboarding: (id: string) => request<GatewayReleaseOperationAccepted>(
+    `/api/v1/model-management/apim-onboarding/${encodeURIComponent(id)}/retry`, { method: "POST" },
   ),
   apimTargets: async (): Promise<ApimTargetTopologyList | null> => {
     try { return await request<ApimTargetTopologyList>("/api/v1/model-management/apim-targets") }
@@ -371,8 +365,14 @@ export const dataSource = {
       throw error
     }
   },
-  registerApimTarget: (value: ApimTargetWrite, credential?: string) => managementRequest<ApimTargetTopology>(
-    "/api/v1/model-management/apim-targets", credential, value,
+  registerApimTarget: (value: ApimTargetWrite) => writeJson<ApimTargetTopology>(
+    "/api/v1/model-management/apim-targets", value,
+  ),
+  previewApimTargetRemoval: (id: string) => request<ApimTargetRemovalPreview>(
+    `/api/v1/model-management/apim-targets/${encodeURIComponent(id)}/removal-preview`,
+  ),
+  removeApimTarget: (id: string) => request<ApimTargetRemovalPreview>(
+    `/api/v1/model-management/apim-targets/${encodeURIComponent(id)}`, { method: "DELETE" },
   ),
   syncApimTarget: (id: string) => request<GatewayReleaseOperationAccepted>(
     `/api/v1/model-management/apim-targets/${encodeURIComponent(id)}/inventory-sync`,
@@ -384,8 +384,8 @@ export const dataSource = {
   renameSelfHostedGateway: (id: string, name: string) => writeJson<void>(
     `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/name`, { display_name: name }, "PATCH",
   ),
-  validateSelfHostedGateway: (id: string, credential?: string) => managementRequest<GatewayDeploymentTopology>(
-    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/validations`, credential,
+  validateSelfHostedGateway: (id: string) => request<GatewayDeploymentTopology>(
+    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/validations`, { method: "POST" },
   ),
   selfHostedGatewayRemovalPreview: (id: string) => request<SelfHostedGatewayRemovalPreview>(
     `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/removal-preview`,

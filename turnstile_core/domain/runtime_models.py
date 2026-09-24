@@ -721,6 +721,8 @@ class RegistryResponse(StrictModel):
     runtimes: list[Runtime]
     models: list[ManagedModel]
     gateway_name_edit_supported: bool = False
+    apim_target_topology_available: bool = False
+    self_hosted_gateway_enabled: bool = False
     context_pricing_supported: bool = False
     context_price_rules_supported: bool = False
     backend_pool_session_affinity_supported: bool = False

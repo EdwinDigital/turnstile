@@ -74,6 +74,8 @@ paths:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets
   /api/v1/model-management/apim-targets/{gateway_profile_id}:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/removal-preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1removal-preview
   /api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1inventory-sync
   /api/v1/model-gateway/images/generations:
@@ -309,6 +311,10 @@ components:
       $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayAssociationChange
     SelfHostedGatewayRemovalPreview:
       $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayRemovalPreview
+    SelfHostedGatewaySummary:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewaySummary
+    ApimTargetRemovalPreview:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetRemovalPreview
     ApimOnboardingRequest:
       $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingRequest
     ApimOnboardingPlan:

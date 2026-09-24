@@ -45,6 +45,7 @@ from turnstile_core.domain.gateway_targets import (
     ApimOnboardingPlan,
     ApimOnboardingRequest,
     ApimOnboardingStart,
+    ApimTargetRemovalPreview,
     ApimTargetTopology,
     ApimTargetTopologyList,
     ApimTargetWrite,
@@ -169,9 +170,9 @@ def list_apim_onboarding_operations(
 )
 def preview_apim_onboarding(
     write: ApimOnboardingRequest, service: ApimOnboardingServiceDependency,
-    runtime: RuntimeService, identity: OwnerSession, authorization: Authorization = None,
+    identity: OwnerSession,
 ) -> ApimOnboardingPlan:
-    runtime.authorize(identity.role, authorization, manage=True)
+    del identity
     try:
         return service.preview(write)
     except ControlPlaneUnavailableError as error:
@@ -189,9 +190,8 @@ def preview_apim_onboarding(
 )
 def start_apim_onboarding(
     write: ApimOnboardingStart, service: ApimOnboardingServiceDependency,
-    runtime: RuntimeService, identity: OwnerSession, authorization: Authorization = None,
+    identity: OwnerSession,
 ) -> GatewayReleaseOperationAccepted:
-    runtime.authorize(identity.role, authorization, manage=True)
     try:
         return service.start(write, identity.email)
     except ControlPlaneUnavailableError as error:
@@ -210,9 +210,8 @@ def start_apim_onboarding(
 )
 def retry_apim_onboarding(
     operation_id: UUID, service: ApimOnboardingServiceDependency,
-    runtime: RuntimeService, identity: OwnerSession, authorization: Authorization = None,
+    identity: OwnerSession,
 ) -> GatewayReleaseOperationAccepted:
-    runtime.authorize(identity.role, authorization, manage=True)
     try:
         return service.retry(operation_id, identity.email)
     except ControlPlaneUnavailableError as error:
@@ -239,14 +238,43 @@ def get_apim_target_topology(
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
+@protected_router.get(
+    "/api/v1/model-management/apim-targets/{gateway_profile_id}/removal-preview",
+    response_model=ApimTargetRemovalPreview,
+)
+def preview_apim_target_removal(
+    gateway_profile_id: UUID, service: ControlPlaneService, identity: OwnerSession,
+) -> ApimTargetRemovalPreview:
+    del identity
+    try:
+        return service.apim_target_removal_preview(gateway_profile_id)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@protected_router.delete(
+    "/api/v1/model-management/apim-targets/{gateway_profile_id}",
+    response_model=ApimTargetRemovalPreview,
+)
+def remove_apim_target(
+    gateway_profile_id: UUID, service: ControlPlaneService, identity: OwnerSession,
+) -> ApimTargetRemovalPreview:
+    del identity
+    try:
+        return service.remove_apim_target(gateway_profile_id)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
 @protected_router.post(
     "/api/v1/model-management/apim-targets", response_model=ApimTargetTopology, status_code=201,
 )
 def register_apim_target_topology(
-    write: ApimTargetWrite, repository: Repository, runtime: RuntimeService,
-    identity: OwnerSession, authorization: Authorization = None,
+    write: ApimTargetWrite, repository: Repository, identity: OwnerSession,
 ) -> ApimTargetTopology:
-    runtime.authorize(identity.role, authorization, manage=True)
+    del identity
     settings = get_settings()
     if not settings.apim_target_registry_enabled:
         raise HTTPException(status_code=503, detail="APIM target registration is not enabled")
@@ -339,10 +367,9 @@ def preview_self_hosted_gateway_removal(
     response_model=GatewayDeploymentTopology,
 )
 def validate_self_hosted_gateway(
-    deployment_id: UUID, service: ControlPlaneService, runtime: RuntimeService,
-    identity: OwnerSession, authorization: Authorization = None,
+    deployment_id: UUID, service: ControlPlaneService, identity: OwnerSession,
 ) -> GatewayDeploymentTopology:
-    runtime.authorize(identity.role, authorization, manage=True)
+    del identity
     try:
         return service.validate_self_hosted_gateway(deployment_id)
     except ControlPlaneNotFoundError as error:

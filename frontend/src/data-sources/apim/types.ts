@@ -545,6 +545,7 @@ export type ApimTargetTopology = {
     inventory: GatewayDeploymentInventory | null
     configuration_endpoint: string
     published_models: GatewayPublishedModelSummary[]
+    published_models_available?: boolean
   }>
   management_endpoint: string
   gateway_endpoint: string | null
@@ -553,6 +554,7 @@ export type ApimTargetTopology = {
   self_hosted_gateway_count: number
   published_model_count: number
   published_models: GatewayPublishedModelSummary[]
+  published_models_available?: boolean
 }
 export type GatewayDeploymentTopology = ApimTargetTopology["deployments"][number]
 export type SelfHostedGatewayWrite = {
@@ -568,6 +570,18 @@ export type SelfHostedGatewayRemovalPreview = {
   deployment_id: string
   display_name: string
   model_count: number
+  models: GatewayPublishedModelSummary[]
+  removal_allowed: boolean
+  blockers: string[]
+}
+
+export type ApimTargetRemovalPreview = {
+  gateway_profile_id: string
+  service_name: string
+  self_hosted_gateway_count: number
+  runtime_count: number
+  model_count: number
+  self_hosted_gateways: Array<{ id: string; native_gateway_id: string; display_name: string }>
   models: GatewayPublishedModelSummary[]
   removal_allowed: boolean
   blockers: string[]
@@ -813,6 +827,8 @@ export type PriceSyncResponse = {
 
 export type ModelRegistry = {
   gateway_name_edit_supported?: boolean
+  apim_target_topology_available?: boolean
+  self_hosted_gateway_enabled?: boolean
   context_pricing_supported?: boolean
   context_price_rules_supported?: boolean
   backend_pool_session_affinity_supported?: boolean

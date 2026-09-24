@@ -300,6 +300,14 @@ schemas:
         type: boolean
         default: false
         description: Owner name-only PATCH and minimal acknowledgement are available.
+      apim_target_topology_available:
+        type: boolean
+        default: false
+        description: Registered APIM topology is enabled; the UI exposes separate Gateway and APIM instance workspaces.
+      self_hosted_gateway_enabled:
+        type: boolean
+        default: false
+        description: Self-hosted Gateway attachment and deployment selection are enabled. Existing lifecycle records remain available.
       context_pricing_supported:
         type: boolean
         default: false

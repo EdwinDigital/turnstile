@@ -113,8 +113,8 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 93
-    assert len(schemas) == 217
+    assert len(paths) == 94
+    assert len(schemas) == 219
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -170,6 +170,34 @@ def test_onboarding_contract_has_exact_models_and_durable_owner_operations() -> 
         dict[str, dict[str, object]], documented["GatewayReleaseOperation"]["properties"],
     )
     assert "apim_onboarding" in cast(list[str], properties["operation_kind"]["enum"])
+
+
+def test_apim_workspace_contract_preserves_owner_lifecycle_and_capabilities() -> None:
+    paths = _documented_paths()
+    root = "/api/v1/model-management/apim-targets/{gateway_profile_id}"
+    for path, method in ((root, "delete"), (root + "/removal-preview", "get")):
+        operation = cast(dict[str, object], paths[path][method])
+        assert operation["security"] == [{"sessionCookie": []}]
+        assert "Owner" in str(operation["description"])
+        assert "200" in cast(dict[str, object], operation["responses"])
+    removal = cast(dict[str, object], paths[root]["delete"])
+    assert "No Azure resource or container is deleted or modified" in str(removal["description"])
+    for path, method in (
+        ("/api/v1/model-management/apim-targets", "post"),
+        ("/api/v1/model-management/apim-onboarding", "post"),
+        ("/api/v1/model-management/apim-onboarding/preview", "post"),
+        ("/api/v1/model-management/apim-onboarding/{operation_id}/retry", "post"),
+        ("/api/v1/model-management/self-hosted-gateways/{deployment_id}/validations", "post"),
+    ):
+        operation = cast(dict[str, object], paths[path][method])
+        assert operation["security"] == [{"sessionCookie": []}]
+        assert "configured management authorization" not in str(operation["description"])
+    properties = cast(
+        dict[str, dict[str, object]], _documented_schemas()["ModelRegistry"]["properties"],
+    )
+    for name in ("apim_target_topology_available", "self_hosted_gateway_enabled"):
+        assert properties[name]["type"] == "boolean"
+        assert properties[name]["default"] is False
 
 
 def test_self_hosted_lifecycle_contract_preserves_minimal_names_and_metadata_boundaries() -> None:

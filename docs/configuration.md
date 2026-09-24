@@ -43,20 +43,27 @@ connection checks are ready. With the flag off, the existing single-target publi
 unchanged. Registration does not create APIM instances, Gateway containers or role assignments.
 
 When enabled, an Owner can register an existing APIM through
-`POST /api/v1/model-management/apim-targets`; normal management authorization and the write-origin
+`POST /api/v1/model-management/apim-targets`; the Owner session and write-origin
 check still apply. The request carries a matching ARM endpoint, tenant/subscription/resource-group/
 service/API identity, Gateway endpoint and subscription identifiers, not key values. The backend
 discovers ARM inventory, obtains or reuses the encrypted dashboard credential and requires a
 non-inference `GET /v1/models` connection check before registration succeeds.
 
-The Register APIM and initialization dialogs accept the configured `MANAGEMENT_API_KEY` in
-the masked Management credential field. Initialization retry and Self-hosted connection
-validation request the same credential in a confirmation dialog. It is sent only in the
-`Authorization: Bearer` header, never in the target JSON, URL, browser storage or React Query
-mutation variables. Registration, retry and validation clear it after each attempt; initialization
-retains it only in the open dialog between preview and confirmation and clears it on failure or
-submission. The existing Owner session and write-origin checks remain required. No management
-credential is compiled into the frontend or obtained automatically by the browser.
+With topology support enabled, Model Management has four tabs: Models, Connections, Gateways,
+and APIM instances. Gateways lists active Self-hosted deployments, including those with unknown
+connection state or no endpoint. APIM instances shows each instance with its Managed and
+Self-hosted children. Older backends without the topology capability retain the three-tab view.
+
+APIM registration, initialization preview/start/retry and Self-hosted connection validation use
+the existing Owner session and write-origin checks. They do not prompt for `MANAGEMENT_API_KEY`
+or require an additional management bearer header. Other management endpoints that require
+that credential retain their existing authorization contract.
+
+APIM removal first previews Self-hosted Gateway, runtime and model dependencies, then rechecks
+them before disabling the profile and retiring its deployments. It preserves target metadata and
+history and never deletes or modifies Azure resources, Gateway containers or hosting environments.
+Self-hosted attachment controls follow `SELF_HOSTED_GATEWAY_ENABLED`; existing records retain
+their name and lifecycle operations, subject to Owner, target and dependency checks.
 
 `APIM_GATEWAY_PROFILE_ID` explicitly binds the legacy global configuration to one registered
 profile. When that ID is absent, a complete global APIM resource identity must match exactly one

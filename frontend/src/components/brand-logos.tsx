@@ -5,6 +5,7 @@ import { Cloud, Database, Network } from "lucide-react"
 import deepseekIcon from "../assets/models/deepseek.svg"
 import kimiIcon from "../assets/models/kimi.svg"
 import amazonBedrockIcon from "../assets/providers/amazon-bedrock.svg"
+import azureGatewaysIcon from "../assets/providers/azure-gateways.svg"
 import type { BrandKey } from "../data-sources/apim/types"
 import type { RuntimeAccessPoint } from "../lib/access-points"
 
@@ -100,6 +101,10 @@ export function FoundryLogo({ size }: { size: number }) {
 // Azure API Management — official service icon from Microsoft's Azure
 // architecture icon set (Azure_Public_Service_Icons_V24, integration /
 // icon-service-API-Management-Services.svg). Gradient ids are per-instance.
+export function ManagedGatewayLogo({ size }: { size: number }) {
+  return <img aria-hidden="true" src={azureGatewaysIcon} width={size} height={size} alt="" />
+}
+
 export function ApimLogo({ size }: { size: number }) {
   const uid = `apim-${useId().replace(/:/g, "")}`
   return (

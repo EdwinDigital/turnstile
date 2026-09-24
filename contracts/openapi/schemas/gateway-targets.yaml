@@ -58,6 +58,44 @@ schemas:
     type: string
     enum: [queued, in_progress, succeeded, partial, failed, rolling_back, rolled_back]
     title: TargetRolloutStatus
+  SelfHostedGatewaySummary:
+    properties:
+      id: {type: string, format: uuid, title: Id}
+      native_gateway_id: {type: string, maxLength: 80, minLength: 1, title: Native Gateway Id}
+      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
+    additionalProperties: false
+    type: object
+    required: [id, native_gateway_id, display_name]
+    title: SelfHostedGatewaySummary
+  ApimTargetRemovalPreview:
+    properties:
+      gateway_profile_id: {type: string, format: uuid, title: Gateway Profile Id}
+      service_name: {type: string, title: Service Name}
+      self_hosted_gateway_count: {type: integer, minimum: 0, title: Self Hosted Gateway Count}
+      runtime_count: {type: integer, minimum: 0, title: Runtime Count}
+      model_count: {type: integer, minimum: 0, title: Model Count}
+      self_hosted_gateways:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewaySummary
+        type: array
+        title: Self Hosted Gateways
+        default: []
+      models:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayPublishedModelSummary
+        type: array
+        title: Models
+        default: []
+      removal_allowed: {type: boolean, title: Removal Allowed}
+      blockers:
+        items: {type: string}
+        type: array
+        title: Blockers
+        default: []
+    additionalProperties: false
+    type: object
+    required: [gateway_profile_id, service_name, self_hosted_gateway_count, runtime_count, model_count, removal_allowed]
+    title: ApimTargetRemovalPreview
   SelfHostedGatewayWrite:
     properties:
       native_gateway_id: {type: string, maxLength: 80, minLength: 1, title: Native Gateway Id}

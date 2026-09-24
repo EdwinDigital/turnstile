@@ -267,6 +267,8 @@ class ModelRuntimeService:
         runtime_ids = {row["id"] for row in runtimes}
         return RegistryResponse(
             gateway_name_edit_supported=True,
+            apim_target_topology_available=self._settings.apim_target_registry_enabled,
+            self_hosted_gateway_enabled=self._settings.self_hosted_gateway_enabled,
             context_pricing_supported=True,
             context_price_rules_supported=True,
             backend_pool_session_affinity_supported=True,

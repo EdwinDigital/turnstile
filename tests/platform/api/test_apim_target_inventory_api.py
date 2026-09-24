@@ -10,6 +10,7 @@ from backend.api import app, control_plane_service
 from backend.http.publication_auth import require_publication_owner
 from backend.http.service_dependencies import apim_onboarding_service
 from backend.http.session import SessionIdentity, require_authenticated_session
+from backend.services.runtime_service import ModelRuntimeService
 from tests.backend.model_platform.control_plane_support import TEST_CIPHER
 from tests.backend.model_platform.test_apim_onboarding import onboarding_request, service_fixture
 from tests.backend.model_platform.test_apim_target_inventory import (
@@ -31,6 +32,55 @@ from turnstile_core.config import Settings
 from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.control_plane import GatewayControlPlaneService
+
+
+@pytest.mark.parametrize("registry_enabled", [False, True])
+@pytest.mark.parametrize("self_hosted_enabled", [False, True])
+def test_control_plane_wires_source_capabilities_and_existing_gateway_probe(
+    registry_enabled: bool, self_hosted_enabled: bool,
+) -> None:
+    settings = Settings.model_construct(
+        apim_target_registry_enabled=registry_enabled,
+        self_hosted_gateway_enabled=self_hosted_enabled,
+    )
+    dependencies = "backend.http.service_dependencies"
+    with (
+        patch(f"{dependencies}.get_settings", return_value=settings),
+        patch(f"{dependencies}.CredentialCipher.from_settings", return_value=TEST_CIPHER),
+        patch(f"{dependencies}.price_catalog"),
+        patch(f"{dependencies}.GatewayConnectionProbe") as probe,
+        patch(f"{dependencies}.GatewayControlPlaneService") as service,
+    ):
+        control_plane_service(InMemoryRepository())
+    options = service.call_args.kwargs
+    assert options["target_registry_enabled"] is registry_enabled
+    assert options["deployment_scoping_enabled"] is self_hosted_enabled
+    assert options["gateway_connection_probe"] is probe.return_value
+    probe.assert_called_once_with()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_registry_declares_source_topology_and_self_hosted_capabilities(enabled: bool) -> None:
+    service = ModelRuntimeService(InMemoryRepository(), Settings.model_construct(
+        apim_target_registry_enabled=enabled, self_hosted_gateway_enabled=enabled,
+    ))
+    registry = service.registry()
+    assert registry.apim_target_topology_available is enabled
+    assert registry.self_hosted_gateway_enabled is enabled
+
+
+def test_apim_removal_http_preserves_history_and_rejects_dependencies(
+    publication_api: InMemoryRepository,
+) -> None:
+    publication_api.upsert_apim_target(target())
+    path = f"/api/v1/model-management/apim-targets/{TARGET}"
+    assert client.get(path + "/removal-preview").json()["removal_allowed"] is False
+    assert client.delete(path).status_code == 409
+    publication_api.models = []
+    publication_api.runtimes = []
+    assert client.delete(path).status_code == 200
+    assert client.get(path).status_code == 404
+    assert publication_api.get_apim_target(TARGET) is not None
 
 
 def test_multi_target_http_create_is_idempotent_and_credential_safe(
@@ -91,7 +141,7 @@ def test_self_hosted_http_lifecycle_is_metadata_only_and_name_acknowledgement_is
     repository, service = lifecycle_service()
     add_path = f"/api/v1/model-management/apim-targets/{TARGET}/self-hosted-gateways"
     values = self_hosted_write().model_dump(mode="json")
-    assert client.post(add_path, json=values).status_code == 503
+    assert client.post(add_path, json=values).status_code == 404
     with patch.dict(app.dependency_overrides, {control_plane_service: lambda: service}):
         added = client.post(add_path, json=values)
         assert added.status_code == 201
@@ -117,22 +167,23 @@ def test_self_hosted_http_lifecycle_is_metadata_only_and_name_acknowledgement_is
 
 
 @pytest.mark.usefixtures("management_runtime_service")
-def test_self_hosted_http_validation_requires_management_auth(
+def test_self_hosted_http_validation_uses_owner_session_without_extra_credential(
     publication_api: InMemoryRepository,
 ) -> None:
     del publication_api
     _, service = lifecycle_service()
+    expected = service.add_self_hosted_gateway(TARGET, self_hosted_write())
     path = f"/api/v1/model-management/self-hosted-gateways/{TARGET}/validations"
     with (
         patch.dict(app.dependency_overrides, {control_plane_service: lambda: service}),
-        patch.object(service, "validate_self_hosted_gateway") as validate,
+        patch.object(service, "validate_self_hosted_gateway", return_value=expected) as validate,
     ):
-        assert client.post(path).status_code == 401
-        validate.assert_not_called()
+        assert client.post(path).status_code == 200
+        validate.assert_called_once_with(TARGET)
 
 
 @pytest.mark.parametrize("access", ["anonymous", "member", "foreign-origin"])
-def test_self_hosted_http_methods_preserve_owner_and_origin_guards(
+def test_gateway_lifecycle_http_methods_preserve_owner_and_origin_guards(
     publication_api: InMemoryRepository, access: str,
 ) -> None:
     del publication_api
@@ -152,6 +203,7 @@ def test_self_hosted_http_methods_preserve_owner_and_origin_guards(
     values = self_hosted_write().model_dump(mode="json")
     headers = {"Origin": "https://foreign.example.test"} if access == "foreign-origin" else {}
     add_path = f"/api/v1/model-management/apim-targets/{TARGET}/self-hosted-gateways"
+    apim_path = f"/api/v1/model-management/apim-targets/{TARGET}"
     with patch.dict(app.dependency_overrides, {
         control_plane_service: lambda: service, require_authenticated_session: identity,
     }):
@@ -160,11 +212,13 @@ def test_self_hosted_http_methods_preserve_owner_and_origin_guards(
             ("PATCH", path + "/name", {"display_name": "Name"}),
             ("POST", path + "/validations", {}), ("DELETE", path, {}),
             ("PUT", path + "/apim-association", {**values, "apim_target_id": str(TARGET)}),
+            ("DELETE", apim_path, {}),
         ):
             response = client.request(method, url, json=body, headers=headers)
             assert response.status_code == (401 if access == "anonymous" else 403)
         if access != "foreign-origin":
             assert client.get(path + "/removal-preview").status_code in {401, 403}
+            assert client.get(apim_path + "/removal-preview").status_code in {401, 403}
     assert service.mock_calls == []
 
 
@@ -175,33 +229,29 @@ def test_onboarding_http_preview_start_idempotency_and_linked_retry(
     del publication_api
     service, repository, _, _ = service_fixture()
     path = "/api/v1/model-management/apim-onboarding"
-    headers = {"Authorization": "Bearer management-secret"}
     with patch.dict(app.dependency_overrides, {apim_onboarding_service: lambda: service}):
         assert client.get(path).json()["available"] is True
-        denied = client.post(path + "/preview", json=onboarding_request().model_dump(mode="json"))
-        assert denied.status_code == 401
-        preview = client.post(path + "/preview", headers=headers,
-                              json=onboarding_request().model_dump(mode="json"))
+        preview = client.post(path + "/preview", json=onboarding_request().model_dump(mode="json"))
         assert preview.status_code == 200
         plan = preview.json()
         write = {"request": plan["request"], "confirmation_sha256": plan["confirmation_sha256"]}
-        started = client.post(path, headers=headers, json=write)
+        started = client.post(path, json=write)
         assert started.status_code == 202
         operation = started.json()["operation"]
-        repeated = client.post(path, headers=headers, json=write)
+        repeated = client.post(path, json=write)
         assert repeated.json()["operation"]["id"] == operation["id"]
         listed = client.get(path).json()["items"]
         assert len(listed) == 1 and listed[0]["id"] == operation["id"]
         assert "primary" not in started.text and "ciphertext" not in started.text
-        changed = client.post(path, headers=headers, json={
+        changed = client.post(path, json={
             **write, "confirmation_sha256": "b" * 64,
         })
         assert changed.status_code == 409
-        assert client.post(f"{path}/{operation['id']}/retry", headers=headers).status_code == 409
+        assert client.post(f"{path}/{operation['id']}/retry").status_code == 409
         row = repository.claim_gateway_release_operation("worker", 180)
         assert row is not None
         repository.transition_gateway_release_operation(row["id"], "queued", "failed", {}, "worker")
-        retried = client.post(f"{path}/{operation['id']}/retry", headers=headers)
+        retried = client.post(f"{path}/{operation['id']}/retry")
         assert retried.status_code == 202
         assert retried.json()["operation"]["checkpoint"]["retry_of"] == operation["id"]
 
@@ -311,15 +361,12 @@ def test_target_api_returns_persisted_topology_and_not_found(
 
 
 @pytest.mark.usefixtures("management_runtime_service")
-def test_target_registration_honors_feature_and_management_gates(
+def test_target_registration_honors_feature_and_owner_session_gates(
     publication_api: InMemoryRepository,
 ) -> None:
     path = "/api/v1/model-management/apim-targets"
     with patch("backend.http.model_platform.get_settings", return_value=Settings.model_construct()):
-        assert client.post(path, json=payload()).status_code == 401
-        response = client.post(
-            path, json=payload(), headers={"Authorization": "Bearer management-secret"}
-        )
+        response = client.post(path, json=payload())
         assert response.status_code == 503
     publication_api.upsert_apim_target(target())
     expected = GatewayControlPlaneService(publication_api).apim_target_topology(TARGET)
@@ -332,9 +379,7 @@ def test_target_registration_honors_feature_and_management_gates(
         ),
         patch("backend.http.model_platform.register_existing_apim_target", return_value=expected),
     ):
-        response = client.post(
-            path, json=payload(), headers={"Authorization": "Bearer management-secret"}
-        )
+        response = client.post(path, json=payload())
     assert response.status_code == 201
     assert response.json()["target"]["gateway_profile_id"] == str(TARGET)
 
@@ -360,7 +405,7 @@ def test_target_registration_preserves_session_owner_and_origin_guards(
             session_expires_at=owner.session_expires_at,
         )
 
-    headers = {"Authorization": "Bearer management-secret"}
+    headers = {}
     if access == "foreign-origin":
         headers["Origin"] = "https://foreign.example.test"
     with (

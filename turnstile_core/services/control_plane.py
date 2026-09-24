@@ -71,6 +71,7 @@ from ..domain.gateway_targets import (
     ApimTargetArmInventory,
     ApimTargetConnectionState,
     ApimTargetDriftState,
+    ApimTargetRemovalPreview,
     ApimTargetRouteBinding,
     ApimTargetTopology,
     ApimTargetTopologyList,
@@ -92,6 +93,7 @@ from ..domain.gateway_targets import (
     SelfHostedGatewayAssociationChange,
     SelfHostedGatewayNameWrite,
     SelfHostedGatewayRemovalPreview,
+    SelfHostedGatewaySummary,
     SelfHostedGatewayWrite,
     TargetRolloutChild,
     TargetRolloutChildStatus,
@@ -362,23 +364,67 @@ class GatewayControlPlaneService:
                 None if self._target_inventory_sync_enabled
                 else "APIM target inventory synchronization is not enabled"
             ),
-            resource_lifecycle_available=self._self_hosted_gateway_enabled,
+            resource_lifecycle_available=True,
             deployment_scoping_available=self._deployment_scoping_enabled,
             onboarding_available=self._onboarding_enabled,
-            self_hosted_gateway_name_edit_supported=self._self_hosted_gateway_enabled,
+            self_hosted_gateway_name_edit_supported=True,
         )
 
     def apim_target_topology(self, gateway_profile_id: UUID) -> ApimTargetTopology:
         return self._apim_target_topology(self._active_apim_target_row(gateway_profile_id))
 
-    def _require_self_hosted_lifecycle(self) -> None:
-        if not self._self_hosted_gateway_enabled:
-            raise ControlPlaneUnavailableError("Self-hosted Gateway lifecycle is not enabled")
+    def apim_target_removal_preview(self, gateway_profile_id: UUID) -> ApimTargetRemovalPreview:
+        target = self._apim_target(self._active_apim_target_row(gateway_profile_id))
+        deployments = [self._gateway_deployment(row)
+                       for row in self._repository.list_gateway_deployments(gateway_profile_id)]
+        self_hosted = tuple(SelfHostedGatewaySummary(
+            id=deployment.id, native_gateway_id=deployment.native_gateway_id,
+            display_name=deployment.display_name,
+        ) for deployment in deployments if deployment.kind is GatewayDeploymentKind.SELF_HOSTED
+            and deployment.endpoint_url is not None)
+        registry = self._repository.registry()
+        runtimes = [row for row in registry["runtimes"]
+                    if row.get("gateway_profile_id") == gateway_profile_id]
+        runtime_ids = {UUID(str(row["id"])) for row in runtimes}
+        models = tuple(sorted((GatewayPublishedModelSummary(
+            id=UUID(str(row["id"])), model_key=str(row["model_key"]),
+            display_name=str(row["display_name"]),
+        ) for row in registry["models"] if UUID(str(row["runtime_id"])) in runtime_ids),
+            key=lambda item: (item.display_name.casefold(), str(item.id))))
+        blockers: list[str] = []
+        if self_hosted:
+            blockers.append("Remove associated Self-hosted Gateways first")
+        if models:
+            blockers.append("Remove or move published models first")
+        if runtimes:
+            blockers.append("Remove model connections first")
+        return ApimTargetRemovalPreview(
+            gateway_profile_id=gateway_profile_id, service_name=target.service_name,
+            self_hosted_gateway_count=len(self_hosted), runtime_count=len(runtimes),
+            model_count=len(models), self_hosted_gateways=self_hosted, models=models,
+            removal_allowed=not blockers, blockers=tuple(blockers),
+        )
+
+    def remove_apim_target(self, gateway_profile_id: UUID) -> ApimTargetRemovalPreview:
+        preview = self.apim_target_removal_preview(gateway_profile_id)
+        if not preview.removal_allowed:
+            raise ControlPlaneConflictError("; ".join(preview.blockers))
+        for row in self._repository.list_gateway_deployments(gateway_profile_id):
+            deployment = self._gateway_deployment(row)
+            self._repository.upsert_gateway_deployment(
+                deployment.model_copy(update={"retired_at": datetime.now(UTC)}),
+                preserve_display_name=True,
+            )
+        updated = self._repository.update_registry_item(
+            "gateway", gateway_profile_id, {"enabled": False, "is_default": False},
+        )
+        if updated is None:
+            raise ControlPlaneNotFoundError("APIM target not found")
+        return preview
 
     def add_self_hosted_gateway(
         self, apim_target_id: UUID, write: SelfHostedGatewayWrite,
     ) -> GatewayDeploymentTopology:
-        self._require_self_hosted_lifecycle()
         target = self._apim_target(self._active_apim_target_row(apim_target_id))
         if target.capabilities.self_hosted_gateway is CapabilitySupport.UNSUPPORTED:
             raise ControlPlaneConflictError("The APIM target does not support Self-hosted Gateway")
@@ -510,7 +556,6 @@ class GatewayControlPlaneService:
         )
 
     def _active_self_hosted_gateway(self, deployment_id: UUID) -> GatewayDeployment:
-        self._require_self_hosted_lifecycle()
         row = self._repository.get_gateway_deployment(deployment_id)
         if row is None:
             raise ControlPlaneNotFoundError("Self-hosted Gateway not found")

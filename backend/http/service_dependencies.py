@@ -83,15 +83,13 @@ def control_plane_service(repository: Repository) -> GatewayControlPlaneService:
         target_inventory_sync_enabled=(
             settings.apim_target_registry_enabled and settings.gateway_release_worker_enabled
         ),
-        deployment_scoping_enabled=settings.apim_target_registry_enabled,
+        deployment_scoping_enabled=settings.self_hosted_gateway_enabled,
         target_registry_enabled=settings.apim_target_registry_enabled,
         onboarding_enabled=apim_onboarding_available(settings),
         self_hosted_gateway_enabled=(
             settings.apim_target_registry_enabled and settings.self_hosted_gateway_enabled
         ),
-        gateway_connection_probe=(
-            GatewayConnectionProbe() if settings.self_hosted_gateway_enabled else None
-        ),
+        gateway_connection_probe=GatewayConnectionProbe(),
         trusted_gateway_endpoints=settings.self_hosted_gateway_trusted_endpoints,
         multi_target_rollout_enabled=settings.multi_apim_target_rollout_enabled,
     )

@@ -167,7 +167,7 @@ paths:
       tags: [Model Control Plane]
       operationId: validateSelfHostedGateway
       summary: Validate a trusted Self-hosted Gateway endpoint without inference
-      description: Requires an Owner session, the write-origin check and configured management authorization. Requires present ARM declaration, API association and either a matching declared hostname or the exact trusted endpoint. Sends the target credential only after these checks. GET models follows no redirects; the timestamped result records reachability, not live health or physical migration.
+      description: Requires an Owner session and the write-origin check. Requires present ARM declaration, API association and either a matching declared hostname or the exact trusted endpoint. Sends the target credential only after these checks. GET models follows no redirects; the timestamped result records reachability, not live health or physical migration.
       security:
       - sessionCookie: []
       parameters:
@@ -321,7 +321,7 @@ paths:
       tags: [Model Control Plane]
       operationId: startApimOnboarding
       summary: Queue a confirmed initialization of an existing APIM service
-      description: Requires an Owner session, the write-origin check and configured management authorization. Revalidates the preview hash before queuing. Repeating the same confirmed plan returns its existing operation; a changed plan is rejected. The leased worker initializes only owned API resources and enables the local target after budget projection and authenticated Managed Gateway readiness checks.
+      description: Requires an Owner session and the write-origin check. Revalidates the preview hash before queuing. Repeating the same confirmed plan returns its existing operation; a changed plan is rejected. The leased worker initializes only owned API resources and enables the local target after budget projection and authenticated Managed Gateway readiness checks.
       security:
       - sessionCookie: []
       requestBody:
@@ -356,7 +356,7 @@ paths:
       tags: [Model Control Plane]
       operationId: previewApimOnboarding
       summary: Preview a target-bound APIM initialization plan
-      description: Requires an Owner session, the write-origin check and configured management authorization. Read-only validation of the existing APIM, reserved API identity, shared governance configuration and budget readiness. Returns exact generated identifiers, steps, blockers and a confirmation hash. No Azure resource or local target is created by preview.
+      description: Requires an Owner session and the write-origin check. Read-only validation of the existing APIM, reserved API identity, shared governance configuration and budget readiness. Returns exact generated identifiers, steps, blockers and a confirmation hash. No Azure resource or local target is created by preview.
       security:
       - sessionCookie: []
       requestBody:
@@ -389,7 +389,7 @@ paths:
       tags: [Model Control Plane]
       operationId: retryApimOnboarding
       summary: Retry the latest failed initialization with its original plan
-      description: Requires an Owner session, the write-origin check and configured management authorization. Revalidates the same preview hash, retains the failed operation, links retry_of and reuses the existing encrypted credentials. Does not silently accept changed plans or retry an older attempt.
+      description: Requires an Owner session and the write-origin check. Revalidates the same preview hash, retains the failed operation, links retry_of and reuses the existing encrypted credentials. Does not silently accept changed plans or retry an older attempt.
       security:
       - sessionCookie: []
       parameters:
@@ -441,7 +441,7 @@ paths:
       tags: [Model Control Plane]
       operationId: registerApimTarget
       summary: Register an existing APIM target
-      description: Requires an Owner session, the write-origin check, configured management authorization and the target-registry gate. Validates ARM identity and a credentialed GET models probe before persisting the profile. Does not create Azure resources or issue inference requests.
+      description: Requires an Owner session, the write-origin check and the target-registry gate. Validates ARM identity and a credentialed GET models probe before persisting the profile. Does not create Azure resources or issue inference requests.
       security:
       - sessionCookie: []
       requestBody:
@@ -491,6 +491,67 @@ paths:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopology
         '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+    delete:
+      tags: [Model Control Plane]
+      operationId: removeApimTarget
+      summary: Remove an APIM target from Turnstile
+      description: Requires an Owner session and the write-origin check. Rechecks Self-hosted Gateway, runtime and model dependencies before retiring deployments and disabling the Gateway profile. Preserves target metadata and history. No Azure resource or container is deleted or modified.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Dependency preview for the removed target.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ApimTargetRemovalPreview
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/removal-preview:
+    get:
+      tags: [Model Control Plane]
+      operationId: previewApimTargetRemoval
+      summary: Inspect dependencies before removing an APIM target
+      description: Requires an Owner session. Reads persisted Self-hosted Gateway, runtime and model dependencies without contacting or modifying Azure.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Related resources, counts and removal blockers.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ApimTargetRemovalPreview
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse

@@ -66,10 +66,9 @@ def lifecycle_service() -> tuple[InMemoryRepository, GatewayControlPlaneService]
 
 
 def test_self_hosted_lifecycle_preserves_identity_and_unknown_reachability() -> None:
-    repository, service = lifecycle_service()
+    repository, _ = lifecycle_service()
+    service = GatewayControlPlaneService(repository, TEST_CIPHER)
     write = self_hosted_write()
-    with pytest.raises(ControlPlaneUnavailableError, match="not enabled"):
-        GatewayControlPlaneService(repository).add_self_hosted_gateway(TARGET, write)
     saved = service.add_self_hosted_gateway(TARGET, write)
     identity = saved.deployment.id
     assert saved.deployment.declared_state == "unknown"
@@ -438,7 +437,8 @@ def test_topology_uses_persisted_unknown_state_and_legacy_model_membership() -> 
     result = GatewayControlPlaneService(repository).apim_target_topologies(registry)
     assert result.total == 1
     assert not result.inventory_sync_available
-    assert not result.resource_lifecycle_available
+    assert result.resource_lifecycle_available
+    assert result.self_hosted_gateway_name_edit_supported
     assert not result.onboarding_available
     item = result.items[0]
     assert item.connection_state == "unknown"
@@ -446,6 +446,27 @@ def test_topology_uses_persisted_unknown_state_and_legacy_model_membership() -> 
     assert item.published_model_count == 1
     assert all(len(child.published_models) == 1 for child in item.deployments)
     assert str(item.gateway_endpoint) == "https://unit.azure-api.net/"
+
+def test_apim_removal_preserves_records_and_requires_empty_dependencies() -> None:
+    repository, service = lifecycle_service()
+    repository.upsert_gateway_deployment(deployment())
+    edge = service.add_self_hosted_gateway(TARGET, self_hosted_write())
+    preview = service.apim_target_removal_preview(TARGET)
+    assert preview.self_hosted_gateway_count == 1
+    assert not preview.removal_allowed
+    with pytest.raises(ControlPlaneConflictError):
+        service.remove_apim_target(TARGET)
+    repository.gateway_deployments.pop(edge.deployment.id)
+    repository.runtimes = []
+    assert service.apim_target_removal_preview(TARGET).removal_allowed
+    result = service.remove_apim_target(TARGET)
+    assert result.removal_allowed
+    assert service.apim_target_topologies().total == 0
+    assert repository.get_apim_target(TARGET) is not None
+    retired = repository.get_gateway_deployment(deployment().id)
+    assert retired is not None and retired["retired_at"] is not None
+    profile = next(row for row in repository.gateways if row["id"] == TARGET)
+    assert profile["enabled"] is False and profile["is_default"] is False
 
 
 @pytest.mark.parametrize("enabled", [True, False])

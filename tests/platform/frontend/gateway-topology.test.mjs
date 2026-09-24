@@ -9,29 +9,35 @@ import {
   apimGatewayEntries, gatewayEvidence, gatewayPublicationChoices, resolveGatewaySelection,
 } from "../../../frontend/src/lib/gateway-topology.ts"
 import * as gatewayTopology from "../../../frontend/src/lib/gateway-topology.ts"
+import * as gatewayForms from "../../../frontend/src/lib/gateway-forms.ts"
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
 const { QueryClient } = frontendRequire("@tanstack/react-query")
-async function compile(path) {
+async function compile(path, expose = []) {
   const entry = fileURLToPath(new URL(path, import.meta.url))
-  const bundle = await rolldown({ input: entry, external: path => path !== entry, transform: { jsx: { runtime: "automatic" } }, treeshake: false })
+  const bundle = await rolldown({ input: entry, external: path => path !== entry, transform: { jsx: { runtime: "automatic" } }, treeshake: false,
+    plugins: expose.length ? [{ name: "test-component-exports", load(path) { if (path === entry) return `${readFileSync(entry, "utf8")}\nexport { ${expose.join(", ")} }` } }] : [],
+  })
   try { return (await bundle.generate({ format: "cjs" })).output[0].code }
   finally { await bundle.close() }
 }
 const apiCode = await compile("../../../frontend/src/data-sources/apim/api.ts")
 const queryCode = await compile("../../../frontend/src/data-sources/apim/queries.ts")
-const componentCode = await compile("../../../frontend/src/components/model-management/gateway-targets.tsx")
 const onboardingCode = await compile("../../../frontend/src/components/model-management/apim-onboarding-dialog.tsx")
-const credentialCode = await compile("../../../frontend/src/components/model-management/management-credential.tsx")
+const workspaceCode = await compile("../../../frontend/src/components/model-management/apim-gateway-workspace.tsx", ["ApimTable", "GatewayTable", "GatewayChildRow", "InfrastructureActions", "ApimEditor", "GatewayEditor", "GatewayAssociationEditor", "InfrastructureNameEditor", "RemovalDialog", "InfrastructureTableLoading"])
+const pageCode = await compile("../../../frontend/src/pages/model-management-page.tsx", ["ModelWorkspace", "modelManagementTabFromUrl"])
 
-function componentHarness(exportName, props, { operation = null, mutationPending = false, code = componentCode, api = {} } = {}) {
+function componentHarness(exportName, props, { operation = null, mutationPending = false, code = workspaceCode, api = {}, role = "owner" } = {}) {
   const slots = []
   let cursor = 0
   const effects = []
   const syncCalls = []
+  const pendingMutations = []
   const mutationVariables = []
-  const queryClient = { setQueryData() {}, invalidateQueries() { return Promise.resolve() } }
+  const queries = []
+  const invalidations = []
+  const queryClient = { setQueryData() {}, getQueriesData() { return [] }, invalidateQueries(options) { invalidations.push(options.queryKey); return Promise.resolve() } }
   const imports = {
     react: {
       useId: () => "unit-gateway",
@@ -50,16 +56,14 @@ function componentHarness(exportName, props, { operation = null, mutationPending
     "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
     "@tanstack/react-query": {
       useQueryClient: () => queryClient,
-      useQuery: () => ({ data: operation, error: null, refetch() {} }),
+      useQuery: options => { queries.push(options); return { data: operation, error: null, refetch() {} } },
       useMutation: options => {
         const index = cursor++
         if (!(index in slots)) slots[index] = { pending: false, error: null }
         const state = slots[index]
-        return { isPending: mutationPending || state.pending, error: state.error,
-          reset() { state.error = null },
-          mutate: () => { syncCalls.push(options); options.onSuccess?.({ operation: { id: "unit-operation" } }) },
-          async mutateAsync(value) {
+        const mutateAsync = async value => {
             state.pending = true
+            state.variables = value
             mutationVariables.push(value)
             try {
               const result = await options.mutationFn(value, { client: queryClient })
@@ -67,15 +71,24 @@ function componentHarness(exportName, props, { operation = null, mutationPending
               return result
             } catch (error) { state.error = error; throw error }
             finally { state.pending = false; await options.onSettled?.() }
+        }
+        return { isPending: mutationPending || state.pending, error: state.error, variables: state.variables,
+          reset() { state.error = null }, mutateAsync,
+          mutate: value => {
+            syncCalls.push(options)
+            const pending = mutateAsync(value)
+            pendingMutations.push(pending)
+            void pending.catch(() => {})
           },
         }
       },
     },
     "../../data-sources/apim/api": { dataSource: api },
     "../../data-sources/apim/queries": {
-      finopsKeys: { apimTargets: ["targets"], gatewayReleaseOperation: id => ["operation", id] },
+      finopsKeys: { registry: ["registry"], apimTargets: ["targets"], apimOnboarding: ["onboarding"], gatewayReleaseOperation: id => ["operation", id] },
       finopsQueries: {
         gatewayReleaseOperation: id => ({ queryKey: ["operation", id] }),
+        apimOnboarding: () => ({ queryKey: ["onboarding"] }),
         selfHostedGatewayRemoval: id => ({ queryKey: ["removal", id] }),
       },
       storeGatewayDeployment: async () => {},
@@ -83,13 +96,33 @@ function componentHarness(exportName, props, { operation = null, mutationPending
       storeApimTarget: async () => {},
     },
     "../../lib/gateway-topology": gatewayTopology,
+    "../../lib/gateway-forms": gatewayForms,
+    "../../providers/auth-provider": { useAuth: () => ({ user: { role } }) },
+    "../../locales": { useLocale: () => ({ locale: "en-US" }) },
+    "../../providers/timezone-provider": { useTimezone: () => ({ timezone: "UTC" }) },
+    "../components/brand-logos": new Proxy({ providerBrandFromIdentity: () => "generic", gatewayBrandFromIdentity: () => "generic" }, { get: (target, name) => target[name] ?? name }),
   }
+  const onboardingExports = {}
+  runInNewContext(onboardingCode, { exports: onboardingExports,
+    require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }),
+  })
+  imports["./apim-onboarding-dialog"] = onboardingExports
   const exports = {}
-  runInNewContext(code, { exports, Set, URL, require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }) })
+  runInNewContext(code, { exports, Set, URL, window: { location: { href: "http://localhost/?tab=apim" } },
+    require: name => imports[name] ?? (name.endsWith("/gateway-topology") ? gatewayTopology : new Proxy({}, { get: (_target, key) => key })),
+  })
   const nodes = value => Array.isArray(value) ? value.flatMap(nodes)
     : value && typeof value === "object" ? [value, ...nodes(value.props?.children)] : []
-  const render = () => { cursor = 0; return exports[exportName](props) }
-  return { props, syncCalls, effects, mutationVariables, nodes, render, all: () => nodes(render()), find: predicate => nodes(render()).find(predicate) }
+  const render = () => { cursor = 0; queries.length = 0; return exports[exportName](props) }
+  const settle = async () => {
+    let settled = 0
+    while (settled < pendingMutations.length) {
+      const current = pendingMutations.slice(settled)
+      settled += current.length
+      await Promise.allSettled(current)
+    }
+  }
+  return { props, syncCalls, effects, mutationVariables, queries, invalidations, nodes, render, settle, all: () => nodes(render()), find: predicate => nodes(render()).find(predicate) }
 }
 
 class ApiError extends Error {
@@ -125,14 +158,316 @@ function topology(changes = {}) {
   }
 }
 
+test("private design has four ordered tabs and a separate self-hosted inventory", () => {
+  assert.deepEqual(gatewayTopology.MODEL_MANAGEMENT_TABS, ["models", "connections", "gateways", "apim"])
+  const target = topology()
+  target.deployments.push(topology({ id: "edge", native_gateway_id: "edge", kind: "self_hosted", endpoint_url: null, declared_state: "unknown" }).deployments[0])
+  target.deployments.push(topology({ id: "retired", kind: "self_hosted", retired_at: "2026-09-23T00:00:00Z" }).deployments[0])
+  assert.deepEqual(gatewayTopology.gatewayEntries({ items: [target] }).map(entry => entry.deployment.id), ["edge"])
+  assert.deepEqual(gatewayTopology.gatewayEntries(null), [])
+})
+
+test("registry preserves strict backend topology and self-hosted capability flags", async () => {
+  for (const enabled of [true, false, undefined, "true"]) {
+    const registry = await apiHarness(async () => ({ providers: [], gateways: [], runtimes: [], models: [],
+      apim_target_topology_available: enabled, self_hosted_gateway_enabled: enabled,
+    })).registry()
+    assert.equal(registry.apim_target_topology_available, enabled === true)
+    assert.equal(registry.self_hosted_gateway_enabled, enabled === true)
+  }
+})
+
+for (const mode of ["gateways", "apim"]) test(`source workspace renders four real tabs in ${mode} view`, () => {
+  const changes = []
+  const target = topology()
+  target.deployments.push(topology({ id: "edge", kind: "self_hosted" }).deployments[0])
+  const harness = componentHarness("ApimGatewayWorkspace", {
+    mode, registry: { models: [], runtimes: [], gateways: profiles, self_hosted_gateway_enabled: true },
+    topology: { items: [target], total: 1, resource_lifecycle_available: true },
+    loading: false, error: null, onTabChange: value => changes.push(value), onToggleSidebar() {},
+  }, { code: workspaceCode })
+  const tabs = harness.all().filter(node => node.props?.["data-tab"])
+  assert.deepEqual(tabs.map(node => node.props["data-tab"]), ["models", "connections", "gateways", "apim"])
+  assert.equal(tabs.at(-1).props.children[0], "APIM 实例")
+  tabs.at(-1).props.onClick()
+  assert.deepEqual(changes, ["apim"])
+  const table = harness.find(node => node.type?.name === (mode === "apim" ? "ApimTable" : "GatewayTable"))
+  assert.ok(table)
+  if (mode === "gateways") assert.deepEqual(table.props.entries.map(entry => entry.deployment.id), ["edge"])
+  assert.equal(harness.find(node => node.type === "ManagementCredentialDialog"), undefined)
+})
+
+test("the page routes apim URLs and preserves source three-tab compatibility for old backends", () => {
+  assert.equal(componentHarness("modelManagementTabFromUrl", {}, { code: pageCode }).render(), "apim")
+  const harness = componentHarness("ModelWorkspace", {
+    registry: { models: [], providers: [], runtimes: [], gateways: [] }, topology: { items: [], total: 0 },
+    topologyAvailable: true, tab: "models", publications: [], loadingRuntimeHealthIds: new Set(),
+  }, { code: pageCode })
+  assert.deepEqual(harness.all().filter(node => node.props?.["data-tab"]).map(node => node.props["data-tab"]), ["models", "connections", "gateways", "apim"])
+  harness.props.topologyAvailable = false
+  assert.deepEqual(harness.all().filter(node => node.props?.["data-tab"]).map(node => node.props["data-tab"]), ["models", "connections", "gateways"])
+})
+
+test("source initialization queries honor capability presence and active-only 1.5-second polling", () => {
+  const props = {
+    mode: "apim", registry: { models: [], runtimes: [], gateways: [] },
+    topology: { items: [], total: 0, resource_lifecycle_available: true },
+    loading: false, error: null, onTabChange() {}, onToggleSidebar() {},
+  }
+  const harness = componentHarness("ApimGatewayWorkspace", props)
+  const query = () => { harness.render(); return harness.queries.find(options => options.queryKey[0] === "onboarding") }
+  assert.equal(query().enabled, false)
+  props.topology.onboarding_available = false
+  assert.equal(query().enabled, true)
+  assert.equal(query().refetchInterval({ state: { data: { items: [{ status: "queued" }] } } }), 1500)
+  assert.equal(query().refetchInterval({ state: { data: { items: [{ status: "failed" }, { status: "succeeded" }] } } }), false)
+  props.mode = "gateways"
+  assert.equal(query().enabled, false)
+  props.mode = "apim"
+  const member = componentHarness("ApimGatewayWorkspace", props, { role: "member" })
+  member.render()
+  assert.equal(member.queries.find(options => options.queryKey[0] === "onboarding").enabled, false)
+})
+
+test("source APIM collapse keeps its children and search preserves the total tab count", () => {
+  const target = topology()
+  const harness = componentHarness("ApimGatewayWorkspace", {
+    mode: "apim", registry: { models: [], runtimes: [], gateways: profiles },
+    topology: { items: [target], total: 1, resource_lifecycle_available: true },
+    loading: false, error: null, onTabChange() {}, onToggleSidebar() {},
+  })
+  const table = () => harness.find(node => node.type?.name === "ApimTable")
+  table().props.onToggleTarget("first")
+  const collapsed = componentHarness("ApimTable", table().props)
+  assert.equal(collapsed.find(node => node.props?.id === "apim-gateways-first").props.hidden, true)
+  assert.equal(collapsed.all().filter(node => node.type?.name === "GatewayChildRow").length, 1)
+  table().props.onToggleTarget("first")
+  assert.equal(componentHarness("ApimTable", table().props).find(node => node.props?.id === "apim-gateways-first").props.hidden, false)
+  harness.find(node => node.type === "ExpandableSearch").props.onChange("does-not-exist")
+  assert.equal(table().props.targets.length, 0)
+  assert.equal(table().props.filtered, true)
+  assert.equal(harness.find(node => node.props?.["data-tab"] === "apim").props.children[1].props.children, 1)
+})
+
+for (const syncAvailable of [false, true]) test(`source attachment refreshes topology and respects inventory sync availability ${syncAvailable}`, async () => {
+  const calls = []
+  const harness = componentHarness("ApimGatewayWorkspace", {
+    mode: "apim", registry: { models: [], runtimes: [], gateways: profiles, self_hosted_gateway_enabled: true },
+    topology: { items: [topology()], total: 1, resource_lifecycle_available: true, inventory_sync_available: syncAvailable },
+    loading: false, error: null, onTabChange() {}, onToggleSidebar() {},
+  }, { api: {
+    addSelfHostedGateway: async (targetId, value) => calls.push(["attach", targetId, value]),
+    syncApimTarget: async targetId => { calls.push(["sync", targetId]); return { operation: { id: "sync-id", status: "queued" } } },
+  } })
+  const table = () => harness.find(node => node.type?.name === "ApimTable")
+  table().props.onToggleTarget("first")
+  table().props.onAttach("first")
+  const editor = harness.find(node => node.type?.name === "GatewayEditor")
+  editor.props.onSubmit("first", { native_gateway_id: "edge" })
+  await harness.settle()
+  assert.deepEqual(calls.map(call => call[0]), syncAvailable ? ["attach", "sync"] : ["attach"])
+  assert.ok(calls.every(call => call[1] === "first"))
+  assert.equal(table().props.collapsedTargetIds.has("first"), false)
+  assert.equal(harness.find(node => node.type?.name === "GatewayEditor"), undefined)
+  assert.deepEqual(harness.invalidations, [["registry"], ["targets"]])
+})
+
+test("source failed connection validation refreshes persisted evidence", async () => {
+  const harness = componentHarness("ApimGatewayWorkspace", {
+    mode: "gateways", registry: { models: [], runtimes: [], gateways: profiles },
+    topology: { items: [topology({ id: "edge", kind: "self_hosted" })], total: 1, resource_lifecycle_available: true },
+    loading: false, error: null, onTabChange() {}, onToggleSidebar() {},
+  }, { api: { validateSelfHostedGateway: async () => { throw new Error("Probe failed") } } })
+  harness.find(node => node.type?.name === "GatewayTable").props.onValidate("edge")
+  await harness.settle()
+  assert.deepEqual(harness.invalidations, [["registry"], ["targets"]])
+  assert.ok(harness.find(node => node.type?.name === "InfrastructureErrorNotice"))
+})
+
+test("source association preserves Gateway identity and blocks published or unknown model dependencies", async () => {
+  const target = topology({ id: "edge", kind: "self_hosted", hosting_mode: "kubernetes" })
+  const destination = topology()
+  destination.target.gateway_profile_id = "second"
+  destination.configuration_endpoint = "https://second.configuration.example.test"
+  const saved = []
+  const props = {
+    entry: { ...target.deployments[0], target }, targets: [target, destination],
+    canChangeAssociation: true, lifecycleAvailable: true, busy: false, error: null,
+    onClose() {}, onSubmit: value => saved.push(value),
+  }
+  const harness = componentHarness("GatewayAssociationEditor", props)
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  harness.find(node => node.type?.name === "TargetSelect").props.onChange("second")
+  harness.find(node => node.props?.type === "url").props.onChange({ target: { value: " https://second.example.test/api " } })
+  await submitForm(harness)
+  assert.equal(saved[0].apim_target_id, "second")
+  assert.equal(saved[0].native_gateway_id, target.deployments[0].deployment.native_gateway_id)
+  assert.equal(saved[0].display_name, "Managed")
+  assert.equal(saved[0].endpoint_url, "https://second.example.test/api")
+  assert.equal(saved[0].hosting_mode, "kubernetes")
+  for (const entry of [
+    { ...props.entry, published_models: [{ id: "model", display_name: "Model", model_key: "model-key" }] },
+    { ...props.entry, published_models_available: false },
+  ]) {
+    const blocked = componentHarness("GatewayAssociationEditor", { ...props, entry })
+    assert.equal(blocked.find(node => node.props?.type === "submit"), undefined)
+    assert.equal(blocked.find(node => node.type?.name === "TargetSelect").props.disabled, true)
+    await submitForm(blocked)
+  }
+  assert.equal(saved.length, 1)
+})
+
+test("source loading and errors cannot appear as an empty successful inventory", () => {
+  const props = {
+    mode: "apim", registry: { models: [], runtimes: [], gateways: [] }, topology: null,
+    loading: true, error: null, onTabChange() {}, onToggleSidebar() {},
+  }
+  const harness = componentHarness("ApimGatewayWorkspace", props)
+  assert.ok(harness.find(node => node.type?.name === "InfrastructureTableLoading"))
+  assert.equal(harness.find(node => node.type === "footer"), undefined)
+  props.loading = false
+  props.error = new Error("Inventory unavailable")
+  assert.ok(harness.find(node => node.props?.role === "alert"))
+  assert.equal(harness.find(node => node.type?.name === "ApimTable"), undefined)
+  assert.equal(harness.find(node => node.type === "footer"), undefined)
+  props.error = null
+  props.topology = { items: [], total: 0 }
+  assert.ok(harness.find(node => node.type?.name === "ApimTable"))
+  assert.ok(harness.find(node => node.type === "footer"))
+})
+
+test("source Gateway attachment validates endpoints and keeps the selected APIM without a release-gate field", async () => {
+  const saved = []
+  const harness = componentHarness("GatewayEditor", {
+    targets: [topology()], initialTargetId: "first", available: true, busy: false, error: null,
+    onClose() {}, onSubmit: (...values) => saved.push(values),
+  }, { code: workspaceCode })
+  for (const [name, value] of Object.entries({ display_name: " Edge ", native_gateway_id: " edge ", endpoint_url: "https://edge.example.test/api?" })) {
+    harness.find(node => node.props?.name === name).props.onChange({ target: { value } })
+  }
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  harness.find(node => node.props?.name === "endpoint_url").props.onChange({ target: { value: "https://edge.example.test/api" } })
+  assert.equal(harness.find(node => node.type?.name === "TargetSelect").props.disabled, true)
+  assert.equal(harness.find(node => node.props?.name === "release_gate"), undefined)
+  await submitForm(harness)
+  assert.equal(saved[0][0], "first")
+  assert.equal(saved[0][1].display_name, "Edge")
+  assert.equal(saved[0][1].hosting_mode, "kubernetes")
+  assert.equal(saved[0][1].release_gate, "required")
+  harness.props.available = false
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+})
+
+test("source APIM adoption form validates identity without requesting a management credential", async () => {
+  const saved = []
+  const harness = componentHarness("ApimEditor", { busy: false, error: null, onClose() {}, onSubmit: value => saved.push(value) }, { code: workspaceCode })
+  const subscription = "00000000-0000-0000-0000-000000000002"
+  const values = { name: " Unit ", tenant_id: "00000000-0000-0000-0000-000000000003", subscription_id: subscription,
+    resource_group: "unit", service_name: "unit-service", api_id: "unit-api", gateway_endpoint: "https://unit.example.test/api",
+    management_endpoint: `https://management.azure.com/subscriptions/${subscription}/resourceGroups/unit/providers/Microsoft.ApiManagement/service/unit-service`,
+  }
+  for (const [name, value] of Object.entries(values)) harness.find(node => node.props?.name === name).props.onChange({ target: { value } })
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, false)
+  assert.equal(harness.find(node => node.props?.type === "password"), undefined)
+  await submitForm(harness)
+  assert.equal(saved[0].name, "Unit")
+  assert.equal(saved[0].management_auth_profile_ref, "system_managed_identity")
+  harness.find(node => node.props?.name === "service_name").props.onChange({ target: { value: "other" } })
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+})
+
+test("source name editor submits only a trimmed name and honors backend support", async () => {
+  const saved = []
+  const harness = componentHarness("InfrastructureNameEditor", {
+    kind: "gateway", identity: "edge", name: "Edge", supported: true, busy: false, error: null, onClose() {}, onSubmit: value => saved.push(value),
+  }, { code: workspaceCode })
+  assert.equal(harness.all().filter(node => node.type === "Input").length, 1)
+  harness.find(node => node.type === "Input").props.onChange({ target: { value: " Renamed " } })
+  await submitForm(harness)
+  assert.deepEqual(saved, ["Renamed"])
+  harness.props.supported = false
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+})
+
+test("source removal confirmation blocks loading or dependencies and retains the shared footer", () => {
+  const harness = componentHarness("RemovalDialog", { target: { kind: "apim", id: "first", name: "First" }, preview: null,
+    loading: true, busy: false, error: null, onClose() {}, onConfirm() {},
+  }, { code: workspaceCode })
+  const action = () => harness.find(node => node.type === "AlertDialogAction")
+  assert.equal(action().props.disabled, true)
+  assert.equal(harness.find(node => node.type === "AlertDialogFooter").props.className, "model-delete-footer")
+  harness.props.loading = false
+  harness.props.preview = { removal_allowed: false, blockers: ["Remove model connections first"], models: [] }
+  assert.equal(action().props.disabled, true)
+  harness.props.preview.removal_allowed = true
+  assert.equal(action().props.disabled, false)
+})
+
+test("source Gateway actions are Owner-only and Managed children have no lifecycle controls", () => {
+  const props = { name: "Edge", checkLabel: "验证连接", removeLabel: "移除", busy: false, checking: false, checkDisabled: false, removeDisabled: false,
+    onCheck() {}, onEdit() {}, onBinding() {}, onRemove() {},
+  }
+  const member = componentHarness("InfrastructureActions", props, { code: workspaceCode, role: "member" })
+  assert.equal(member.all().filter(node => node.type === "DropdownMenuItem").length, 0)
+  const owner = componentHarness("InfrastructureActions", props, { code: workspaceCode })
+  assert.equal(owner.render().props.className, "model-row-actions infrastructure-row-actions gateway-name-actions")
+  assert.equal(owner.all().filter(node => node.type === "DropdownMenuItem").length, 4)
+  const target = topology()
+  const child = componentHarness("GatewayChildRow", { entry: { ...target.deployments[0], target }, busy: false, lifecycleAvailable: true }, { code: workspaceCode })
+  assert.equal(child.find(node => node.type?.name === "InfrastructureActions"), undefined)
+  assert.ok(child.find(node => node.type === "ManagedGatewayLogo"))
+})
+
+test("source Gateway validation dispatches directly from the existing Owner action", async () => {
+  const calls = []
+  const target = topology()
+  const harness = componentHarness("ApimGatewayWorkspace", { mode: "gateways", registry: { gateways: profiles, runtimes: [], models: [] },
+    topology: { items: [target], total: 1, resource_lifecycle_available: true }, loading: false, error: null,
+    onTabChange() {}, onToggleSidebar() {},
+  }, { code: workspaceCode, api: { async validateSelfHostedGateway(...values) { calls.push(values) } } })
+  harness.find(node => node.type?.name === "GatewayTable").props.onValidate("edge")
+  await harness.settle()
+  assert.deepEqual(calls, [["edge"]])
+  assert.equal(harness.find(node => node.type === "ManagementCredentialDialog"), undefined)
+})
+
+test("source loading state preserves the APIM parent and child hierarchy", () => {
+  const apim = componentHarness("InfrastructureTableLoading", { mode: "apim" }, { code: workspaceCode })
+  assert.ok(apim.find(node => node.props?.role === "rowgroup" && node.props?.["aria-busy"] === "true"))
+  assert.equal(apim.all().filter(node => node.props?.role === "row").length, 2)
+  const gateways = componentHarness("InfrastructureTableLoading", { mode: "gateways" }, { code: workspaceCode })
+  assert.equal(gateways.all().filter(node => node.props?.role === "row").length, 1)
+})
+
+test("source mobile actions remain visible and initialization retry retains its dimensions", () => {
+  const { parse } = frontendRequire("postcss")
+  const css = parse(readFileSync(new URL("../../../frontend/src/styles/model-platform.css", import.meta.url), "utf8"))
+  const mobileRules = []
+  const retry = new Map()
+  css.walkRules(rule => {
+    if (rule.parent.type === "atrule" && rule.parent.params === "(max-width: 760px)") mobileRules.push(rule)
+    if (rule.selector === ".apim-onboarding-details .apim-onboarding-error > button.apim-onboarding-retry") {
+      rule.walkDecls(declaration => retry.set(declaration.prop, declaration.value))
+    }
+  })
+  assert.ok(mobileRules.some(rule => rule.selector === ".model-row-actions:not(.infrastructure-row-actions) > button:not(.toggle)"))
+  assert.ok(!mobileRules.some(rule => rule.selector === ".model-row-actions > button:not(.toggle)"))
+  const tabs = mobileRules.find(rule => rule.selector === ".model-workspace .model-tabs")
+  assert.equal(tabs.nodes.find(declaration => declaration.prop === "width").value, "100%")
+  assert.equal(tabs.nodes.find(declaration => declaration.prop === "overflow-x").value, "auto")
+  assert.equal(retry.get("width"), "auto")
+  assert.equal(retry.get("height"), "28px")
+  assert.equal(retry.get("max-width"), "100%")
+})
+
 for (const [changes, label] of [
-  [{ retired_at: "2026-09-23T00:00:00Z" }, "Retired"],
-  [{ declared_state: "absent" }, "Not found"],
-  [{ endpoint_url: null }, "Not configured"],
-  [{ declared_state: "unknown" }, "Not synchronized"],
-  [{ last_probe_at: null }, "Not verified"],
-  [{ reachability_state: "unreachable" }, "Unreachable"],
-  [{}, "Verified"],
+  [{ retired_at: "2026-09-23T00:00:00Z" }, "已退役"],
+  [{ declared_state: "absent" }, "未发现"],
+  [{ endpoint_url: null }, "未配置"],
+  [{ declared_state: "unknown" }, "待同步"],
+  [{ last_probe_at: null }, "待验证"],
+  [{ reachability_state: "unreachable" }, "不可达"],
+  [{}, "已验证"],
 ]) test(`Gateway evidence: ${label}`, () => {
   const target = topology(changes)
   assert.equal(gatewayEvidence({ ...target.deployments[0], target }).label, label)
@@ -141,7 +476,7 @@ for (const [changes, label] of [
 test("declared self-hosted Gateway without API membership is not verified", () => {
   const target = topology({ kind: "self_hosted" })
   const entry = { ...target.deployments[0], inventory: { associated_api_ids: ["other-api"] }, target }
-  assert.equal(gatewayEvidence(entry).label, "Not associated")
+  assert.equal(gatewayEvidence(entry).label, "未关联")
   assert.equal(apimGatewayEntries(topology({ retired_at: "2026-09-23T00:00:00Z" })).length, 0)
 })
 
@@ -155,7 +490,7 @@ test("required sibling readiness gates selected optional deployments", () => {
   target.deployments.push(topology({ id: "optional", kind: "self_hosted", release_gate: "optional" }).deployments[0])
   const choices = gatewayPublicationChoices(profiles, { items: [target] }, true)
   assert.equal(choices.length, 2)
-  assert.ok(choices.every(choice => !choice.selectable && choice.reason === "Required Gateway is not ready"))
+  assert.ok(choices.every(choice => !choice.selectable && choice.reason === "Required Gateway 未就绪"))
 })
 
 test("an explicit invalid selection never jumps to another APIM or deployment", () => {
@@ -185,36 +520,34 @@ test("initialization clients use exact URLs and preserve authorization errors", 
   await api.startApimOnboarding(start)
   await api.retryApimOnboarding("first/second")
   assert.equal(calls[0][0], "/api/v1/model-management/apim-onboarding/preview")
-  assert.deepEqual(JSON.parse(calls[0][1].body), request)
-  assert.equal(calls[0][1].headers.Authorization, undefined)
+  assert.equal(calls[0][1], request)
   assert.equal(calls[1][0], "/api/v1/model-management/apim-onboarding")
-  assert.deepEqual(JSON.parse(calls[1][1].body), start)
+  assert.equal(calls[1][1], start)
   assert.equal(calls[2][0], "/api/v1/model-management/apim-onboarding/first%2Fsecond/retry")
   assert.equal(calls[2][1].method, "POST")
 })
 
-test("management credentials stay in request headers for protected Gateway actions", async () => {
+test("source management clients use Owner session without extra credential parameters", async () => {
   const calls = []
   const api = apiHarness(async (...args) => { calls.push(args); return {} })
-  const credential = "unit-management-credential"
   const target = { name: "Unit APIM" }
   const preview = { tenant_id: "unit-tenant", resource_id: "unit-resource" }
   const start = { request: preview, confirmation_sha256: "a".repeat(64) }
-  await api.registerApimTarget(target, credential)
-  await api.previewApimOnboarding(preview, credential)
-  await api.startApimOnboarding(start, credential)
-  await api.retryApimOnboarding("first/second", credential)
-  await api.validateSelfHostedGateway("first/second", credential)
+  await api.registerApimTarget(target)
+  await api.previewApimOnboarding(preview)
+  await api.startApimOnboarding(start)
+  await api.retryApimOnboarding("first/second")
+  await api.validateSelfHostedGateway("first/second")
   assert.equal(calls.length, 5)
   for (const [path, init] of calls) {
-    assert.equal(init.method, "POST")
-    assert.equal(init.headers.Authorization, `Bearer ${credential}`)
-    assert.equal(path.includes(credential), false)
-    assert.equal((init.body ?? "").includes(credential), false)
+    assert.ok(path.startsWith("/api/v1/model-management/"))
+    assert.equal(init.headers?.Authorization, undefined)
   }
-  assert.deepEqual(JSON.parse(calls[0][1].body), target)
-  assert.deepEqual(JSON.parse(calls[1][1].body), preview)
-  assert.deepEqual(JSON.parse(calls[2][1].body), start)
+  assert.equal(calls[0][1], target)
+  assert.equal(calls[1][1], preview)
+  assert.equal(calls[2][1], start)
+  assert.equal(calls[3][1].method, "POST")
+  assert.equal(calls[4][1].method, "POST")
   assert.equal(calls[3][1].body, undefined)
   assert.equal(calls[4][1].body, undefined)
   assert.ok(calls[3][0].includes("first%2Fsecond"))
@@ -268,40 +601,6 @@ function onboardingHarness(api, extra = {}) {
 }
 const submitForm = harness => harness.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
 
-test("management credential field is masked and one-shot dialogs clear it after failure", async () => {
-  const field = componentHarness("ManagementCredentialField", {
-    value: "", disabled: false, onChange() {},
-  }, { code: credentialCode })
-  const input = field.find(node => node.type === "Input")
-  assert.equal(input.props.type, "password")
-  assert.equal(input.props.autoComplete, "off")
-  const submitted = []
-  const dialog = componentHarness("ManagementCredentialDialog", {
-    title: "Validate connection", targetName: "Unit", submitLabel: "Validate",
-    busy: false, available: true, error: null, onClose() {},
-    async onConfirm(credential) { submitted.push(credential); throw new Error("HTTP 401") },
-  }, { code: credentialCode })
-  dialog.find(node => node.type.name === "ManagementCredentialField").props.onChange("unit-secret")
-  await submitForm(dialog)
-  assert.deepEqual(submitted, ["unit-secret"])
-  assert.equal(dialog.find(node => node.type.name === "ManagementCredentialField").props.value, "")
-})
-
-test("registration keeps management credentials out of mutation variables", async () => {
-  const calls = []
-  const harness = componentHarness("GatewayRegistrationAction", {}, { api: {
-    async registerApimTarget(value, credential) { calls.push({ value, credential }); return topology() },
-  } })
-  harness.find(node => node.type === "Button").props.onClick()
-  const dialog = harness.find(node => node.type.name === "GatewayRegistrationDialog")
-  const payload = { name: "Unit APIM" }
-  await dialog.props.onSave(payload, "unit-management-credential")
-  assert.equal(calls[0].credential, "unit-management-credential")
-  assert.equal(calls[0].value, payload)
-  assert.deepEqual(harness.mutationVariables, [payload])
-  assert.equal(JSON.stringify(harness.mutationVariables).includes("unit-management-credential"), false)
-})
-
 test("initialization uses the confirmed server plan and invalidates it on Back", async () => {
   const plan = initializationPlan()
   const calls = []
@@ -318,7 +617,7 @@ test("initialization uses the confirmed server plan and invalidates it on Back",
   assert.equal(calls[1][1].request, plan.request)
   assert.equal(calls[1][1].confirmation_sha256, plan.confirmation_sha256)
   assert.equal(accepted[0].id, "unit-operation")
-  harness.find(node => node.type === "Button" && node.props.children?.includes?.("Back")).props.onClick()
+  harness.find(node => node.type === "Button" && node.props.children?.includes?.("返回修改")).props.onClick()
   assert.equal(harness.find(node => node.props?.name === "name").props.value.trim(), "Unit APIM")
   await submitForm(harness)
   assert.equal(calls[2][0], "preview")
@@ -336,19 +635,16 @@ test("blocked initialization plans can recheck but never start", async () => {
   assert.equal(checks, 2)
 })
 
-test("initialization credentials remain dialog-local across preview and clear after submission", async () => {
+test("initialization follows the source Owner flow without a management credential field", async () => {
   const calls = []
   const harness = onboardingHarness({
     previewApimOnboarding: async (value, credential) => { calls.push({ value, credential }); return initializationPlan() },
     startApimOnboarding: async (value, credential) => { calls.push({ value, credential }); return { operation: { id: "unit-operation" } } },
   })
-  harness.find(node => node.type === "ManagementCredentialField").props.onChange("unit-management-credential")
+  assert.equal(harness.find(node => node.type === "ManagementCredentialField"), undefined)
   await submitForm(harness)
-  assert.equal(harness.find(node => node.type === "ManagementCredentialField").props.value, "unit-management-credential")
   await submitForm(harness)
-  assert.deepEqual(calls.map(call => call.credential), ["unit-management-credential", "unit-management-credential"])
-  assert.equal(harness.find(node => node.type === "ManagementCredentialField").props.value, "")
-  assert.equal(JSON.stringify(harness.mutationVariables).includes("unit-management-credential"), false)
+  assert.deepEqual(calls.map(call => call.credential), [undefined, undefined])
 })
 
 test("initialization prevents duplicate submission and dismissal until preview settles", async () => {
@@ -376,7 +672,7 @@ test("initialization error preserves the confirmed plan and disables unavailable
   await submitForm(harness)
   await submitForm(harness)
   assert.equal(harness.find(node => node.props?.role === "alert").props.children, "Preflight unavailable")
-  assert.ok(harness.find(node => node.props?.["aria-label"] === "Initialization plan"))
+  assert.ok(harness.find(node => node.props?.["aria-label"] === "APIM 初始化计划"))
   harness.props.available = false
   assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
 })
@@ -385,32 +681,14 @@ test("initialization progress retains failure, exact retry identity and complete
   const retries = []
   const operation = { id: "failed-task", semantic_preview: initializationPlan(), status: "failed", worker_available: true,
     checkpoint: { completed_steps: ["validate_target", "create_api"], retry_of: "previous-task" }, error_message: "Permission preflight failed" }
-  const harness = componentHarness("ApimOnboardingRow", { operation, available: true, retryingId: null, onRetry: async (id, credential) => { retries.push({ id, credential }) } }, { code: onboardingCode })
+  const harness = componentHarness("ApimOnboardingRow", { operation, available: true, retryingId: null, onRetry: id => { retries.push(id) } }, { code: onboardingCode })
   assert.equal(harness.all().filter(node => node.props?.["data-complete"] === true).length, 2)
-  harness.find(node => node.props?.["aria-label"] === "Retry initialization").props.onClick()
-  assert.deepEqual(retries, [])
-  await harness.find(node => node.type === "ManagementCredentialDialog").props.onConfirm("unit-management-credential")
-  assert.deepEqual(retries, [{ id: "failed-task", credential: "unit-management-credential" }])
-  harness.find(node => node.props?.["aria-label"] === "Initialization progress").props.onClick()
+  harness.find(node => node.props?.className === "apim-onboarding-retry").props.onClick()
+  assert.deepEqual(retries, ["failed-task"])
+  harness.find(node => node.props?.["aria-label"] === "收起初始化进度").props.onClick()
   assert.equal(harness.find(node => node.props?.role === "alert").props.children, "Permission preflight failed")
   harness.props.retryingId = "another-task"
-  assert.equal(harness.find(node => node.props?.["aria-label"] === "Retry initialization").props.disabled, true)
-})
-
-test("Self-hosted validation prompts before requesting and never caches the credential", async () => {
-  const calls = []
-  const target = topology({ id: "edge", apim_target_id: "first", kind: "self_hosted" })
-  const harness = componentHarness("GatewayTargetGroup", {
-    target, profile: profiles[0], canManage: true, syncAvailable: true, lifecycleAvailable: true,
-  }, { api: {
-    async validateSelfHostedGateway(id, credential) { calls.push({ id, credential }); return target.deployments[0] },
-  } })
-  harness.find(node => node.type === "DropdownMenuItem" && node.props.children?.includes?.("Validate connection")).props.onClick()
-  assert.deepEqual(calls, [])
-  await harness.find(node => node.type === "ManagementCredentialDialog").props.onConfirm("unit-management-credential")
-  assert.deepEqual(calls, [{ id: "edge", credential: "unit-management-credential" }])
-  assert.deepEqual(harness.mutationVariables, ["edge"])
-  assert.equal(harness.find(node => node.type === "ManagementCredentialDialog"), undefined)
+  assert.equal(harness.find(node => node.props?.className === "apim-onboarding-retry").props.disabled, true)
 })
 
 test("Self-hosted clients keep exact identity, minimal name payload and mutation methods", async () => {
@@ -476,128 +754,6 @@ function selfHostedEntry() {
   return { ...target.deployments[0], target }
 }
 
-test("Self-hosted editor validates HTTPS, preserves metadata and blocks duplicate submission", async () => {
-  let finish
-  const saves = []
-  let closes = 0
-  const target = topology()
-  const harness = componentHarness("SelfHostedGatewayEditor", {
-    targets: [target], initialTargetId: "first", available: true, busy: false, error: null,
-    onClose() { closes++ }, onSave: (...args) => { saves.push(args); return new Promise(resolve => { finish = resolve }) },
-  })
-  for (const [name, value] of Object.entries({ display_name: " Edge ", native_gateway_id: " edge ", endpoint_url: "https://user:secret@edge.example.test", location: " Unit " })) {
-    harness.find(node => node.props?.name === name).props.onChange({ target: { value } })
-  }
-  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
-  harness.find(node => node.props?.name === "endpoint_url").props.onChange({ target: { value: "https://edge.example.test/unit/llm" } })
-  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, false)
-  const pending = submitForm(harness)
-  await submitForm(harness)
-  harness.render().props.onOpenChange(false)
-  assert.equal(saves.length, 1)
-  assert.equal(saves[0][0], "first")
-  assert.equal(saves[0][1].display_name, "Edge")
-  assert.equal(saves[0][1].native_gateway_id, "edge")
-  assert.equal(saves[0][1].release_gate, "required")
-  assert.equal(closes, 0)
-  finish()
-  await pending
-  harness.render().props.onOpenChange(false)
-  assert.equal(closes, 1)
-})
-
-test("Self-hosted reassociation requires a fresh matching clear preview and another APIM", () => {
-  const entry = selfHostedEntry()
-  const other = { ...topology(), target: { ...topology().target, gateway_profile_id: "second", service_name: "Second" } }
-  const harness = componentHarness("SelfHostedGatewayEditor", {
-    targets: [entry.target, other], initialTargetId: "first", entry, available: true, busy: false, error: null,
-    preview: { deployment_id: "edge", removal_allowed: true, blockers: [], models: [] }, loading: false,
-    onClose() {}, onSave: async () => {},
-  })
-  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
-  harness.find(node => node.type === "Select" && node.props.value === "first").props.onValueChange("second")
-  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, false)
-  assert.ok(harness.find(node => node.props?.name === "native_gateway_id").props.readOnly)
-  harness.props.preview = { ...harness.props.preview, deployment_id: "other-edge" }
-  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
-  harness.props.preview = { deployment_id: "edge", removal_allowed: false, blockers: ["Publication is pending"], models: [] }
-  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
-  assert.ok(harness.find(node => node.props?.role === "alert"))
-})
-
-test("Gateway name dialog is name-only and retains draft after failure", async () => {
-  const values = []
-  const harness = componentHarness("GatewayDeploymentNameDialog", {
-    entry: selfHostedEntry(), available: true, busy: false, error: null,
-    onClose() {}, onSave: async name => { values.push(name); throw new Error("Unavailable") },
-  })
-  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
-  harness.find(node => node.type === "Input").props.onChange({ target: { value: " Renamed " } })
-  await submitForm(harness)
-  assert.deepEqual(values, ["Renamed"])
-  assert.equal(harness.find(node => node.type === "Input").props.value, " Renamed ")
-  harness.props.available = false
-  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
-})
-
-test("Gateway retirement refuses loading, blocked and foreign previews and guards double confirmation", async () => {
-  let finish
-  let calls = 0
-  const harness = componentHarness("GatewayRetirementDialog", {
-    entry: selfHostedEntry(), preview: null, loading: true, busy: false, error: null, available: true,
-    onClose() {}, onConfirm: () => { calls++; return new Promise(resolve => { finish = resolve }) },
-  })
-  const action = () => harness.find(node => node.type === "AlertDialogAction")
-  assert.equal(harness.find(node => node.type === "AlertDialogFooter").props.className, "model-delete-footer")
-  assert.ok(harness.find(node => node.type === "AlertDialogCancel"))
-  assert.equal(action().props.disabled, true)
-  harness.props.loading = false
-  harness.props.preview = { deployment_id: "other", removal_allowed: true, models: [], blockers: [] }
-  assert.equal(action().props.disabled, true)
-  harness.props.preview.deployment_id = "edge"
-  assert.equal(action().props.disabled, false)
-  harness.props.preview.removal_allowed = false
-  assert.equal(action().props.disabled, true)
-  harness.props.preview.removal_allowed = true
-  const pending = action().props.onClick()
-  await action().props.onClick()
-  assert.equal(calls, 1)
-  finish()
-  await pending
-})
-
-test("Gateway lifecycle menus require Owner and capability; Managed entries never get lifecycle actions", () => {
-  const target = { ...topology(), published_model_count: 0, self_hosted_gateway_count: 1 }
-  target.deployments.push(selfHostedEntry())
-  const harness = componentHarness("GatewayTargetGroup", {
-    target, profile: profiles[0], canManage: false, syncAvailable: true, lifecycleAvailable: true,
-  })
-  assert.equal(harness.all().filter(node => node.props?.["aria-label"] === "Gateway actions").length, 0)
-  harness.props.canManage = true
-  assert.equal(harness.all().filter(node => node.props?.["aria-label"] === "Gateway actions").length, 1)
-  assert.equal(harness.all().filter(node => node.type === "DropdownMenuItem" && node.props.variant === "destructive").length, 1)
-  harness.props.lifecycleAvailable = false
-  assert.equal(harness.all().filter(node => node.props?.["aria-label"] === "Gateway actions").length, 0)
-})
-
-test("adding a Self-hosted Gateway uses the selected APIM and schedules one inventory sync", async () => {
-  const target = { ...topology(), published_model_count: 0, self_hosted_gateway_count: 0 }
-  const calls = []
-  const harness = componentHarness("GatewayTargetGroup", {
-    target, profile: profiles[0], canManage: true, syncAvailable: true, lifecycleAvailable: true,
-  }, { api: { addSelfHostedGateway: async (...args) => { calls.push(args); return selfHostedEntry() } } })
-  harness.find(node => node.type === "DropdownMenuItem" && node.props.children?.includes?.("Add Self-hosted Gateway")).props.onClick()
-  const editor = harness.find(node => node.type?.name === "SelfHostedGatewayEditor")
-  assert.ok(editor)
-  const value = { native_gateway_id: "edge", display_name: "Edge", endpoint_url: "https://edge.example.test" }
-  await editor.props.onSave("first", value)
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0][0], "first")
-  assert.equal(calls[0][1], value)
-  assert.equal(harness.find(node => node.type?.name === "SelfHostedGatewayEditor"), undefined)
-  assert.equal(harness.syncCalls.length, 1)
-})
-
 test("multi-target clients preserve parent and child identity with exact public URLs", async () => {
   const calls = []
   const rollout = { id: "parent", status: "partial", logical_model_id: "logical-model", children: [
@@ -640,8 +796,7 @@ test("registration and sync clients use the exact public routes", async () => {
   await api.registerApimTarget(payload)
   await api.syncApimTarget("first/second")
   assert.equal(calls[0][0], "/api/v1/model-management/apim-targets")
-  assert.deepEqual(JSON.parse(calls[0][1].body), payload)
-  assert.equal(calls[0][1].headers.Authorization, undefined)
+  assert.equal(calls[0][1], payload)
   assert.equal(calls[1][0], "/api/v1/model-management/apim-targets/first%2Fsecond/inventory-sync")
   assert.equal(calls[1][1].method, "POST")
 })
@@ -661,67 +816,4 @@ test("a late topology read cannot replace a confirmed target write", async () =>
   assert.equal(client.getQueryData(finopsKeys.apimTargets).items[0].target.service_name, "confirmed-service")
   assert.equal(client.getQueryData(finopsKeys.apimTargets).total, 1)
   client.clear()
-})
-
-test("topology component has scoped expansion, evidence labels and Owner-only sync", () => {
-  const target = { ...topology(), published_model_count: 0, self_hosted_gateway_count: 0 }
-  const harness = componentHarness("GatewayTargetGroup", { target, profile: profiles[0], canManage: false, syncAvailable: true })
-  assert.equal(harness.all().filter(node => node.type === "article").length, 1)
-  assert.equal(harness.find(node => node.props?.["aria-label"] === "Synchronize inventory"), undefined)
-  harness.find(node => node.props?.["aria-expanded"] === true).props.onClick()
-  assert.equal(harness.all().filter(node => node.type === "article").length, 0)
-  harness.props.canManage = true
-  const sync = harness.find(node => node.props?.["aria-label"] === "Synchronize inventory")
-  assert.equal(sync.props.disabled, false)
-  sync.props.onClick()
-  assert.equal(harness.syncCalls.length, 1)
-  assert.equal(harness.find(node => node.props?.["aria-label"] === "Synchronize inventory").props.disabled, true)
-})
-
-test("registration blocks duplicate submit and close until the same promise settles", async () => {
-  let finish
-  const saved = []
-  let closes = 0
-  const harness = componentHarness("GatewayRegistrationDialog", {
-    busy: false, error: null, onClose() { closes++ },
-    onSave(value) { saved.push(value); return new Promise(resolve => { finish = resolve }) },
-  })
-  assert.equal(harness.find(node => node.type === "DialogHeader").props.className, "registry-editor-header")
-  assert.equal(harness.find(node => node.type === "DialogFooter").props.className, "registry-editor-footer")
-  assert.equal(harness.all().filter(node => node.props?.className === "registry-field-label").length, 10)
-  for (const input of harness.all().filter(node => node.type === "Input")) input.props.onChange({ target: { value: ` ${input.props.name} ` } })
-  const submit = harness.find(node => node.type === "form").props.onSubmit
-  const pending = submit({ preventDefault() {} })
-  await submit({ preventDefault() {} })
-  harness.render().props.onOpenChange(false)
-  assert.equal(saved.length, 1)
-  assert.equal(saved[0].name, "name")
-  assert.equal(closes, 0)
-  finish()
-  await pending
-  harness.render().props.onOpenChange(false)
-  assert.equal(closes, 1)
-})
-
-test("registration failure retains fields and disables every input while busy", async () => {
-  const harness = componentHarness("GatewayRegistrationDialog", {
-    busy: false, error: null, onClose() {}, onSave: async () => { throw new Error("dependency unavailable") },
-  })
-  for (const input of harness.all().filter(node => node.type === "Input")) input.props.onChange({ target: { value: input.props.name } })
-  await harness.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
-  harness.props.error = "Registration validation failed"
-  assert.equal(harness.find(node => node.props?.name === "name").props.value, "name")
-  assert.equal(harness.find(node => node.props?.role === "alert").props.children, harness.props.error)
-  harness.props.busy = true
-  assert.ok(harness.all().filter(node => node.type === "Input").every(node => node.props.disabled))
-  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
-})
-
-test("Gateway details and sync actions remain visible under narrow table rules", () => {
-  const css = frontendRequire("postcss").parse(readFileSync(new URL("../../../frontend/src/styles/model-platform.css", import.meta.url), "utf8"))
-  let display
-  css.walkRules(".gateway-target-group .model-row-actions > button:not(.toggle)", rule => {
-    rule.walkDecls("display", declaration => { display = declaration.value })
-  })
-  assert.equal(display, "grid")
 })

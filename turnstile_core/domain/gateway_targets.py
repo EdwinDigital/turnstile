@@ -724,6 +724,24 @@ class ApimTargetTopology(StrictModel):
     published_models: tuple[GatewayPublishedModelSummary, ...] = ()
 
 
+class SelfHostedGatewaySummary(StrictModel):
+    id: UUID
+    native_gateway_id: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(min_length=1, max_length=120)
+
+
+class ApimTargetRemovalPreview(StrictModel):
+    gateway_profile_id: UUID
+    service_name: str
+    self_hosted_gateway_count: int = Field(ge=0)
+    runtime_count: int = Field(ge=0)
+    model_count: int = Field(ge=0)
+    self_hosted_gateways: tuple[SelfHostedGatewaySummary, ...] = ()
+    models: tuple[GatewayPublishedModelSummary, ...] = ()
+    removal_allowed: bool
+    blockers: tuple[str, ...] = ()
+
+
 class SelfHostedGatewayRemovalPreview(StrictModel):
     deployment_id: UUID
     display_name: str
