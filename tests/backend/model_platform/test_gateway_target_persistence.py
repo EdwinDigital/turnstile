@@ -32,6 +32,37 @@ from turnstile_core.persistence.repository_support import _validate_gateway_depl
 from turnstile_core.services.control_plane import GatewayControlPlaneService
 
 
+@pytest.mark.parametrize("explicit_id", [False, True])
+def test_postgres_gateway_creation_inserts_the_registration_identity(explicit_id: bool) -> None:
+    connection, context = MagicMock(), MagicMock()
+    context.__enter__.return_value = connection
+    connection.execute.return_value.fetchone.return_value = {"id": TARGET}
+    repository = PostgreSqlOpsDbProxy("postgresql://unused", pool_min_size=0)
+    values: dict[str, Any] = {
+        "name": "Registered APIM", "implementation": "apim", "base_url": None,
+        "auth_type": "api_key", "credential_ciphertext": None, "credential_hint": None,
+        "enabled": False, "is_default": False, "config": {},
+    }
+    if explicit_id:
+        values["id"] = TARGET
+    before = deepcopy(values)
+    with patch.object(repository, "_connection", return_value=context):
+        repository.create_registry_item("gateway", values)
+        repository.create_registry_item("gateway", values)
+    first, second = connection.execute.call_args_list
+    statement, parameters = first.args
+    normalized = " ".join(statement.split())
+    assert "INSERT INTO gateway_profile ( id, name," in normalized
+    assert ") VALUES (%(id)s, %(name)s," in normalized
+    if explicit_id:
+        assert parameters["id"] == TARGET
+        assert second.args[1]["id"] == TARGET
+    else:
+        assert isinstance(parameters["id"], UUID)
+        assert parameters["id"] != second.args[1]["id"]
+    assert values == before
+
+
 @pytest.mark.parametrize("change", ["retired", "missing", "target", "native", "endpoint"])
 @pytest.mark.parametrize("retry", [False, True])
 def test_publication_queue_and_retry_reject_stale_gateway_snapshots(

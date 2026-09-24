@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
 
@@ -300,14 +300,15 @@ class PostgreSqlRegistryRepositoryMixin:
             parameters["config"] = Jsonb(parameters["config"])
         with self._connection() as connection, connection.transaction():
             if kind == "gateway":
+                parameters.setdefault("id", uuid4())
                 if values["is_default"]:
                     connection.execute("UPDATE gateway_profile SET is_default = FALSE")
                 row = connection.execute(
                     """INSERT INTO gateway_profile (
-                               name, implementation, base_url, auth_type,
+                               id, name, implementation, base_url, auth_type,
                                credential_ciphertext, credential_hint, enabled,
                                is_default, config
-                           ) VALUES (%(name)s, %(implementation)s, %(base_url)s,
+                           ) VALUES (%(id)s, %(name)s, %(implementation)s, %(base_url)s,
                                %(auth_type)s, %(credential_ciphertext)s,
                                %(credential_hint)s, %(enabled)s, %(is_default)s,
                                %(config)s) RETURNING *""",
