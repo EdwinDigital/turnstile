@@ -127,7 +127,7 @@ def test_image_upgrade_keeps_subscription_burst_default_independent_of_applicati
 
     assert image.attrib["calls"] == "25000"
     assert text.attrib["tokens-per-minute"] == (
-        '@((long)context.Variables["applicationTokensPerMinute"])'
+        '@((int)(long)context.Variables["applicationTokensPerMinute"])'
     )
 
 

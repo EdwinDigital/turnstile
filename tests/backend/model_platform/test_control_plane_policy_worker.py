@@ -364,6 +364,33 @@ def test_existing_application_tpm_upgrade_preserves_default_and_is_idempotent(
     assert 'name="applicationTokensPerMinute"' in ApimPolicyCompiler().patch_parent_policy(source)
 
 
+@pytest.mark.parametrize("default_rate", ["25000", "2147483647", "__TOKENS_PER_MINUTE__"])
+def test_application_tpm_upgrade_converts_long_to_policy_integer(default_rate: str) -> None:
+    canonical = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    root = parse_policy(canonical.replace("__TOKENS_PER_MINUTE__", default_rate))
+    subscription = next(node for node in root.iter("llm-token-limit")
+                        if "finops:subscription:" in node.get("counter-key", ""))
+    subscription.set(
+        "tokens-per-minute", '@((long)context.Variables["applicationTokensPerMinute"])'
+    )
+    source = serialize_policy(root)
+
+    upgraded = upgrade_application_tpm_policy(source)
+
+    observed = parse_policy(upgraded)
+    limit = next(node for node in observed.iter("llm-token-limit")
+                 if "finops:subscription:" in node.get("counter-key", ""))
+    assert limit.get("tokens-per-minute") == (
+        '@((int)(long)context.Variables["applicationTokensPerMinute"])'
+    )
+    variable = observed.find(".//set-variable[@name='applicationTokensPerMinute']")
+    original = root.find(".//set-variable[@name='applicationTokensPerMinute']")
+    assert variable is not None and original is not None
+    assert variable.attrib == original.attrib
+    assert upgrade_application_tpm_policy(upgraded) == upgraded
+    assert validate_parent_policy(source, canonical) == upgraded
+
+
 @pytest.mark.parametrize("change", ["guard", "attribute", "duplicate", "invalid-default"])
 def test_application_tpm_upgrade_rejects_partial_or_weakened_rules(change: str) -> None:
     source = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()

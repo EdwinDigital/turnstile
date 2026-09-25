@@ -410,7 +410,7 @@ def test_application_output_clamp_uses_monthly_budget_not_tpm() -> None:
     limits = root.findall(".//llm-token-limit")
     assert len(limits) == 2
     assert {limit.attrib["tokens-per-minute"] for limit in limits} == {
-        '@((long)context.Variables["applicationTokensPerMinute"])',
+        '@((int)(long)context.Variables["applicationTokensPerMinute"])',
         "__EMPLOYEE_TOKENS_PER_MINUTE__",
     }
     assert all(limit.attrib["estimate-prompt-tokens"] == "true" for limit in limits)
@@ -442,7 +442,7 @@ def test_application_tpm_uses_validated_quota_and_preserves_default_protection()
     )
     assert employee.attrib["tokens-per-minute"] == "__EMPLOYEE_TOKENS_PER_MINUTE__"
     assert subscription.attrib["tokens-per-minute"] == (
-        '@((long)context.Variables["applicationTokensPerMinute"])'
+        '@((int)(long)context.Variables["applicationTokensPerMinute"])'
     )
     assert subscription.attrib["estimate-prompt-tokens"] == "true"
     assert subscription.attrib["tokens-consumed-variable-name"] == "tokensConsumed"
@@ -642,7 +642,7 @@ def test_apim_token_limits_use_product_subscription_identity() -> None:
     assert 'token-quota="__MONTHLY_TOKEN_QUOTA__"' not in policy
     assert 'token-quota-period="Monthly"' not in policy
     assert (
-        'tokens-per-minute="@((long)context.Variables[&quot;applicationTokensPerMinute&quot;])"'
+        'tokens-per-minute="@((int)(long)context.Variables[&quot;applicationTokensPerMinute&quot;])"'
         in policy
     )
     assert "long defaultRate = __TOKENS_PER_MINUTE__;" in policy

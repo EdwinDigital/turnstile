@@ -1195,7 +1195,7 @@
           <when condition="@(!(bool)context.Variables[&quot;isImagesOperation&quot;])">
         <llm-token-limit
           counter-key="@($&quot;finops:subscription:{(string)context.Variables[&quot;consumerId&quot;]}&quot;)"
-          tokens-per-minute="@((long)context.Variables[&quot;applicationTokensPerMinute&quot;])"
+          tokens-per-minute="@((int)(long)context.Variables[&quot;applicationTokensPerMinute&quot;])"
           estimate-prompt-tokens="true"
           retry-after-header-name="Retry-After"
           remaining-tokens-header-name="x-ratelimit-remaining-tokens"

@@ -108,10 +108,11 @@ def upgrade_application_tpm_policy(source: str) -> str:
     ):
         raise PolicyCompilationError("Subscription token limit is outside its identity branch")
     variables = root.findall(".//set-variable[@name='applicationTokensPerMinute']")
-    attribute = '@((long)context.Variables["applicationTokensPerMinute"])'
+    attribute = '@((int)(long)context.Variables["applicationTokensPerMinute"])'
+    legacy_attribute = '@((long)context.Variables["applicationTokensPerMinute"])'
     configured = limit.get("tokens-per-minute", "")
     if variables:
-        if len(variables) != 1 or configured != attribute:
+        if len(variables) != 1 or configured not in {attribute, legacy_attribute}:
             raise PolicyCompilationError("Application token limit upgrade is incomplete")
         if (
             parents[variables[0]] is not parent
@@ -144,6 +145,9 @@ def upgrade_application_tpm_policy(source: str) -> str:
             raise PolicyCompilationError(
                 "Application token limit differs from the reviewed contract"
             )
+        if limit.get("tokens-per-minute") == legacy_attribute:
+            limit.set("tokens-per-minute", attribute)
+            return serialize_policy(root)
         return source
     parent.insert(list(parent).index(consumer) + 1, ET.Element(
         "set-variable", {"name":"applicationTokensPerMinute", "value":expression},
@@ -349,7 +353,10 @@ def compose_image_parent_policy(source: str, profiles: Sequence[ImageGenerationP
             wrapper = _branch(node, None)
             if tag == "llm-token-limit":
                 image_rate = node.attrib["tokens-per-minute"]
-                if image_rate == '@((long)context.Variables["applicationTokensPerMinute"])':
+                if image_rate in {
+                    '@((long)context.Variables["applicationTokensPerMinute"])',
+                    '@((int)(long)context.Variables["applicationTokensPerMinute"])',
+                }:
                     default = re.search(
                         r"long\s+defaultRate\s*=\s*([0-9]+|__TOKENS_PER_MINUTE__)\s*;",
                         _variable(root, "applicationTokensPerMinute").get("value", ""),
