@@ -47,6 +47,8 @@ import {
   type ProviderBrand,
 } from "../components/brand-logos"
 import { FINOPS_NAVIGATE_EVENT } from "../lib/navigation"
+import { emptyModelFilters, matchesModelFilters, modelFilterRecord, publicationFilterRecord } from "../lib/model-inventory-filters"
+import { useIsMobile } from "../hooks/use-mobile"
 import { Button } from "../components/ui/button"
 import { ButtonGroup } from "../components/ui/button-group"
 import { Checkbox } from "../components/ui/checkbox"
@@ -97,6 +99,7 @@ import {
 } from "../components/model-management/model-publication-dialog"
 import { ConnectionDialog } from "../components/model-management/connection-dialog"
 import { ModelEditDialog } from "../components/model-management/model-edit-dialog"
+import { ModelInventoryFilterChips, ModelInventoryFilterMenu } from "../components/model-management/model-inventory-filter-menu"
 import { ApimGatewayWorkspace } from "../components/model-management/apim-gateway-workspace"
 import { MODEL_MANAGEMENT_TABS, gatewayEntries, type ModelManagementTab } from "../lib/gateway-topology"
 import type {
@@ -1106,14 +1109,15 @@ function ModelWorkspace({ registry, topology, topologyAvailable, tab, notice, er
   onRenameGateway: (gateway: GatewayProfile) => void
 }) {
   const activeTab: ModelTableTab = tab
+  const compactLayout = useIsMobile()
   const [search, setSearch] = useState("")
+  const [modelFilters, setModelFilters] = useState(emptyModelFilters)
   const [providerFilter, setProviderFilter] = useState("all")
   const [connectionHealthFilter, setConnectionHealthFilter] = useState<"active" | RuntimeHealthState>("active")
   const [collapsedProviderIds, setCollapsedProviderIds] = useState<Set<string>>(() => new Set())
   const kind: RegistryKind = activeTab === "connections" ? "runtime" : activeTab === "models" ? "model" : "gateway"
   const tabs = topologyAvailable ? MODEL_MANAGEMENT_TABS : MODEL_MANAGEMENT_TABS.filter(value => value !== "apim")
   const matches = (text: string) => text.toLowerCase().includes(search.toLowerCase())
-  const models = registry.models.filter((model) => matches(`${model.display_name} ${model.model_key} ${model.runtime_name} ${model.provider_name}`))
   const inventoryConnections = registry.runtimes
   const inventoryProviderIds = new Set(
     inventoryConnections.map((runtime) => runtime.provider_id),
@@ -1197,6 +1201,18 @@ function ModelWorkspace({ registry, topology, topologyAvailable, tab, notice, er
       && rowStatuses.has(publication.status)
       && !registry.models.some((model) => model.model_key === publication.model_key),
   )
+  const modelRecords = registry.models.map(model => {
+    const runtime = registry.runtimes.find(item => item.id === model.runtime_id)
+    const provider = registry.providers.find(item => item.id === model.provider_id)
+    const record = modelFilterRecord(model, runtime, provider)
+    const publication = latestPublicationByModel.get(model.model_key)
+    if (publication && rowStatuses.has(publication.status)) record.status = publicationFilterRecord(publication).status
+    return { model, record }
+  })
+  const pendingRecords = pendingModelPublications.map(publication => ({ publication, record: publicationFilterRecord(publication) }))
+  const filterRecords = [...modelRecords, ...pendingRecords].map(item => item.record)
+  const models = modelRecords.filter(item => matchesModelFilters(item.record, modelFilters, search)).map(item => item.model)
+  const visiblePublications = pendingRecords.filter(item => matchesModelFilters(item.record, modelFilters, search)).map(item => item.publication)
 
   return <div className="smh-workspace model-workspace">
     <header className="smh-page-header">
@@ -1205,7 +1221,7 @@ function ModelWorkspace({ registry, topology, topologyAvailable, tab, notice, er
     </header>
     <div className="model-toolbar">
       <ButtonGroup className="model-tabs usage-metric-segment" aria-label="模型管理类型">{tabs.map(value => <button key={value} data-tab={value} className={activeTab === value ? "active" : ""} aria-pressed={activeTab === value} onClick={() => onTabChange(value)}>{value === "models" ? "模型" : value === "connections" ? "连接" : value === "apim" ? "APIM 实例" : "Gateway"}<span>{value === "connections" ? scopedConnections.length : value === "apim" ? topology?.total ?? "\u2014" : value === "gateways" ? topologyAvailable && !topology ? "\u2014" : gatewayCount : registry.models.length}</span></button>)}</ButtonGroup>
-      <div className="model-toolbar-filters">
+      <div className={`model-toolbar-filters ${activeTab === "models" ? "model-inventory-toolbar-filters" : ""}`}>
         {activeTab === "connections" && <Select value={connectionHealthFilter} onValueChange={(value) => setConnectionHealthFilter((value ?? "active") as "active" | RuntimeHealthState)}>
           <SelectTrigger className="connection-health-filter" aria-label="按健康状态筛选"><SelectValue>{connectionHealthLabels[connectionHealthFilter]} · {connectionHealthCounts[connectionHealthFilter]}</SelectValue></SelectTrigger>
           <SelectContent align="end">
@@ -1227,8 +1243,10 @@ function ModelWorkspace({ registry, topology, topologyAvailable, tab, notice, er
           </SelectContent>
         </Select>}
         <ExpandableSearch key={activeTab} value={search} onChange={setSearch} placeholder={`搜索${addLabel}...`} />
+        {activeTab === "models" && <ModelInventoryFilterMenu filters={modelFilters} onChange={setModelFilters} connections={registry.runtimes} records={filterRecords} search={search} compact={compactLayout} />}
       </div>
     </div>
+    {activeTab === "models" && <ModelInventoryFilterChips filters={modelFilters} onChange={setModelFilters} connections={registry.runtimes} />}
     {notice && <RegistryNoticeBanner notice={notice} onDismiss={onDismissNotice} onAction={onNoticeAction} />}
     {error && <div className="registry-error smh-notice" role="alert">
       <TriangleAlert size={13} aria-hidden="true" />
@@ -1263,7 +1281,7 @@ function ModelWorkspace({ registry, topology, topologyAvailable, tab, notice, er
               && registry.databricks_oauth_supported === true
           return <ModelRow key={model.id} model={model} oauthCredential={runtime?.config.auth_strategy === "oauth_client_credentials"} busy={busy} removing={removingModelKey === model.model_key} publication={rowPublication} canRotateCredential={Boolean(model.publication_id && managedCredential)} deleteDisabledReason={deleteDisabledReason} onOpenPublication={onOpenPublication} onEdit={() => onEdit("model", model)} onToggle={() => onToggleModel(model)} onRotateCredential={() => onRotateCredential(model)} onDelete={() => onDeleteModel(model)} />
         })}
-        {activeTab === "models" && pendingModelPublications.map((publication) => <PublicationModelRow key={publication.id} publication={publication} onOpen={() => onOpenPublication(publication.id)} />)}
+        {activeTab === "models" && visiblePublications.map((publication) => <PublicationModelRow key={publication.id} publication={publication} onOpen={() => onOpenPublication(publication.id)} />)}
         {activeTab === "connections" && connectionGroups.map(({ provider, connections: providerConnections, connectionCount, modelCount }) => {
           const collapsed = collapsedProviderIds.has(provider.id)
           return <section className="connection-provider-group" role="rowgroup" aria-label={provider.name} key={provider.id}>
@@ -1286,10 +1304,10 @@ function ModelWorkspace({ registry, topology, topologyAvailable, tab, notice, er
               : null
           return <GatewayRow key={gateway.id} gateway={gateway} runtimeCount={runtimeCount} busy={busy} deleteDisabledReason={deleteDisabledReason} onEdit={() => onEdit("gateway", gateway)} onToggle={() => onToggleGateway(gateway)} onDefault={() => onDefaultGateway(gateway)} onDelete={() => onDeleteGateway(gateway)} onRename={canRenameGateway ? () => onRenameGateway(gateway) : undefined} />
         })}
-        {((activeTab === "models" && !models.length) || (activeTab === "connections" && !connectionGroups.length) || (activeTab === "gateways" && !gateways.length)) && <div className="smh-empty"><Search size={28} /><b>没有找到{addLabel}</b><span>尝试调整搜索条件。</span></div>}
+        {((activeTab === "models" && !models.length && !visiblePublications.length) || (activeTab === "connections" && !connectionGroups.length) || (activeTab === "gateways" && !gateways.length)) && <div className="smh-empty"><Search size={28} /><b>没有找到{addLabel}</b><span>尝试调整搜索条件。</span></div>}
       </div>
     </ResizableGridTable>
-    <footer className="model-table-footer">共 {count} 个{addLabel}</footer>
+    <footer className="model-table-footer" aria-live="polite">共 {activeTab === "models" ? models.length + visiblePublications.length : count} 个{addLabel}</footer>
   </div>
 }
 

@@ -408,6 +408,39 @@
 .model-tabs button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .model-tabs button span { font: 10px/14px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted-foreground); }
 .model-toolbar-filters { min-width: 0; flex: 1 1 auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.model-filter-trigger { height: 28px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--border); border-radius: 7px; padding: 0 10px; background: var(--background); color: var(--muted-foreground); font-size: 12px; line-height: 20px; font-weight: 500; white-space: nowrap; cursor: pointer; }
+.model-filter-trigger:hover, .model-filter-trigger[aria-expanded="true"] { background: var(--muted); color: var(--foreground); }
+.model-filter-trigger[data-active="true"] { border-color: var(--brand); background: var(--brand); color: var(--brand-foreground); }
+.model-filter-trigger > svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.model-filter-menu, .model-filter-options { width: max-content; min-width: 160px; max-width: min(var(--available-width, 320px), calc(100vw - 16px)); max-height: min(var(--available-height, 400px), 400px); overflow-x: hidden; overflow-y: auto; border-radius: var(--radius); padding: 4px; outline: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent); background: var(--popover); color: var(--popover-foreground); box-shadow: 0 4px 10px oklch(0 0 0 / 12%); }
+.model-filter-menu { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.model-filter-options { min-width: min(192px, calc(100vw - 16px)); }
+.model-filter-category, .model-filter-option { position: relative; min-height: 28px; display: flex; align-items: center; gap: 6px; border-radius: 6px; padding: 4px 6px; outline: none; color: var(--popover-foreground); font-size: 14px; line-height: 20px; cursor: default; user-select: none; }
+.model-filter-category > svg, .model-filter-option svg, .model-filter-clear > svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.model-filter-label { flex: 1; white-space: nowrap; }
+.model-filter-category > svg:last-child { margin-left: 8px; }
+.model-filter-selected-count { color: var(--brand); font-size: 11px; font-variant-numeric: tabular-nums; }
+.model-filter-category[data-highlighted], .model-filter-category[data-popup-open], .model-filter-category:focus, .model-filter-option[data-highlighted], .model-filter-option:focus { background: var(--accent); color: var(--accent-foreground); }
+.model-filter-category[data-disabled] { opacity: .5; pointer-events: none; }
+.model-filter-option { padding-right: 28px; }
+.model-filter-family-icon, .model-filter-platform-icon { width: 16px; height: 16px; flex: 0 0 16px; display: inline-flex; align-items: center; justify-content: center; }
+.model-filter-chip .model-filter-family-icon, .model-filter-chip .model-filter-platform-icon { width: 14px; height: 14px; flex-basis: 14px; }
+.model-filter-platform-icon > svg, .model-filter-platform-icon > img { width: 100%; height: 100%; flex: 0 0 100%; object-fit: contain; }
+.model-filter-option-label { min-width: 0; max-width: 232px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-filter-option-count { margin-left: auto; padding-left: 12px; color: var(--muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
+.model-filter-option [data-slot="dropdown-menu-checkbox-item-indicator"] { position: absolute; right: 6px; width: 16px; height: 16px; display: grid; place-items: center; }
+.model-filter-chips { min-width: 0; flex: 0 0 auto; display: flex; align-items: center; gap: 8px; margin: 0 16px 8px; border-radius: 8px; padding: 6px 8px; background: color-mix(in oklch, var(--muted) 50%, transparent); }
+.model-filter-chip-list { min-width: 0; flex: 1 1 auto; display: flex; align-items: center; gap: 6px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.model-filter-chip { min-width: 0; max-width: 280px; height: 24px; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; border-radius: 6px; padding: 0 4px 0 8px; background: var(--background); color: var(--foreground); font-size: 12px; line-height: 18px; white-space: nowrap; }
+.model-filter-chip-dimension { flex: 0 0 auto; color: var(--muted-foreground); }
+.model-filter-chip-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.model-filter-chip-icons { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 2px; }
+.model-filter-chip > svg { flex: 0 0 auto; }
+.model-filter-chip-remove { width: 16px; height: 16px; flex: 0 0 16px; display: grid; place-items: center; border: 0; border-radius: 3px; padding: 0; background: transparent; color: var(--muted-foreground); cursor: pointer; }
+.model-filter-chip-remove:hover, .model-filter-reset:hover { background: var(--accent); color: var(--foreground); }
+.model-filter-reset { min-height: 24px; margin-left: auto; flex: 0 0 auto; border: 0; border-radius: 6px; padding: 3px 6px; background: transparent; color: var(--muted-foreground); font-size: 12px; white-space: nowrap; cursor: pointer; }
+.model-filter-trigger:focus-visible, .model-filter-chip-remove:focus-visible, .model-filter-reset:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+.model-inventory-toolbar-filters .model-search-control.expanded { min-width: 100px; flex: 0 1 320px; }
 .connection-provider-filter { width: 184px; flex: 0 0 184px; }
 .connection-health-filter { width: 128px; flex: 0 0 128px; }
 .connection-health-option { width: 100%; display: grid; grid-template-columns: 8px minmax(0, 1fr) max-content; align-items: center; gap: 7px; }
@@ -693,6 +726,9 @@
 	.smh-notice button.smh-notice-action { grid-column: 2; justify-self: start; padding-inline: 0; }
 	.smh-notice button.smh-notice-close { grid-column: 3; grid-row: 1; }
 	.model-toolbar-filters { width: 100%; display: grid; grid-template-columns: minmax(110px, 128px) minmax(0, 1fr) max-content; align-items: center; }
+	.model-toolbar-filters.model-inventory-toolbar-filters { display: flex; }
+	.model-inventory-toolbar-filters .model-search-control.expanded { width: auto; flex: 1 1 auto; max-width: none; }
+	.model-filter-chips { margin-inline: 12px; }
 	.connection-health-filter { width: 100%; min-width: 0; }
 	.connection-provider-filter { width: 100%; min-width: 0; }
 	.model-search-control { grid-column: auto; justify-self: end; }

@@ -10,6 +10,7 @@ import {
 } from "../../../frontend/src/lib/gateway-topology.ts"
 import * as gatewayTopology from "../../../frontend/src/lib/gateway-topology.ts"
 import * as gatewayForms from "../../../frontend/src/lib/gateway-forms.ts"
+import * as modelFilters from "../../../frontend/src/lib/model-inventory-filters.ts"
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
@@ -97,6 +98,8 @@ function componentHarness(exportName, props, { operation = null, mutationPending
     },
     "../../lib/gateway-topology": gatewayTopology,
     "../../lib/gateway-forms": gatewayForms,
+    "../lib/model-inventory-filters": modelFilters,
+    "../hooks/use-mobile": { useIsMobile: () => false },
     "../../providers/auth-provider": { useAuth: () => ({ user: { role } }) },
     "../../locales": { useLocale: () => ({ locale: "en-US" }) },
     "../../providers/timezone-provider": { useTimezone: () => ({ timezone: "UTC" }) },
@@ -206,6 +209,42 @@ test("the page routes apim URLs and preserves source three-tab compatibility for
   assert.deepEqual(harness.all().filter(node => node.props?.["data-tab"]).map(node => node.props["data-tab"]), ["models", "connections", "gateways", "apim"])
   harness.props.topologyAvailable = false
   assert.deepEqual(harness.all().filter(node => node.props?.["data-tab"]).map(node => node.props["data-tab"]), ["models", "connections", "gateways"])
+})
+
+test("model workspace applies filters and search to models, pending rows, empty states and totals", () => {
+  const registry = {
+    gateways: profiles,
+    providers: [{ id: "provider", name: "Foundry", brand_key: "microsoft_foundry", enabled: true }],
+    runtimes: [{ id: "connection", name: "Connection", provider_id: "provider", gateway_profile_id: "first", brand_key: "microsoft_foundry", runtime_kind: "foundry", enabled: true, health_status: "unknown", config: {} }],
+    models: [
+      { id: "alpha", model_key: "gpt-alpha", display_name: "Alpha", runtime_id: "connection", provider_id: "provider", family_key: "openai", capabilities: ["chat"], enabled: true },
+      { id: "beta", model_key: "claude-beta", display_name: "Beta", runtime_id: "connection", provider_id: "provider", family_key: "claude", capabilities: ["chat"], enabled: false },
+    ],
+  }
+  const harness = componentHarness("ModelWorkspace", {
+    registry, topology: { items: [], total: 0 }, topologyAvailable: true, tab: "models",
+    publications: [{ id: "pending", model_key: "deepseek-pending", display_name: "DeepSeek pending", publication_kind: "model_add", status: "queued", updated_at: "2026-01-01T00:00:00Z" }],
+    loadingRuntimeHealthIds: new Set(),
+  }, { code: pageCode })
+  const visible = () => harness.all().filter(node => ["ModelRow", "PublicationModelRow"].includes(node.type?.name))
+    .map(node => node.props.model?.model_key ?? node.props.publication.model_key)
+  const apply = value => harness.find(node => node.type === "ModelInventoryFilterMenu").props.onChange(value)
+  const search = value => harness.find(node => node.type === "ExpandableSearch").props.onChange(value)
+  assert.deepEqual(visible(), ["gpt-alpha", "claude-beta", "deepseek-pending"])
+  apply({ ...modelFilters.emptyModelFilters(), family: ["deepseek"] })
+  assert.deepEqual(visible(), ["deepseek-pending"])
+  assert.equal(harness.find(node => node.props?.className === "smh-empty"), undefined)
+  assert.equal(harness.find(node => node.type === "footer").props.children[1], 1)
+  apply({ ...modelFilters.emptyModelFilters(), status: ["enabled"], capability: ["chat"] })
+  assert.deepEqual(visible(), ["gpt-alpha"])
+  search(" beta ")
+  assert.deepEqual(visible(), [])
+  assert.ok(harness.find(node => node.props?.className === "smh-empty"))
+  assert.equal(harness.find(node => node.type === "footer").props.children[1], 0)
+  apply(modelFilters.emptyModelFilters())
+  assert.deepEqual(visible(), ["claude-beta"])
+  search("")
+  assert.deepEqual(visible(), ["gpt-alpha", "claude-beta", "deepseek-pending"])
 })
 
 test("source initialization queries honor capability presence and active-only 1.5-second polling", () => {

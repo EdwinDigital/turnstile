@@ -2,6 +2,8 @@ const plural = (value: string, singular: string, pluralForm = `${singular}s`) =>
   Number(value.replace(/,/g, "")) === 1 ? singular : pluralForm
 
 export const DYNAMIC_RULES: Array<[RegExp, (...args: string[]) => string]> = [
+  [/^([\d,]+)\s*个筛选$/g, (_match, value) => `${value} ${plural(value, "filter")}`],
+  [/^([\d,]+)\s*项$/g, (_match, value) => `${value} selected`],
   [/^复制 (Primary|Secondary) Key$/g, (_match, kind) => `Copy ${kind} Key`],
   [/^轮换 (Primary|Secondary) Key$/g, (_match, kind) => `Rotate ${kind} Key`],
   [/^轮换 (Primary|Secondary) Key？$/g, (_match, kind) => `Rotate ${kind} Key?`],

@@ -1,4 +1,6 @@
 export const DYNAMIC_RULES: Array<[RegExp, (...args: string[]) => string]> = [
+  [/^([\d,]+)\s*个筛选$/g, (_match, value) => `${value}개 필터`],
+  [/^([\d,]+)\s*项$/g, (_match, value) => `${value}개`],
   [/^复制 (Primary|Secondary) Key$/g, (_match, kind) => `${kind} Key 복사`],
   [/^轮换 (Primary|Secondary) Key$/g, (_match, kind) => `${kind} Key 교체`],
   [/^轮换 (Primary|Secondary) Key？$/g, (_match, kind) => `${kind} Key를 교체할까요?`],

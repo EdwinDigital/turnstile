@@ -1,4 +1,6 @@
 export const DYNAMIC_RULES: Array<[RegExp, (...args: string[]) => string]> = [
+  [/^([\d,]+)\s*个筛选$/g, (_match, value) => `${value} 件の絞り込み`],
+  [/^([\d,]+)\s*项$/g, (_match, value) => `${value} 件`],
   [/^复制 (Primary|Secondary) Key$/g, (_match, kind) => `${kind} Key をコピー`],
   [/^轮换 (Primary|Secondary) Key$/g, (_match, kind) => `${kind} Key をローテーション`],
   [/^轮换 (Primary|Secondary) Key？$/g, (_match, kind) => `${kind} Key をローテーションしますか？`],
