@@ -246,6 +246,49 @@ def test_openai_connection_registration_defers_credentials_and_model_publication
     assert mismatched_vendor.value.status_code == 409
 
 
+def test_foundry_connections_on_different_gateways_have_unique_names(tmp_path: Path) -> None:
+    repository = InMemoryRepository()
+    service = ModelRuntimeService(repository, Settings(
+        apim_principal_id=str(UUID(int=99)), credential_key_file=tmp_path / "key",
+    ))
+    first_gateway = next(item for item in repository.gateways if item["implementation"] == "apim")
+    second_gateway_id = UUID(int=911)
+    repository.gateways.append({
+        **first_gateway, "id": second_gateway_id, "name": "Second APIM", "is_default": False,
+    })
+    endpoint = "https://same-project.services.ai.azure.com/api/projects/shared"
+    request = {
+        "gateway_profile_id": str(first_gateway["id"]),
+        "provider": {"template": "microsoft_foundry"},
+        "auth_mode": "managed_identity",
+        "foundry_project_endpoint": endpoint,
+    }
+    first_registry = service.save_connection(ModelConnectionCreate.model_validate(request))
+    first = next(
+        item for item in first_registry.runtimes if item.config.get("project_endpoint") == endpoint
+    )
+    second_request = ModelConnectionCreate.model_validate({
+        **request, "gateway_profile_id": str(second_gateway_id),
+        "provider": {"existing_id": str(first.provider_id)},
+    })
+
+    registry = service.save_connection(second_request)
+
+    connections = [
+        item for item in registry.runtimes if item.config.get("project_endpoint") == endpoint
+    ]
+    assert len(connections) == 2
+    assert len({item.name for item in connections}) == 2
+    assert next(item for item in connections if item.id == first.id) == first
+    second = next(item for item in connections if item.gateway_profile_id == second_gateway_id)
+    assert second.name == f"{first.name} [{second_gateway_id}]"
+    assert second.provider_id == first.provider_id
+    assert second.config["auth_strategy"] == "managed_identity"
+    with pytest.raises(HTTPException) as duplicate:
+        service.save_connection(second_request)
+    assert duplicate.value.status_code == 409
+
+
 def test_databricks_connection_normalizes_workspace_and_uses_native_anthropic_route() -> None:
     workspace = "https://adb-unit.1.azuredatabricks.net"
     assert databricks_workspace_url(f"{workspace.upper()}/") == workspace

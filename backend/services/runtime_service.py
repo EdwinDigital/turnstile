@@ -503,6 +503,9 @@ class ModelRuntimeService:
                 status_code=409,
                 detail="This provider does not support managed connection onboarding",
             )
+        if any(runtime["name"] == values["name"] for runtime in registry["runtimes"]):
+            suffix = f" [{gateway['id']}]"
+            values["name"] = f"{values['name'][:255 - len(suffix)]}{suffix}"
         try:
             runtime_brand = brand
             if provider_kind is ProviderKind.OPENAI_COMPATIBLE:
