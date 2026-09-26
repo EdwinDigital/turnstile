@@ -22,7 +22,7 @@ from turnstile_core.domain.control_plane import (
     GatewayReleaseDependencies,
     RuntimeTarget,
 )
-from turnstile_core.domain.models import TokenUsageRecord
+from turnstile_core.domain.models import ModelPrice, TokenUsageRecord
 from turnstile_core.domain.runtime_models import (
     AuthType,
     BrandKey,
@@ -965,7 +965,7 @@ def test_internal_invocation_does_not_block_a_department_in_audit_mode() -> None
     assert all(record.status_code != 403 for record in repository.usage_records)
 
 
-def test_apim_denial_is_preserved_without_local_telemetry() -> None:
+def test_apim_denial_is_traced_without_overwriting_formal_telemetry() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             403,
@@ -1003,7 +1003,70 @@ def test_apim_denial_is_preserved_without_local_telemetry() -> None:
     assert blocked.value.headers["x-request-id"] == "request-apim-denied"
     assert blocked.value.headers["x-correlation-id"] == "correlation-apim-denied"
     assert blocked.value.headers["retry-after"] == "60"
-    assert repository.usage_records == []
+    assert len(repository.usage_records) == 1
+    record = repository.usage_records[0]
+    assert record.request_id == "request-apim-denied"
+    assert record.correlation_id == "correlation-apim-denied"
+    assert record.model_id == str(model["id"])
+    assert record.runtime == runtime["name"]
+    assert record.status_code == 403
+    assert record.estimated is True
+    assert record.ingest_source == "gateway"
+    assert record.ingest_error == "gateway_invocation_usage_unavailable"
+    assert record.input_price_per_million is None
+    assert record.price_context_snapshot is not None
+    assert "model_not_assigned" in (record.error_message or "")
+    price = ModelPrice.model_validate(record.price_context_snapshot)
+    formal = record.model_copy(update={
+        "input_tokens": 7, "output_tokens": 3, "estimated": False,
+        "status": "200", "status_code": 200, "ingest_source": "eventhub",
+        "ingest_error": None, "error_message": None,
+    })
+    repository.write_token_usage(formal)
+    assert len(repository.usage_records) == 1
+    assert repository.usage_records[0].estimated_cost == price.cost(7, 0, 3)
+    settled = repository.usage_records[0]
+    with pytest.raises(HTTPException):
+        service.invoke(request().model_copy(update={"model_id": model["id"]}))
+    assert repository.usage_records == [settled]
+
+
+@pytest.mark.parametrize("failure", ["bad_request", "timeout"])
+@pytest.mark.parametrize("telemetry_available", [True, False])
+def test_failed_invocation_preserves_request_identity_and_unknown_usage(
+    monkeypatch: pytest.MonkeyPatch, failure: str, telemetry_available: bool,
+) -> None:
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        if failure == "timeout":
+            raise httpx.ReadTimeout("timed out", request=incoming)
+        return httpx.Response(400, json={"error": {"message": "not published"}})
+
+    repository = InMemoryRepository()
+    runtime, model = _foundry_route(repository)
+    if not telemetry_available:
+        monkeypatch.setattr(
+            repository, "write_token_usage", Mock(side_effect=RuntimeError("offline")),
+        )
+    service = ModelRuntimeService(
+        repository, Settings(), GatewayRouter(httpx.Client(transport=httpx.MockTransport(handler))),
+    )
+    with pytest.raises(HTTPException) as caught:
+        service.invoke(
+            request().model_copy(update={"model_id": model["id"]}), request_id="unit-request",
+        )
+    assert caught.value.status_code == (504 if failure == "timeout" else 400)
+    assert caught.value.headers is not None
+    assert caught.value.headers["x-request-id"] == "unit-request"
+    if telemetry_available:
+        record = repository.usage_records[0]
+        assert record.request_id == record.correlation_id == "unit-request"
+        assert record.status_code == caught.value.status_code
+        assert record.estimated is True and record.estimated_cost == 0
+        assert record.input_tokens == record.output_tokens == 0
+        assert record.runtime == runtime["name"]
+        assert record.error_message
+
+
 
 
 def test_production_invocation_rejects_non_apim_transport() -> None:
@@ -2036,6 +2099,61 @@ def test_apim_invocation_uses_configured_gateway_when_registry_url_is_empty(
     response = service.invoke(invocation)
 
     assert response.content == "CONFIGURED_GATEWAY_OK"
+
+
+@pytest.mark.parametrize(
+    "mode", ["trusted", "inventory", "managed", "untrusted", "empty", "disabled"],
+)
+def test_invocation_uses_only_a_trusted_serving_deployment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    endpoint = "https://edge.test/turnstile/llm"
+    deployment_id = UUID(int=71)
+    sent: list[httpx.Request] = []
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        sent.append(incoming)
+        assert str(incoming.url) == endpoint + "/chat/completions"
+        assert incoming.headers["Ocp-Apim-Subscription-Key"] == "dashboard-key"
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "EDGE_OK"}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+        })
+
+    repository = InMemoryRepository()
+    model_id = UUID("9b45b7e1-403d-4c6c-a877-5dc77775b911")
+    runtime_id = UUID("30000000-0000-4000-8000-000000000003")
+    route = repository.invocation_route(runtime_id, model_id)
+    assert route is not None
+    route["gateway_deployments"] = [] if mode == "empty" else [{
+        "deployment_id": str(deployment_id), "endpoint_url": endpoint,
+        "kind": "managed" if mode == "managed" else "self_hosted",
+        "hostnames": ["edge.test"] if mode == "inventory" else [],
+    }]
+    monkeypatch.setattr(repository, "invocation_route", Mock(return_value=route))
+    settings = Settings(
+        credential_key_file=tmp_path / "key",
+        apim_target_registry_enabled=True,
+        self_hosted_gateway_enabled=mode != "disabled",
+        self_hosted_gateway_trusted_endpoints={deployment_id: HttpUrl(endpoint)}
+        if mode in {"trusted", "disabled"} else {},
+        apim_dashboard_subscription_key=SecretStr("dashboard-key"),
+    )
+    service = ModelRuntimeService(
+        repository, settings, GatewayRouter(httpx.Client(transport=httpx.MockTransport(handler))),
+    )
+    invocation = request().model_copy(update={"model_id": model_id, "runtime_id": runtime_id})
+    if mode in {"untrusted", "empty", "disabled"}:
+        decrypt = Mock(side_effect=AssertionError("Credentials must not be decrypted"))
+        monkeypatch.setattr(service, "_decrypt_route", decrypt)
+        with pytest.raises(HTTPException) as caught:
+            service.invoke(invocation)
+        assert caught.value.status_code == 503
+        decrypt.assert_not_called()
+        assert sent == []
+    else:
+        assert service.invoke(invocation).content == "EDGE_OK"
+        assert len(sent) == 1
 
 
 def test_apim_registry_excludes_github_copilot_telemetry_identity() -> None:

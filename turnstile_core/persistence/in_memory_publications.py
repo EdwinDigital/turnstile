@@ -26,6 +26,7 @@ class InMemoryPublicationRepositoryMixin:
     apim_targets: dict[UUID, dict[str, Any]]
     apim_target_route_bindings: dict[UUID, dict[str, Any]]
     gateway_deployments: dict[UUID, dict[str, Any]]
+    gateway_deployment_inventories: dict[UUID, dict[str, Any]]
     gateway_release_operation_secrets: dict[UUID, bytes]
 
     assistant_setting: dict[str, Any]
@@ -1472,7 +1473,18 @@ class InMemoryPublicationRepositoryMixin:
         if not candidates:
             return None
         model = sorted(candidates, key=lambda item: not bool(item["is_default"]))[0]
-        runtime = self._require(self.runtimes, model["runtime_id"], "runtime")
+        routes = [row for row in self.apim_target_route_bindings.values()
+                  if row["logical_model_id"] == model["id"]]
+        enabled_routes = sorted(
+            (row for row in routes if row["enabled"]),
+            key=lambda row: (not row["is_default_serving"], row["created_at"], str(row["id"])),
+        )
+        if routes and not enabled_routes:
+            return None
+        binding = enabled_routes[0] if enabled_routes else None
+        runtime = self._require(
+            self.runtimes, binding["runtime_id"] if binding else model["runtime_id"], "runtime",
+        )
         provider = self._require(self.providers, model["provider_id"], "provider")
         gateway = self._find(self.gateways, runtime.get("gateway_profile_id"))
         if (
@@ -1514,7 +1526,29 @@ class InMemoryPublicationRepositoryMixin:
             "gateway_auth_type": gateway["auth_type"] if gateway else None,
             "gateway_credential_ciphertext": gateway["credential_ciphertext"] if gateway else None,
             "gateway_config": gateway["config"] if gateway else {},
+            "gateway_deployments": self._invocation_deployments(binding) if binding else None,
         }
+
+    def _invocation_deployments(self, binding: Mapping[str, Any]) -> list[dict[str, Any]]:
+        scope = binding["deployment_scope"]
+        deployments = [
+            row for row in self.gateway_deployments.values()
+            if row["apim_target_id"] == binding["apim_target_id"]
+            and row.get("retired_at") is None
+            and row["declared_state"] == "present"
+            and row["reachability_state"] != "unreachable"
+            and row.get("endpoint_url") is not None
+            and (scope["mode"] == "all" or row["id"] in scope["deployment_ids"])
+        ]
+        ordered = sorted(deployments, key=lambda row: (row["kind"] != "managed", str(row["id"])))
+        return [{
+            "deployment_id": str(row["id"]), "kind": row["kind"],
+            "native_gateway_id": row["native_gateway_id"],
+            "endpoint_url": str(row["endpoint_url"]),
+            "hostnames": [item["hostname"] for item in self.gateway_deployment_inventories.get(
+                row["id"], {},
+            ).get("hostname_configurations", [])],
+        } for row in ordered]
 
     def _published_image_profile(self, model: Mapping[str, Any]) -> object:
         raise NotImplementedError

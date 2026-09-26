@@ -1715,6 +1715,10 @@ class PostgreSqlPublicationRepositoryMixin:
             "runtime.enabled",
             "provider.enabled",
             "(gateway.id IS NULL OR gateway.enabled)",
+            """(route_binding.id IS NOT NULL OR NOT EXISTS (
+                SELECT 1 FROM apim_target_route_binding stored_route
+                WHERE stored_route.logical_model_id = model.id
+            ))""",
         ]
         parameters: list[Any] = []
         if model_id is not None:
@@ -1757,9 +1761,19 @@ class PostgreSqlPublicationRepositoryMixin:
                     gateway.base_url AS gateway_base_url,
                     gateway.auth_type AS gateway_auth_type,
                     gateway.credential_ciphertext AS gateway_credential_ciphertext,
-                    gateway.config AS gateway_config
+                    gateway.config AS gateway_config,
+                    CASE WHEN route_binding.id IS NOT NULL
+                        THEN COALESCE(deployments.items, '[]'::jsonb)
+                        ELSE NULL END AS gateway_deployments
                 FROM managed_model model
-                JOIN model_runtime runtime ON runtime.id = model.runtime_id
+                LEFT JOIN LATERAL (
+                    SELECT route.* FROM apim_target_route_binding route
+                    WHERE route.logical_model_id = model.id AND route.enabled
+                    ORDER BY route.is_default_serving DESC, route.created_at, route.id
+                    LIMIT 1
+                ) route_binding ON TRUE
+                JOIN model_runtime runtime
+                    ON runtime.id = COALESCE(route_binding.runtime_id, model.runtime_id)
                 JOIN model_provider provider ON provider.id = model.provider_id
                 LEFT JOIN managed_model_price price ON price.model_id = model.id
                                 LEFT JOIN managed_model_metadata model_metadata
@@ -1776,6 +1790,31 @@ class PostgreSqlPublicationRepositoryMixin:
                     WHERE lower(value->'model'->>'model_key') = lower(model.model_key)
                     LIMIT 1
                 ) binding ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'deployment_id', deployment.id,
+                        'kind', deployment.kind,
+                        'native_gateway_id', deployment.native_gateway_id,
+                        'endpoint_url', deployment.endpoint_url,
+                        'hostnames', COALESCE((
+                            SELECT jsonb_agg(hostname.hostname)
+                            FROM gateway_deployment_hostname_inventory hostname
+                            WHERE hostname.deployment_id = deployment.id
+                        ), '[]'::jsonb)
+                    ) ORDER BY (deployment.kind = 'managed') DESC, deployment.id) AS items
+                    FROM gateway_deployment deployment
+                    WHERE deployment.apim_target_id = route_binding.apim_target_id
+                        AND deployment.retired_at IS NULL
+                        AND deployment.declared_state = 'present'
+                        AND deployment.reachability_state <> 'unreachable'
+                        AND deployment.endpoint_url IS NOT NULL
+                        AND (route_binding.deployment_scope_mode = 'all' OR EXISTS (
+                            SELECT 1 FROM apim_target_route_binding_deployment selected
+                            WHERE selected.route_binding_id = route_binding.id
+                                AND selected.apim_target_id = route_binding.apim_target_id
+                                AND selected.gateway_deployment_id = deployment.id
+                        ))
+                ) deployments ON TRUE
                 WHERE {" AND ".join(conditions)}
                 ORDER BY model.is_default DESC, model.created_at
                 LIMIT 1""",

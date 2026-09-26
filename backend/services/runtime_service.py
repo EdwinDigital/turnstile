@@ -1201,6 +1201,76 @@ class ModelRuntimeService:
             headers={"x-request-id": request_id},
         )
 
+    def _invocation_deployment_route(self, route: dict[str, Any]) -> dict[str, Any]:
+        deployments = route.get("gateway_deployments")
+        if route.get("gateway_implementation") != GatewayKind.APIM or deployments is None:
+            return route
+        for deployment in deployments:
+            endpoint = str(deployment.get("endpoint_url") or "").rstrip("/")
+            try:
+                parsed = urlsplit(endpoint)
+                deployment_id = UUID(str(deployment["deployment_id"]))
+            except (KeyError, ValueError):
+                continue
+            if (
+                parsed.scheme != "https" or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment
+            ):
+                continue
+            if deployment["kind"] != "managed":
+                if not self._settings.self_hosted_gateway_enabled:
+                    continue
+                declared_hosts = {
+                    str(hostname).casefold() for hostname in deployment.get("hostnames", [])
+                }
+                trusted = self._settings.self_hosted_gateway_trusted_endpoints.get(deployment_id)
+                if (
+                    parsed.hostname.casefold() not in declared_hosts
+                    and (trusted is None or str(trusted).rstrip("/") != endpoint)
+                ):
+                    continue
+            return {
+                **route, "gateway_base_url": endpoint,
+                "gateway_deployment_id": str(deployment_id),
+            }
+        raise HTTPException(
+            status_code=503, detail="No trusted serving Gateway deployment is available",
+        )
+
+    def _record_invocation_failure(
+        self, request: ModelInvocationRequest, route: dict[str, Any],
+        error: GatewayInvocationError, headers: dict[str, str], latency_ms: int,
+    ) -> None:
+        metadata = request.metadata
+        request_id = headers["x-request-id"]
+        correlation_id = headers["x-correlation-id"]
+        try:
+            price = model_price_from_values(route)
+            self._repository.write_token_usage(TokenUsageRecord(
+                id=correlation_id, request_id=request_id, correlation_id=correlation_id,
+                ts=datetime.now(UTC), team=metadata.department or "unattributed",
+                organization=metadata.organization, organization_id=metadata.organization_id,
+                department=metadata.department, department_id=metadata.department_id,
+                project=metadata.project, project_id=metadata.project_id,
+                user=metadata.user, user_id=metadata.user_id,
+                agent=metadata.agent, agent_id=metadata.agent_id,
+                workflow=metadata.workflow, run_id=metadata.run_id,
+                turn_index=metadata.turn_index, provider="unattributed",
+                model=str(route["display_name"]), model_id=str(route["model_id"]),
+                runtime=str(route["runtime_name"]), request_source=metadata.request_source,
+                usage_domain=metadata.usage_domain, input_tokens=0, cached_tokens=0,
+                output_tokens=0, et=0.0,
+                et_coeff_m=self._settings.model_coefficients.get("default", 1.0),
+                latency_ms=latency_ms, status=str(error.status_code), status_code=error.status_code,
+                estimated_cost=0.0, estimated=True, ingest_source="gateway",
+                ingest_error="gateway_invocation_usage_unavailable",
+                error_message=str(error)[:2000],
+                price_context_snapshot=price.model_dump(mode="json") if price else None,
+            ))
+        except Exception:
+            logger.exception("Failed invocation trace could not be written for %s", request_id)
+
     def invoke(
         self,
         request: ModelInvocationRequest,
@@ -1234,6 +1304,7 @@ class ModelRuntimeService:
         if enforce_user_model_access:
             self._assert_model_allowed(request, route, request_id)
         self._assert_budget_available(request, route, request_id)
+        route = self._invocation_deployment_route(route)
         route = self._decrypt_route(route)
         if (
             route.get("gateway_implementation") == GatewayKind.APIM
@@ -1259,6 +1330,8 @@ class ModelRuntimeService:
         except GatewayInvocationError as error:
             headers = dict(error.headers)
             headers.setdefault("x-request-id", request_id)
+            headers.setdefault("x-correlation-id", headers["x-request-id"])
+            self._record_invocation_failure(request, route, error, headers, elapsed_ms(started))
             raise HTTPException(
                 status_code=error.status_code,
                 detail=str(error),
@@ -1306,6 +1379,7 @@ class ModelRuntimeService:
             raise HTTPException(status_code=409, detail=str(error)) from error
         self._assert_model_allowed(request, route, request_id)
         self._assert_budget_available(request, route, request_id)
+        route = self._invocation_deployment_route(route)
         route = self._decrypt_route(route)
         if not route.get("gateway_base_url") and self._settings.apim_gateway_url:
             route["gateway_base_url"] = self._settings.apim_gateway_url

@@ -32,6 +32,28 @@ from turnstile_core.persistence.repository_support import _validate_gateway_depl
 from turnstile_core.services.control_plane import GatewayControlPlaneService
 
 
+def test_invocation_query_uses_active_route_deployment_scope() -> None:
+    connection, context = MagicMock(), MagicMock()
+    context.__enter__.return_value = connection
+    connection.execute.return_value.fetchone.return_value = {"model_id": UUID(int=17)}
+    repository = PostgreSqlOpsDbProxy("postgresql://unused", pool_min_size=0)
+    with patch.object(repository, "_connection", return_value=context):
+        repository.invocation_route(None, UUID(int=17))
+    statement, parameters = connection.execute.call_args.args
+    assert parameters == [UUID(int=17)]
+    assert "FROM apim_target_route_binding" in statement
+    assert "route.enabled" in statement
+    assert "route.is_default_serving DESC" in statement
+    assert "COALESCE(route_binding.runtime_id, model.runtime_id)" in statement
+    assert "route_binding.deployment_scope_mode = 'all'" in statement
+    assert "selected.gateway_deployment_id = deployment.id" in statement
+    assert "deployment.apim_target_id = route_binding.apim_target_id" in statement
+    assert "deployment.retired_at IS NULL" in statement
+    assert "deployment.declared_state = 'present'" in statement
+    assert "AS gateway_deployments" in statement
+    assert "route_binding.id IS NOT NULL OR NOT EXISTS" in statement
+
+
 @pytest.mark.parametrize("explicit_id", [False, True])
 def test_postgres_gateway_creation_inserts_the_registration_identity(explicit_id: bool) -> None:
     connection, context = MagicMock(), MagicMock()
@@ -61,6 +83,56 @@ def test_postgres_gateway_creation_inserts_the_registration_identity(explicit_id
         assert isinstance(parameters["id"], UUID)
         assert parameters["id"] != second.args[1]["id"]
     assert values == before
+
+
+@pytest.mark.parametrize("scope_mode", ["all", "selected"])
+@pytest.mark.parametrize("state", ["present", "retired", "absent", "unreachable", "disabled"])
+def test_invocation_route_respects_serving_scope_and_retirement(
+    scope_mode: str, state: str,
+) -> None:
+    repository = InMemoryRepository()
+    repository.upsert_apim_target(target())
+    runtime = next(item for item in repository.runtimes if item.get("gateway_profile_id") == TARGET)
+    model = next(item for item in repository.models
+                 if item["runtime_id"] == runtime["id"] and item["enabled"])
+    managed = deployment(
+        endpoint_url="https://managed.example.test/unit/llm",
+        declared_state="present", last_arm_sync_at=NOW,
+    )
+    edge = deployment(
+        id=gateway_deployment_id_for(TARGET, "edge"),
+        native_gateway_id="edge", kind="self_hosted", hosting_mode="docker",
+        endpoint_url="https://edge.example.test/unit/llm",
+        declared_state="present", last_arm_sync_at=NOW,
+    )
+    repository.upsert_gateway_deployment(managed)
+    repository.upsert_gateway_deployment(edge)
+    binding = ApimTargetRouteBinding(
+        id=UUID(int=71), logical_model_id=model["id"], apim_target_id=TARGET,
+        runtime_id=runtime["id"], is_default_serving=True,
+        deployment_scope=GatewayDeploymentScope(
+            mode=GatewayDeploymentScopeMode(scope_mode),
+            deployment_ids=(edge.id,) if scope_mode == "selected" else (),
+        ),
+    )
+    repository.upsert_apim_target_route_binding(binding)
+    if state == "retired":
+        repository.gateway_deployments[edge.id]["retired_at"] = NOW
+    elif state == "absent":
+        repository.gateway_deployments[edge.id]["declared_state"] = "absent"
+    elif state == "unreachable":
+        repository.gateway_deployments[edge.id]["reachability_state"] = "unreachable"
+    elif state == "disabled":
+        repository.apim_target_route_bindings[binding.id]["enabled"] = False
+    route = repository.invocation_route(runtime["id"], model["id"])
+    if state == "disabled":
+        assert route is None
+    else:
+        assert route is not None
+        expected = ([str(managed.id)] if scope_mode == "all" else [])
+        if state == "present":
+            expected.append(str(edge.id))
+        assert [item["deployment_id"] for item in route["gateway_deployments"]] == expected
 
 
 @pytest.mark.parametrize("change", ["retired", "missing", "target", "native", "endpoint"])
