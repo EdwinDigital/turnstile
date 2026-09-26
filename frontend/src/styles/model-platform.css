@@ -245,12 +245,12 @@
 .apim-onboarding-blockers { margin: 14px 0 0; padding-left: 16px; }
 .apim-onboarding-footer { flex-wrap: wrap; }
 .apim-onboarding-footer > :first-child { margin-right: auto; }
-.apim-onboarding-row { position: relative; }
-.apim-onboarding-row::before { content: ""; position: absolute; inset: 0 16px; border-radius: 8px; background: color-mix(in oklch, var(--muted) 38%, transparent); }
-.apim-onboarding-row > * { position: relative; }
+.apim-onboarding-row, .gateway-provision-item { position: relative; }
+.apim-onboarding-row::before, .gateway-provision-item::before { content: ""; position: absolute; inset: 0 16px; border-radius: 8px; background: color-mix(in oklch, var(--muted) 38%, transparent); }
+.apim-onboarding-row > *, .gateway-provision-item > * { position: relative; }
 .apim-onboarding-row .connection-provider-heading::before { content: none; }
-.apim-onboarding-details > [role="cell"] { min-width: 0; padding: 0 24px 12px; }
-.apim-onboarding-details .apim-onboarding-steps { padding-inline: 2px; }
+.apim-onboarding-details > [role="cell"], .gateway-provision-details > [role="cell"] { min-width: 0; padding: 0 24px 12px; }
+.apim-onboarding-details .apim-onboarding-steps, .gateway-provision-details .apim-onboarding-steps { padding-inline: 2px; }
 .apim-onboarding-details .registry-error { margin: 10px 2px 0; font-size: 11px; line-height: 17px; overflow-wrap: anywhere; }
 .apim-onboarding-error { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .apim-onboarding-error > p { min-width: 0; flex: 1 1 240px; margin: 0; }
@@ -261,10 +261,15 @@
 .apim-onboarding-mobile-summary { display: none; }
 .gateway-endpoint-confirmation { display: flex; align-items: flex-start; gap: 10px; color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
 .gateway-endpoint-confirmation > [data-slot="checkbox"] { flex-shrink: 0; margin-top: 2px; }
-.gateway-provision-progress { display: grid; gap: 10px; min-width: 0; padding: 16px; border-bottom: 1px solid var(--border); }
-.gateway-provision-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; }
-.gateway-provision-heading > span { color: var(--muted-foreground); font-size: 12px; }
-.gateway-provision-progress > code { overflow-wrap: anywhere; font-size: 11px; }
+.gateway-provision-item .gateway-provision-row { border-bottom: 0; }
+.gateway-provision-details .apim-onboarding-steps { padding-top: 10px; gap: 8px 16px; }
+.gateway-provision-status > span { white-space: normal; overflow-wrap: anywhere; }
+.gateway-provision-status svg { flex: 0 0 13px; }
+.gateway-provision-error { margin: 10px 0 0; color: var(--destructive); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.infrastructure-row-actions > .gateway-provision-action { appearance: none; display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px; padding: 0; border: 1px solid var(--input); border-radius: 6px; background: var(--background); color: var(--foreground); cursor: pointer; }
+.gateway-provision-action:hover:not(:disabled) { background: var(--muted); }
+.gateway-provision-action:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.gateway-provision-action:disabled { opacity: .5; cursor: default; }
 .gateway-bootstrap-metadata { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; margin: 0; font-size: 12px; }
 .gateway-bootstrap-metadata dt { margin-top: 8px; color: var(--muted-foreground); }
 .gateway-bootstrap-metadata dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
@@ -286,8 +291,8 @@
 .infrastructure-dependencies > span > code { overflow: hidden; color: var(--muted-foreground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .infrastructure-remove-dialog .infrastructure-warning { margin-top: 12px; }
 @media (max-width: 760px) {
-	.apim-onboarding-row::before { inset-inline: 12px; }
-	.apim-onboarding-details > [role="cell"] { padding-inline: 20px; }
+	.apim-onboarding-row::before, .gateway-provision-item::before { inset-inline: 12px; }
+	.apim-onboarding-details > [role="cell"], .gateway-provision-details > [role="cell"] { padding-inline: 20px; }
 	.apim-onboarding-mobile-summary { display: grid; gap: 3px; margin: 0 0 10px; font-size: 11px; line-height: 16px; }
 	.apim-onboarding-mobile-summary dt { color: var(--muted-foreground); }
 	.apim-onboarding-mobile-summary dd { min-width: 0; margin: 0 0 5px; overflow-wrap: anywhere; }

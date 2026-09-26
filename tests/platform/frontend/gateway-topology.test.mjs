@@ -56,7 +56,7 @@ test("Gateway creation uses an idempotency header and bootstrap is never cacheab
   assert.deepEqual(JSON.parse(requests[1][1].body), { expires_in_hours: 24 })
 })
 
-function componentHarness(exportName, props, { operation = null, mutationPending = false, code = workspaceCode, api = {}, role = "owner", globals = {} } = {}) {
+function componentHarness(exportName, props, { operation = null, queryData = {}, mutationPending = false, code = workspaceCode, api = {}, role = "owner", globals = {} } = {}) {
   const slots = []
   let cursor = 0
   const effects = []
@@ -84,7 +84,7 @@ function componentHarness(exportName, props, { operation = null, mutationPending
     "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
     "@tanstack/react-query": {
       useQueryClient: () => queryClient,
-      useQuery: options => { queries.push(options); return { data: operation, error: null, refetch() {} } },
+      useQuery: options => { queries.push(options); return { data: Object.hasOwn(queryData, options.queryKey[0]) ? queryData[options.queryKey[0]] : operation, error: null, refetch() {} } },
       useMutation: options => {
         const index = cursor++
         if (!(index in slots)) slots[index] = { pending: false, error: null }
@@ -231,6 +231,136 @@ for (const mode of ["gateways", "apim"]) test(`source workspace renders four rea
   assert.ok(table)
   if (mode === "gateways") assert.deepEqual(table.props.entries.map(entry => entry.deployment.id), ["edge"])
   assert.equal(harness.find(node => node.type === "ManagementCredentialDialog"), undefined)
+})
+
+for (const mode of ["gateways", "apim"]) test(`Gateway creation stays inside its own list item in ${mode} view`, () => {
+  const creation = {
+    id: "creation", gateway_profile_id: "first", operation_kind: "self_hosted_gateway_provision",
+    status: "queued", worker_available: true, checkpoint: {},
+    semantic_preview: { native_gateway_id: "turnstile-unit", configuration: {
+      display_name: "New Docker Gateway", endpoint_url: "https://edge.example.test/unit-api",
+      hosting_mode: "docker",
+    } },
+  }
+  const harness = componentHarness("ApimGatewayWorkspace", {
+    mode, registry: { models: [], runtimes: [], gateways: profiles, self_hosted_gateway_enabled: true },
+    topology: { items: [topology()], total: 1, resource_lifecycle_available: true, self_hosted_gateway_provisioning_available: true },
+    loading: false, error: null, onTabChange() {}, onToggleSidebar() {},
+  }, { queryData: { provisions: { items: [creation] } } })
+  assert.equal(harness.find(node => node.type?.name === "SelfHostedGatewayProvisionProgress"), undefined)
+  assert.equal(harness.queries.find(query => query.queryKey[0] === "provisions").enabled, mode === "gateways")
+  if (mode === "gateways") {
+    const table = harness.find(node => node.type?.name === "GatewayTable")
+    assert.deepEqual(table.props.provisionItems.map(item => item.operation.id), ["creation"])
+    const content = componentHarness("GatewayTable", table.props)
+    assert.equal(content.all().filter(node => node.type?.name === "SelfHostedGatewayProvisionProgress").length, 1)
+    assert.equal(content.find(node => node.type?.name === "InfrastructureEmpty"), undefined)
+    assert.equal(harness.find(node => node.props?.["data-tab"] === "gateways").props.children[1].props.children, 1)
+    assert.equal(harness.find(node => node.type === "footer").props.children, "共 1 个Gateway")
+  } else {
+    assert.ok(harness.find(node => node.type?.name === "ApimTable"))
+    assert.equal(harness.find(node => node.type?.name === "GatewayTable"), undefined)
+  }
+})
+
+test("Gateway creation shares inventory search and never duplicates or resurrects completed rows", () => {
+  const target = topology()
+  target.deployments.push(topology({ id: "edge", native_gateway_id: "turnstile-unit", kind: "self_hosted", provisioning_operation_id: "creation", display_name: "Docker edge" }).deployments[0])
+  const current = {
+    id: "creation", gateway_profile_id: "first", status: "queued", worker_available: true,
+    checkpoint: {}, semantic_preview: { native_gateway_id: "turnstile-unit", configuration: {
+      display_name: "New Docker", endpoint_url: "https://new.example.test", hosting_mode: "docker",
+    } },
+  }
+  const queryData = { provisions: { items: [current] } }
+  const props = {
+    mode: "gateways", registry: { models: [], runtimes: [], gateways: profiles, self_hosted_gateway_enabled: true },
+    topology: { items: [target], resource_lifecycle_available: true, self_hosted_gateway_provisioning_available: true },
+    loading: false, error: null, onTabChange() {}, onToggleSidebar() {},
+  }
+  const harness = componentHarness("ApimGatewayWorkspace", props, { queryData })
+  const table = () => harness.find(node => node.type?.name === "GatewayTable")
+  const count = () => harness.find(node => node.props?.["data-tab"] === "gateways").props.children[1].props.children
+  assert.equal(table().props.provisionItems.length, 1)
+  assert.equal(table().props.entries.length, 0)
+  assert.equal(count(), 1)
+  harness.find(node => node.type === "ExpandableSearch").props.onChange("no-match")
+  assert.equal(table().props.provisionItems.length, 0)
+  assert.equal(harness.find(node => node.type === "footer").props.children, "共 0 个Gateway")
+  assert.equal(count(), 1)
+  harness.find(node => node.type === "ExpandableSearch").props.onChange("unit-service")
+  assert.equal(table().props.provisionItems.length, 1)
+  current.status = "succeeded"
+  current.checkpoint = { deployment_id: "edge" }
+  assert.equal(table().props.provisionItems.length, 0)
+  assert.equal(table().props.entries.length, 1)
+  assert.equal(count(), 1)
+  target.deployments = target.deployments.filter(item => item.deployment.id !== "edge")
+  assert.equal(table().props.provisionItems.length, 0)
+  assert.equal(table().props.entries.length, 0)
+  assert.equal(count(), 0)
+  current.status = "failed"
+  const member = componentHarness("ApimGatewayWorkspace", props, { queryData, role: "member" })
+  assert.equal(member.find(node => node.type?.name === "GatewayTable").props.provisionItems.length, 0)
+})
+
+test("Gateway creation status, steps and retry errors belong to its own table item", () => {
+  const retries = []
+  const operation = {
+    id: "creation", gateway_profile_id: "first", status: "failed", worker_available: true,
+    checkpoint: { apim_gateway_created: true }, error_message: "API association failed",
+    semantic_preview: { native_gateway_id: "turnstile-unit", configuration: {
+      display_name: "Docker edge", endpoint_url: "https://edge.example.test", hosting_mode: "docker",
+    } },
+  }
+  const props = { operation, target: topology(), available: true, retrying: false, error: new Error("Retry rejected"), onRetry: id => retries.push(id) }
+  const harness = componentHarness("SelfHostedGatewayProvisionProgress", props, { code: creationCode })
+  const item = harness.render()
+  assert.equal(item.props.role, "rowgroup")
+  assert.ok(item.props.className.split(" ").includes("connection-provider-group"))
+  assert.equal(item.props["data-operation-id"], "creation")
+  const rows = harness.all().filter(node => node.props?.role === "row")
+  assert.equal(rows.length, 2)
+  assert.equal(harness.nodes(rows[0]).filter(node => node.props?.role === "cell").length, 5)
+  assert.equal(harness.nodes(rows[0]).find(node => node.props?.role === "status").props.children.props.children[1], "创建失败")
+  assert.equal(harness.nodes(rows[1]).find(node => node.props?.role === "alert").props.children, "Retry rejected")
+  assert.deepEqual(harness.nodes(rows[1]).filter(node => node.type === "li").map(node => node.props["data-complete"]), [true, false, false])
+  const retry = () => harness.find(node => node.props?.["aria-label"] === "重试创建")
+  retry().props.onClick()
+  assert.deepEqual(retries, ["creation"])
+  props.retrying = true
+  assert.equal(retry().props.disabled, true)
+  props.retrying = false
+  props.available = false
+  assert.equal(retry().props.disabled, true)
+  operation.status = "queued"
+  operation.worker_available = false
+  operation.error_message = null
+  props.error = null
+  assert.equal(retry(), undefined)
+  assert.equal(harness.find(node => node.props?.role === "status").props.children.props.children[1], "创建已排队，Worker 当前不可用")
+})
+
+test("Gateway creation completion cannot open a dialog or notice across tabs", () => {
+  const current = { id: "creation", gateway_profile_id: "first", status: "queued", checkpoint: {}, semantic_preview: { native_gateway_id: "turnstile-unit", configuration: { display_name: "New Docker" } } }
+  const props = { mode: "gateways", registry: { models: [], runtimes: [], gateways: profiles, self_hosted_gateway_enabled: true }, topology: { items: [topology()], self_hosted_gateway_provisioning_available: true, resource_lifecycle_available: true }, loading: false, error: null, onTabChange() {}, onToggleSidebar() {} }
+  const harness = componentHarness("ApimGatewayWorkspace", props, { queryData: { provisions: { items: [current] } } })
+  harness.render()
+  harness.effects.splice(0).forEach(effect => effect())
+  props.mode = "apim"
+  current.status = "succeeded"
+  current.checkpoint = { deployment_id: "edge" }
+  harness.render()
+  harness.effects.splice(0).forEach(effect => effect())
+  assert.equal(harness.find(node => node.type?.name === "SelfHostedGatewayBootstrapDialog"), undefined)
+  assert.equal(harness.find(node => node.props?.className === "registry-notice smh-notice"), undefined)
+  assert.deepEqual(harness.invalidations, [])
+  props.mode = "gateways"
+  harness.render()
+  harness.effects.splice(0).forEach(effect => effect())
+  assert.equal(harness.find(node => node.type?.name === "SelfHostedGatewayBootstrapDialog"), undefined)
+  assert.equal(harness.find(node => node.props?.className === "registry-notice smh-notice"), undefined)
+  assert.deepEqual(harness.invalidations, [["registry"], ["targets"]])
 })
 
 test("the page routes apim URLs and preserves source three-tab compatibility for old backends", () => {
@@ -534,6 +664,29 @@ test("source mobile actions remain visible and initialization retry retains its 
   assert.equal(retry.get("width"), "auto")
   assert.equal(retry.get("height"), "28px")
   assert.equal(retry.get("max-width"), "100%")
+})
+
+test("Gateway creation rows share existing item margins without shifting columns", () => {
+  const { parse } = frontendRequire("postcss")
+  const css = parse(readFileSync(new URL("../../../frontend/src/styles/model-platform.css", import.meta.url), "utf8"))
+  const declarationsFor = (selector, mobile = false) => {
+    const declarations = new Map()
+    css.walkRules(rule => {
+      const isMobile = rule.parent.type === "atrule" && rule.parent.params === "(max-width: 760px)"
+      if (isMobile === mobile && rule.selectors.includes(selector)) rule.walkDecls(declaration => declarations.set(declaration.prop, declaration.value))
+    })
+    return declarations
+  }
+  for (const mobile of [false, true]) {
+    assert.deepEqual(declarationsFor(".gateway-provision-item", mobile), declarationsFor(".apim-onboarding-row", mobile))
+    assert.deepEqual(declarationsFor(".gateway-provision-item::before", mobile), declarationsFor(".apim-onboarding-row::before", mobile))
+    assert.deepEqual(declarationsFor('.gateway-provision-details > [role="cell"]', mobile), declarationsFor('.apim-onboarding-details > [role="cell"]', mobile))
+    const row = declarationsFor(".gateway-provision-item .gateway-provision-row", mobile)
+    for (const property of ["padding", "padding-inline", "padding-left", "padding-right", "margin", "margin-inline", "grid-template-columns", "width"]) assert.equal(row.has(property), false, property)
+  }
+  assert.equal(declarationsFor(".gateway-provision-item::before").get("position"), "absolute")
+  assert.equal(declarationsFor(".gateway-provision-item::before").get("inset"), "0 16px")
+  assert.equal(declarationsFor(".gateway-provision-item::before", true).get("inset-inline"), "12px")
 })
 
 for (const [changes, label] of [

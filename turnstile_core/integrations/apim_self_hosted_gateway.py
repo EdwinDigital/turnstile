@@ -119,7 +119,7 @@ class AzureSelfHostedGatewayManagementMixin:
                 "properties": {"provisioningState": "created"},
             })
             associated = self._request("HEAD", association)
-        if associated.status_code != 200:
+        if associated.status_code not in {200, 204}:
             raise PolicyCompilationError("Gateway API association readback does not match")
 
     def self_hosted_gateway_bootstrap(
@@ -136,7 +136,7 @@ class AzureSelfHostedGatewayManagementMixin:
         self._verify_provisioned_gateway(spec, self._request("GET", path).json())
         association_path = path + "/apis/" + quote(spec.target.api_id, safe="")
         association = self._request("HEAD", association_path)
-        if association.status_code != 200:
+        if association.status_code not in {200, 204}:
             raise PolicyCompilationError("Gateway API association readback does not match")
         expiry = datetime.now(UTC).replace(microsecond=0) + timedelta(
             hours=expires_in_hours, seconds=-60,

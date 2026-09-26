@@ -63,8 +63,9 @@ from turnstile_core.persistence.in_memory import InMemoryRepository
 
 
 @pytest.mark.parametrize("interrupted", [None, "gateway", "association"])
+@pytest.mark.parametrize("association_status", [200, 204])
 def test_new_self_hosted_gateway_creates_and_recovers_without_duplicate_resources(
-    interrupted: str | None,
+    interrupted: str | None, association_status: int,
 ) -> None:
     settings = publisher_settings().model_copy(update={
         "azure_subscription_id": str(UUID(int=2)), "apim_resource_group": "unit-group",
@@ -101,7 +102,7 @@ def test_new_self_hosted_gateway_creates_and_recovers_without_duplicate_resource
             return httpx.Response(200, json={"value": native_id + "&202601010000&unit-secret"})
         if request.method == "HEAD":
             assert path == f"/gateways/{native_id}/apis/unit-api"
-            return httpx.Response(200 if path in resources else 404)
+            return httpx.Response(association_status if path in resources else 404)
         if request.method == "GET":
             assert "/apis/" not in path
             if path in resources:
@@ -208,7 +209,9 @@ def test_gateway_creation_never_overwrites_foreign_resources_or_bypasses_permiss
     assert writes == []
 
 
-@pytest.mark.parametrize("defect", ["foreign", "association", "token_target", "token_newline"])
+@pytest.mark.parametrize("defect", [
+    "foreign", "association", "association_pending", "token_target", "token_newline",
+])
 def test_gateway_bootstrap_rejects_changed_ownership_or_invalid_token(defect: str) -> None:
     settings = publisher_settings().model_copy(update={
         "azure_subscription_id": str(UUID(int=2)), "apim_resource_group": "unit-group",
@@ -236,7 +239,7 @@ def test_gateway_bootstrap_rejects_changed_ownership_or_invalid_token(defect: st
             })
         if request.method == "HEAD":
             assert path == f"/gateways/{native_id}/apis/unit-api"
-            return httpx.Response(404 if defect == "association" else 200)
+            return httpx.Response({"association": 404, "association_pending": 202}.get(defect, 204))
         assert request.method == "POST" and path == f"/gateways/{native_id}/generateToken"
         issued.append(path)
         value = "another&unit-secret" if defect == "token_target" else native_id + "&unit-secret\n"

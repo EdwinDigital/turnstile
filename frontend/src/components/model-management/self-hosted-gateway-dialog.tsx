@@ -64,23 +64,38 @@ export function SelfHostedGatewayCreateDialog({ targets, initialTargetId, availa
   </Dialog>
 }
 
-export function SelfHostedGatewayProvisionProgress({ operation, available, retrying, onRetry }: {
-  operation: GatewayReleaseOperation; available: boolean; retrying: boolean; onRetry: (id: string) => void
+export function SelfHostedGatewayProvisionProgress({ operation, target, available, retrying, error, onRetry, onBootstrap }: {
+  operation: GatewayReleaseOperation; target?: ApimTargetTopology | null; available: boolean
+  retrying: boolean; error?: unknown; onRetry: (id: string) => void; onBootstrap?: (id: string) => void
 }) {
   const configuration = operation.semantic_preview.configuration as Partial<SelfHostedGatewayCreate> | undefined
   const nativeId = typeof operation.semantic_preview.native_gateway_id === "string" ? operation.semantic_preview.native_gateway_id : ""
   const failed = operation.status === "failed"
   const complete = operation.status === "succeeded"
+  const name = configuration?.display_name ?? nativeId
+  const endpoint = configuration?.endpoint_url ?? ""
+  const deploymentId = operation.checkpoint.deployment_id
+  const status = failed ? "创建失败" : complete ? "待启动" : operation.worker_available ? "正在创建 Gateway" : "创建已排队，Worker 当前不可用"
   const steps = [
     { label: "创建 APIM 网关配置", done: complete || operation.checkpoint.apim_gateway_created === true },
     { label: "关联 API", done: complete || operation.checkpoint.api_associated === true },
     { label: "读回确认", done: complete },
   ]
-  return <section className="gateway-provision-progress" aria-label={configuration?.display_name ?? "Gateway 创建任务"}>
-    <div className="gateway-provision-heading"><Server size={16} /><strong data-no-localize>{configuration?.display_name ?? nativeId}</strong><span role="status">{failed ? "创建失败" : complete ? "APIM 配置已创建，等待容器接入" : operation.worker_available ? "正在创建 Gateway" : "创建已排队，Worker 当前不可用"}</span></div>
-    <code data-no-localize>{nativeId}</code>
-    <ol className="apim-onboarding-steps">{steps.map(step => <li key={step.label} data-complete={step.done}>{step.done ? <CheckCircle2 size={13} /> : <Circle size={13} />}<span>{step.label}</span></li>)}</ol>
-    {(failed || operation.error_message) && <div className="registry-error apim-onboarding-error"><p role="alert" data-no-localize>{operation.error_message}</p>{failed && <Button type="button" size="sm" variant="outline" disabled={!available || retrying} onClick={() => onRetry(operation.id)}><RefreshCw size={14} className={retrying ? "spin" : ""} />重试创建</Button>}</div>}
+  return <section className="connection-provider-group gateway-provision-item" role="rowgroup" aria-label={name || "Gateway 创建任务"} data-operation-id={operation.id}>
+    <article className="model-list-row infrastructure-resource-row gateway gateway-provision-row" role="row">
+      <div className="model-primary-cell connection-provider-identity" role="cell"><span className="model-list-icon gateway-child-icon" data-model-family="apim"><Server size={15} /></span><div><b title={name} data-no-localize>{name}</b><code title={nativeId} data-no-localize>{nativeId}</code></div></div>
+      <div className="model-runtime-cell" role="cell"><b title={target?.target.service_name} data-no-localize>{target?.target.service_name ?? operation.gateway_profile_id}</b><span data-no-localize>{target?.target.api_id}</span></div>
+      <div className="model-pricing-cell" role="cell"><b title={endpoint} data-no-localize>{endpoint || "Endpoint 未配置"}</b><span title={target?.configuration_endpoint} data-no-localize>{target?.configuration_endpoint}</span></div>
+      <div className="model-status-cell" role="cell"><span className={`gateway-readiness gateway-provision-status ${failed ? "unavailable" : "warning"}`} role="status"><span>{failed ? <CircleAlert size={13} /> : complete ? <CheckCircle2 size={13} /> : <RefreshCw size={13} className={operation.worker_available || retrying ? "spin" : ""} />}{status}</span></span></div>
+      <div className="model-row-actions infrastructure-row-actions" role="cell">
+        {failed && <button type="button" className="gateway-provision-action" disabled={!available || retrying} aria-label="重试创建" title="重试创建" onClick={() => onRetry(operation.id)}><RefreshCw size={14} className={retrying ? "spin" : ""} /></button>}
+        {complete && typeof deploymentId === "string" && onBootstrap && <button type="button" className="gateway-provision-action" disabled={!available} aria-label="启动配置" title="启动配置" onClick={() => onBootstrap(deploymentId)}><Download size={14} /></button>}
+      </div>
+    </article>
+    <div className="gateway-provision-details" role="row"><div role="cell" aria-colspan={5}>
+      <ol className="apim-onboarding-steps">{steps.map(step => <li key={step.label} data-complete={step.done}>{step.done ? <CheckCircle2 size={13} /> : <Circle size={13} />}<span>{step.label}</span></li>)}</ol>
+      {(error || operation.error_message) && <p className="gateway-provision-error" role="alert" data-no-localize>{error ? errorMessage(error) : operation.error_message}</p>}
+    </div></div>
   </section>
 }
 
