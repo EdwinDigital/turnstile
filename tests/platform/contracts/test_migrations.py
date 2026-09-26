@@ -38,8 +38,20 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "011_gateway_targets.up.sql",
         "012_apim_onboarding.up.sql",
         "013_multi_target_rollout.up.sql",
+        "014_self_hosted_gateway_provisioning.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
+
+
+def test_gateway_creation_upgrade_binds_request_and_target_without_rewriting_history() -> None:
+    sql = (MIGRATIONS / "014_self_hosted_gateway_provisioning.up.sql").read_text()
+    assert table_names(sql) == set()
+    assert "'self_hosted_gateway_provision'" in sql
+    assert "(gateway_profile_id, (semantic_preview->>'request_id'))" in sql
+    assert "FOREIGN KEY (provisioning_operation_id, apim_target_id)" in sql
+    assert "ON DELETE RESTRICT" in sql
+    assert "provisioning_operation_id IS NULL OR kind = 'self_hosted'" in sql
+    assert not re.search(r"^(INSERT|UPDATE|DELETE|TRUNCATE|DROP TABLE)\b", sql, re.MULTILINE)
 
 
 def test_multi_target_upgrade_preserves_history_and_binds_child_publication_target() -> None:

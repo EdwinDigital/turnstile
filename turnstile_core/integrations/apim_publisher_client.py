@@ -67,9 +67,10 @@ from .apim_control_plane_contract import (
 )
 from .apim_policy_compiler import ApimPolicyCompiler
 from .apim_policy_components import parent_readback_matches
+from .apim_self_hosted_gateway import AzureSelfHostedGatewayManagementMixin
 
 
-class AzureApimPublisherClient:
+class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
     _MANAGEMENT_ORIGIN = "https://management.azure.com"
     _MANAGEMENT_RESOURCE = f"{_MANAGEMENT_ORIGIN}/"
     _API_VERSION = "2024-05-01"

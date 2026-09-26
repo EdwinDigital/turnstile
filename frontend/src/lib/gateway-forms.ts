@@ -1,4 +1,4 @@
-import type { ApimOnboardingRequest, ApimTargetWrite, SelfHostedGatewayWrite } from "../data-sources/apim/types"
+import type { ApimOnboardingRequest, ApimTargetWrite, SelfHostedGatewayCreate, SelfHostedGatewayWrite } from "../data-sources/apim/types"
 
 export function isGatewayEndpoint(value: string) {
   try {
@@ -26,6 +26,21 @@ export function gatewayFormValid(value: SelfHostedGatewayWrite) {
 export function gatewayFormPayload(value: SelfHostedGatewayWrite): SelfHostedGatewayWrite {
   return { ...value, native_gateway_id: value.native_gateway_id.trim(), display_name: value.display_name.trim(),
     endpoint_url: value.endpoint_url.trim(), location: value.location?.trim() || null }
+}
+
+export type GatewayCreateForm = Omit<SelfHostedGatewayCreate, "endpoint_control_confirmed"> & { endpoint_control_confirmed: boolean }
+
+export function gatewayCreateFormValid(value: GatewayCreateForm) {
+  return textWithin(value.display_name, 120) && isGatewayEndpoint(value.endpoint_url)
+    && (!value.location?.trim() || value.location.trim().length <= 128)
+    && value.endpoint_control_confirmed === true
+}
+
+export function gatewayCreateFormPayload(value: GatewayCreateForm): SelfHostedGatewayCreate {
+  if (!gatewayCreateFormValid(value)) throw new Error("Gateway creation fields are incomplete")
+  return { display_name: value.display_name.trim(), endpoint_url: value.endpoint_url.trim(),
+    location: value.location?.trim() || null, hosting_mode: value.hosting_mode ?? "docker",
+    release_gate: value.release_gate ?? "required", endpoint_control_confirmed: true }
 }
 
 export function apimFormValid(value: ApimTargetWrite) {

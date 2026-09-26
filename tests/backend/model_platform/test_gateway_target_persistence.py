@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
+from pydantic import HttpUrl
 
 from tests.backend.model_platform.control_plane_support import (
     ROOT,
@@ -18,18 +20,183 @@ from tests.backend.model_platform.control_plane_support import (
 from tests.backend.model_platform.test_gateway_targets import NOW, TARGET, deployment, target
 from turnstile_core.domain.budget_counting import BudgetPublicationContracts
 from turnstile_core.domain.gateway_targets import (
+    ApimTargetArmInventory,
     ApimTargetRouteBinding,
+    GatewayArmInventory,
     GatewayDeploymentInventory,
     GatewayDeploymentScope,
     GatewayDeploymentScopeMode,
     GatewayEndpointProbeResult,
     GatewayInstanceObservation,
+    SelfHostedGatewayBootstrap,
+    SelfHostedGatewayBootstrapRequest,
+    SelfHostedGatewayCreate,
+    SelfHostedGatewayProvisionSpec,
     gateway_deployment_id_for,
 )
+from turnstile_core.integrations.apim_control_plane_contract import FixedApimPublisherClientResolver
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
 from turnstile_core.persistence.repository_support import _validate_gateway_deployment_snapshots
-from turnstile_core.services.control_plane import GatewayControlPlaneService
+from turnstile_core.services.control_plane import (
+    ControlPlaneConflictError,
+    ControlPlaneUnavailableError,
+    GatewayControlPlaneService,
+)
+from turnstile_core.services.gateway_release_operation_worker import GatewayReleaseOperationWorker
+
+
+def test_new_gateway_creation_queues_one_identity_without_an_existing_gateway() -> None:
+    repository = InMemoryRepository()
+    repository.upsert_apim_target(target(capabilities={"self_hosted_gateway": "supported"}))
+    service = GatewayControlPlaneService(repository, self_hosted_gateway_provisioning_enabled=True)
+    write = SelfHostedGatewayCreate(
+        display_name="New gateway", endpoint_url=HttpUrl("https://new.example.test/unit/llm"),
+        endpoint_control_confirmed=True,
+    )
+    before = deepcopy(repository.registry())
+    created = service.request_self_hosted_gateway_provision(TARGET, write, UUID(int=73), "owner")
+    repeated = service.request_self_hosted_gateway_provision(TARGET, write, UUID(int=73), "owner")
+    assert created.operation.id == repeated.operation.id
+    assert len(repository.gateway_release_operations) == 1
+    stored = repository.gateway_release_operations[0]
+    spec = SelfHostedGatewayProvisionSpec.model_validate(stored["semantic_preview"])
+    assert spec.native_gateway_id.startswith("turnstile-")
+    assert stored["operation_kind"] == "self_hosted_gateway_provision"
+    assert stored["status"] == "queued"
+    assert repository.gateway_deployments == {}
+    assert repository.registry() == before
+    assert repository.gateway_release_operation_secrets == {}
+    with pytest.raises(ControlPlaneConflictError, match="differently"):
+        service.request_self_hosted_gateway_provision(
+            TARGET, write.model_copy(update={"display_name": "Different"}), UUID(int=73), "owner",
+        )
+    with pytest.raises(ControlPlaneUnavailableError):
+        GatewayControlPlaneService(repository).request_self_hosted_gateway_provision(
+            TARGET, write, UUID(int=74), "owner",
+        )
+
+
+def test_gateway_creation_worker_materializes_only_after_arm_readback() -> None:
+    repository = InMemoryRepository()
+    registered = target(capabilities={"self_hosted_gateway": "supported"})
+    repository.upsert_apim_target(registered)
+
+    class Client(FakeApimClient):
+        created: SelfHostedGatewayProvisionSpec | None = None
+        bootstrap_reads = 0
+
+        def ensure_self_hosted_gateway(
+            self, spec: SelfHostedGatewayProvisionSpec, before_write: Callable[[], None],
+        ) -> None:
+            before_write()
+            self.created = spec
+
+        def discover_apim_target_inventory(self, gateway_id: UUID) -> ApimTargetArmInventory:
+            assert gateway_id == TARGET and self.created is not None
+            return ApimTargetArmInventory.model_validate({
+                **registered.model_dump(include=set(ApimTargetArmInventory.model_fields)),
+                "api_revision": "1", "managed_gateway_url": "https://unit.azure-api.net/unit/llm",
+                "source_api_version": "2024-05-01", "discovered_at": datetime.now(UTC),
+                "gateways": [GatewayArmInventory(
+                    native_gateway_id=self.created.native_gateway_id,
+                    arm_resource_id=(registered.arm_resource_id
+                                     + "/gateways/" + self.created.native_gateway_id),
+                    description=f"Turnstile gateway {TARGET}/{self.created.request_id}",
+                    associated_api_ids=(registered.api_id,),
+                )],
+            })
+
+        def self_hosted_gateway_bootstrap(
+            self, spec: SelfHostedGatewayProvisionSpec, hours: int, image: str,
+        ) -> SelfHostedGatewayBootstrap:
+            self.bootstrap_reads += 1
+            assert spec == self.created
+            return SelfHostedGatewayBootstrap(
+                deployment_id=spec.deployment_id, native_gateway_id=spec.native_gateway_id,
+                configuration_endpoint=HttpUrl("https://unit.configuration.azure-api.net"),
+                expires_at=datetime.now(UTC) + timedelta(hours=hours), image=image,
+                environment_file_name=spec.native_gateway_id + ".env",
+                environment_file="config.service.auth=GatewayKey unit-secret",
+                docker_command="docker run --env-file gateway.env " + image,
+                renewal_command="docker stop unit && docker rm unit",
+            )
+
+    client = Client()
+    service = GatewayControlPlaneService(
+        repository, self_hosted_gateway_provisioning_enabled=True,
+        gateway_bootstrap_client_resolver=FixedApimPublisherClientResolver(client),
+    )
+    created = service.request_self_hosted_gateway_provision(
+        TARGET, SelfHostedGatewayCreate(
+            display_name="New edge", endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+            endpoint_control_confirmed=True,
+        ), UUID(int=74), "owner",
+    )
+    enrollment = MagicMock(return_value=("managed",))
+    worker = GatewayReleaseOperationWorker(
+        repository, client, self_hosted_gateway_provisioning_enabled=True,
+        gateway_protocol_enrollment=enrollment,
+    )
+    for phase in ("validating_dependencies", "verifying_readback", "succeeded"):
+        advanced = worker.run_once("worker")
+        assert advanced is not None and advanced.status == phase
+        if phase != "succeeded":
+            assert repository.gateway_deployments == {}
+    spec = SelfHostedGatewayProvisionSpec.model_validate(created.operation.semantic_preview)
+    stored = repository.get_gateway_deployment(spec.deployment_id)
+    assert stored is not None
+    assert stored["provisioning_operation_id"] == created.operation.id
+    assert stored["declared_state"] == "present"
+    assert stored["reachability_state"] == "unknown"
+    assert str(stored["endpoint_url"]) == str(spec.configuration.endpoint_url)
+    enrollment.assert_called_once()
+    assert repository._provisioned_gateway_endpoint(stored) == str(spec.configuration.endpoint_url)
+    repository.apim_targets[TARGET]["api_path"] = "changed/llm"
+    assert repository._provisioned_gateway_endpoint(stored) is None
+    with pytest.raises(ControlPlaneConflictError, match="identity changed"):
+        service.self_hosted_gateway_bootstrap(
+            spec.deployment_id, SelfHostedGatewayBootstrapRequest(),
+        )
+    repository.apim_targets[TARGET]["api_path"] = registered.api_path
+    bootstrap = service.self_hosted_gateway_bootstrap(
+        spec.deployment_id, SelfHostedGatewayBootstrapRequest(),
+    )
+    assert bootstrap.environment_file.endswith("unit-secret")
+    assert "unit-secret" not in service.release_operation(created.operation.id).model_dump_json()
+    assert repository.gateway_release_operation_secrets == {}
+    repository.gateway_deployments[spec.deployment_id]["endpoint_url"] = "https://other.example.test"
+    with pytest.raises(ControlPlaneConflictError, match="changed"):
+        service.self_hosted_gateway_bootstrap(
+            spec.deployment_id, SelfHostedGatewayBootstrapRequest(),
+        )
+    assert client.bootstrap_reads == 1
+
+
+def test_failed_gateway_creation_retries_same_task_without_release_rollback() -> None:
+    repository = InMemoryRepository()
+    repository.upsert_apim_target(target(capabilities={"self_hosted_gateway": "supported"}))
+    service = GatewayControlPlaneService(repository, self_hosted_gateway_provisioning_enabled=True)
+    created = service.request_self_hosted_gateway_provision(
+        TARGET, SelfHostedGatewayCreate(
+            display_name="New gateway", endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+            endpoint_control_confirmed=True,
+        ), UUID(int=75), "owner",
+    )
+    worker = GatewayReleaseOperationWorker(
+        repository, FakeApimClient(), self_hosted_gateway_provisioning_enabled=True,
+    )
+    worker.run_once("worker")
+    failed = worker.run_once("worker")
+    assert failed is not None and failed.status == "failed"
+    assert all(item.to_status != "restoring" for item in failed.audit)
+    assert repository.gateway_deployments == {}
+    retried = service.retry_self_hosted_gateway_provision(failed.id, "owner")
+    repeated = service.retry_self_hosted_gateway_provision(failed.id, "owner")
+    assert retried.operation.id == repeated.operation.id == created.operation.id
+    assert retried.operation.semantic_preview == created.operation.semantic_preview
+    assert len(repository.gateway_release_operations) == 1
+    assert retried.operation.audit[-1].detail["error_code"] == failed.error_code
 
 
 def test_invocation_query_uses_active_route_deployment_scope() -> None:

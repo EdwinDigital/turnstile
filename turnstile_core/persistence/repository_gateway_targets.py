@@ -132,6 +132,53 @@ class PostgreSqlGatewayTargetRepositoryMixin:
             )
         return cast(dict[str, Any], operation)
 
+    def retry_self_hosted_gateway_provision(
+        self, operation_id: UUID, actor: str,
+    ) -> dict[str, Any]:
+        with self._connection() as connection, connection.transaction():
+            identity = connection.execute(
+                "SELECT gateway_profile_id FROM gateway_release_operation WHERE id = %s",
+                (operation_id,),
+            ).fetchone()
+            if identity is None:
+                raise ValueError("Gateway creation operation was not found")
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"gateway-release-operation:{identity['gateway_profile_id']}",),
+            )
+            prior = connection.execute(
+                "SELECT * FROM gateway_release_operation WHERE id = %s FOR UPDATE",
+                (operation_id,),
+            ).fetchone()
+            if prior is None or prior["operation_kind"] != "self_hosted_gateway_provision":
+                raise ValueError("Gateway creation operation was not found")
+            if prior["status"] in {"queued", "validating_dependencies", "verifying_readback"}:
+                return cast(dict[str, Any], prior)
+            if prior["status"] != "failed":
+                raise ValueError("Only failed Gateway creation can be retried")
+            inflight = connection.execute(
+                """SELECT id FROM gateway_release_operation WHERE gateway_profile_id = %s
+                   AND id <> %s AND status NOT IN ('succeeded', 'failed', 'restored')
+                   LIMIT 1""", (prior["gateway_profile_id"], operation_id),
+            ).fetchone()
+            if inflight is not None:
+                raise ValueError("Another Gateway operation is already in progress")
+            operation = connection.execute(
+                """UPDATE gateway_release_operation SET status = 'queued', attempt_count = 0,
+                   lease_owner = NULL, lease_expires_at = NULL, error_code = NULL,
+                   error_message = NULL, started_at = NULL, completed_at = NULL, updated_at = now()
+                   WHERE id = %s RETURNING *""", (operation_id,),
+            ).fetchone()
+            connection.execute(
+                """INSERT INTO gateway_release_operation_audit
+                   (operation_id, from_status, to_status, actor, detail)
+                   VALUES (%s, 'failed', 'queued', %s, %s)""",
+                (operation_id, actor, Jsonb({"retry": True, "error_code": prior["error_code"],
+                                           "error_message": prior["error_message"],
+                                           "attempt_count": prior["attempt_count"]})),
+            )
+        return cast(dict[str, Any], operation)
+
     def finish_apim_onboarding_operation(
         self, operation_id: UUID, worker_id: str, credential_ciphertext: bytes,
         credential_hint: str, configuration_sha256: str,
@@ -476,14 +523,14 @@ class PostgreSqlGatewayTargetRepositoryMixin:
                    location, endpoint_url, hosting_mode, lifecycle_ownership, release_gate,
                    declared_state, reachability_state, observation_state, runtime_version_support,
                    rate_limit_synchronization, last_arm_sync_at, last_probe_at, last_observed_at,
-                   retired_at
+                   retired_at, provisioning_operation_id
                    ) VALUES (
                    %(schema_version)s, %(id)s, %(apim_target_id)s, %(native_gateway_id)s,
                    %(kind)s, %(display_name)s, %(location)s, %(endpoint_url)s, %(hosting_mode)s,
                    %(lifecycle_ownership)s, %(release_gate)s, %(declared_state)s,
                    %(reachability_state)s, %(observation_state)s, %(runtime_version_support)s,
                    %(rate_limit_synchronization)s, %(last_arm_sync_at)s, %(last_probe_at)s,
-                   %(last_observed_at)s, %(retired_at)s
+                   %(last_observed_at)s, %(retired_at)s, %(provisioning_operation_id)s
                    ) ON CONFLICT (id) DO UPDATE SET
                    display_name = CASE WHEN %(preserve_display_name)s
                      THEN existing.display_name ELSE EXCLUDED.display_name END,
@@ -498,6 +545,10 @@ class PostgreSqlGatewayTargetRepositoryMixin:
                    last_arm_sync_at = EXCLUDED.last_arm_sync_at,
                    last_probe_at = EXCLUDED.last_probe_at,
                    last_observed_at = EXCLUDED.last_observed_at,
+                                     provisioning_operation_id = COALESCE(
+                                         existing.provisioning_operation_id,
+                                         EXCLUDED.provisioning_operation_id
+                                     ),
                    retired_at = CASE WHEN %(preserve_display_name)s
                      THEN COALESCE(existing.retired_at, EXCLUDED.retired_at)
                      ELSE EXCLUDED.retired_at END, updated_at = now()

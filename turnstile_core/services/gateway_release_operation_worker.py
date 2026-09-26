@@ -15,7 +15,10 @@ from ..domain.control_plane import (
     GatewayReleaseOperationKind,
     GatewayReleaseRetentionPolicy,
 )
-from ..domain.gateway_targets import ApimTargetArmInventory
+from ..domain.gateway_targets import (
+    ApimTargetArmInventory,
+    SelfHostedGatewayProvisionSpec,
+)
 from ..integrations.apim_control_plane import (
     ApimPublisherClient,
     PolicyCompilationError,
@@ -53,6 +56,7 @@ class GatewayReleaseOperationWorker:
         gateway_protocol_enrollment: Callable[
             [ApimTargetArmInventory, ApimPublisherClient, Callable[[], None]], tuple[str, ...]
         ] | None = None,
+        self_hosted_gateway_provisioning_enabled: bool = False,
     ) -> None:
         self._repository = repository
         self._client_resolver = coerce_apim_publisher_client_resolver(client)
@@ -65,6 +69,7 @@ class GatewayReleaseOperationWorker:
         self._application_projector = application_projector
         self._onboarding_handler = onboarding_handler
         self._gateway_protocol_enrollment = gateway_protocol_enrollment
+        self._self_hosted_gateway_provisioning_enabled = self_hosted_gateway_provisioning_enabled
         self._parent_policy = parent_policy
         self._parent_policy_overrides = dict(parent_policy_overrides or {})
         self._service = GatewayControlPlaneService(
@@ -160,6 +165,89 @@ class GatewayReleaseOperationWorker:
             self._advance_application_provision(row, worker_id)
         elif kind is GatewayReleaseOperationKind.TARGET_INVENTORY_SYNC:
             self._advance_target_inventory_sync(row, worker_id)
+        elif kind is GatewayReleaseOperationKind.SELF_HOSTED_GATEWAY_PROVISION:
+            self._advance_self_hosted_gateway_provision(row, worker_id)
+
+    def _advance_self_hosted_gateway_provision(
+        self, row: Mapping[str, Any], worker_id: str,
+    ) -> None:
+        if not self._self_hosted_gateway_provisioning_enabled:
+            raise PolicyCompilationError(
+                "Self-hosted Gateway creation is not enabled on this Worker",
+            )
+        spec = SelfHostedGatewayProvisionSpec.model_validate(row["semantic_preview"])
+        if spec.target.gateway_profile_id != UUID(str(row["gateway_profile_id"])):
+            raise ControlPlaneConflictError("Gateway creation references another APIM target")
+        target = self._service._apim_target(
+            self._service._active_apim_target_row(spec.target.gateway_profile_id),
+        )
+        if (target.ownership_mode == "read_only"
+                or target.arm_resource_id.casefold() != spec.target.arm_resource_id.casefold()
+                or target.tenant_id != spec.target.tenant_id
+                or target.api_id != spec.target.api_id or target.api_path != spec.target.api_path):
+            raise ControlPlaneConflictError("Gateway creation target changed or is read-only")
+        if row["status"] == "queued":
+            self._transition(row, "validating_dependencies", {}, worker_id)
+            return
+
+        def before_write() -> None:
+            if not self._repository.renew_gateway_release_operation_lease(
+                UUID(str(row["id"])), worker_id, 180,
+            ):
+                raise RetryablePublicationError("Worker lease is no longer owned")
+
+        if row["status"] == "validating_dependencies":
+            create = getattr(self._client, "ensure_self_hosted_gateway", None)
+            if not callable(create):
+                raise PolicyCompilationError("APIM client does not support Gateway creation")
+            create(spec, before_write)
+            self._transition(row, "verifying_readback", {"checkpoint": self._checkpoint(
+                row, native_gateway_id=spec.native_gateway_id,
+                deployment_id=str(spec.deployment_id), apim_gateway_created=True,
+                api_associated=True,
+            )}, worker_id)
+            return
+        if row["status"] != "verifying_readback":
+            return
+        discover = getattr(self._client, "discover_apim_target_inventory", None)
+        if not callable(discover):
+            raise PolicyCompilationError("APIM client does not support target inventory")
+        inventory = ApimTargetArmInventory.model_validate(discover(spec.target.gateway_profile_id))
+        gateway = next((item for item in inventory.gateways
+                        if item.native_gateway_id == spec.native_gateway_id), None)
+        if gateway is None or spec.target.api_id not in gateway.associated_api_ids:
+            raise RetryablePublicationError("Created Gateway API association is not visible yet")
+        expected_id = spec.target.arm_resource_id + "/gateways/" + spec.native_gateway_id
+        if (gateway.arm_resource_id.casefold() != expected_id.casefold()
+                or gateway.description
+                != f"Turnstile gateway {spec.target.gateway_profile_id}/{spec.request_id}"):
+            raise ControlPlaneConflictError("Created Gateway ownership changed before activation")
+        before_write()
+        self._service.apply_target_inventory(inventory)
+        current = self._repository.get_gateway_deployment(spec.deployment_id)
+        if current is None or current.get("retired_at") is not None:
+            raise ControlPlaneConflictError("Created Gateway was removed before activation")
+        operation_id = UUID(str(row["id"]))
+        if current.get("provisioning_operation_id") not in {None, operation_id}:
+            raise ControlPlaneConflictError("Gateway is already owned by another creation request")
+        deployment = self._service._gateway_deployment(current).model_copy(update={
+            "display_name": spec.configuration.display_name,
+            "endpoint_url": spec.configuration.endpoint_url,
+            "location": spec.configuration.location or spec.configuration.display_name,
+            "hosting_mode": spec.configuration.hosting_mode,
+            "release_gate": spec.configuration.release_gate,
+            "provisioning_operation_id": operation_id,
+        })
+        before_write()
+        self._repository.upsert_gateway_deployment(deployment)
+        enrolled = self._gateway_protocol_enrollment(
+            inventory, self._client, before_write,
+        ) if self._gateway_protocol_enrollment is not None else None
+        self._transition(row, "succeeded", {"checkpoint": self._checkpoint(
+            row, deployment_id=str(spec.deployment_id), native_gateway_id=spec.native_gateway_id,
+            configuration_ready=True, waiting_for_container=True, gateway_token_stored=False,
+            **({"protocol_enrolled_gateways": list(enrolled)} if enrolled is not None else {}),
+        )}, worker_id)
 
     def _advance_target_inventory_sync(self, row: Mapping[str, Any], worker_id: str) -> None:
         if row["status"] == "queued":
@@ -600,6 +688,7 @@ class GatewayReleaseOperationWorker:
         if row["operation_kind"] in {
             GatewayReleaseOperationKind.APPLICATION_PROVISION,
             GatewayReleaseOperationKind.APIM_ONBOARDING,
+            GatewayReleaseOperationKind.SELF_HOSTED_GATEWAY_PROVISION,
         }:
             self._transition(row, "failed", updates, worker_id)
             return
@@ -624,6 +713,7 @@ class GatewayReleaseOperationWorker:
         if row["operation_kind"] in {
             GatewayReleaseOperationKind.APPLICATION_PROVISION,
             GatewayReleaseOperationKind.APIM_ONBOARDING,
+            GatewayReleaseOperationKind.SELF_HOSTED_GATEWAY_PROVISION,
         }:
             next_status = "failed"
         elif status in {
@@ -653,7 +743,10 @@ class GatewayReleaseOperationWorker:
         worker_id: str,
     ) -> None:
         if (
-            row["operation_kind"] == GatewayReleaseOperationKind.APPLICATION_PROVISION
+            row["operation_kind"] in {
+                GatewayReleaseOperationKind.APPLICATION_PROVISION,
+                GatewayReleaseOperationKind.SELF_HOSTED_GATEWAY_PROVISION,
+            }
             and status != str(row["status"])
         ):
             updates = {"error_code": None, "error_message": None, **updates}

@@ -22,6 +22,13 @@ git diff --check
 
 ## Database validation
 
+Migration `014_self_hosted_gateway_provisioning` adds a durable creation operation, target-scoped
+idempotency index and nullable deployment-to-operation ownership link. It does not create Azure
+resources, enable the feature, store Gateway tokens or modify usage history. Validate concurrent
+duplicate submissions, cross-target foreign-key rejection, lease loss and same-ID failed-task
+retry against an explicitly authorized PostgreSQL database. Do not run an initializing local
+database fixture against an existing shared environment.
+
 Migration `013_multi_target_rollout` adds parent intent and target-bound child publication tables
 only. It leaves models, existing releases and financial history unchanged. Validate all-or-none
 queue creation, stable lock order, cross-target child rejection and derived partial status in an
@@ -37,7 +44,7 @@ Validate cross-target foreign keys, the unique enabled default route, preserved 
 and transactional inventory replacement against a separately authorized PostgreSQL environment.
 Local domain and SQL-source tests are not evidence that a migration has been applied.
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, `011_gateway_targets`, `012_apim_onboarding`, and `013_multi_target_rollout`), then run the command again and verify that no migration is reapplied.
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, `011_gateway_targets`, `012_apim_onboarding`, `013_multi_target_rollout`, and `014_self_hosted_gateway_provisioning`), then run the command again and verify that no migration is reapplied.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
@@ -104,6 +111,28 @@ request outcomes cannot authorize a replay. Record unresolved transport errors w
 their cause to the platform without evidence.
 
 ## Browser validation
+
+### New Self-hosted Gateway creation
+
+Local checks exercise the actual API/client/worker handlers with isolated repository and HTTP
+adapters. Cover an initially absent native Gateway, stable generated ID, `HEAD` API membership
+readback, same-ID recovery after both possible lost PUT responses, foreign ownership rejection,
+missing permissions, disabled capabilities, Owner and origin guards, endpoint consent, no-store
+startup responses and secret-free task history. Frontend checks execute real component handlers
+for default creation versus legacy association, uncertainty-safe resubmission, pending status,
+renewal selection and memory/Blob cleanup. Compile the optional access template independently.
+
+For live acceptance, first authorize the exact APIM child resource, migration, identity permissions
+and application packages. Prove the generated native ID is absent before submitting the normal
+Turnstile form. Verify creation and API association through ARM and persisted task readback; then
+download the startup file without recording its token, run the official image on the separately
+authorized server, and validate connectivity from Turnstile. Complete model publication, normal
+page invocation, exact request/correlation Trace and accounting checks. Repeat the UI inspection
+at desktop and 390 px, retaining copyable non-secret input values above screenshots. Keep all
+existing gateways, containers and history; cleanup needs an exact session-owned allowlist.
+
+Do not count an already configured Gateway attachment, offline component screenshots, a generated
+Docker command, or task status alone as successful new-Gateway cloud acceptance.
 
 ### APIM initialization
 

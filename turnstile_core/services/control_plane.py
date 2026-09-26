@@ -62,6 +62,7 @@ from ..domain.control_plane import (
     MultiTargetPublicationCreate,
     PublicationKind,
     PublicationStatus,
+    SelfHostedGatewayProvisionOperations,
     StreamingMode,
     publication_materialized_named_values,
     publication_retry_requires_credential,
@@ -91,7 +92,11 @@ from ..domain.gateway_targets import (
     GatewayServingDeployment,
     MultiTargetRollout,
     SelfHostedGatewayAssociationChange,
+    SelfHostedGatewayBootstrap,
+    SelfHostedGatewayBootstrapRequest,
+    SelfHostedGatewayCreate,
     SelfHostedGatewayNameWrite,
+    SelfHostedGatewayProvisionSpec,
     SelfHostedGatewayRemovalPreview,
     SelfHostedGatewaySummary,
     SelfHostedGatewayWrite,
@@ -100,6 +105,7 @@ from ..domain.gateway_targets import (
     TargetRolloutKind,
     derive_target_rollout_status,
     gateway_deployment_id_for,
+    self_hosted_gateway_native_id_for,
 )
 from ..domain.image_profiles import (
     ImageGenerationLimits,
@@ -124,6 +130,7 @@ from ..domain.runtime_models import (
     openai_compatible_endpoint_values,
     openai_compatible_runtime_name,
 )
+from ..integrations.apim_control_plane_contract import ApimPublisherClientResolver
 from ..integrations.gateway_connection_probe import (
     GatewayConnectionProbe,
     GatewayConnectionProbeError,
@@ -183,6 +190,9 @@ class GatewayControlPlaneService:
         target_registry_enabled: bool = False,
         onboarding_enabled: bool = False,
         self_hosted_gateway_enabled: bool = False,
+        self_hosted_gateway_provisioning_enabled: bool = False,
+        gateway_bootstrap_client_resolver: ApimPublisherClientResolver | None = None,
+        gateway_bootstrap_image: str = "mcr.microsoft.com/azure-api-management/gateway:2.12.1",
         gateway_connection_probe: GatewayConnectionProbe | None = None,
         trusted_gateway_endpoints: Mapping[UUID, HttpUrl] | None = None,
         multi_target_rollout_enabled: bool = False,
@@ -199,6 +209,9 @@ class GatewayControlPlaneService:
         self._onboarding_enabled = onboarding_enabled
         self._multi_target_rollout_enabled = multi_target_rollout_enabled
         self._self_hosted_gateway_enabled = self_hosted_gateway_enabled
+        self._self_hosted_gateway_provisioning_enabled = self_hosted_gateway_provisioning_enabled
+        self._gateway_bootstrap_client_resolver = gateway_bootstrap_client_resolver
+        self._gateway_bootstrap_image = gateway_bootstrap_image
         self._gateway_connection_probe = gateway_connection_probe
         self._trusted_gateway_endpoints = {
             key: str(value).rstrip("/") for key, value in (trusted_gateway_endpoints or {}).items()
@@ -368,6 +381,9 @@ class GatewayControlPlaneService:
             deployment_scoping_available=self._deployment_scoping_enabled,
             onboarding_available=self._onboarding_enabled,
             self_hosted_gateway_name_edit_supported=True,
+            self_hosted_gateway_provisioning_available=(
+                self._self_hosted_gateway_provisioning_enabled and self._release_worker_enabled
+            ),
         )
 
     def apim_target_topology(self, gateway_profile_id: UUID) -> ApimTargetTopology:
@@ -422,6 +438,126 @@ class GatewayControlPlaneService:
             raise ControlPlaneNotFoundError("APIM target not found")
         return preview
 
+    def request_self_hosted_gateway_provision(
+        self, apim_target_id: UUID, write: SelfHostedGatewayCreate,
+        request_id: UUID, actor: str,
+    ) -> GatewayReleaseOperationAccepted:
+        self._require_release_worker()
+        if not self._self_hosted_gateway_provisioning_enabled:
+            raise ControlPlaneUnavailableError("Self-hosted Gateway creation is not enabled")
+        target = self._apim_target(self._active_apim_target_row(apim_target_id))
+        if target.ownership_mode == "read_only":
+            raise ControlPlaneConflictError("This APIM target is read-only")
+        if target.capabilities.self_hosted_gateway is not CapabilitySupport.SUPPORTED:
+            raise ControlPlaneConflictError("Synchronize a supported APIM target before creation")
+        native_id = self_hosted_gateway_native_id_for(apim_target_id, request_id)
+        spec = SelfHostedGatewayProvisionSpec(
+            request_id=request_id, target=target, configuration=write,
+            native_gateway_id=native_id,
+            deployment_id=gateway_deployment_id_for(apim_target_id, native_id),
+        )
+        payload = {
+            "request_id": str(request_id), "target": str(target.arm_resource_id).casefold(),
+            "api_id": target.api_id, "api_path": target.api_path,
+            "configuration": write.model_dump(mode="json"),
+        }
+        digest = hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        try:
+            row = self._repository.create_gateway_release_operation(
+                apim_target_id, GatewayReleaseOperationKind.SELF_HOSTED_GATEWAY_PROVISION.value,
+                actor, confirmation_sha256=digest, semantic_preview=spec.model_dump(mode="json"),
+            )
+        except ValueError as error:
+            raise ControlPlaneConflictError(str(error)) from error
+        operation = self._operation_view(row)
+        return GatewayReleaseOperationAccepted(
+            operation=operation,
+            status_url=f"/api/v1/model-management/release-operations/{operation.id}",
+        )
+
+    def self_hosted_gateway_provisions(self) -> SelfHostedGatewayProvisionOperations:
+        available = self._self_hosted_gateway_provisioning_enabled and self._release_worker_enabled
+        registry = self._repository.registry()
+        operations = [
+            self._operation_view(row)
+            for gateway in registry["gateways"]
+            if gateway.get("enabled") and gateway.get("implementation") == "apim"
+            for row in self._repository.list_gateway_release_operations(UUID(str(gateway["id"])))
+            if row["operation_kind"] == GatewayReleaseOperationKind.SELF_HOSTED_GATEWAY_PROVISION
+        ]
+        return SelfHostedGatewayProvisionOperations(
+            available=available,
+            unavailable_reason=None if available else "Self-hosted Gateway creation is not enabled",
+            items=sorted(operations, key=lambda item: item.created_at, reverse=True),
+        )
+
+    def retry_self_hosted_gateway_provision(
+        self, operation_id: UUID, actor: str,
+    ) -> GatewayReleaseOperationAccepted:
+        self._require_release_worker()
+        if not self._self_hosted_gateway_provisioning_enabled:
+            raise ControlPlaneUnavailableError("Self-hosted Gateway creation is not enabled")
+        row = self._repository.get_gateway_release_operation(operation_id)
+        if row is None or row["operation_kind"] != "self_hosted_gateway_provision":
+            raise ControlPlaneNotFoundError("Gateway creation operation was not found")
+        spec = SelfHostedGatewayProvisionSpec.model_validate(row["semantic_preview"])
+        target = self._apim_target(self._active_apim_target_row(spec.target.gateway_profile_id))
+        if (target.ownership_mode == "read_only"
+                or target.arm_resource_id.casefold() != spec.target.arm_resource_id.casefold()
+                or target.api_id != spec.target.api_id or target.api_path != spec.target.api_path):
+            raise ControlPlaneConflictError("Gateway creation target changed or is read-only")
+        try:
+            retried = self._repository.retry_self_hosted_gateway_provision(operation_id, actor)
+        except ValueError as error:
+            raise ControlPlaneConflictError(str(error)) from error
+        return GatewayReleaseOperationAccepted(
+            operation=self._operation_view(retried),
+            status_url=f"/api/v1/model-management/release-operations/{operation_id}",
+        )
+
+    def _gateway_provision_spec(
+        self, deployment: GatewayDeployment,
+    ) -> SelfHostedGatewayProvisionSpec:
+        operation_id = deployment.provisioning_operation_id
+        row = self._repository.get_gateway_release_operation(operation_id) if operation_id else None
+        if row is None or row["status"] != "succeeded":
+            raise ControlPlaneConflictError("Gateway creation has not completed")
+        if row["operation_kind"] != GatewayReleaseOperationKind.SELF_HOSTED_GATEWAY_PROVISION:
+            raise ControlPlaneConflictError("Gateway creation has not completed")
+        spec = SelfHostedGatewayProvisionSpec.model_validate(row["semantic_preview"])
+        if (spec.deployment_id != deployment.id
+                or spec.target.gateway_profile_id != deployment.apim_target_id
+                or spec.native_gateway_id != deployment.native_gateway_id
+                or spec.configuration.endpoint_url != deployment.endpoint_url):
+            raise ControlPlaneConflictError("Gateway configuration changed after creation")
+        current_target = self._apim_target(self._active_apim_target_row(deployment.apim_target_id))
+        if (current_target.arm_resource_id.casefold() != spec.target.arm_resource_id.casefold()
+            or current_target.api_id != spec.target.api_id
+            or current_target.api_path != spec.target.api_path
+            or current_target.tenant_id != spec.target.tenant_id):
+            raise ControlPlaneConflictError("Gateway creation target identity changed")
+        return spec
+
+    def self_hosted_gateway_bootstrap(
+        self, deployment_id: UUID, request: SelfHostedGatewayBootstrapRequest,
+    ) -> SelfHostedGatewayBootstrap:
+        if (not self._self_hosted_gateway_provisioning_enabled
+                or self._gateway_bootstrap_client_resolver is None):
+            raise ControlPlaneUnavailableError("Gateway startup configuration is not enabled")
+        deployment = self._active_self_hosted_gateway(deployment_id)
+        spec = self._gateway_provision_spec(deployment)
+        resolved = self._gateway_bootstrap_client_resolver.resolve(deployment.apim_target_id)
+        if resolved.gateway_profile_id != deployment.apim_target_id:
+            raise ControlPlaneConflictError("Gateway bootstrap resolved another APIM target")
+        bootstrap = getattr(resolved.client, "self_hosted_gateway_bootstrap", None)
+        if not callable(bootstrap):
+            raise ControlPlaneUnavailableError("Gateway startup configuration is unavailable")
+        return SelfHostedGatewayBootstrap.model_validate(
+            bootstrap(spec, request.expires_in_hours, self._gateway_bootstrap_image),
+        )
+
     def add_self_hosted_gateway(
         self, apim_target_id: UUID, write: SelfHostedGatewayWrite,
     ) -> GatewayDeploymentTopology:
@@ -462,6 +598,10 @@ class GatewayControlPlaneService:
         declared_hosts = {item.hostname.casefold() for item in inventory.hostname_configurations}
         trusted = self._trusted_gateway_endpoints.get(deployment.id)
         trusted_endpoint = trusted == str(deployment.endpoint_url).rstrip("/")
+        if deployment.provisioning_operation_id is not None:
+            trusted_endpoint = self._gateway_provision_spec(
+                deployment,
+            ).configuration.endpoint_control_confirmed
         if endpoint_host not in declared_hosts and not trusted_endpoint:
             raise ControlPlaneConflictError(
                 "The Gateway endpoint host is not declared in APIM inventory"

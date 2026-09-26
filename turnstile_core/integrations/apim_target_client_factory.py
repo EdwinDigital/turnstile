@@ -155,7 +155,7 @@ class RepositoryApimTargetClientConfigResolver:
         self,
         repository: QueryRepository,
         settings: Settings,
-        probe_credentials: TargetProbeCredentialResolver,
+        probe_credentials: TargetProbeCredentialResolver | None,
     ) -> None:
         self._repository = repository
         self._settings = settings
@@ -241,7 +241,9 @@ class RepositoryApimTargetClientConfigResolver:
                 "apim_principal_id": str(target.principal_id) if target.principal_id else None,
                 "apim_gateway_url": str(deployment.endpoint_url).rstrip("/"),
                 "apim_dashboard_subscription_key": None,
-                "apim_probe_subscription_key": self._probe_credentials.resolve(target),
+                "apim_probe_subscription_key": (
+                    self._probe_credentials.resolve(target) if self._probe_credentials else None
+                ),
                 "apim_probe_subscription_id": probe_subscription_id,
                 "apim_usage_observer_url": observer_url,
                 "apim_usage_observer_key_named_value": observer_key,
@@ -309,11 +311,17 @@ def apim_target_client_config_resolver(
     repository: QueryRepository,
     settings: Settings,
     probe_credentials: TargetProbeCredentialResolver | None = None,
+    *, include_probe_credentials: bool = True,
 ) -> ApimTargetClientConfigResolver:
+    if not include_probe_credentials:
+        settings = settings.model_copy(update={
+            "apim_probe_subscription_key": None, "apim_dashboard_subscription_key": None,
+        })
     if not settings.apim_target_registry_enabled:
         return LegacySettingsApimTargetClientConfigResolver(settings)
     return RepositoryApimTargetClientConfigResolver(
         repository,
         settings,
-        probe_credentials or AzureApimTargetProbeCredentialResolver(),
+        (probe_credentials or AzureApimTargetProbeCredentialResolver())
+        if include_probe_credentials else None,
     )

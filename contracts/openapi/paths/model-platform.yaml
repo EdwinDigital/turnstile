@@ -88,6 +88,123 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions:
+    post:
+      tags: [Model Control Plane]
+      operationId: createSelfHostedGateway
+      summary: Create an APIM Self-hosted Gateway and associate the target API
+      description: Owner-only, same-origin, opt-in durable creation. Turnstile generates the native ID from the target and Idempotency-Key; the client never supplies a native ID. Repeated identical submissions return the same operation. The worker checks permissions and ownership, creates only the named child configuration, and verifies API membership. Success means configuration ready, not a running container. Server installation remains customer-controlled.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayCreate
+      responses:
+        '202':
+          description: Durable creation accepted; inspect status_url for actual completion.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/self-hosted-gateway-provisions:
+    get:
+      tags: [Model Control Plane]
+      operationId: listSelfHostedGatewayProvisions
+      summary: List Owner-visible Gateway creation progress and failures
+      security:
+      - sessionCookie: []
+      responses:
+        '200':
+          description: Creation capability and durable tasks; never contains bootstrap tokens.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayProvisionOperations
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/self-hosted-gateway-provisions/{operation_id}/retry:
+    post:
+      tags: [Model Control Plane]
+      operationId: retrySelfHostedGatewayProvision
+      summary: Retry the same failed Gateway creation without changing its native ID
+      description: Requires an Owner session and the write-origin check. Preserves the original task identity, configuration and failure audit. The worker reads the existing resource before any conditional write; foreign resources are never adopted by this operation.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: operation_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '202':
+          description: Same operation requeued or already active.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/bootstrap:
+    post:
+      tags: [Model Control Plane]
+      operationId: getSelfHostedGatewayBootstrap
+      summary: Generate short-lived Gateway-specific Docker startup credentials
+      description: Requires an Owner session, the write-origin check and an unchanged active deployment owned by a succeeded creation task. Verifies the live APIM Gateway and API association. Returns a GatewayKey token only in the environment file, never a model subscription key. No token is persisted in tasks, logs or audits. Tokens last at most 720 hours. Regenerate from Turnstile for renewal; recreating the named container interrupts its connections.
+      security:
+      - sessionCookie: []
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayBootstrapRequest
+      responses:
+        '200':
+          description: Sensitive environment file and credential-free container commands.
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+            Pragma:
+              schema: {type: string, const: no-cache}
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayBootstrap
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '502':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
   /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways:
     post:
       tags: [Model Control Plane]

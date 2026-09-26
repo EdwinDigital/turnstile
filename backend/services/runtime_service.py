@@ -1225,9 +1225,11 @@ class ModelRuntimeService:
                     str(hostname).casefold() for hostname in deployment.get("hostnames", [])
                 }
                 trusted = self._settings.self_hosted_gateway_trusted_endpoints.get(deployment_id)
+                approved = str(deployment.get("approved_endpoint_url") or "").rstrip("/")
                 if (
                     parsed.hostname.casefold() not in declared_hosts
                     and (trusted is None or str(trusted).rstrip("/") != endpoint)
+                    and approved != endpoint
                 ):
                     continue
             return {

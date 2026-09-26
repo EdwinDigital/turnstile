@@ -6,6 +6,34 @@ Turnstile infrastructure includes PostgreSQL, Event Hubs, Storage, Key Vault, Ap
 
 The API, telemetry and control-plane Functions, observer, and budget ledger require public service endpoints for package deployment or runtime traffic. They explicitly enable public network access and carry the resource-level `SecurityControl=Ignore` tag so an organization-level network Modify policy does not silently disable them. The exemption is not applied at resource-group scope; platform Storage and Key Vault resources designed for private-link access remain private.
 
+## Self-hosted Gateway management
+
+The optional [access template](../infra/self-hosted-gateway-access.bicep) enables Turnstile to
+manage new Self-hosted Gateway configurations on an **existing** APIM service. It never creates
+an APIM instance, server, network or container and is not invoked by the default installation.
+Use explicit subscription, APIM resource group/name, API managed-identity principal ID and
+Control-plane principal ID. Review a subscription-level what-if before applying it; only the two
+new role definitions and two assignments scoped to that exact APIM service are expected.
+
+The Worker role allows Gateway creation, API association and necessary inventory/permission reads.
+The API role allows Gateway and association reads plus `gateways/generateToken/action` only.
+Neither role grants Gateway deletion, model subscription key reads, shared-key rotation, policy
+updates or role assignment. The existing Publisher role is unchanged. These installation-time
+permissions require operator authorization; the application never grants itself additional roles.
+
+Before rollout, approve and apply only migration `014_self_hosted_gateway_provisioning`, preserving
+existing migration checksums and history. Deploy matching API, Control-plane and shared-model
+readers with creation disabled, then enable the settings described in
+[configuration](configuration.md#create-a-self-hosted-gateway-from-turnstile). Confirm the managed
+identities' effective permissions and real worker execution, not merely application availability.
+The endpoint must be reachable through HTTPS from the API and Control-plane applications.
+
+Feature acceptance must start with the generated Gateway absent from APIM and create it through
+Turnstile. Precreating a Gateway outside the application and attaching it proves only the legacy
+association workflow. A generic package-only functional validation does not authorize these RBAC
+or APIM resource changes; use a separately reviewed, exact-target infrastructure/feature plan.
+Retain existing APIM resources, containers, application state and financial history.
+
 ## Budget execution cutover
 
 The atomic budget protocol is not activated by an application update. Keep all new execution flags

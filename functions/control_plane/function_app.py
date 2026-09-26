@@ -311,6 +311,9 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
             ),
             cipher=CredentialCipher.from_settings(settings),
             parent_policy=parent_policy,
+            self_hosted_gateway_provisioning_enabled=getattr(
+                settings, "self_hosted_gateway_provisioning_enabled", False,
+            ),
             **release_options,
             application_projector=(
                 project_application

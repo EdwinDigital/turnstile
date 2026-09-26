@@ -26,10 +26,37 @@ async function compile(path, expose = []) {
 const apiCode = await compile("../../../frontend/src/data-sources/apim/api.ts")
 const queryCode = await compile("../../../frontend/src/data-sources/apim/queries.ts")
 const onboardingCode = await compile("../../../frontend/src/components/model-management/apim-onboarding-dialog.tsx")
+const creationCode = await compile("../../../frontend/src/components/model-management/self-hosted-gateway-dialog.tsx")
 const workspaceCode = await compile("../../../frontend/src/components/model-management/apim-gateway-workspace.tsx", ["ApimTable", "GatewayTable", "GatewayChildRow", "InfrastructureActions", "ApimEditor", "GatewayEditor", "GatewayAssociationEditor", "InfrastructureNameEditor", "RemovalDialog", "InfrastructureTableLoading"])
 const pageCode = await compile("../../../frontend/src/pages/model-management-page.tsx", ["ModelWorkspace", "modelManagementTabFromUrl"])
 
-function componentHarness(exportName, props, { operation = null, mutationPending = false, code = workspaceCode, api = {}, role = "owner" } = {}) {
+test("new Gateway form generates no native identity and requires endpoint control confirmation", () => {
+  const form = { display_name: "  New Docker  ", endpoint_url: "https://edge.test/unit/llm", location: " ", endpoint_control_confirmed: false }
+  assert.equal(gatewayForms.gatewayCreateFormValid(form), false)
+  form.endpoint_control_confirmed = true
+  assert.deepEqual(gatewayForms.gatewayCreateFormPayload(form), {
+    display_name: "New Docker", endpoint_url: form.endpoint_url, location: null,
+    hosting_mode: "docker", release_gate: "required", endpoint_control_confirmed: true,
+  })
+  assert.equal(gatewayForms.gatewayCreateFormValid({ ...form, endpoint_url: "http://edge.test" }), false)
+  assert.equal(gatewayForms.gatewayCreateFormValid({ ...form, display_name: " " }), false)
+  assert.equal("native_gateway_id" in gatewayForms.gatewayCreateFormPayload({ ...form, native_gateway_id: "injected" }), false)
+})
+
+test("Gateway creation uses an idempotency header and bootstrap is never cacheable", async () => {
+  const requests = []
+  const api = apiHarness(async (...args) => { requests.push(args); return {} })
+  const payload = { display_name: "New Docker", endpoint_url: "https://edge.test", endpoint_control_confirmed: true }
+  await api.createSelfHostedGateway("target", payload, "request-uuid")
+  assert.equal(requests[0][0], "/api/v1/model-management/apim-targets/target/self-hosted-gateway-provisions")
+  assert.equal(requests[0][1].headers["Idempotency-Key"], "request-uuid")
+  assert.deepEqual(JSON.parse(requests[0][1].body), payload)
+  await api.selfHostedGatewayBootstrap("deployment", 24)
+  assert.equal(requests[1][1].cache, "no-store")
+  assert.deepEqual(JSON.parse(requests[1][1].body), { expires_in_hours: 24 })
+})
+
+function componentHarness(exportName, props, { operation = null, mutationPending = false, code = workspaceCode, api = {}, role = "owner", globals = {} } = {}) {
   const slots = []
   let cursor = 0
   const effects = []
@@ -86,10 +113,11 @@ function componentHarness(exportName, props, { operation = null, mutationPending
     },
     "../../data-sources/apim/api": { dataSource: api },
     "../../data-sources/apim/queries": {
-      finopsKeys: { registry: ["registry"], apimTargets: ["targets"], apimOnboarding: ["onboarding"], gatewayReleaseOperation: id => ["operation", id] },
+      finopsKeys: { registry: ["registry"], apimTargets: ["targets"], apimOnboarding: ["onboarding"], selfHostedGatewayProvisions: ["provisions"], gatewayReleaseOperation: id => ["operation", id] },
       finopsQueries: {
         gatewayReleaseOperation: id => ({ queryKey: ["operation", id] }),
         apimOnboarding: () => ({ queryKey: ["onboarding"] }),
+        selfHostedGatewayProvisions: () => ({ queryKey: ["provisions"] }),
         selfHostedGatewayRemoval: id => ({ queryKey: ["removal", id] }),
       },
       storeGatewayDeployment: async () => {},
@@ -110,8 +138,13 @@ function componentHarness(exportName, props, { operation = null, mutationPending
     require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }),
   })
   imports["./apim-onboarding-dialog"] = onboardingExports
+  const creationExports = {}
+  runInNewContext(creationCode, { exports: creationExports, crypto: { randomUUID: () => "unit-request-id" }, AbortController, URL, Blob,
+    require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }),
+  })
+  imports["./self-hosted-gateway-dialog"] = creationExports
   const exports = {}
-  runInNewContext(code, { exports, Set, URL, window: { location: { href: "http://localhost/?tab=apim" } },
+  runInNewContext(code, { exports, Set, URL, Blob, AbortController, Error, crypto: { randomUUID: () => "unit-request-id" }, window: { location: { href: "http://localhost/?tab=apim" } }, ...globals,
     require: name => imports[name] ?? (name.endsWith("/gateway-topology") ? gatewayTopology : new Proxy({}, { get: (_target, key) => key })),
   })
   const nodes = value => Array.isArray(value) ? value.flatMap(nodes)
@@ -301,6 +334,10 @@ for (const syncAvailable of [false, true]) test(`source attachment refreshes top
   const table = () => harness.find(node => node.type?.name === "ApimTable")
   table().props.onToggleTarget("first")
   table().props.onAttach("first")
+  const create = harness.find(node => node.type?.name === "SelfHostedGatewayCreateDialog")
+  assert.ok(create)
+  assert.equal(harness.find(node => node.type?.name === "GatewayEditor"), undefined)
+  create.props.onAdopt("first")
   const editor = harness.find(node => node.type?.name === "GatewayEditor")
   editor.props.onSubmit("first", { native_gateway_id: "edge" })
   await harness.settle()
@@ -639,6 +676,93 @@ function onboardingHarness(api, extra = {}) {
   return harness
 }
 const submitForm = harness => harness.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
+
+test("new Gateway dialog requires no native ID and retries an uncertain submission with identical identity", async () => {
+  const calls = []
+  const accepted = []
+  const harness = componentHarness("SelfHostedGatewayCreateDialog", {
+    targets: [topology()], initialTargetId: null, available: true,
+    onClose() {}, onAdopt() {}, onAccepted: value => accepted.push(value), onSettled() {},
+  }, { code: creationCode, api: { createSelfHostedGateway: async (...args) => {
+    calls.push(args)
+    if (calls.length === 1) throw new Error("Response lost")
+    return { operation: { id: "created" } }
+  } } })
+  assert.equal(harness.find(node => node.props?.name === "native_gateway_id"), undefined)
+  assert.equal(harness.find(node => node.type === "form").props["data-request-id"], "unit-request-id")
+  for (const [name, value] of Object.entries({ display_name: "  Docker edge  ", endpoint_url: "https://edge.test/unit/llm" })) {
+    harness.find(node => node.props?.name === name).props.onChange({ target: { value } })
+  }
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  harness.find(node => node.type === "Checkbox").props.onCheckedChange(true)
+  await submitForm(harness)
+  assert.equal(harness.find(node => node.props?.role === "alert").props.children, "Response lost")
+  assert.ok(harness.all().filter(node => node.type === "Input").every(node => node.props.disabled))
+  await submitForm(harness)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(calls[0], calls[1])
+  assert.equal(calls[0][2], "unit-request-id")
+  assert.equal(calls[0][1].display_name, "Docker edge")
+  assert.equal(calls[0][1].hosting_mode, "docker")
+  assert.equal("native_gateway_id" in calls[0][1], false)
+  assert.equal(accepted[0].id, "created")
+})
+
+test("new Gateway creation capability fails closed and old association stays a separate action", async () => {
+  let adopted = false
+  const harness = componentHarness("SelfHostedGatewayCreateDialog", {
+    targets: [topology()], initialTargetId: "first", available: false,
+    onClose() {}, onAdopt: () => { adopted = true }, onAccepted() {}, onSettled() {},
+  }, { code: creationCode })
+  assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
+  assert.ok(harness.find(node => node.props?.role === "status"))
+  harness.find(node => node.type === "Button" && node.props.children?.includes?.("关联已有 Gateway")).props.onClick()
+  assert.equal(adopted, true)
+})
+
+test("startup configuration stays outside query state and DOM, downloads then clears on close", async () => {
+  const blobs = []
+  const links = []
+  const revoked = []
+  let requestedSignal
+  const harness = componentHarness("SelfHostedGatewayBootstrapDialog", {
+    deploymentId: "edge", name: "Docker edge", onClose() {}, onValidate() {},
+  }, { code: creationCode, api: { selfHostedGatewayBootstrap: async (id, hours, signal) => {
+    assert.equal(id, "edge"); assert.equal(hours, 24); requestedSignal = signal
+    return { native_gateway_id: "turnstile-generated", deployment_id: id,
+      configuration_endpoint: "https://unit.configuration.azure-api.net", expires_at: "2026-10-01T00:00:00Z",
+      image: "mcr.microsoft.com/azure-api-management/gateway:2.12.1", environment_file_name: "turnstile-generated.env",
+      environment_file: "config.service.auth=GatewayKey confidential-bootstrap-token", docker_command: "docker run --env-file turnstile-generated.env official-image", renewal_command: "docker stop turnstile-generated && docker rm turnstile-generated && docker run --env-file turnstile-generated.env official-image" }
+  } }, globals: {
+    URL: { createObjectURL: blob => { blobs.push(blob); return "blob:unit" }, revokeObjectURL: url => revoked.push(url) },
+    document: { createElement: () => { const link = { click() { links.push(this) } }; return link } },
+  } })
+  harness.render()
+  const cleanup = harness.effects[0]()
+  assert.equal(harness.mutationVariables.length, 0)
+  assert.equal(harness.queries.length, 0)
+  await harness.find(node => node.type === "Button" && node.props.children?.includes?.("获取启动配置")).props.onClick()
+  assert.equal(requestedSignal.aborted, false)
+  assert.equal(JSON.stringify(harness.render()).includes("confidential-bootstrap-token"), false)
+  const selects = harness.all().filter(node => node.type === "Select")
+  selects[1].props.onValueChange("renew")
+  assert.ok(harness.find(node => node.type === "textarea").props.value.startsWith("docker stop turnstile-generated"))
+  const download = harness.find(node => node.type === "Button" && node.props.children?.includes?.("下载环境文件"))
+  download.props.onClick()
+  assert.equal(await blobs[0].text(), "config.service.auth=GatewayKey confidential-bootstrap-token")
+  assert.equal(links[0].download, "turnstile-generated.env")
+  assert.deepEqual(revoked, ["blob:unit"])
+  cleanup()
+  download.props.onClick()
+  assert.equal(blobs.length, 1)
+})
+
+test("newly created configuration is waiting for its container, never reported verified", () => {
+  const target = topology({ id: "edge", native_gateway_id: "edge", kind: "self_hosted", provisioning_operation_id: "creation", last_probe_at: null, reachability_state: "unknown" })
+  const evidence = gatewayEvidence(apimGatewayEntries(target)[0])
+  assert.equal(evidence.state, "warning")
+  assert.equal(evidence.label, "待启动")
+})
 
 test("initialization uses the confirmed server plan and invalidates it on Back", async () => {
   const plan = initializationPlan()

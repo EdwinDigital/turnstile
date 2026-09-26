@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowRightLeft, Boxes, CheckCircle2, ChevronRight, CircleAlert, Link2, MoreHorizontal, PanelLeft, Pencil, Plus, RefreshCw, Save, Search, Server, Trash2, Wifi, WifiOff, X } from "lucide-react"
+import { ArrowRightLeft, Boxes, CheckCircle2, ChevronRight, CircleAlert, Download, Link2, MoreHorizontal, PanelLeft, Pencil, Plus, RefreshCw, Save, Search, Server, Trash2, Wifi, WifiOff, X } from "lucide-react"
 
 import { dataSource } from "../../data-sources/apim/api"
 import { finopsKeys, finopsQueries, storeApimTarget, storeGatewayDeploymentName, storeGatewayName, storeRegistry } from "../../data-sources/apim/queries"
@@ -21,6 +21,7 @@ import { Input } from "../ui/input"
 import { ResizableGridTable } from "../ui/resizable-table"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
 import { ApimOnboardingDialog, ApimOnboardingRow, pendingApimOnboarding } from "./apim-onboarding-dialog"
+import { SelfHostedGatewayBootstrapDialog, SelfHostedGatewayCreateDialog, SelfHostedGatewayProvisionProgress } from "./self-hosted-gateway-dialog"
 
 type InfrastructureTab = Extract<ModelManagementTab, "apim" | "gateways">
 type RemovalTarget = { kind: "apim" | "gateway"; id: string; name: string }
@@ -54,6 +55,8 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
   const [apimOpen, setApimOpen] = useState(false)
   const [adoptOpen, setAdoptOpen] = useState(false)
   const [gatewayOpen, setGatewayOpen] = useState(false)
+  const [createGatewayOpen, setCreateGatewayOpen] = useState(false)
+  const [startupGatewayId, setStartupGatewayId] = useState<string | null>(null)
   const [gatewayTargetId, setGatewayTargetId] = useState<string | null>(null)
   const [editingApim, setEditingApim] = useState<ApimTargetTopology | null>(null)
   const [editingGateway, setEditingGateway] = useState<GatewayEntry | null>(null)
@@ -67,6 +70,11 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
   ))
   const notifiedOperation = useRef<string | null>(null)
   const pendingInitializations = useRef(new Set<string>())
+  const pendingProvisions = useRef(new Set<string>())
+  const provisions = useQuery({
+    ...finopsQueries.selfHostedGatewayProvisions(),
+    enabled: canManage && topology !== null && "self_hosted_gateway_provisioning_available" in topology,
+  })
   const onboarding = useQuery({
     ...finopsQueries.apimOnboarding(),
     enabled: canManage && mode === "apim" && topology !== null && "onboarding_available" in topology,
@@ -104,6 +112,17 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
     onSuccess: async (_, value) => { await storeGatewayDeploymentName(queryClient, value.id, value.name); setEditingGateway(null); setNotice("Gateway 显示名称已更新") },
   })
   const refreshOnboarding = () => { void queryClient.invalidateQueries({ queryKey: finopsKeys.apimOnboarding }) }
+  const refreshProvisions = () => { void queryClient.invalidateQueries({ queryKey: finopsKeys.selfHostedGatewayProvisions }) }
+  const acceptedProvision = (current: GatewayReleaseOperation) => {
+    pendingProvisions.current.add(current.id)
+    queryClient.setQueryData(finopsKeys.gatewayReleaseOperation(current.id), current)
+    setCreateGatewayOpen(false)
+    refreshProvisions()
+  }
+  const retryProvision = useMutation({
+    mutationFn: (id: string) => dataSource.retrySelfHostedGatewayProvision(id),
+    onSuccess: accepted => acceptedProvision(accepted.operation), onSettled: refreshProvisions,
+  })
   const acceptedOnboarding = (current: GatewayReleaseOperation) => {
     pendingInitializations.current.add(current.id)
     queryClient.setQueryData(finopsKeys.gatewayReleaseOperation(current.id), current)
@@ -170,6 +189,18 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
       void queryClient.invalidateQueries({ queryKey: finopsKeys.apimTargets })
     }
   }, [onboarding.data, queryClient])
+  useEffect(() => {
+    for (const current of provisions.data?.items ?? []) {
+      if (pendingApimOnboarding(current)) pendingProvisions.current.add(current.id)
+      else if (pendingProvisions.current.delete(current.id) && current.status === "succeeded") {
+        setNotice("APIM 配置已创建，等待容器接入")
+        const deploymentId = current.checkpoint.deployment_id
+        if (typeof deploymentId === "string") setStartupGatewayId(deploymentId)
+        void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
+        void queryClient.invalidateQueries({ queryKey: finopsKeys.apimTargets })
+      }
+    }
+  }, [provisions.data, queryClient])
   const initializations = apimOnboardingRows(canManage ? onboarding.data?.items ?? [] : [], topology?.items ?? [])
   const initializingIds = new Set(initializations.map(item => item.gateway_profile_id))
   const matches = (values: unknown[]) => values.join(" ").toLowerCase().includes(search.toLowerCase())
@@ -185,6 +216,7 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
     || renameDeployment.isPending || validateGateway.isPending || changeAssociation.isPending || remove.isPending
   const lifecycleAvailable = topology?.resource_lifecycle_available === true
   const gatewayAttachmentAvailable = lifecycleAvailable && registry.self_hosted_gateway_enabled === true
+  const gatewayCreationAvailable = gatewayAttachmentAvailable && topology?.self_hosted_gateway_provisioning_available === true
   const gatewayNameSupported = canManage && lifecycleAvailable && topology?.self_hosted_gateway_name_edit_supported === true
   const topologyUnavailable = !loading && topology === null && Boolean(error)
   const counts: Record<ModelManagementTab, number | string> = {
@@ -192,7 +224,8 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
     apim: topology ? new Set([...topology.items.map(item => item.target.gateway_profile_id), ...initializingIds]).size : "\u2014",
     gateways: topology ? gatewayEntries(topology).length : "\u2014",
   }
-  const openGateway = (targetId: string | null = null) => { addGateway.reset(); setGatewayTargetId(targetId); setGatewayOpen(true) }
+  const openGateway = (targetId: string | null = null) => { setGatewayTargetId(targetId); setCreateGatewayOpen(true) }
+  const openStartup = (entry: GatewayEntry) => setStartupGatewayId(entry.deployment.id)
   const editGateway = (entry: GatewayEntry) => { renameDeployment.reset(); setEditingGateway(entry) }
   const openRemoval = (target: RemovalTarget) => { remove.reset(); setRemovalTarget(target) }
   const toggleTarget = (id: string) => setCollapsedTargetIds(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
@@ -205,34 +238,39 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
     {notice && <div className="registry-notice smh-notice" role="status"><CheckCircle2 size={14} /><div className="smh-notice-copy"><span>{notice}</span></div><button type="button" className="smh-notice-close" title="关闭" aria-label="关闭" onClick={() => setNotice(null)}><X size={13} /></button></div>}
     {syncing && <div className="registry-progress smh-notice" role="status"><RefreshCw className={operation.data?.worker_available ? "spin" : ""} size={14} /><div className="smh-notice-copy"><span>{operation.data?.worker_available ? "正在同步 APIM 清单" : "同步已排队，Worker 当前不可用"}</span></div></div>}
     {(onboarding.error || retryOnboarding.error) && <InfrastructureErrorNotice>{errorMessage(onboarding.error ?? retryOnboarding.error)}</InfrastructureErrorNotice>}
+    {(provisions.error || retryProvision.error) && <InfrastructureErrorNotice>{errorMessage(provisions.error ?? retryProvision.error)}</InfrastructureErrorNotice>}
+    {canManage && (provisions.data?.items ?? []).filter(current => current.status !== "succeeded").map(current => <SelfHostedGatewayProvisionProgress key={current.id} operation={current} available={gatewayCreationAvailable} retrying={retryProvision.isPending} onRetry={id => retryProvision.mutate(id)} />)}
     {(operation.error || operation.data?.status === "failed") && <InfrastructureErrorNotice>{operation.error ? errorMessage(operation.error) : operation.data?.error_message ?? "APIM 清单同步失败"}</InfrastructureErrorNotice>}
     {topology && !lifecycleAvailable && <div className="registry-progress smh-notice infrastructure-read-only-notice" role="status"><ApimLogo size={14} /><div className="smh-notice-copy"><span>当前独立 API 版本仅支持查看 APIM 与 Gateway；部署匹配版本后才能添加、验证、重新关联或移除资源。</span></div></div>}
     {Boolean(error) && topology !== null && <InfrastructureErrorNotice>{`无法加载 APIM 拓扑：${errorMessage(error)}`}</InfrastructureErrorNotice>}
     {(addApim.error || addGateway.error || syncTarget.error || validateGateway.error || changeAssociation.error) && <InfrastructureErrorNotice>操作失败：{errorMessage(addApim.error ?? addGateway.error ?? syncTarget.error ?? validateGateway.error ?? changeAssociation.error)}</InfrastructureErrorNotice>}
     {loading && <InfrastructureTableLoading mode={mode} />}
     {topologyUnavailable && <ResourceTable kind={mode === "apim" ? "apim" : "gateway"} label={`${tabLabels[mode]}加载失败`} headers={resourceHeaders(mode)}><div className="smh-empty infrastructure-state-error" role="alert"><CircleAlert size={24} /><b>{`无法加载 APIM 拓扑：${errorMessage(error)}`}</b></div></ResourceTable>}
-    {!loading && !topologyUnavailable && mode === "apim" && <ApimTable targets={targets} profiles={registry.gateways} onboardingItems={onboardingItems} onboardingAvailable={onboarding.data?.available === true} retryingId={retryOnboarding.isPending ? retryOnboarding.variables : null} onRetry={id => retryOnboarding.mutate(id)} filtered={Boolean(search.trim())} collapsedTargetIds={collapsedTargetIds} busy={busy} lifecycleAvailable={lifecycleAvailable} inventorySyncAvailable={topology?.inventory_sync_available === true} gatewayAttachmentAvailable={gatewayAttachmentAvailable} syncingId={syncTarget.isPending ? syncTarget.variables : syncing ? operation.data?.gateway_profile_id ?? null : null} validatingId={validateGateway.isPending ? validateGateway.variables : null} onToggleTarget={toggleTarget} onSync={id => syncTarget.mutate(id)} onEdit={target => { renameApim.reset(); setEditingApim(target) }} onEditGateway={editGateway} onAttach={openGateway} onValidate={id => validateGateway.mutate(id)} onChange={setAssociationTarget} onRemoveGateway={entry => openRemoval({ kind: "gateway", id: entry.deployment.id, name: entry.deployment.display_name })} onRemove={target => openRemoval({ kind: "apim", id: target.target.gateway_profile_id, name: apimTargetDisplayName(target, registry.gateways) })} />}
-    {!loading && !topologyUnavailable && mode === "gateways" && <GatewayTable entries={gateways} filtered={Boolean(search.trim())} busy={busy} lifecycleAvailable={lifecycleAvailable} validatingId={validateGateway.isPending ? validateGateway.variables : null} onEdit={editGateway} onValidate={id => validateGateway.mutate(id)} onChange={setAssociationTarget} onRemove={entry => openRemoval({ kind: "gateway", id: entry.deployment.id, name: entry.deployment.display_name })} />}
+    {!loading && !topologyUnavailable && mode === "apim" && <ApimTable targets={targets} profiles={registry.gateways} onboardingItems={onboardingItems} onboardingAvailable={onboarding.data?.available === true} retryingId={retryOnboarding.isPending ? retryOnboarding.variables : null} onRetry={id => retryOnboarding.mutate(id)} filtered={Boolean(search.trim())} collapsedTargetIds={collapsedTargetIds} busy={busy} lifecycleAvailable={lifecycleAvailable} inventorySyncAvailable={topology?.inventory_sync_available === true} gatewayAttachmentAvailable={gatewayAttachmentAvailable} syncingId={syncTarget.isPending ? syncTarget.variables : syncing ? operation.data?.gateway_profile_id ?? null : null} validatingId={validateGateway.isPending ? validateGateway.variables : null} onToggleTarget={toggleTarget} onSync={id => syncTarget.mutate(id)} onEdit={target => { renameApim.reset(); setEditingApim(target) }} onEditGateway={editGateway} onAttach={openGateway} onBootstrap={gatewayCreationAvailable ? openStartup : undefined} onValidate={id => validateGateway.mutate(id)} onChange={setAssociationTarget} onRemoveGateway={entry => openRemoval({ kind: "gateway", id: entry.deployment.id, name: entry.deployment.display_name })} onRemove={target => openRemoval({ kind: "apim", id: target.target.gateway_profile_id, name: apimTargetDisplayName(target, registry.gateways) })} />}
+    {!loading && !topologyUnavailable && mode === "gateways" && <GatewayTable entries={gateways} filtered={Boolean(search.trim())} busy={busy} lifecycleAvailable={lifecycleAvailable} validatingId={validateGateway.isPending ? validateGateway.variables : null} onEdit={editGateway} onBootstrap={gatewayCreationAvailable ? openStartup : undefined} onValidate={id => validateGateway.mutate(id)} onChange={setAssociationTarget} onRemove={entry => openRemoval({ kind: "gateway", id: entry.deployment.id, name: entry.deployment.display_name })} />}
     {!loading && !topologyUnavailable && <footer className="model-table-footer">{`共 ${mode === "apim" ? targets.length + onboardingItems.length : gateways.length} 个${tabLabels[mode]}`}</footer>}
     {apimOpen && <ApimOnboardingDialog available={topology?.onboarding_available === true && onboarding.data?.available !== false} onClose={() => setApimOpen(false)} onAdopt={() => { setApimOpen(false); setAdoptOpen(true) }} onAccepted={acceptedOnboarding} onSettled={refreshOnboarding} />}
     {adoptOpen && <ApimEditor busy={addApim.isPending} error={addApim.error} onClose={() => setAdoptOpen(false)} onSubmit={value => addApim.mutate(value)} />}
     {editingApim && <InfrastructureNameEditor key={editingApim.target.gateway_profile_id} kind="apim" identity={editingApim.target.service_name} name={apimTargetDisplayName(editingApim, registry.gateways)} supported={canManage && registry.gateway_name_edit_supported === true} busy={renameApim.isPending} error={renameApim.error} onClose={() => setEditingApim(null)} onSubmit={name => renameApim.mutate({ id: editingApim.target.gateway_profile_id, name })} />}
     {editingGateway && <InfrastructureNameEditor key={editingGateway.deployment.id} kind="gateway" identity={`${editingGateway.deployment.native_gateway_id} · ${editingGateway.target.target.service_name}`} name={editingGateway.deployment.display_name} available={gatewayEntries(topology).some(entry => entry.deployment.id === editingGateway.deployment.id)} supported={gatewayNameSupported} busy={renameDeployment.isPending} error={renameDeployment.error} onClose={() => setEditingGateway(null)} onSubmit={name => renameDeployment.mutate({ id: editingGateway.deployment.id, name })} />}
     {gatewayOpen && <GatewayEditor targets={(topology?.items ?? []).filter(item => !initializingIds.has(item.target.gateway_profile_id))} initialTargetId={gatewayTargetId} available={canManage && gatewayAttachmentAvailable} busy={addGateway.isPending} error={addGateway.error} onClose={() => setGatewayOpen(false)} onSubmit={(targetId, value) => addGateway.mutate({ targetId, value })} />}
+    {createGatewayOpen && <SelfHostedGatewayCreateDialog targets={topology?.items ?? []} initialTargetId={gatewayTargetId} available={canManage && gatewayCreationAvailable} onClose={() => setCreateGatewayOpen(false)} onAdopt={targetId => { setCreateGatewayOpen(false); setGatewayTargetId(targetId); addGateway.reset(); setGatewayOpen(true) }} onAccepted={acceptedProvision} onSettled={refreshProvisions} />}
+    {startupGatewayId && canManage && <SelfHostedGatewayBootstrapDialog key={startupGatewayId} deploymentId={startupGatewayId} name={gatewayEntries(topology).find(entry => entry.deployment.id === startupGatewayId)?.deployment.display_name ?? startupGatewayId} onClose={() => setStartupGatewayId(null)} onValidate={() => { validateGateway.mutate(startupGatewayId); setStartupGatewayId(null) }} />}
     {associationTarget && <GatewayAssociationEditor entry={associationTarget} targets={topology?.items ?? []} canChangeAssociation={(topology?.items.length ?? 0) > 1} lifecycleAvailable={lifecycleAvailable} busy={changeAssociation.isPending} error={changeAssociation.error} onClose={() => setAssociationTarget(null)} onSubmit={value => changeAssociation.mutate({ deploymentId: associationTarget.deployment.id, value })} />}
     {removalTarget && <RemovalDialog target={removalTarget} preview={removal.data ?? null} loading={removal.isPending || removal.isFetching} busy={remove.isPending} error={removal.error ?? remove.error} onClose={() => { if (!remove.isPending) setRemovalTarget(null) }} onConfirm={() => { if (removal.data?.removal_allowed && !removal.isFetching && !removal.error) remove.mutate(removalTarget) }} />}
   </div>
 }
 
-type GatewayActions = { busy: boolean; lifecycleAvailable: boolean; onEdit: (entry: GatewayEntry) => void; onValidate: (id: string) => void; onChange: (entry: GatewayEntry) => void; onRemove: (entry: GatewayEntry) => void }
+type GatewayActions = { busy: boolean; lifecycleAvailable: boolean; onEdit: (entry: GatewayEntry) => void; onValidate: (id: string) => void; onChange: (entry: GatewayEntry) => void; onRemove: (entry: GatewayEntry) => void; onBootstrap?: (entry: GatewayEntry) => void }
 
-function ApimTable({ targets, profiles, onboardingItems, onboardingAvailable, retryingId, onRetry, filtered, collapsedTargetIds, busy, lifecycleAvailable, inventorySyncAvailable, gatewayAttachmentAvailable, syncingId, validatingId, onToggleTarget, onSync, onEdit, onEditGateway, onAttach, onValidate, onChange, onRemoveGateway, onRemove }: {
+function ApimTable({ targets, profiles, onboardingItems, onboardingAvailable, retryingId, onRetry, filtered, collapsedTargetIds, busy, lifecycleAvailable, inventorySyncAvailable, gatewayAttachmentAvailable, syncingId, validatingId, onToggleTarget, onSync, onEdit, onEditGateway, onAttach, onBootstrap, onValidate, onChange, onRemoveGateway, onRemove }: {
   targets: ApimTargetTopology[]; profiles: ModelRegistry["gateways"]; onboardingItems: GatewayReleaseOperation[]
   onboardingAvailable: boolean; retryingId: string | null; onRetry: (id: string) => void; filtered: boolean
   collapsedTargetIds: Set<string>; busy: boolean; lifecycleAvailable: boolean; inventorySyncAvailable: boolean
   gatewayAttachmentAvailable: boolean; syncingId: string | null; validatingId: string | null
   onToggleTarget: (id: string) => void; onSync: (id: string) => void; onEdit: (target: ApimTargetTopology) => void
   onEditGateway: (entry: GatewayEntry) => void; onAttach: (id: string) => void; onValidate: (id: string) => void
+  onBootstrap?: (entry: GatewayEntry) => void
   onChange: (entry: GatewayEntry) => void; onRemoveGateway: (entry: GatewayEntry) => void; onRemove: (target: ApimTargetTopology) => void
 }) {
   return <ResourceTable kind="apim" label="APIM 实例列表" headers={resourceHeaders("apim")}>
@@ -251,7 +289,7 @@ function ApimTable({ targets, profiles, onboardingItems, onboardingAvailable, re
           <div className="model-status-cell" role="cell"><ResourceReadiness state={item.connection_state === "connected" ? "ready" : item.connection_state === "unavailable" ? "unavailable" : "warning"} label={item.connection_state === "connected" ? "已同步" : item.connection_state === "unavailable" ? "不可用" : "待验证"} detail={item.connection_state === "connected" ? "APIM 清单已验证；并非实时数据面健康状态" : item.connection_state === "unavailable" ? "APIM 清单与配置不一致" : "尚未同步"} timestamp={item.target.last_inventory_sync_at} /></div>
           <InfrastructureActions name={displayName} checkLabel="验证并同步 APIM" removeLabel="从 Turnstile 移除 APIM" busy={busy} checkDisabled={!inventorySyncAvailable} removeDisabled={!lifecycleAvailable} checking={syncingId === targetId} onCheck={() => onSync(targetId)} onEdit={profiles.some(profile => profile.id === targetId) ? () => onEdit(item) : undefined} onAttach={() => onAttach(targetId)} attachDisabled={!gatewayAttachmentAvailable || item.target.capabilities.self_hosted_gateway === "unsupported"} onRemove={() => onRemove(item)} disclosure={entries.length ? { expanded, controls: childrenId, onToggle: () => onToggleTarget(targetId) } : undefined} />
         </article>
-        {entries.length > 0 && <div id={childrenId} className="apim-gateway-children" hidden={!expanded}>{entries.map(entry => <GatewayChildRow key={entry.deployment.id} entry={entry} busy={busy} lifecycleAvailable={lifecycleAvailable} validating={validatingId === entry.deployment.id} onEdit={() => onEditGateway(entry)} onValidate={() => onValidate(entry.deployment.id)} onChange={() => onChange(entry)} onRemove={() => onRemoveGateway(entry)} />)}</div>}
+        {entries.length > 0 && <div id={childrenId} className="apim-gateway-children" hidden={!expanded}>{entries.map(entry => <GatewayChildRow key={entry.deployment.id} entry={entry} busy={busy} lifecycleAvailable={lifecycleAvailable} validating={validatingId === entry.deployment.id} onEdit={() => onEditGateway(entry)} onValidate={() => onValidate(entry.deployment.id)} onChange={() => onChange(entry)} onBootstrap={onBootstrap ? () => onBootstrap(entry) : undefined} onRemove={() => onRemoveGateway(entry)} />)}</div>}
       </section>
     })}
     {onboardingItems.map(operation => <ApimOnboardingRow key={operation.gateway_profile_id} operation={operation} available={onboardingAvailable && !busy} retryingId={retryingId} onRetry={onRetry} />)}
@@ -259,9 +297,10 @@ function ApimTable({ targets, profiles, onboardingItems, onboardingAvailable, re
   </ResourceTable>
 }
 
-function GatewayChildRow({ entry, busy, lifecycleAvailable, validating, onEdit, onValidate, onChange, onRemove }: {
+function GatewayChildRow({ entry, busy, lifecycleAvailable, validating, onEdit, onValidate, onChange, onRemove, onBootstrap }: {
   entry: GatewayEntry; busy: boolean; lifecycleAvailable: boolean; validating: boolean
   onEdit: () => void; onValidate: () => void; onChange: () => void; onRemove: () => void
+  onBootstrap?: () => void
 }) {
   const managed = entry.deployment.kind === "managed"
   const connected = gatewayEvidence(entry).state === "ready"
@@ -273,11 +312,11 @@ function GatewayChildRow({ entry, busy, lifecycleAvailable, validating, onEdit, 
     <div className="model-runtime-cell" role="cell"><b title={entry.deployment.endpoint_url ?? undefined}>{entry.deployment.endpoint_url ?? "Endpoint 未配置"}</b><span title={endpointMetadata}>{endpointMetadata}</span></div>
     <div className="model-pricing-cell" role="cell"><b>{publishedModelSummary(models.length, entry.target.target.api_id)}</b><span>{models.length ? models.map(model => model.display_name).join("、") : "尚未发布模型"}</span></div>
     <div className="model-status-cell" role="cell"><GatewayReadiness entry={entry} /></div>
-    {managed ? <div className="model-row-actions infrastructure-row-actions" role="cell" /> : <InfrastructureActions name={entry.deployment.display_name} checkLabel="验证连接" editLabel="编辑 Gateway 名称" removeLabel="从 Turnstile 移除 Gateway" busy={busy} checkDisabled={!lifecycleAvailable || !entry.deployment.endpoint_url} removeDisabled={!lifecycleAvailable} checking={validating} onCheck={onValidate} onEdit={onEdit} onBinding={onChange} onRemove={onRemove} />}
+    {managed ? <div className="model-row-actions infrastructure-row-actions" role="cell" /> : <InfrastructureActions name={entry.deployment.display_name} checkLabel="验证连接" editLabel="编辑 Gateway 名称" removeLabel="从 Turnstile 移除 Gateway" busy={busy} checkDisabled={!lifecycleAvailable || !entry.deployment.endpoint_url} removeDisabled={!lifecycleAvailable} checking={validating} onCheck={onValidate} onEdit={onEdit} onBinding={onChange} onBootstrap={entry.deployment.provisioning_operation_id ? onBootstrap : undefined} onRemove={onRemove} />}
   </article>
 }
 
-function GatewayTable({ entries, filtered, busy, lifecycleAvailable, validatingId, onEdit, onValidate, onChange, onRemove }: GatewayActions & { entries: GatewayEntry[]; filtered: boolean; validatingId: string | null }) {
+function GatewayTable({ entries, filtered, busy, lifecycleAvailable, validatingId, onEdit, onValidate, onChange, onRemove, onBootstrap }: GatewayActions & { entries: GatewayEntry[]; filtered: boolean; validatingId: string | null }) {
   return <ResourceTable kind="gateway" label="Self-hosted Gateway 列表" headers={resourceHeaders("gateways")}>
     {entries.map(entry => {
       const connected = gatewayEvidence(entry).state === "ready"
@@ -287,16 +326,17 @@ function GatewayTable({ entries, filtered, busy, lifecycleAvailable, validatingI
         <div className="model-runtime-cell" role="cell"><b title={`${entry.target.target.service_name} · ${entry.target.target.resource_group}`}>{entry.target.target.service_name}</b><span title={models.map(model => model.display_name).join("、")}>{entry.published_models_available === false ? "模型关系需升级 API" : publishedModelSummary(models.length, entry.target.target.api_id)}</span></div>
         <div className="model-pricing-cell" role="cell"><b title={entry.deployment.endpoint_url ?? undefined}>{entry.deployment.endpoint_url ?? "Endpoint 未配置"}</b><span title={entry.configuration_endpoint}>Configuration · {entry.configuration_endpoint}</span></div>
         <div className="model-status-cell" role="cell"><GatewayReadiness entry={entry} /></div>
-        <InfrastructureActions name={entry.deployment.display_name} checkLabel="验证连接" editLabel="编辑 Gateway 名称" removeLabel="从 Turnstile 移除 Gateway" busy={busy} checkDisabled={!lifecycleAvailable || !entry.deployment.endpoint_url} removeDisabled={!lifecycleAvailable} checking={validatingId === entry.deployment.id} onCheck={() => onValidate(entry.deployment.id)} onEdit={() => onEdit(entry)} onBinding={() => onChange(entry)} onRemove={() => onRemove(entry)} />
+        <InfrastructureActions name={entry.deployment.display_name} checkLabel="验证连接" editLabel="编辑 Gateway 名称" removeLabel="从 Turnstile 移除 Gateway" busy={busy} checkDisabled={!lifecycleAvailable || !entry.deployment.endpoint_url} removeDisabled={!lifecycleAvailable} checking={validatingId === entry.deployment.id} onCheck={() => onValidate(entry.deployment.id)} onEdit={() => onEdit(entry)} onBinding={() => onChange(entry)} onBootstrap={entry.deployment.provisioning_operation_id && onBootstrap ? () => onBootstrap(entry) : undefined} onRemove={() => onRemove(entry)} />
       </article>
     })}
     {!entries.length && <InfrastructureEmpty icon={filtered ? <Search size={27} /> : <Server size={27} />} label={filtered ? "没有匹配的 Self-hosted Gateway" : "尚未添加 Self-hosted Gateway"} />}
   </ResourceTable>
 }
 
-function InfrastructureActions({ name, checkLabel, editLabel = "编辑 APIM 名称", removeLabel, busy, checkDisabled, removeDisabled, checking, onCheck, onEdit, onAttach, attachDisabled = false, onBinding, onRemove, disclosure }: {
+function InfrastructureActions({ name, checkLabel, editLabel = "编辑 APIM 名称", removeLabel, busy, checkDisabled, removeDisabled, checking, onCheck, onEdit, onAttach, attachDisabled = false, onBinding, onRemove, onBootstrap, disclosure }: {
   name: string; checkLabel: string; editLabel?: string; removeLabel: string; busy: boolean; checkDisabled: boolean; removeDisabled: boolean; checking: boolean
   onCheck: () => void; onEdit?: () => void; onAttach?: () => void; attachDisabled?: boolean; onBinding?: () => void; onRemove: () => void
+  onBootstrap?: () => void
   disclosure?: { expanded: boolean; controls: string; onToggle: () => void }
 }) {
   const { user } = useAuth()
@@ -309,7 +349,8 @@ function InfrastructureActions({ name, checkLabel, editLabel = "编辑 APIM 名�
       {onBinding && <button type="button" className="model-edit-action" aria-label="APIM 绑定" title="APIM 绑定" disabled={busy} onClick={onBinding}><Link2 size={14} /></button>}
       {!menuActions && <button type="button" className="model-delete-action" aria-label={removeLabel} title={removeLabel} disabled={busy || removeDisabled} onClick={onRemove}><Trash2 size={14} /></button>}
       <DropdownMenu><DropdownMenuTrigger render={<button type="button" className={menuActions ? "infrastructure-menu-trigger model-edit-action" : "infrastructure-menu-trigger"} aria-label="更多操作" title={name} disabled={busy} />}><MoreHorizontal size={15} /></DropdownMenuTrigger><DropdownMenuContent align="end" className="infrastructure-row-menu">
-        {onAttach && <DropdownMenuItem disabled={busy || attachDisabled} title={attachDisabled ? "此 APIM 当前不支持挂载 Self-hosted Gateway" : undefined} onClick={onAttach}><Plus size={14} />挂载 Self-hosted Gateway</DropdownMenuItem>}
+        {onAttach && <DropdownMenuItem disabled={busy || attachDisabled} title={attachDisabled ? "此 APIM 当前不支持挂载 Self-hosted Gateway" : undefined} onClick={onAttach}><Plus size={14} />新建 Self-hosted Gateway</DropdownMenuItem>}
+        {onBootstrap && <DropdownMenuItem disabled={busy} onClick={onBootstrap}><Download size={14} />启动配置</DropdownMenuItem>}
         <DropdownMenuItem disabled={busy || checkDisabled} onClick={onCheck}><RefreshCw size={14} />{checkLabel}</DropdownMenuItem>
         {onEdit && <DropdownMenuItem disabled={busy} onClick={onEdit}><Pencil size={14} />{editLabel}</DropdownMenuItem>}
         {onBinding && <DropdownMenuItem disabled={busy} onClick={onBinding}><Link2 size={14} />APIM 绑定</DropdownMenuItem>}
@@ -413,7 +454,7 @@ function GatewayEditor({ targets, initialTargetId, available, busy, error, onClo
   const valid = available && Boolean(selected) && gatewayFormValid(value)
   const invalidEndpoint = Boolean(value.endpoint_url.trim()) && !isGatewayEndpoint(value.endpoint_url)
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent className="registry-editor-dialog infrastructure-editor-dialog gateway-attachment-dialog" finalFocus={false}><form className="registry-editor" onSubmit={event => { event.preventDefault(); if (valid && !busy) onSubmit(targetId, gatewayFormPayload(value)) }}>
-    <DialogHeader className="registry-editor-header"><DialogTitle>{initialTargetId === null ? "添加 Self-hosted Gateway" : "挂载 Self-hosted Gateway"}</DialogTitle><DialogDescription>关联用户已有的Gateway配置；Turnstile不会创建或部署Gateway。</DialogDescription></DialogHeader><EditorClose busy={busy} />
+    <DialogHeader className="registry-editor-header"><DialogTitle>关联已有 Gateway</DialogTitle><DialogDescription>已有 APIM Gateway 配置</DialogDescription></DialogHeader><EditorClose busy={busy} />
     <div className="registry-editor-body infrastructure-editor-body"><TargetSelect targets={choices} value={targetId} onChange={setTargetId} disabled={busy || initialTargetId !== null} /><Field label="Configuration endpoint"><Input value={selected?.configuration_endpoint ?? ""} readOnly /></Field>
       <div className="infrastructure-field-grid"><Field label="Gateway 名称"><Input name="display_name" value={value.display_name} disabled={busy} maxLength={120} onChange={event => update("display_name", event.target.value)} autoFocus /></Field><Field label="APIM Gateway ID"><Input name="native_gateway_id" value={value.native_gateway_id} disabled={busy} maxLength={80} onChange={event => update("native_gateway_id", event.target.value)} /></Field></div>
       <div><Field label="Gateway endpoint"><Input name="endpoint_url" type="url" value={value.endpoint_url} disabled={busy} aria-invalid={invalidEndpoint} aria-describedby={invalidEndpoint ? endpointErrorId : undefined} onChange={event => update("endpoint_url", event.target.value)} placeholder="https://gateway.example.com/api-path" /></Field>{invalidEndpoint && <span className="infrastructure-field-error" id={endpointErrorId}>使用 HTTPS URL，不得包含凭据、查询参数或片段。</span>}</div>

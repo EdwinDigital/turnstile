@@ -1,6 +1,9 @@
 import type {
   GatewayDeploymentTopology,
   SelfHostedGatewayAssociationChange,
+  SelfHostedGatewayBootstrap,
+  SelfHostedGatewayCreate,
+  SelfHostedGatewayProvisionOperations,
   SelfHostedGatewayRemovalPreview,
   SelfHostedGatewayWrite,
   ApimOnboardingOperations,
@@ -380,6 +383,21 @@ export const dataSource = {
   ),
   addSelfHostedGateway: (targetId: string, value: SelfHostedGatewayWrite) => writeJson<GatewayDeploymentTopology>(
     `/api/v1/model-management/apim-targets/${encodeURIComponent(targetId)}/self-hosted-gateways`, value,
+  ),
+  createSelfHostedGateway: (targetId: string, value: SelfHostedGatewayCreate, requestId: string) => request<GatewayReleaseOperationAccepted>(
+    `/api/v1/model-management/apim-targets/${encodeURIComponent(targetId)}/self-hosted-gateway-provisions`,
+    { method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": requestId }, body: JSON.stringify(value) },
+  ),
+  selfHostedGatewayProvisions: () => request<SelfHostedGatewayProvisionOperations>(
+    "/api/v1/model-management/self-hosted-gateway-provisions",
+  ),
+  retrySelfHostedGatewayProvision: (id: string) => request<GatewayReleaseOperationAccepted>(
+    `/api/v1/model-management/self-hosted-gateway-provisions/${encodeURIComponent(id)}/retry`, { method: "POST" },
+  ),
+  selfHostedGatewayBootstrap: (id: string, expiresInHours: number, signal?: AbortSignal) => request<SelfHostedGatewayBootstrap>(
+    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/bootstrap`,
+    { method: "POST", headers: { "content-type": "application/json" }, cache: "no-store", signal,
+      body: JSON.stringify({ expires_in_hours: expiresInHours }) },
   ),
   renameSelfHostedGateway: (id: string, name: string) => writeJson<void>(
     `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(id)}/name`, { display_name: name }, "PATCH",

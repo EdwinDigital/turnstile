@@ -2102,7 +2102,8 @@ def test_apim_invocation_uses_configured_gateway_when_registry_url_is_empty(
 
 
 @pytest.mark.parametrize(
-    "mode", ["trusted", "inventory", "managed", "untrusted", "empty", "disabled"],
+    "mode", ["trusted", "inventory", "managed", "untrusted", "empty", "disabled",
+             "provisioned", "approval_mismatch"],
 )
 def test_invocation_uses_only_a_trusted_serving_deployment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
@@ -2129,6 +2130,9 @@ def test_invocation_uses_only_a_trusted_serving_deployment(
         "deployment_id": str(deployment_id), "endpoint_url": endpoint,
         "kind": "managed" if mode == "managed" else "self_hosted",
         "hostnames": ["edge.test"] if mode == "inventory" else [],
+        "approved_endpoint_url": endpoint if mode == "provisioned" else (
+            "https://another-edge.test/turnstile/llm" if mode == "approval_mismatch" else None
+        ),
     }]
     monkeypatch.setattr(repository, "invocation_route", Mock(return_value=route))
     settings = Settings(
@@ -2143,7 +2147,7 @@ def test_invocation_uses_only_a_trusted_serving_deployment(
         repository, settings, GatewayRouter(httpx.Client(transport=httpx.MockTransport(handler))),
     )
     invocation = request().model_copy(update={"model_id": model_id, "runtime_id": runtime_id})
-    if mode in {"untrusted", "empty", "disabled"}:
+    if mode in {"untrusted", "empty", "disabled", "approval_mismatch"}:
         decrypt = Mock(side_effect=AssertionError("Credentials must not be decrypted"))
         monkeypatch.setattr(service, "_decrypt_route", decrypt)
         with pytest.raises(HTTPException) as caught:

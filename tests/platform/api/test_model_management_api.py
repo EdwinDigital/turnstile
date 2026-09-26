@@ -26,9 +26,11 @@ from tests.backend.model_platform.control_plane_support import (
     activate_publication,
     transition_publication,
 )
+from tests.backend.model_platform.test_gateway_targets import TARGET, target
 from tests.backend.model_platform.test_image_publication import image_publication
 from turnstile_core.config import Settings
 from turnstile_core.domain.control_plane import GatewayPublication, GatewayPublicationCreate
+from turnstile_core.domain.gateway_targets import SelfHostedGatewayBootstrap
 from turnstile_core.integrations.apim_control_plane import ApimPolicyCompiler
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.security import CredentialCipher
@@ -63,6 +65,102 @@ def publication_api() -> Iterator[InMemoryRepository]:
     app.dependency_overrides.pop(control_plane_service, None)
     app.dependency_overrides.pop(require_authenticated_session, None)
     app.dependency_overrides.pop(require_publication_owner, None)
+
+
+def test_gateway_creation_api_generates_identity_and_retries_the_same_request(
+    publication_api: InMemoryRepository,
+) -> None:
+    publication_api.upsert_apim_target(target(capabilities={"self_hosted_gateway": "supported"}))
+    service = GatewayControlPlaneService(
+        publication_api, self_hosted_gateway_provisioning_enabled=True,
+    )
+    app.dependency_overrides[control_plane_service] = lambda: service
+    path = f"/api/v1/model-management/apim-targets/{TARGET}/self-hosted-gateway-provisions"
+    payload = {"display_name": "New Docker gateway", "endpoint_url": "https://edge.example.test/unit/llm",
+               "endpoint_control_confirmed": True}
+    headers = {"Idempotency-Key": str(UUID(int=101))}
+    assert client.post(path, json=payload).status_code == 422
+    created = client.post(path, json=payload, headers=headers)
+    assert created.status_code == 202
+    operation = created.json()["operation"]
+    assert operation["semantic_preview"]["native_gateway_id"].startswith("turnstile-")
+    repeated = client.post(path, json=payload, headers=headers)
+    assert repeated.json()["operation"]["id"] == operation["id"]
+    assert len(publication_api.gateway_release_operations) == 1
+    assert publication_api.gateway_deployments == {}
+    jobs = client.get("/api/v1/model-management/self-hosted-gateway-provisions").json()
+    assert jobs["items"][0]["id"] == operation["id"]
+    prior = publication_api.gateway_release_operations[0]
+    prior.update(
+        status="failed", error_code="missing_permission", error_message="Grant required rights",
+    )
+    retried = client.post(
+        f"/api/v1/model-management/self-hosted-gateway-provisions/{operation['id']}/retry",
+    )
+    assert retried.status_code == 202
+    assert retried.json()["operation"]["id"] == operation["id"]
+    assert retried.json()["operation"]["status"] == "queued"
+    assert retried.json()["operation"]["audit"][-1]["detail"]["error_code"] == "missing_permission"
+    assert publication_api.gateway_release_operation_secrets == {}
+
+
+@pytest.mark.parametrize("access", ["anonymous", "member", "foreign-origin"])
+@pytest.mark.parametrize("action", ["create", "retry", "bootstrap"])
+def test_gateway_provision_endpoints_preserve_owner_and_origin_guards(
+    publication_api: InMemoryRepository, access: str, action: str,
+) -> None:
+    owner = app.dependency_overrides[require_authenticated_session]()
+
+    def identity() -> SessionIdentity:
+        if access == "anonymous":
+            raise HTTPException(status_code=401, detail="Sign in required")
+        return SessionIdentity(
+            id=owner.id, email=owner.email, name=owner.name,
+            role="member" if access == "member" else "owner", method=owner.method,
+            session_expires_at=owner.session_expires_at,
+        )
+
+    paths = {
+        "create": f"apim-targets/{TARGET}/self-hosted-gateway-provisions",
+        "retry": f"self-hosted-gateway-provisions/{UUID(int=101)}/retry",
+        "bootstrap": f"self-hosted-gateways/{UUID(int=102)}/bootstrap",
+    }
+    headers = {"Idempotency-Key": str(UUID(int=103))}
+    if access == "foreign-origin":
+        headers["Origin"] = "https://foreign.example.test"
+    with patch.dict(app.dependency_overrides, {require_authenticated_session: identity}):
+        response = client.post(
+            "/api/v1/model-management/" + paths[action], json={}, headers=headers,
+        )
+    assert response.status_code == (401 if access == "anonymous" else 403)
+    assert publication_api.gateway_release_operations == []
+
+
+def test_gateway_bootstrap_response_is_not_cached_and_never_uses_model_keys(
+    publication_api: InMemoryRepository,
+) -> None:
+    service = GatewayControlPlaneService(publication_api)
+    app.dependency_overrides[control_plane_service] = lambda: service
+    result = SelfHostedGatewayBootstrap.model_validate({
+        "deployment_id": UUID(int=104), "native_gateway_id": "turnstile-generated",
+        "configuration_endpoint": "https://unit.configuration.azure-api.net",
+        "expires_at": "2026-10-01T00:00:00Z", "image": "official-pinned-image",
+        "environment_file_name": "turnstile-generated.env",
+        "environment_file": "config.service.auth=GatewayKey unit-bootstrap-secret",
+        "docker_command": "docker run --env-file turnstile-generated.env official-image",
+        "renewal_command": "docker stop turnstile-generated && docker rm turnstile-generated",
+    })
+    with patch.object(service, "self_hosted_gateway_bootstrap", return_value=result) as bootstrap:
+        response = client.post(
+            f"/api/v1/model-management/self-hosted-gateways/{UUID(int=104)}/bootstrap", json={},
+        )
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Pragma"] == "no-cache"
+    assert bootstrap.call_args.args[1].expires_in_hours == 24
+    assert "unit-bootstrap-secret" in response.json()["environment_file"]
+    assert "unit-bootstrap-secret" not in response.json()["docker_command"]
+    assert publication_api.gateway_release_operation_secrets == {}
 
 
 @pytest.mark.parametrize("deployment_name", ["   ", "\t\n"])

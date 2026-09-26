@@ -6,13 +6,14 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID, uuid4, uuid5
 
-from pydantic import Field, HttpUrl, model_validator
+from pydantic import AwareDatetime, Field, HttpUrl, model_validator
 
 from .models import StrictModel
 
 _GATEWAY_DEPLOYMENT_NAMESPACE = UUID("559ea680-1788-44df-95c5-05f60387e1e1")
 _APIM_TARGET_ROUTE_NAMESPACE = UUID("fb2fc0a2-1d9b-409d-a52b-1f49ff530082")
 _APIM_ONBOARDING_NAMESPACE = UUID("accb7b42-78c1-4c4f-89f0-54f857c8ae38")
+_SELF_HOSTED_PROVISION_NAMESPACE = UUID("1b73428d-26ed-464c-b52e-7c6c2b1b44f8")
 
 
 def _require_https_gateway_endpoint(endpoint: HttpUrl) -> None:
@@ -120,6 +121,11 @@ class GatewayDeploymentScopeMode(StrEnum):
 
 def gateway_deployment_id_for(apim_target_id: UUID, native_gateway_id: str) -> UUID:
     return uuid5(_GATEWAY_DEPLOYMENT_NAMESPACE, f"{apim_target_id}:{native_gateway_id.casefold()}")
+
+
+def self_hosted_gateway_native_id_for(apim_target_id: UUID, request_id: UUID) -> str:
+    identity = uuid5(_SELF_HOSTED_PROVISION_NAMESPACE, f"{apim_target_id}:{request_id}")
+    return f"turnstile-{identity.hex}"
 
 
 def apim_target_route_binding_id_for(logical_model_id: UUID, apim_target_id: UUID) -> UUID:
@@ -287,6 +293,68 @@ class SelfHostedGatewayWrite(StrictModel):
         return self
 
 
+class SelfHostedGatewayCreate(StrictModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    endpoint_url: HttpUrl
+    location: str | None = Field(default=None, min_length=1, max_length=128)
+    hosting_mode: GatewayHostingMode = GatewayHostingMode.DOCKER
+    release_gate: GatewayReleaseGate = GatewayReleaseGate.REQUIRED
+    endpoint_control_confirmed: Literal[True]
+
+    @model_validator(mode="before")
+    @classmethod
+    def require_explicit_endpoint_confirmation(cls, value: object) -> object:
+        if isinstance(value, dict) and value.get("endpoint_control_confirmed") is not True:
+            raise ValueError("Confirm control of the Gateway HTTPS endpoint")
+        return value
+
+    @model_validator(mode="after")
+    def require_gateway_configuration(self) -> SelfHostedGatewayCreate:
+        self.display_name = self.display_name.strip()
+        if not self.display_name:
+            raise ValueError("The Gateway display name cannot be blank")
+        _require_https_gateway_endpoint(self.endpoint_url)
+        if self.hosting_mode is GatewayHostingMode.AZURE_MANAGED:
+            raise ValueError("A Self-hosted Gateway cannot use Azure-managed hosting")
+        return self
+
+
+class SelfHostedGatewayProvisionSpec(StrictModel):
+    schema_version: Literal[1] = 1
+    request_id: UUID
+    target: ApimTarget
+    configuration: SelfHostedGatewayCreate
+    native_gateway_id: str = Field(pattern=r"^turnstile-[a-f0-9]{32}$")
+    deployment_id: UUID
+
+    @model_validator(mode="after")
+    def require_generated_identity(self) -> SelfHostedGatewayProvisionSpec:
+        expected = self_hosted_gateway_native_id_for(
+            self.target.gateway_profile_id, self.request_id,
+        )
+        if self.native_gateway_id != expected or self.deployment_id != gateway_deployment_id_for(
+            self.target.gateway_profile_id, expected,
+        ):
+            raise ValueError("Gateway provisioning identity does not match its request")
+        return self
+
+
+class SelfHostedGatewayBootstrapRequest(StrictModel):
+    expires_in_hours: int = Field(default=24, ge=1, le=720, strict=True)
+
+
+class SelfHostedGatewayBootstrap(StrictModel):
+    deployment_id: UUID
+    native_gateway_id: str
+    configuration_endpoint: HttpUrl
+    expires_at: AwareDatetime
+    image: str
+    environment_file_name: str
+    environment_file: str = Field(repr=False)
+    docker_command: str
+    renewal_command: str
+
+
 class SelfHostedGatewayNameWrite(StrictModel):
     display_name: str = Field(min_length=1, max_length=120)
 
@@ -323,6 +391,7 @@ class GatewayDeployment(StrictModel):
     last_probe_at: datetime | None = None
     last_observed_at: datetime | None = None
     retired_at: datetime | None = None
+    provisioning_operation_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_deployment_identity_and_evidence(self) -> GatewayDeployment:
@@ -760,3 +829,4 @@ class ApimTargetTopologyList(StrictModel):
     deployment_scoping_available: bool = False
     onboarding_available: bool = False
     self_hosted_gateway_name_edit_supported: bool = False
+    self_hosted_gateway_provisioning_available: bool = False

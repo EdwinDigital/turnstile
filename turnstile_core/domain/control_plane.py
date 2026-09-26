@@ -99,6 +99,7 @@ class GatewayReleaseOperationKind(StrEnum):
     APPLICATION_PROVISION = "application_provision"
     TARGET_INVENTORY_SYNC = "target_inventory_sync"
     APIM_ONBOARDING = "apim_onboarding"
+    SELF_HOSTED_GATEWAY_PROVISION = "self_hosted_gateway_provision"
 
 
 class GatewayReleaseOperationStatus(StrEnum):
@@ -1080,6 +1081,12 @@ class ApimOnboardingOperations(StrictModel):
 class GatewayReleaseOperationAccepted(StrictModel):
     operation: GatewayReleaseOperation
     status_url: str
+
+
+class SelfHostedGatewayProvisionOperations(StrictModel):
+    available: bool
+    unavailable_reason: str | None = None
+    items: list[GatewayReleaseOperation] = Field(default_factory=list)
 
 
 class GatewayApplicationSubscriptionProvisionAccepted(GatewayReleaseOperationAccepted):

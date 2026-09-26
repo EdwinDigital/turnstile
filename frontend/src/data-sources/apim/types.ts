@@ -490,6 +490,7 @@ export type GatewayDeployment = {
   last_probe_at: string | null
   last_observed_at: string | null
   retired_at: string | null
+  provisioning_operation_id?: string | null
 }
 export type GatewayPublishedModelSummary = { id: string; model_key: string; display_name: string }
 export type GatewayDeploymentInventory = {
@@ -566,6 +567,25 @@ export type SelfHostedGatewayWrite = {
   release_gate?: GatewayDeployment["release_gate"]
 }
 export type SelfHostedGatewayAssociationChange = SelfHostedGatewayWrite & { apim_target_id: string }
+export type SelfHostedGatewayCreate = Omit<SelfHostedGatewayWrite, "native_gateway_id"> & {
+  endpoint_control_confirmed: true
+}
+export type SelfHostedGatewayBootstrap = {
+  deployment_id: string
+  native_gateway_id: string
+  configuration_endpoint: string
+  expires_at: string
+  image: string
+  environment_file_name: string
+  environment_file: string
+  docker_command: string
+  renewal_command: string
+}
+export type SelfHostedGatewayProvisionOperations = {
+  available: boolean
+  unavailable_reason: string | null
+  items: GatewayReleaseOperation[]
+}
 export type SelfHostedGatewayRemovalPreview = {
   deployment_id: string
   display_name: string
@@ -596,6 +616,7 @@ export type ApimTargetTopologyList = {
   deployment_scoping_available: boolean
   onboarding_available: boolean
   self_hosted_gateway_name_edit_supported: boolean
+  self_hosted_gateway_provisioning_available?: boolean
 }
 export type ApimOnboardingRequest = { tenant_id: string; resource_id: string; name?: string | null }
 export type ApimOnboardingPlan = {
@@ -1181,7 +1202,7 @@ export type GatewayReleaseGcPlan = {
 export type GatewayReleaseOperation = {
   id: string
   gateway_profile_id: string
-  operation_kind: "rollback" | "integrity_check" | "gc_plan" | "application_sync" | "application_provision" | "target_inventory_sync" | "apim_onboarding"
+  operation_kind: "rollback" | "integrity_check" | "gc_plan" | "application_sync" | "application_provision" | "target_inventory_sync" | "apim_onboarding" | "self_hosted_gateway_provision"
   target_release_id: string | null
   prior_release_id: string | null
   status: GatewayReleaseOperationStatus

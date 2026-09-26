@@ -1733,6 +1733,7 @@ schemas:
         - application_provision
         - target_inventory_sync
         - apim_onboarding
+        - self_hosted_gateway_provision
       target_release_id:
         type:
         - string

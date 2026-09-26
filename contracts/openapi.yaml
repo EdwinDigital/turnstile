@@ -54,6 +54,14 @@ paths:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1rollouts~1{rollout_id}
   /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1self-hosted-gateways
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1self-hosted-gateway-provisions
+  /api/v1/model-management/self-hosted-gateway-provisions:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateway-provisions
+  /api/v1/model-management/self-hosted-gateway-provisions/{operation_id}/retry:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateway-provisions~1{operation_id}~1retry
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/bootstrap:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1bootstrap
   /api/v1/model-management/self-hosted-gateways/{deployment_id}/name:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1name
   /api/v1/model-management/self-hosted-gateways/{deployment_id}/validations:
@@ -305,6 +313,14 @@ components:
       $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/TargetRolloutStatus
     SelfHostedGatewayWrite:
       $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayWrite
+    SelfHostedGatewayCreate:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayCreate
+    SelfHostedGatewayBootstrapRequest:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayBootstrapRequest
+    SelfHostedGatewayBootstrap:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayBootstrap
+    SelfHostedGatewayProvisionOperations:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayProvisionOperations
     SelfHostedGatewayNameWrite:
       $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayNameWrite
     SelfHostedGatewayAssociationChange:

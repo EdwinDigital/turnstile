@@ -35,6 +35,22 @@ PARAMETERS = json.loads(
 )["parameters"]
 
 
+def test_self_hosted_access_is_opt_in_and_separates_creation_from_tokens() -> None:
+    wrapper = (ROOT / "infra/self-hosted-gateway-access.bicep").read_text()
+    access = (ROOT / "infra/modules/self-hosted-gateway-rbac.bicep").read_text()
+    assert "targetScope = 'subscription'" in wrapper
+    assert "scope: apimResourceGroup" in wrapper
+    assert "self-hosted-gateway-rbac" not in MAIN
+    assert access.count("scope: apim\n") == 2
+    for action in ("gateways/write", "gateways/apis/write", "gateways/generateToken/action"):
+        assert f"Microsoft.ApiManagement/service/{action}" in access
+        assert f"Microsoft.ApiManagement/service/{action}" not in CONTROL_PLANE_APIM_RBAC
+    provisioner, bootstrap = access.split("resource bootstrapRole", 1)
+    assert "generateToken" not in provisioner
+    assert "gateways/write" not in bootstrap and "gateways/apis/write" not in bootstrap
+    assert all(value not in access for value in ("listSecrets", "listKeys", "/delete", "'*'"))
+
+
 def test_main_creates_the_platform_resource_group_and_apim() -> None:
     assert "targetScope = 'subscription'" in MAIN
     assert "resource platformResourceGroup" in MAIN

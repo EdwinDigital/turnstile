@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any, cast
+from unittest.mock import Mock
 from uuid import UUID
 
 import httpx
@@ -19,6 +21,7 @@ from tests.backend.model_platform.control_plane_support import (
     foundry_publication,
     publisher_settings,
 )
+from tests.backend.model_platform.test_gateway_targets import TARGET, target
 from turnstile_core.domain.control_plane import (
     ApiFormat,
     GatewayBackendPoolConfig,
@@ -31,7 +34,14 @@ from turnstile_core.domain.control_plane import (
     RuntimeTarget,
     publication_model_id,
 )
-from turnstile_core.domain.gateway_targets import GatewayDeploymentScope, GatewayServingDeployment
+from turnstile_core.domain.gateway_targets import (
+    GatewayDeploymentScope,
+    GatewayServingDeployment,
+    SelfHostedGatewayCreate,
+    SelfHostedGatewayProvisionSpec,
+    gateway_deployment_id_for,
+    self_hosted_gateway_native_id_for,
+)
 from turnstile_core.domain.runtime_models import OAuthClientCredentialsConfig, ProviderTarget
 from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
@@ -50,6 +60,198 @@ from turnstile_core.integrations.apim_control_plane_contract import (
     OperationResource,
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
+
+
+@pytest.mark.parametrize("interrupted", [None, "gateway", "association"])
+def test_new_self_hosted_gateway_creates_and_recovers_without_duplicate_resources(
+    interrupted: str | None,
+) -> None:
+    settings = publisher_settings().model_copy(update={
+        "azure_subscription_id": str(UUID(int=2)), "apim_resource_group": "unit-group",
+        "apim_service_name": "unit-service", "apim_api_id": "unit-api",
+    })
+    native_id = self_hosted_gateway_native_id_for(TARGET, UUID(int=91))
+    spec = SelfHostedGatewayProvisionSpec(
+        request_id=UUID(int=91), target=target(), native_gateway_id=native_id,
+        deployment_id=gateway_deployment_id_for(TARGET, native_id),
+        configuration=SelfHostedGatewayCreate(
+            display_name="New edge", endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+            endpoint_control_confirmed=True,
+        ),
+    )
+    resources: dict[str, Any] = {}
+    writes: list[str] = []
+    token_requests: list[dict[str, Any]] = []
+    interrupted_once = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal interrupted_once
+        assert request.headers["Authorization"]
+        assert request.url.host == "management.azure.com"
+        path = request.url.path.removeprefix(spec.target.arm_resource_id)
+        if path == "/providers/Microsoft.Authorization/permissions":
+            return httpx.Response(200, json={"value": [{"actions": ["*"], "notActions": []}]})
+        if path == "":
+            return httpx.Response(200, json={"id": spec.target.arm_resource_id,
+                                           "sku": {"name": "Developer"}})
+        if path == "/apis/unit-api":
+            return httpx.Response(200, json={"id": spec.target.arm_resource_id + path})
+        if path.endswith("/generateToken"):
+            token_requests.append(json.loads(request.content))
+            return httpx.Response(200, json={"value": native_id + "&202601010000&unit-secret"})
+        if request.method == "HEAD":
+            assert path == f"/gateways/{native_id}/apis/unit-api"
+            return httpx.Response(200 if path in resources else 404)
+        if request.method == "GET":
+            assert "/apis/" not in path
+            if path in resources:
+                return httpx.Response(200, json=resources[path])
+            return httpx.Response(404)
+        assert request.method == "PUT"
+        if path == "/gateways/" + native_id:
+            assert request.headers["if-none-match"] == "*"
+        writes.append(path)
+        resources[path] = {"id": spec.target.arm_resource_id + path, **json.loads(request.content)}
+        step = "association" if "/apis/" in path else "gateway"
+        if interrupted == step and not interrupted_once:
+            interrupted_once = True
+            raise httpx.ReadTimeout("Response lost after server commit", request=request)
+        return httpx.Response(201, json=resources[path])
+
+    client = AzureApimPublisherClient(
+        settings, cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    lease = Mock()
+    if interrupted:
+        with pytest.raises(httpx.ReadTimeout):
+            client.ensure_self_hosted_gateway(spec, lease)
+    client.ensure_self_hosted_gateway(spec, lease)
+    client.ensure_self_hosted_gateway(spec, lease)
+    assert writes == [f"/gateways/{native_id}", f"/gateways/{native_id}/apis/unit-api"]
+    assert lease.call_count == 2
+    bootstrap = client.self_hosted_gateway_bootstrap(
+        spec, 24, "mcr.microsoft.com/azure-api-management/gateway:2.12.1",
+    )
+    assert bootstrap.native_gateway_id == native_id
+    assert "GatewayKey " + native_id in bootstrap.environment_file
+    assert "unit-secret" not in repr(bootstrap)
+    assert "unit-secret" not in bootstrap.docker_command
+    assert "chmod 600" in bootstrap.docker_command
+    assert "--env-file" in bootstrap.docker_command
+    assert "config.service.endpoint=https://unit-service.configuration.azure-api.net" in (
+        bootstrap.environment_file
+    )
+    assert token_requests[0]["keyType"] == "primary"
+    assert 23 * 3600 < (bootstrap.expires_at - datetime.now(UTC)).total_seconds() < 24 * 3600
+    assert len(writes) == 2
+
+
+@pytest.mark.parametrize("blocked", [
+    "permission", "foreign", "lease", "permission_shape", "permission_page", "sku", "api",
+])
+def test_gateway_creation_never_overwrites_foreign_resources_or_bypasses_permissions(
+    blocked: str,
+) -> None:
+    settings = publisher_settings().model_copy(update={
+        "azure_subscription_id": str(UUID(int=2)), "apim_resource_group": "unit-group",
+        "apim_service_name": "unit-service", "apim_api_id": "unit-api",
+    })
+    native_id = self_hosted_gateway_native_id_for(TARGET, UUID(int=92))
+    spec = SelfHostedGatewayProvisionSpec(
+        request_id=UUID(int=92), target=target(), native_gateway_id=native_id,
+        deployment_id=gateway_deployment_id_for(TARGET, native_id),
+        configuration=SelfHostedGatewayCreate(
+            display_name="New edge", endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+            endpoint_control_confirmed=True,
+        ),
+    )
+    writes = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(spec.target.arm_resource_id)
+        if request.method != "GET":
+            writes.append(path)
+            raise AssertionError("No ARM write may be issued")
+        if path.endswith("/permissions"):
+            if blocked == "permission_shape":
+                return httpx.Response(200, json={"value": [{"actions": "*"}]})
+            if blocked == "permission_page":
+                return httpx.Response(200, json={"value": [{"actions": ["*"]}],
+                                                "nextLink": "https://foreign.example.test"})
+            return httpx.Response(200, json={"value": [{
+                "actions": ["*"],
+                "notActions": ["*/gateways/write"] if blocked == "permission" else [],
+            }]})
+        if path == "":
+            return httpx.Response(200, json={
+                "id": spec.target.arm_resource_id,
+                "sku": {"name": "StandardV2" if blocked == "sku" else "Developer"},
+            })
+        if path == "/apis/unit-api":
+            resource_id = "wrong" if blocked == "api" else spec.target.arm_resource_id + path
+            return httpx.Response(200, json={"id": resource_id})
+        return httpx.Response(200, json={"id": spec.target.arm_resource_id + path,
+                                        "properties": {"description": "customer-owned"}}) \
+            if blocked == "foreign" else httpx.Response(404)
+
+    client = AzureApimPublisherClient(
+        settings, cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    def lease() -> None:
+        if blocked == "lease":
+            raise RetryablePublicationError("Lease lost")
+
+    with pytest.raises((PolicyCompilationError, RetryablePublicationError)):
+        client.ensure_self_hosted_gateway(spec, lease)
+    assert writes == []
+
+
+@pytest.mark.parametrize("defect", ["foreign", "association", "token_target", "token_newline"])
+def test_gateway_bootstrap_rejects_changed_ownership_or_invalid_token(defect: str) -> None:
+    settings = publisher_settings().model_copy(update={
+        "azure_subscription_id": str(UUID(int=2)), "apim_resource_group": "unit-group",
+        "apim_service_name": "unit-service", "apim_api_id": "unit-api",
+    })
+    native_id = self_hosted_gateway_native_id_for(TARGET, UUID(int=93))
+    spec = SelfHostedGatewayProvisionSpec(
+        request_id=UUID(int=93), target=target(), native_gateway_id=native_id,
+        deployment_id=gateway_deployment_id_for(TARGET, native_id),
+        configuration=SelfHostedGatewayCreate(
+            display_name="New edge", endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+            endpoint_control_confirmed=True,
+        ),
+    )
+    issued = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(spec.target.arm_resource_id)
+        if request.method == "GET":
+            assert path == f"/gateways/{native_id}"
+            marker = f"Turnstile gateway {TARGET}/{spec.request_id}"
+            return httpx.Response(200, json={
+                "id": spec.target.arm_resource_id + path,
+                "properties": {"description": "foreign" if defect == "foreign" else marker},
+            })
+        if request.method == "HEAD":
+            assert path == f"/gateways/{native_id}/apis/unit-api"
+            return httpx.Response(404 if defect == "association" else 200)
+        assert request.method == "POST" and path == f"/gateways/{native_id}/generateToken"
+        issued.append(path)
+        value = "another&unit-secret" if defect == "token_target" else native_id + "&unit-secret\n"
+        return httpx.Response(200, json={"value": value})
+
+    client = AzureApimPublisherClient(
+        settings, cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(PolicyCompilationError) as error:
+        client.self_hosted_gateway_bootstrap(
+            spec, 24, "mcr.microsoft.com/azure-api-management/gateway:2.12.1",
+        )
+    assert "unit-secret" not in str(error.value)
+    assert len(issued) == (1 if defect.startswith("token_") else 0)
 
 
 @pytest.mark.parametrize("out_of_scope", [False, True])

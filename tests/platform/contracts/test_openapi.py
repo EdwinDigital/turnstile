@@ -113,8 +113,8 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 94
-    assert len(schemas) == 219
+    assert len(paths) == 98
+    assert len(schemas) == 223
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -203,7 +203,7 @@ def test_apim_workspace_contract_preserves_owner_lifecycle_and_capabilities() ->
 def test_self_hosted_lifecycle_contract_preserves_minimal_names_and_metadata_boundaries() -> None:
     paths = _documented_paths()
     lifecycle = [(path, item) for path, item in paths.items() if "self-hosted-gateways" in path]
-    assert len(lifecycle) == 6
+    assert len(lifecycle) == 7
     for _, item in lifecycle:
         for operation in item.values():
             values = cast(dict[str, object], operation)
@@ -215,6 +215,31 @@ def test_self_hosted_lifecycle_contract_preserves_minimal_names_and_metadata_bou
     assert "content" not in responses["204"]
     removal = cast(dict[str, object], paths[root]["delete"])
     assert "No Azure resource or container is deleted" in str(removal["description"])
+
+
+def test_gateway_creation_contract_requires_idempotency_and_protects_bootstrap() -> None:
+    paths = _documented_paths()
+    schemas = _documented_schemas()
+    root = "/api/v1/model-management"
+    create = cast(dict[str, object], paths[
+        root + "/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions"
+    ]["post"])
+    parameters = cast(list[dict[str, object]], create["parameters"])
+    key = next(item for item in parameters if item["name"] == "Idempotency-Key")
+    assert key["required"] is True and key["in"] == "header"
+    assert create["security"] == [{"sessionCookie": []}]
+    properties = cast(dict[str, object], schemas["SelfHostedGatewayCreate"]["properties"])
+    assert "native_gateway_id" not in properties
+    assert properties["endpoint_control_confirmed"] == {
+        "type": "boolean", "const": True, "title": "Endpoint Control Confirmed",
+    }
+    bootstrap = cast(dict[str, object], paths[
+        root + "/self-hosted-gateways/{deployment_id}/bootstrap"
+    ]["post"])
+    responses = cast(dict[str, dict[str, object]], bootstrap["responses"])
+    headers = cast(dict[str, dict[str, object]], responses["200"]["headers"])
+    assert headers["Cache-Control"]["schema"] == {"type": "string", "const": "no-store"}
+    assert bootstrap["security"] == [{"sessionCookie": []}]
 
 
 def test_multi_target_contract_matches_runtime_and_never_exposes_child_secrets() -> None:

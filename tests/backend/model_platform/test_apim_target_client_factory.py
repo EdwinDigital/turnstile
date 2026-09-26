@@ -104,6 +104,19 @@ def registered() -> InMemoryRepository:
     return repository
 
 
+def test_bootstrap_management_resolver_never_reads_or_copies_model_subscription_keys() -> None:
+    repository, credentials = registered(), Mock()
+    settings = configured()
+    config = apim_target_client_config_resolver(
+        repository, settings, credentials, include_probe_credentials=False,
+    ).resolve(TARGET)
+    credentials.resolve.assert_not_called()
+    assert config.gateway_profile_id == TARGET
+    assert config.settings.apim_probe_subscription_key is None
+    assert config.settings.apim_dashboard_subscription_key is None
+    assert settings.apim_probe_subscription_key is not None
+
+
 def test_resolver_does_not_reuse_default_secrets_or_observer_for_other_targets() -> None:
     repository, credentials = registered(), Mock()
     credentials.resolve.return_value = SecretStr("target-test-key")

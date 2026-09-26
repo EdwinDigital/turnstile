@@ -82,6 +82,11 @@ class QueryRepository(ABC):
     def retry_apim_onboarding_operation(self, operation_id: UUID, actor: str) -> dict[str, Any]: ...
 
     @abstractmethod
+    def retry_self_hosted_gateway_provision(
+        self, operation_id: UUID, actor: str,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
     def upsert_gateway_instance_observation(
         self, observation: GatewayInstanceObservation,
     ) -> dict[str, Any]: ...

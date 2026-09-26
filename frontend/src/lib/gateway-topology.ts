@@ -40,6 +40,7 @@ export function gatewayEvidence(entry: GatewayEntry): GatewayEvidence {
   if (!deployment.endpoint_url) return result("warning", "未配置", "Endpoint 未配置")
   if (deployment.declared_state !== "present") return result("warning", "待同步", "请先同步 APIM 清单")
   if (deployment.kind === "self_hosted" && !gatewayApiAssociated(entry)) return result("warning", "未关联", "API 未关联")
+  if (deployment.provisioning_operation_id && !deployment.last_probe_at) return result("warning", "待启动", "APIM 配置已创建，等待容器接入")
   if (!deployment.last_probe_at || deployment.reachability_state === "unknown") return result("warning", "待验证", "尚未运行校验")
   if (deployment.reachability_state === "unreachable") return result("unavailable", "不可达", "上次探测未通过；并非实时健康状态")
   return result("ready", "已验证", "上次探测通过；并非实时健康状态")

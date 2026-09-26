@@ -259,6 +259,17 @@
 .apim-onboarding-status > span { align-items: flex-start; overflow-wrap: anywhere; }
 .apim-onboarding-status svg { flex: 0 0 13px; margin-top: 2px; }
 .apim-onboarding-mobile-summary { display: none; }
+.gateway-endpoint-confirmation { display: flex; align-items: flex-start; gap: 10px; color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
+.gateway-endpoint-confirmation > [data-slot="checkbox"] { flex-shrink: 0; margin-top: 2px; }
+.gateway-provision-progress { display: grid; gap: 10px; min-width: 0; padding: 16px; border-bottom: 1px solid var(--border); }
+.gateway-provision-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+.gateway-provision-heading > span { color: var(--muted-foreground); font-size: 12px; }
+.gateway-provision-progress > code { overflow-wrap: anywhere; font-size: 11px; }
+.gateway-bootstrap-metadata { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; margin: 0; font-size: 12px; }
+.gateway-bootstrap-metadata dt { margin-top: 8px; color: var(--muted-foreground); }
+.gateway-bootstrap-metadata dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.gateway-bootstrap-command { box-sizing: border-box; width: 100%; min-width: 0; resize: vertical; min-height: 150px; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--muted); color: var(--foreground); font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.gateway-create-dialog .registry-editor-footer > button { white-space: normal; }
 .infrastructure-field-grid { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .infrastructure-editor-body .registry-field { min-width: 0; }
 .infrastructure-editor-body .registry-field > [data-slot="input"], .infrastructure-editor-body .registry-field > [data-slot="select-trigger"] { width: 100%; }

@@ -34,6 +34,7 @@ from turnstile_core.domain.control_plane import (
     GatewayReleaseRollbackRequest,
     MultiTargetPublicationCreate,
     MultiTargetPublicationRequestAccepted,
+    SelfHostedGatewayProvisionOperations,
 )
 from turnstile_core.domain.enterprise import (
     configured_invocation_tester,
@@ -53,6 +54,9 @@ from turnstile_core.domain.gateway_targets import (
     MultiTargetRollout,
     MultiTargetRolloutList,
     SelfHostedGatewayAssociationChange,
+    SelfHostedGatewayBootstrap,
+    SelfHostedGatewayBootstrapRequest,
+    SelfHostedGatewayCreate,
     SelfHostedGatewayNameWrite,
     SelfHostedGatewayRemovalPreview,
     SelfHostedGatewayWrite,
@@ -79,7 +83,10 @@ from turnstile_core.domain.runtime_models import (
     TrafficGenerationRequest,
     TrafficGenerationResult,
 )
-from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
+from turnstile_core.integrations.apim_control_plane_contract import (
+    PolicyCompilationError,
+    RetryablePublicationError,
+)
 from turnstile_core.integrations.gateway_connection_probe import GatewayConnectionProbeError
 from turnstile_core.services.control_plane import (
     ControlPlaneConflictError,
@@ -307,6 +314,80 @@ def request_apim_target_inventory_sync(
         raise HTTPException(status_code=503, detail=str(error)) from error
     except ControlPlaneConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@protected_router.post(
+    "/api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions",
+    response_model=GatewayReleaseOperationAccepted, status_code=202,
+)
+def create_self_hosted_gateway(
+    gateway_profile_id: UUID, write: SelfHostedGatewayCreate,
+    idempotency_key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    service: ControlPlaneService, identity: OwnerSession,
+) -> GatewayReleaseOperationAccepted:
+    try:
+        return service.request_self_hosted_gateway_provision(
+            gateway_profile_id, write, idempotency_key, identity.email,
+        )
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@protected_router.get(
+    "/api/v1/model-management/self-hosted-gateway-provisions",
+    response_model=SelfHostedGatewayProvisionOperations,
+)
+def list_self_hosted_gateway_provisions(
+    service: ControlPlaneService, identity: OwnerSession,
+) -> SelfHostedGatewayProvisionOperations:
+    del identity
+    return service.self_hosted_gateway_provisions()
+
+
+@protected_router.post(
+    "/api/v1/model-management/self-hosted-gateway-provisions/{operation_id}/retry",
+    response_model=GatewayReleaseOperationAccepted, status_code=202,
+)
+def retry_self_hosted_gateway_provision(
+    operation_id: UUID, service: ControlPlaneService, identity: OwnerSession,
+) -> GatewayReleaseOperationAccepted:
+    try:
+        return service.retry_self_hosted_gateway_provision(operation_id, identity.email)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@protected_router.post(
+    "/api/v1/model-management/self-hosted-gateways/{deployment_id}/bootstrap",
+    response_model=SelfHostedGatewayBootstrap,
+)
+def get_self_hosted_gateway_bootstrap(
+    deployment_id: UUID, request: SelfHostedGatewayBootstrapRequest,
+    response: Response, service: ControlPlaneService, identity: OwnerSession,
+) -> SelfHostedGatewayBootstrap:
+    del identity
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    try:
+        return service.self_hosted_gateway_bootstrap(deployment_id, request)
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (PolicyCompilationError, RetryablePublicationError, httpx.HTTPError) as error:
+        raise HTTPException(
+            status_code=502, detail="Gateway startup configuration unavailable",
+        ) from error
 
 
 @protected_router.post(

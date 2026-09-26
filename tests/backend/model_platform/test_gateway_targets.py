@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from pydantic import HttpUrl
 
 from turnstile_core.domain.gateway_targets import (
     ApimTarget,
@@ -16,9 +17,12 @@ from turnstile_core.domain.gateway_targets import (
     GatewayDeploymentScope,
     GatewayInstanceObservation,
     SelfHostedGatewayAssociationChange,
+    SelfHostedGatewayCreate,
     SelfHostedGatewayNameWrite,
+    SelfHostedGatewayProvisionSpec,
     SelfHostedGatewayWrite,
     gateway_deployment_id_for,
+    self_hosted_gateway_native_id_for,
 )
 
 TARGET = UUID("10000000-0000-4000-8000-000000000001")
@@ -82,6 +86,54 @@ def test_self_hosted_requests_reject_unsafe_or_managed_configuration(
     }).apim_target_id == TARGET
     with pytest.raises(ValueError):
         SelfHostedGatewayWrite.model_validate({**values, **change})
+
+
+@pytest.mark.parametrize("unconfirmed", [False, 1, "true", None])
+def test_new_self_hosted_gateway_does_not_require_a_user_supplied_id(unconfirmed: Any) -> None:
+    request = SelfHostedGatewayCreate(
+        display_name="  My edge gateway  ",
+        endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+        endpoint_control_confirmed=True,
+    )
+    assert request.display_name == "My edge gateway"
+    assert request.hosting_mode == "docker"
+    assert "native_gateway_id" not in request.model_dump()
+    with pytest.raises(ValueError):
+        SelfHostedGatewayCreate.model_validate({
+            **request.model_dump(), "native_gateway_id": "user-supplied-id",
+        })
+    with pytest.raises(ValueError):
+        SelfHostedGatewayCreate.model_validate({**request.model_dump(), "display_name": " \t "})
+    with pytest.raises(ValueError):
+        SelfHostedGatewayCreate.model_validate({
+            **request.model_dump(), "endpoint_url": "http://edge.example.test",
+        })
+    with pytest.raises(ValueError):
+        SelfHostedGatewayCreate.model_validate({
+            **request.model_dump(), "endpoint_control_confirmed": unconfirmed,
+        })
+
+
+def test_generated_gateway_identity_is_stable_and_target_scoped() -> None:
+    request_id = UUID(int=83)
+    native_id = self_hosted_gateway_native_id_for(TARGET, request_id)
+    assert native_id == self_hosted_gateway_native_id_for(TARGET, request_id)
+    assert native_id != self_hosted_gateway_native_id_for(UUID(int=2), request_id)
+    assert native_id != self_hosted_gateway_native_id_for(TARGET, UUID(int=84))
+    assert len(native_id) < 80
+    spec = SelfHostedGatewayProvisionSpec(
+        request_id=request_id, target=target(), native_gateway_id=native_id,
+        deployment_id=gateway_deployment_id_for(TARGET, native_id),
+        configuration=SelfHostedGatewayCreate(
+            display_name="Gateway", endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+            endpoint_control_confirmed=True,
+        ),
+    )
+    assert SelfHostedGatewayProvisionSpec.model_validate_json(spec.model_dump_json()) == spec
+    with pytest.raises(ValueError, match="identity"):
+        SelfHostedGatewayProvisionSpec.model_validate({
+            **spec.model_dump(), "request_id": UUID(int=9),
+        })
 
 
 def test_self_hosted_name_write_cannot_mutate_routing_or_store_blank_names() -> None:

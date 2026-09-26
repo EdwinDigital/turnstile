@@ -234,13 +234,15 @@ def test_release_timer_wires_lazy_initialization_handler(monkeypatch: pytest.Mon
 
 @pytest.mark.parametrize("provisioning_enabled", (False, True))
 @pytest.mark.parametrize("fails", (False, True))
+@pytest.mark.parametrize("gateway_creation_enabled", (False, True))
 def test_release_timer_never_constructs_publication_worker(
-    monkeypatch: Any, provisioning_enabled: bool, fails: bool,
+    monkeypatch: Any, provisioning_enabled: bool, fails: bool, gateway_creation_enabled: bool,
 ) -> None:
     settings = SimpleNamespace(
         control_plane_enabled=True,
         gateway_release_worker_enabled=True,
         gateway_application_provisioning_enabled=provisioning_enabled,
+        self_hosted_gateway_provisioning_enabled=gateway_creation_enabled,
         ledger_table_endpoint="https://ledger.example.test",
         ledger_table_name="TurnstileLedger",
         gateway_release_retention_count=20,
@@ -294,6 +296,7 @@ def test_release_timer_never_constructs_publication_worker(
                 "application_default_tokens_per_minute": 100_000,
                 "cipher": cipher,
                 "parent_policy": None,
+                "self_hosted_gateway_provisioning_enabled": gateway_creation_enabled,
             }
 
         def run_once(

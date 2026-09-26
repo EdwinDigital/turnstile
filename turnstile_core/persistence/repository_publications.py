@@ -677,6 +677,21 @@ class PostgreSqlPublicationRepositoryMixin:
                 "SELECT pg_advisory_xact_lock(hashtext(%s))",
                 (f"gateway-release-operation:{gateway_profile_id}",),
             )
+            if operation_kind == "self_hosted_gateway_provision":
+                request_id = str((semantic_preview or {}).get("request_id", ""))
+                if not request_id or not confirmation_sha256:
+                    raise ValueError("Gateway creation requires an idempotent request")
+                existing = connection.execute(
+                    """SELECT * FROM gateway_release_operation
+                       WHERE gateway_profile_id = %s AND operation_kind = %s
+                         AND semantic_preview->>'request_id' = %s""",
+                    (gateway_profile_id, operation_kind, request_id),
+                ).fetchone()
+                if existing is not None:
+                    if (existing["confirmation_sha256"] != confirmation_sha256
+                            or existing["created_by"] != created_by):
+                        raise ValueError("Gateway creation request was already used differently")
+                    return cast(dict[str, Any], existing)
             open_operation = connection.execute(
                 """SELECT id FROM gateway_release_operation
                    WHERE gateway_profile_id = %s
@@ -1796,6 +1811,27 @@ class PostgreSqlPublicationRepositoryMixin:
                         'kind', deployment.kind,
                         'native_gateway_id', deployment.native_gateway_id,
                         'endpoint_url', deployment.endpoint_url,
+                        'approved_endpoint_url', CASE
+                            WHEN provision.operation_kind = 'self_hosted_gateway_provision'
+                                AND provision.status = 'succeeded'
+                                AND provision.gateway_profile_id = deployment.apim_target_id
+                                AND provision.semantic_preview->>'deployment_id'
+                                    = deployment.id::text
+                                AND provision.semantic_preview->>'native_gateway_id'
+                                    = deployment.native_gateway_id
+                                AND provision.semantic_preview
+                                    #>> '{{configuration,endpoint_control_confirmed}}' = 'true'
+                                AND lower(provision.semantic_preview
+                                    #>> '{{target,arm_resource_id}}')
+                                    = lower(approved_target.arm_resource_id)
+                                AND provision.semantic_preview #>> '{{target,api_id}}'
+                                    = approved_target.api_id
+                                AND provision.semantic_preview #>> '{{target,api_path}}'
+                                    = approved_target.api_path
+                                AND provision.semantic_preview #>> '{{target,tenant_id}}'
+                                    = approved_target.tenant_id::text
+                            THEN provision.semantic_preview->'configuration'->>'endpoint_url'
+                            ELSE NULL END,
                         'hostnames', COALESCE((
                             SELECT jsonb_agg(hostname.hostname)
                             FROM gateway_deployment_hostname_inventory hostname
@@ -1803,6 +1839,10 @@ class PostgreSqlPublicationRepositoryMixin:
                         ), '[]'::jsonb)
                     ) ORDER BY (deployment.kind = 'managed') DESC, deployment.id) AS items
                     FROM gateway_deployment deployment
+                    LEFT JOIN gateway_release_operation provision
+                        ON provision.id = deployment.provisioning_operation_id
+                    LEFT JOIN apim_target_metadata approved_target
+                        ON approved_target.gateway_profile_id = deployment.apim_target_id
                     WHERE deployment.apim_target_id = route_binding.apim_target_id
                         AND deployment.retired_at IS NULL
                         AND deployment.declared_state = 'present'

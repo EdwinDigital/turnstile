@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     apim_legacy_target_compatibility_enabled: bool = False
     apim_gateway_profile_id: UUID | None = None
     self_hosted_gateway_enabled: bool = False
+    self_hosted_gateway_provisioning_enabled: bool = False
+    self_hosted_gateway_image: str = Field(
+        default="mcr.microsoft.com/azure-api-management/gateway:2.12.1",
+        pattern=(r"^mcr\.microsoft\.com/azure-api-management/gateway"
+                 r"(?::[0-9]+\.[0-9]+\.[0-9]+|@sha256:[a-f0-9]{64})$"),
+    )
     self_hosted_gateway_trusted_endpoints: dict[UUID, HttpUrl] = Field(default_factory=dict)
     multi_apim_target_rollout_enabled: bool = False
     gateway_publication_worker_enabled: bool = False
@@ -198,6 +204,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def require_target_registry_for_extended_gateway_features(self) -> Settings:
+        if self.self_hosted_gateway_provisioning_enabled and not self.self_hosted_gateway_enabled:
+            raise ValueError("Gateway creation requires Self-hosted Gateway support")
         if not self.apim_target_registry_enabled and (
             self.self_hosted_gateway_enabled or self.multi_apim_target_rollout_enabled
             or self.self_hosted_gateway_trusted_endpoints or self.apim_usage_observers

@@ -104,6 +104,37 @@ class InMemoryGatewayTargetRepositoryMixin:
         })
         return deepcopy(operation)
 
+    def retry_self_hosted_gateway_provision(
+        self, operation_id: UUID, actor: str,
+    ) -> dict[str, Any]:
+        prior = next((row for row in self.gateway_release_operations
+                      if row["id"] == operation_id), None)
+        if prior is None or prior["operation_kind"] != "self_hosted_gateway_provision":
+            raise ValueError("Gateway creation operation was not found")
+        if prior["status"] in {"queued", "validating_dependencies", "verifying_readback"}:
+            return deepcopy(prior)
+        if prior["status"] != "failed":
+            raise ValueError("Only failed Gateway creation can be retried")
+        if any(row["gateway_profile_id"] == prior["gateway_profile_id"]
+               and row["id"] != operation_id
+               and row["status"] not in {"succeeded", "failed", "restored"}
+               for row in self.gateway_release_operations):
+            raise ValueError("Another Gateway operation is already in progress")
+        now = datetime.now(UTC)
+        self.gateway_release_operation_audit.append({
+            "id": uuid4(), "operation_id": operation_id, "from_status": "failed",
+            "to_status": "queued", "actor": actor, "created_at": now,
+            "detail": {"retry": True, "error_code": prior["error_code"],
+                       "error_message": prior["error_message"],
+                       "attempt_count": prior["attempt_count"]},
+        })
+        prior.update({
+            "status": "queued", "attempt_count": 0, "lease_owner": None,
+            "lease_expires_at": None, "error_code": None, "error_message": None,
+            "started_at": None, "completed_at": None, "updated_at": now,
+        })
+        return deepcopy(prior)
+
     def finish_apim_onboarding_operation(
         self, operation_id: UUID, worker_id: str, credential_ciphertext: bytes,
         credential_hint: str, configuration_sha256: str,
@@ -342,6 +373,8 @@ class InMemoryGatewayTargetRepositoryMixin:
         now = datetime.now(UTC)
         values = deployment.model_dump()
         values["endpoint_url"] = str(deployment.endpoint_url) if deployment.endpoint_url else None
+        if existing is not None and existing.get("provisioning_operation_id"):
+            values["provisioning_operation_id"] = existing["provisioning_operation_id"]
         if existing is not None and preserve_display_name:
             values["display_name"] = existing["display_name"]
             values["retired_at"] = existing["retired_at"] or values["retired_at"]

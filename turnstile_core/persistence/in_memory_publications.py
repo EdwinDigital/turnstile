@@ -563,6 +563,19 @@ class InMemoryPublicationRepositoryMixin:
         semantic_preview: Mapping[str, Any] | None = None,
         credential_ciphertext: bytes | None = None,
     ) -> dict[str, Any]:
+        if operation_kind == "self_hosted_gateway_provision":
+            request_id = str((semantic_preview or {}).get("request_id", ""))
+            if not request_id or not confirmation_sha256:
+                raise ValueError("Gateway creation requires an idempotent request")
+            existing = next((row for row in self.gateway_release_operations
+                             if row["gateway_profile_id"] == gateway_profile_id
+                             and row["operation_kind"] == operation_kind
+                             and row["semantic_preview"].get("request_id") == request_id), None)
+            if existing is not None:
+                if (existing["confirmation_sha256"] != confirmation_sha256
+                        or existing["created_by"] != created_by):
+                    raise ValueError("Gateway creation request was already used differently")
+                return existing
         if any(
             row["gateway_profile_id"] == gateway_profile_id
             and row["status"] not in {"succeeded", "failed", "restored"}
@@ -1545,10 +1558,36 @@ class InMemoryPublicationRepositoryMixin:
             "deployment_id": str(row["id"]), "kind": row["kind"],
             "native_gateway_id": row["native_gateway_id"],
             "endpoint_url": str(row["endpoint_url"]),
+            "approved_endpoint_url": self._provisioned_gateway_endpoint(row),
             "hostnames": [item["hostname"] for item in self.gateway_deployment_inventories.get(
                 row["id"], {},
             ).get("hostname_configurations", [])],
         } for row in ordered]
+
+    def _provisioned_gateway_endpoint(self, deployment: Mapping[str, Any]) -> str | None:
+        operation = next((row for row in self.gateway_release_operations
+                          if row["id"] == deployment.get("provisioning_operation_id")
+                          and row["gateway_profile_id"] == deployment["apim_target_id"]
+                          and row["operation_kind"] == "self_hosted_gateway_provision"
+                          and row["status"] == "succeeded"), None)
+        spec = operation["semantic_preview"] if operation else {}
+        configuration = spec.get("configuration", {})
+        target = spec.get("target", {})
+        current_target = self.apim_targets.get(UUID(str(deployment["apim_target_id"])))
+        if current_target is None:
+            return None
+        if str(target.get("arm_resource_id", "")).casefold() != str(
+            current_target["arm_resource_id"],
+        ).casefold():
+            return None
+        if any(str(target.get(field, "")) != str(current_target[field])
+               for field in ("api_id", "api_path", "tenant_id")):
+            return None
+        if (spec.get("deployment_id") == str(deployment["id"])
+                and spec.get("native_gateway_id") == deployment["native_gateway_id"]
+                and configuration.get("endpoint_control_confirmed") is True):
+            return str(configuration["endpoint_url"])
+        return None
 
     def _published_image_profile(self, model: Mapping[str, Any]) -> object:
         raise NotImplementedError

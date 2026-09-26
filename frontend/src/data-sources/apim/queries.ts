@@ -83,6 +83,7 @@ export const finopsKeys = {
   registry: ["reference", "model-registry"] as const,
   apimTargets: ["control-plane", "apim-targets"] as const,
   apimOnboarding: ["control-plane", "apim-onboarding"] as const,
+  selfHostedGatewayProvisions: ["control-plane", "self-hosted-gateway-provisions"] as const,
   selfHostedGatewayRemoval: (id: string) => ["control-plane", "self-hosted-removal", id] as const,
   modelBackendPool: (id: string) => ["model-platform", "model-backend-pool", id] as const,
   gatewayPublications: ["control-plane", "gateway-publications"] as const,
@@ -195,6 +196,15 @@ export async function storeApimOnboarding(queryClient: QueryClient, operation: G
 }
 
 export const finopsQueries = {
+  selfHostedGatewayProvisions: () => queryOptions({
+    queryKey: finopsKeys.selfHostedGatewayProvisions,
+    queryFn: dataSource.selfHostedGatewayProvisions,
+    retry: false, staleTime: 0,
+    refetchIntervalInBackground: true,
+    refetchInterval: query => query.state.data?.items.some(
+      item => !["succeeded", "failed", "restored"].includes(item.status),
+    ) ? 1500 : false,
+  }),
   selfHostedGatewayRemoval: (id: string | null) => queryOptions({
     queryKey: finopsKeys.selfHostedGatewayRemoval(id ?? ""),
     queryFn: () => dataSource.selfHostedGatewayRemovalPreview(id!),

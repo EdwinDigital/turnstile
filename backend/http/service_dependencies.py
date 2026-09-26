@@ -14,6 +14,10 @@ from turnstile_core.domain.ledger import LedgerScope
 from turnstile_core.integrations.apim_subscription_key_client import (
     AzureApimSubscriptionKeyClient,
 )
+from turnstile_core.integrations.apim_target_client_factory import (
+    AzureApimPublisherClientResolver,
+    apim_target_client_config_resolver,
+)
 from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
 from turnstile_core.integrations.gateway_connection_probe import GatewayConnectionProbe
 from turnstile_core.integrations.ledger import LedgerSyncService, TableStorageLedger
@@ -89,6 +93,14 @@ def control_plane_service(repository: Repository) -> GatewayControlPlaneService:
         self_hosted_gateway_enabled=(
             settings.apim_target_registry_enabled and settings.self_hosted_gateway_enabled
         ),
+        self_hosted_gateway_provisioning_enabled=settings.self_hosted_gateway_provisioning_enabled,
+        gateway_bootstrap_client_resolver=(
+            AzureApimPublisherClientResolver(apim_target_client_config_resolver(
+                repository, settings, include_probe_credentials=False,
+            ))
+            if settings.self_hosted_gateway_provisioning_enabled else None
+        ),
+        gateway_bootstrap_image=settings.self_hosted_gateway_image,
         gateway_connection_probe=GatewayConnectionProbe(),
         trusted_gateway_endpoints=settings.self_hosted_gateway_trusted_endpoints,
         multi_target_rollout_enabled=settings.multi_apim_target_rollout_enabled,

@@ -1,4 +1,62 @@
 schemas:
+  SelfHostedGatewayCreate:
+    properties:
+      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
+      endpoint_url: {type: string, maxLength: 2083, minLength: 1, format: uri, title: Endpoint Url}
+      location:
+        anyOf:
+        - {type: string, maxLength: 128, minLength: 1}
+        - {type: 'null'}
+        title: Location
+      hosting_mode:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayHostingMode
+        default: docker
+      release_gate:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGate
+        default: required
+      endpoint_control_confirmed: {type: boolean, const: true, title: Endpoint Control Confirmed}
+    additionalProperties: false
+    type: object
+    required: [display_name, endpoint_url, endpoint_control_confirmed]
+    title: SelfHostedGatewayCreate
+  SelfHostedGatewayBootstrapRequest:
+    properties:
+      expires_in_hours: {type: integer, maximum: 720, minimum: 1, title: Expires In Hours, default: 24}
+    additionalProperties: false
+    type: object
+    title: SelfHostedGatewayBootstrapRequest
+  SelfHostedGatewayBootstrap:
+    properties:
+      deployment_id: {type: string, format: uuid, title: Deployment Id}
+      native_gateway_id: {type: string, title: Native Gateway Id}
+      configuration_endpoint: {type: string, maxLength: 2083, minLength: 1, format: uri, title: Configuration Endpoint}
+      expires_at: {type: string, format: date-time, title: Expires At}
+      image: {type: string, title: Image}
+      environment_file_name: {type: string, title: Environment File Name}
+      environment_file: {type: string, title: Environment File}
+      docker_command: {type: string, title: Docker Command}
+      renewal_command: {type: string, title: Renewal Command}
+    additionalProperties: false
+    type: object
+    required: [deployment_id, native_gateway_id, configuration_endpoint, expires_at, image, environment_file_name, environment_file, docker_command, renewal_command]
+    title: SelfHostedGatewayBootstrap
+  SelfHostedGatewayProvisionOperations:
+    properties:
+      available: {type: boolean, title: Available}
+      unavailable_reason:
+        anyOf:
+        - {type: string}
+        - {type: 'null'}
+        title: Unavailable Reason
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperation
+        type: array
+        title: Items
+    additionalProperties: false
+    type: object
+    required: [available]
+    title: SelfHostedGatewayProvisionOperations
   MultiTargetRollout:
     properties:
       schema_version: {type: integer, const: 1, title: Schema Version, default: 1}
@@ -559,6 +617,10 @@ schemas:
         type: boolean
         title: Self Hosted Gateway Name Edit Supported
         default: false
+      self_hosted_gateway_provisioning_available:
+        type: boolean
+        title: Self Hosted Gateway Provisioning Available
+        default: false
     additionalProperties: false
     type: object
     required:
@@ -773,6 +835,12 @@ schemas:
           format: date-time
         - type: 'null'
         title: Retired At
+      provisioning_operation_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Provisioning Operation Id
     additionalProperties: false
     type: object
     required:
