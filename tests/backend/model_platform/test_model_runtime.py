@@ -22,7 +22,7 @@ from turnstile_core.domain.control_plane import (
     GatewayReleaseDependencies,
     RuntimeTarget,
 )
-from turnstile_core.domain.models import ModelPrice, TokenUsageRecord
+from turnstile_core.domain.models import TokenUsageRecord
 from turnstile_core.domain.runtime_models import (
     AuthType,
     BrandKey,
@@ -518,6 +518,9 @@ def _foundry_route(
     runtime = next(
         item for item in repository.runtimes if item["name"] == "Microsoft Foundry via APIM"
     )
+    gateway = next(item for item in repository.gateways
+                   if item["id"] == runtime["gateway_profile_id"])
+    gateway["base_url"] = "https://gateway.example.test/turnstile/llm"
     model = next(item for item in repository.models if item["model_key"] == "gpt-5.3-chat")
     return runtime, model
 
@@ -578,7 +581,7 @@ def test_internal_invocation_enforces_user_model_policy() -> None:
     _assert_storable(denial)
 
 
-def test_dynamic_model_requires_people_assignment_but_allows_runtime_health_probe() -> None:
+def test_dynamic_model_does_not_allow_legacy_health_identity_to_bypass_assignment() -> None:
     calls = 0
 
     def handler(incoming: httpx.Request) -> httpx.Response:
@@ -622,8 +625,10 @@ def test_dynamic_model_requires_people_assignment_but_allows_runtime_health_prob
             )
         }
     )
-    assert service.invoke(health_request).content == "OK"
-    assert calls == 2
+    with pytest.raises(HTTPException) as health_error:
+        service.invoke(health_request)
+    assert health_error.value.detail == "model_not_assigned"
+    assert calls == 1
 
 
 def test_a_denial_trace_names_the_runtime_it_routed_to() -> None:
@@ -995,36 +1000,35 @@ def test_apim_denial_is_traced_without_overwriting_formal_telemetry() -> None:
         service.invoke(
             request(model=model["model_key"], runtime=runtime["name"]).model_copy(
                 update={"model_id": model["id"]}
-            )
+            ), request_id="platform-denied-first",
         )
 
     assert blocked.value.status_code == 403
     assert blocked.value.headers is not None
-    assert blocked.value.headers["x-request-id"] == "request-apim-denied"
+    assert blocked.value.headers["x-request-id"] == "platform-denied-first"
+    assert blocked.value.headers["x-upstream-request-id"] == "request-apim-denied"
     assert blocked.value.headers["x-correlation-id"] == "correlation-apim-denied"
     assert blocked.value.headers["retry-after"] == "60"
-    assert len(repository.usage_records) == 1
-    record = repository.usage_records[0]
-    assert record.request_id == "request-apim-denied"
-    assert record.correlation_id == "correlation-apim-denied"
-    assert record.model_id == str(model["id"])
-    assert record.runtime == runtime["name"]
-    assert record.status_code == 403
-    assert record.estimated is True
-    assert record.ingest_source == "gateway"
-    assert record.ingest_error == "gateway_invocation_usage_unavailable"
-    assert record.input_price_per_million is None
-    assert record.price_context_snapshot is not None
-    assert "model_not_assigned" in (record.error_message or "")
-    price = ModelPrice.model_validate(record.price_context_snapshot)
-    formal = record.model_copy(update={
-        "input_tokens": 7, "output_tokens": 3, "estimated": False,
-        "status": "200", "status_code": 200, "ingest_source": "eventhub",
-        "ingest_error": None, "error_message": None,
-    })
+    assert repository.usage_records == []
+    attempt = repository.invocation_attempts["platform-denied-first"]
+    completion = repository.invocation_completions[attempt.request_id]
+    assert completion.status_code == 403 and completion.failure_kind == "http_error"
+    trace = repository.get_usage_request(attempt.request_id)
+    assert trace is not None and not trace["usage_available"] and not trace["cost_available"]
+    formal = TokenUsageRecord(
+        id="formal-denial", request_id=attempt.request_id, correlation_id="correlation-apim-denied",
+        ts=attempt.started_at, team="unit", user=attempt.metadata.user,
+        user_id=attempt.metadata.user_id, agent="unit", workflow="unit",
+        run_id="unit", turn_index=1,
+        provider="unit", model=model["display_name"], model_id=str(model["id"]),
+        runtime=runtime["name"], input_tokens=7, output_tokens=3, cached_tokens=0,
+        estimated=False, status="200", status_code=200, ingest_source="eventhub",
+        et=10, et_coeff_m=1, latency_ms=1, estimated_cost=0.000026,
+        input_price_per_million=2, output_price_per_million=4,
+    )
     repository.write_token_usage(formal)
     assert len(repository.usage_records) == 1
-    assert repository.usage_records[0].estimated_cost == price.cost(7, 0, 3)
+    assert repository.usage_records[0].estimated_cost == 0.000026
     settled = repository.usage_records[0]
     with pytest.raises(HTTPException):
         service.invoke(request().model_copy(update={"model_id": model["id"]}))
@@ -1032,9 +1036,9 @@ def test_apim_denial_is_traced_without_overwriting_formal_telemetry() -> None:
 
 
 @pytest.mark.parametrize("failure", ["bad_request", "timeout"])
-@pytest.mark.parametrize("telemetry_available", [True, False])
+@pytest.mark.parametrize("completion_available", [True, False])
 def test_failed_invocation_preserves_request_identity_and_unknown_usage(
-    monkeypatch: pytest.MonkeyPatch, failure: str, telemetry_available: bool,
+    monkeypatch: pytest.MonkeyPatch, failure: str, completion_available: bool,
 ) -> None:
     def handler(incoming: httpx.Request) -> httpx.Response:
         if failure == "timeout":
@@ -1043,9 +1047,9 @@ def test_failed_invocation_preserves_request_identity_and_unknown_usage(
 
     repository = InMemoryRepository()
     runtime, model = _foundry_route(repository)
-    if not telemetry_available:
+    if not completion_available:
         monkeypatch.setattr(
-            repository, "write_token_usage", Mock(side_effect=RuntimeError("offline")),
+            repository, "finish_platform_invocation", Mock(side_effect=RuntimeError("offline")),
         )
     service = ModelRuntimeService(
         repository, Settings(), GatewayRouter(httpx.Client(transport=httpx.MockTransport(handler))),
@@ -1057,14 +1061,16 @@ def test_failed_invocation_preserves_request_identity_and_unknown_usage(
     assert caught.value.status_code == (504 if failure == "timeout" else 400)
     assert caught.value.headers is not None
     assert caught.value.headers["x-request-id"] == "unit-request"
-    if telemetry_available:
-        record = repository.usage_records[0]
-        assert record.request_id == record.correlation_id == "unit-request"
-        assert record.status_code == caught.value.status_code
-        assert record.estimated is True and record.estimated_cost == 0
-        assert record.input_tokens == record.output_tokens == 0
-        assert record.runtime == runtime["name"]
-        assert record.error_message
+    record = repository.get_usage_request("unit-request")
+    assert record is not None and record["correlation_id"] is None
+    assert record["usage_available"] is False and record["cost_available"] is False
+    assert record["runtime"] == runtime["name"]
+    assert record["platform_outcome"] == ("failed" if completion_available else "dispatched")
+    assert record["status_code"] == (caught.value.status_code if completion_available else None)
+    assert caught.value.headers["x-platform-trace-state"] == (
+        "recorded" if completion_available else "pending"
+    )
+    assert repository.usage_records == []
 
 
 
@@ -1378,7 +1384,8 @@ def test_http_adapter_consumes_streamed_cache_read_and_write_usage() -> None:
     )
 
     assert result.content == "STREAM_OK"
-    assert result.correlation_id == "apim-stream-123"
+    assert result.correlation_id is None
+    assert result.upstream_request_id == "apim-stream-123"
     assert result.usage is not None
     assert result.usage.input_tokens == 72
     assert result.usage.cached_tokens == 1128
@@ -1622,7 +1629,8 @@ def test_anthropic_adapter_maps_messages_and_usage() -> None:
     result = adapter.invoke(invocation, route)
 
     assert result.content == "ANTHROPIC_OK"
-    assert result.correlation_id == "databricks-request-123"
+    assert result.correlation_id is None
+    assert result.upstream_request_id == "databricks-request-123"
     assert result.usage is not None
     assert result.usage.input_tokens == 8
     assert result.usage.cached_tokens == 5
@@ -2049,7 +2057,8 @@ def test_registry_redacts_secret_and_invocation_records_attribution(
 
     response = service.invoke(request())
     assert response.content == "SERVICE_OK"
-    assert response.correlation_id == response.request_id
+    assert response.correlation_id is None
+    assert response.request_id in repository.invocation_attempts
     assert response.gateway == "apim"
     assert response.estimated_cost == 0.00008
     assert repository.usage_records == []

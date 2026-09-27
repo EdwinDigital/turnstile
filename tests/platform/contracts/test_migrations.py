@@ -39,8 +39,23 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "012_apim_onboarding.up.sql",
         "013_multi_target_rollout.up.sql",
         "014_self_hosted_gateway_provisioning.up.sql",
+        "015_platform_invocation_trace.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
+
+
+def test_platform_trace_migration_is_nonbilling_and_requires_unique_real_correlation() -> None:
+    sql = (MIGRATIONS / "015_platform_invocation_trace.up.sql").read_text()
+    assert table_names(sql) == {"platform_invocation_attempt"}
+    assert "CREATE VIEW public.invocation_request_trace" in sql
+    assert "usage.correlation_id = attempt.completion->>'gateway_correlation_id'" in sql
+    assert "HAVING count(*) = 1" in sql
+    assert "usage.user_id = attempt.snapshot->'metadata'->>'user_id'" in sql
+    assert "usage.model_id = attempt.snapshot->>'model_id'" in sql
+    assert "usage.runtime = attempt.snapshot->>'runtime_name'" in sql
+    assert "application.application_id::text = attempt.snapshot->>'application_id'" in sql
+    assert "platform_usage_unavailable" in sql
+    assert not re.search(r"^(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER)\b", sql, re.MULTILINE)
 
 
 def test_gateway_creation_upgrade_binds_request_and_target_without_rewriting_history() -> None:

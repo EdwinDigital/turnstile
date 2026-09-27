@@ -18,6 +18,50 @@ from ..integrations.ledger import (
 from ..persistence.repository import QueryRepository
 
 
+def read_application_rate_limit(store: TableStorageLedger, application_id: UUID) -> int | None:
+    partition = application_partition_key(application_id, datetime.now(UTC).strftime("%Y-%m"))
+    current = store.read_versioned_entity(partition, "Q")
+    if current is None:
+        return None
+    value = current[0].get("TokensPerMinute")
+    if type(value) is not int or not 0 < value <= 2147483647:
+        raise ValueError("Application rate limit configuration is invalid")
+    return value
+
+
+def project_application_rate_limit(
+    repository: QueryRepository, store: TableStorageLedger, application_id: UUID,
+) -> int | None:
+    for _attempt in range(3):
+        period = datetime.now(UTC).date().replace(day=1)
+        partition = application_partition_key(application_id, period.strftime("%Y-%m"))
+        current = store.read_versioned_entity(partition, "Q")
+        budgets = repository.list_gateway_application_budgets(period, [application_id])
+        if not budgets:
+            return None
+        if len(budgets) != 1 or str(budgets[0]["application_id"]) != str(application_id):
+            raise ValueError("Application rate limit identity is ambiguous")
+        budget = budgets[0]
+        rate = budget["tokens_per_minute"]
+        if type(rate) is not int or not 0 < rate <= 2147483647:
+            raise ValueError("Application rate limit configuration is invalid")
+        if current is None:
+            raise RetryablePublicationError("Application admission ledger is not ready")
+        unchanged = current[0].get("TokensPerMinute") == rate
+        entity = {key: value for key, value in current[0].items()
+                  if key not in {"Timestamp", "odata.etag", "@odata.etag"}}
+        if unchanged or store.replace_if_match(partition, "Q", {
+            **entity, "TokensPerMinute": rate,
+        }, current[1]):
+            if read_application_rate_limit(store, application_id) != rate:
+                continue
+            if (datetime.now(UTC).date().replace(day=1) == period
+                    and repository.list_gateway_application_budgets(period, [application_id])
+                    == budgets):
+                return rate
+    raise RetryablePublicationError("Application rate limit projection is pending")
+
+
 def prepare_application_ledger(
     repository: QueryRepository,
     store: TableStorageLedger,

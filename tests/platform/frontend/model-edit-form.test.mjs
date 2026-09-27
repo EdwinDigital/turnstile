@@ -502,6 +502,8 @@ test("request cost formulas use recorded token buckets and preserve unpriced ver
   assert.equal(requestCostCalculation({ ...request, cache_write_tokens: 201 }), null)
   assert.equal(requestCostCalculation({ ...request, prompt_tokens: 501 }), null)
   assert.equal(requestCostCalculation({ ...request, estimated: true }), null)
+  assert.equal(estimateRequestCost({ ...request, usage_available: false }, [savedModel()]), null)
+  assert.equal(requestCostCalculation({ ...request, usage_available: false }), null)
   assert.equal(requestCostCalculation({ ...request, estimated_cost: 1 }).matchesRecordedCost, false)
 })
 

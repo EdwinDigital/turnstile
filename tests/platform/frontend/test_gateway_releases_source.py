@@ -39,9 +39,13 @@ def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> Non
     assert 'pinned: "已固定"' in page
     assert 'expired: "已过期"' in page
     assert "相对基础版本的变更" in page
-    assert "<b>已新增</b>" in page
-    assert "<b>已移除</b>" in page
-    assert "<b>已变更</b>" in page
+    assert '<b>{planned ? "拟新增" : "已新增"}</b>' in page
+    assert '<b>{planned ? "拟移除" : "已移除"}</b>' in page
+    assert '<b>{planned ? "拟变更" : "已变更"}</b>' in page
+    assert 'data-state={plannedChanges ? "planned" : "applied"}' in page
+    assert '!release.audit.some(event => event.to_status === "active")' in page
+    assert "PublicationFailureNotice" in page
+    assert '.gateway-release-changes-card[data-state="planned"]' in styles
     assert ">+ {value}</span>" not in page
     assert ">− {value}</span>" not in page
     assert ">~ {value}</span>" not in page
@@ -75,7 +79,7 @@ def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> Non
         "<h2>Generation {release.generation}</h2><ReleaseRole "
         'role={release.role} status={release.status} />' in page
     )
-    assert "release.gateway_name" not in page
+    assert "name: release.gateway_name" in page
     assert 'className="gateway-release-card gateway-release-changes-card"' in page
     assert 'className="gateway-release-card gateway-release-dependency-card"' in page
     assert 'className="gateway-release-detail-rail"' in page
@@ -105,7 +109,7 @@ def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> Non
     assert "useIsMobile" in page
     assert 'if (hideSuperseded && role === "superseded") return null' in page
     assert "gateway-release-list-count" not in page
-    assert "ChevronRight" not in page
+    assert 'className="gateway-release-group-caret"' in page
     assert "Revision pending" not in page
     assert "releaseIndicatorRoles.has(role)" in page
     assert '"rolled_back"' in page.split("const releaseIndicatorRoles", 1)[1].split("]", 1)[0]

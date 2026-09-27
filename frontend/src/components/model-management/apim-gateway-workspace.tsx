@@ -6,7 +6,7 @@ import { dataSource } from "../../data-sources/apim/api"
 import { finopsKeys, finopsQueries, storeApimTarget, storeGatewayDeploymentName, storeGatewayName, storeRegistry } from "../../data-sources/apim/queries"
 import type { ApimTargetRemovalPreview, ApimTargetTopology, ApimTargetTopologyList, ApimTargetWrite, GatewayReleaseOperation, ModelRegistry, SelfHostedGatewayAssociationChange, SelfHostedGatewayRemovalPreview, SelfHostedGatewayWrite } from "../../data-sources/apim/types"
 import { apimFormPayload, apimFormValid, gatewayFormPayload, gatewayFormValid, gatewayNameFormValid, isGatewayEndpoint } from "../../lib/gateway-forms"
-import { MODEL_MANAGEMENT_TABS, apimGatewayEntries, apimOnboardingDetails, apimOnboardingOperationName, apimOnboardingRows, apimTargetDisplayName, gatewayEntries, gatewayEvidence, pendingInventorySyncId, type GatewayEntry, type ModelManagementTab } from "../../lib/gateway-topology"
+import { MODEL_MANAGEMENT_TABS, MODEL_MANAGEMENT_TAB_LABELS as tabLabels, apimGatewayEntries, apimOnboardingDetails, apimOnboardingOperationName, apimOnboardingRows, apimTargetDisplayName, gatewayEntries, gatewayEvidence, pendingInventorySyncId, type GatewayEntry, type ModelManagementTab } from "../../lib/gateway-topology"
 import { useLocale } from "../../locales"
 import { useAuth } from "../../providers/auth-provider"
 import { useTimezone } from "../../providers/timezone-provider"
@@ -28,7 +28,10 @@ type RemovalTarget = { kind: "apim" | "gateway"; id: string; name: string }
 type RemovalPreview = ApimTargetRemovalPreview | SelfHostedGatewayRemovalPreview
 type GatewayProvisionItem = { operation: GatewayReleaseOperation; target: ApimTargetTopology | null }
 const resourceTableColumnMinWidths = [180, 120, 160, 80, 136] as const
-const tabLabels = { models: "模型", connections: "连接", gateways: "Gateway", apim: "APIM 实例" }
+const gatewayHostingLabels: Record<string, string> = {
+  aks: "AKS", kubernetes: "Kubernetes", arc: "Azure Arc", container_apps: "Azure Container Apps",
+  docker: "Docker", azure_managed: "Azure 托管", other: "其他环境",
+}
 const emptyApimForm: ApimTargetWrite = {
   name: "", management_endpoint: "", tenant_id: "", subscription_id: "", resource_group: "",
   service_name: "", api_id: "", gateway_endpoint: "", management_auth_profile_ref: "system_managed_identity",
@@ -115,7 +118,7 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
   })
   const renameDeployment = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => dataSource.renameSelfHostedGateway(id, name),
-    onSuccess: async (_, value) => { await storeGatewayDeploymentName(queryClient, value.id, value.name); setEditingGateway(null); setNotice("Gateway 显示名称已更新") },
+    onSuccess: async (_, value) => { await storeGatewayDeploymentName(queryClient, value.id, value.name); setEditingGateway(null); setNotice("网关显示名称已更新") },
   })
   const refreshOnboarding = () => { void queryClient.invalidateQueries({ queryKey: finopsKeys.apimOnboarding }) }
   const refreshProvisions = () => { void queryClient.invalidateQueries({ queryKey: finopsKeys.selfHostedGatewayProvisions }) }
@@ -153,14 +156,14 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
     onSuccess: async (_, variables) => {
       setGatewayOpen(false)
       setCollapsedTargetIds(current => { const next = new Set(current); next.delete(variables.targetId); return next })
-      setNotice("Gateway 关联已保存，请同步 APIM 后验证连接")
+      setNotice("网关关联已保存，请同步 APIM 后验证连接")
       await refresh()
       if (topology?.inventory_sync_available) syncTarget.mutate(variables.targetId)
     },
   })
   const validateGateway = useMutation({
     mutationFn: (id: string) => dataSource.validateSelfHostedGateway(id),
-    onSuccess: () => setNotice("Gateway 连接验证成功"), onSettled: refresh,
+    onSuccess: () => setNotice("网关连接验证成功"), onSettled: refresh,
   })
   const changeAssociation = useMutation({
     mutationFn: ({ deploymentId, value }: { deploymentId: string; value: SelfHostedGatewayAssociationChange }) => dataSource.changeSelfHostedGatewayAssociation(deploymentId, value),
@@ -171,7 +174,7 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
     onSuccess: async (_, target) => {
       const removed = target.kind === "gateway" ? gatewayEntries(topology).find(entry => entry.deployment.id === target.id) : null
       setRemovalTarget(null)
-      setNotice(target.kind === "apim" ? "APIM 实例已从 Turnstile 移除，Azure 资源未更改" : "Gateway 已从 Turnstile 移除，用户部署未更改")
+      setNotice(target.kind === "apim" ? "APIM 实例已从 Turnstile 移除，Azure 资源未更改" : "网关已从 Turnstile 移除，用户部署未更改")
       await refresh()
       if (removed && topology?.inventory_sync_available) syncTarget.mutate(removed.target.target.gateway_profile_id)
     },
@@ -191,7 +194,7 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
       else if (pendingInitializations.current.delete(current.id) && current.status === "succeeded") completed = true
     }
     if (completed) {
-      setNotice("APIM 初始化完成，Managed Gateway 已验证")
+      setNotice("APIM 初始化完成，托管网关已验证")
       void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
       void queryClient.invalidateQueries({ queryKey: finopsKeys.apimTargets })
     }
@@ -246,14 +249,14 @@ export function ApimGatewayWorkspace({ mode, registry, topology, loading, error,
 
   return <div className="smh-workspace model-workspace infrastructure-workspace">
     <header className="smh-page-header"><div><Button type="button" variant="ghost" size="icon-sm" className="model-mobile-sidebar-toggle" aria-label="切换导航栏" title="切换导航栏" onClick={onToggleSidebar}><PanelLeft size={16} /></Button><span className="smh-header-icon">{mode === "apim" ? <ApimLogo size={17} /> : <Boxes size={17} />}</span><h1>{tabLabels[mode]}</h1><span>{counts[mode]}</span></div>
-      {canManage && <div className="smh-header-actions"><button type="button" disabled={busy || loading || !lifecycleAvailable || (mode === "gateways" && !gatewayAttachmentAvailable)} title={!lifecycleAvailable ? "当前 API 版本不支持资源生命周期操作" : undefined} onClick={() => mode === "apim" ? setApimOpen(true) : openGateway()}><Plus size={14} /><span>{mode === "apim" ? "添加 APIM 实例" : "添加 Gateway"}</span></button></div>}
+      {canManage && <div className="smh-header-actions"><button type="button" disabled={busy || loading || !lifecycleAvailable || (mode === "gateways" && !gatewayAttachmentAvailable)} title={!lifecycleAvailable ? "当前 API 版本不支持资源生命周期操作" : undefined} onClick={() => mode === "apim" ? setApimOpen(true) : openGateway()}><Plus size={14} /><span>{mode === "apim" ? "添加 APIM 实例" : "添加网关"}</span></button></div>}
     </header>
     <div className="model-toolbar"><ButtonGroup className="model-tabs usage-metric-segment" aria-label="模型管理类型">{MODEL_MANAGEMENT_TABS.map(tab => <button key={tab} data-tab={tab} className={mode === tab ? "active" : ""} aria-pressed={mode === tab} onClick={() => onTabChange(tab)}>{tabLabels[tab]}<span>{counts[tab]}</span></button>)}</ButtonGroup><ExpandableSearch value={search} onChange={setSearch} placeholder={`搜索${tabLabels[mode]}...`} /></div>
     {notice && <div className="registry-notice smh-notice" role="status"><CheckCircle2 size={14} /><div className="smh-notice-copy"><span>{notice}</span></div><button type="button" className="smh-notice-close" title="关闭" aria-label="关闭" onClick={() => setNotice(null)}><X size={13} /></button></div>}
-    {syncing && <div className="registry-progress smh-notice" role="status"><RefreshCw className={operation.data?.worker_available ? "spin" : ""} size={14} /><div className="smh-notice-copy"><span>{operation.data?.worker_available ? "正在同步 APIM 清单" : "同步已排队，Worker 当前不可用"}</span></div></div>}
+    {syncing && <div className="registry-progress smh-notice" role="status"><RefreshCw className={operation.data?.worker_available ? "spin" : ""} size={14} /><div className="smh-notice-copy"><span>{operation.data?.worker_available ? "正在同步 APIM 清单" : "同步已排队，后台处理服务当前不可用"}</span></div></div>}
     {(onboarding.error || retryOnboarding.error) && <InfrastructureErrorNotice>{errorMessage(onboarding.error ?? retryOnboarding.error)}</InfrastructureErrorNotice>}
     {(operation.error || operation.data?.status === "failed") && <InfrastructureErrorNotice>{operation.error ? errorMessage(operation.error) : operation.data?.error_message ?? "APIM 清单同步失败"}</InfrastructureErrorNotice>}
-    {topology && !lifecycleAvailable && <div className="registry-progress smh-notice infrastructure-read-only-notice" role="status"><ApimLogo size={14} /><div className="smh-notice-copy"><span>当前独立 API 版本仅支持查看 APIM 与 Gateway；部署匹配版本后才能添加、验证、重新关联或移除资源。</span></div></div>}
+    {topology && !lifecycleAvailable && <div className="registry-progress smh-notice infrastructure-read-only-notice" role="status"><ApimLogo size={14} /><div className="smh-notice-copy"><span>当前独立 API 版本仅支持查看 APIM 与网关；部署匹配版本后才能添加、验证、重新关联或移除资源。</span></div></div>}
     {Boolean(error) && topology !== null && <InfrastructureErrorNotice>{`无法加载 APIM 拓扑：${errorMessage(error)}`}</InfrastructureErrorNotice>}
     {(addApim.error || addGateway.error || syncTarget.error || validateGateway.error || changeAssociation.error) && <InfrastructureErrorNotice>操作失败：{errorMessage(addApim.error ?? addGateway.error ?? syncTarget.error ?? validateGateway.error ?? changeAssociation.error)}</InfrastructureErrorNotice>}
     {loading && <InfrastructureTableLoading mode={mode} />}
@@ -295,9 +298,9 @@ function ApimTable({ targets, profiles, onboardingItems, onboardingAvailable, re
       const childrenId = `apim-gateways-${targetId}`
       return <section className="connection-provider-group apim-target-group" role="rowgroup" aria-label={displayName} key={targetId}>
         <article className="connection-provider-heading apim-target-heading" role="row">
-          <div className="connection-provider-identity" role="cell">{entries.length ? <button type="button" className="model-list-icon apim-hierarchy-toggle" aria-label={expanded ? "折叠 Gateway" : "展开 Gateway"} aria-expanded={expanded} aria-controls={childrenId} onClick={() => onToggleTarget(targetId)}><span className="apim-hierarchy-logo"><ApimLogo size={16} /></span><ChevronRight className="apim-hierarchy-chevron" size={16} /></button> : <span className="model-list-icon" data-model-family="apim"><ApimLogo size={16} /></span>}<span><b title={displayName}>{displayName}</b><small className="apim-target-resource" title={resourceLabel}>{resourceLabel}</small></span></div>
-          <span className="connection-provider-summary" role="cell"><b title={item.gateway_endpoint ?? undefined}>{item.gateway_endpoint ?? "Gateway endpoint 未发现"}</b><small title={`Management · ${item.management_endpoint} · Configuration · ${item.configuration_endpoint}`}>Management · {item.management_endpoint} · Configuration · {item.configuration_endpoint}</small></span>
-          <span className="connection-provider-summary" role="cell"><b>{`${entries.length} 个 Gateway`}</b><small>{item.published_models_available === false ? "模型关系需升级 API" : publishedModelSummary(item.published_model_count, item.target.api_id)}</small></span>
+          <div className="connection-provider-identity" role="cell">{entries.length ? <button type="button" className="model-list-icon apim-hierarchy-toggle" aria-label={expanded ? "折叠网关" : "展开网关"} aria-expanded={expanded} aria-controls={childrenId} onClick={() => onToggleTarget(targetId)}><span className="apim-hierarchy-logo"><ApimLogo size={16} /></span><ChevronRight className="apim-hierarchy-chevron" size={16} /></button> : <span className="model-list-icon" data-model-family="apim"><ApimLogo size={16} /></span>}<span><b title={displayName} data-no-localize>{displayName}</b><small className="apim-target-resource" title={resourceLabel} data-no-localize>{resourceLabel}</small></span></div>
+          <span className="connection-provider-summary" role="cell"><b title={item.gateway_endpoint ?? undefined} data-no-localize={Boolean(item.gateway_endpoint) || undefined}>{item.gateway_endpoint ?? "未发现网关地址"}</b><small><span>管理地址</span> · <span title={item.management_endpoint} data-no-localize>{item.management_endpoint}</span> · <span>配置地址</span> · <span title={item.configuration_endpoint} data-no-localize>{item.configuration_endpoint}</span></small></span>
+          <span className="connection-provider-summary" role="cell"><b>{`${entries.length} 个网关`}</b><small>{item.published_models_available === false ? "模型关系需升级 API" : publishedModelSummary(item.published_model_count, item.target.api_id)}</small></span>
           <div className="model-status-cell" role="cell"><ResourceReadiness state={item.connection_state === "connected" ? "ready" : item.connection_state === "unavailable" ? "unavailable" : "warning"} label={item.connection_state === "connected" ? "已同步" : item.connection_state === "unavailable" ? "不可用" : "待验证"} detail={item.connection_state === "connected" ? "APIM 清单已验证；并非实时数据面健康状态" : item.connection_state === "unavailable" ? "APIM 清单与配置不一致" : "尚未同步"} timestamp={item.target.last_inventory_sync_at} /></div>
           <InfrastructureActions name={displayName} checkLabel="验证并同步 APIM" removeLabel="从 Turnstile 移除 APIM" busy={busy} checkDisabled={!inventorySyncAvailable} removeDisabled={!lifecycleAvailable} checking={syncingId === targetId} onCheck={() => onSync(targetId)} onEdit={profiles.some(profile => profile.id === targetId) ? () => onEdit(item) : undefined} onAttach={() => onAttach(targetId)} attachDisabled={!gatewayAttachmentAvailable || item.target.capabilities.self_hosted_gateway === "unsupported"} onRemove={() => onRemove(item)} disclosure={entries.length ? { expanded, controls: childrenId, onToggle: () => onToggleTarget(targetId) } : undefined} />
         </article>
@@ -317,14 +320,13 @@ function GatewayChildRow({ entry, busy, lifecycleAvailable, validating, onEdit, 
   const managed = entry.deployment.kind === "managed"
   const connected = gatewayEvidence(entry).state === "ready"
   const models = gatewayPublishedModels(entry)
-  const metadata = managed ? "Managed Gateway" : `${entry.deployment.native_gateway_id} · ${entry.deployment.hosting_mode.toUpperCase()}`
-  const endpointMetadata = managed ? entry.deployment.location ?? entry.target.target.service_location : `Configuration · ${entry.configuration_endpoint}`
+  const endpointMetadata = managed ? entry.deployment.location ?? entry.target.target.service_location : entry.configuration_endpoint
   return <article className="model-list-row connection-list-row infrastructure-resource-row gateway apim-gateway-child-row" role="row" data-gateway-kind={entry.deployment.kind} aria-label={`${entry.deployment.display_name} · ${entry.target.target.service_name}`}>
-    <div className="model-primary-cell connection-primary-cell" role="cell"><span className="connection-branch" aria-hidden="true" /><span className="model-list-icon gateway-child-icon" data-model-family="apim">{managed ? <ManagedGatewayLogo size={16} /> : connected ? <Wifi size={15} /> : <WifiOff size={15} />}</span><div><b title={entry.deployment.display_name}>{entry.deployment.display_name}</b><code title={metadata}>{metadata}</code></div></div>
-    <div className="model-runtime-cell" role="cell"><b title={entry.deployment.endpoint_url ?? undefined}>{entry.deployment.endpoint_url ?? "Endpoint 未配置"}</b><span title={endpointMetadata}>{endpointMetadata}</span></div>
+    <div className="model-primary-cell connection-primary-cell" role="cell"><span className="connection-branch" aria-hidden="true" /><span className="model-list-icon gateway-child-icon" data-model-family="apim">{managed ? <ManagedGatewayLogo size={16} /> : connected ? <Wifi size={15} /> : <WifiOff size={15} />}</span><div><b title={entry.deployment.display_name} data-no-localize>{entry.deployment.display_name}</b><span className="gateway-deployment-metadata">{managed ? <span>托管网关</span> : <><code title={entry.deployment.native_gateway_id} data-no-localize>{entry.deployment.native_gateway_id}</code> · <span>{gatewayHostingLabels[entry.deployment.hosting_mode]}</span></>}</span></div></div>
+    <div className="model-runtime-cell" role="cell"><b title={entry.deployment.endpoint_url ?? undefined} data-no-localize={Boolean(entry.deployment.endpoint_url) || undefined}>{entry.deployment.endpoint_url ?? "端点未配置"}</b><span>{!managed && <><span>配置地址</span> · </>}<span title={endpointMetadata} data-no-localize>{endpointMetadata}</span></span></div>
     <div className="model-pricing-cell" role="cell"><b>{publishedModelSummary(models.length, entry.target.target.api_id)}</b><span>{models.length ? models.map(model => model.display_name).join("、") : "尚未发布模型"}</span></div>
     <div className="model-status-cell" role="cell"><GatewayReadiness entry={entry} /></div>
-    {managed ? <div className="model-row-actions infrastructure-row-actions" role="cell" /> : <InfrastructureActions name={entry.deployment.display_name} checkLabel="验证连接" editLabel="编辑 Gateway 名称" removeLabel="从 Turnstile 移除 Gateway" busy={busy} checkDisabled={!lifecycleAvailable || !entry.deployment.endpoint_url} removeDisabled={!lifecycleAvailable} checking={validating} onCheck={onValidate} onEdit={onEdit} onBinding={onChange} onBootstrap={entry.deployment.provisioning_operation_id ? onBootstrap : undefined} onRemove={onRemove} />}
+    {managed ? <div className="model-row-actions infrastructure-row-actions" role="cell" /> : <InfrastructureActions name={entry.deployment.display_name} checkLabel="验证连接" editLabel="编辑网关名称" removeLabel="从 Turnstile 移除网关" busy={busy} checkDisabled={!lifecycleAvailable || !entry.deployment.endpoint_url} removeDisabled={!lifecycleAvailable} checking={validating} onCheck={onValidate} onEdit={onEdit} onBinding={onChange} onBootstrap={entry.deployment.provisioning_operation_id ? onBootstrap : undefined} onRemove={onRemove} />}
   </article>
 }
 
@@ -334,21 +336,21 @@ function GatewayTable({ entries, provisionItems = [], provisioningAvailable = fa
   onRetryProvision?: (id: string) => void; onProvisionBootstrap?: (id: string) => void
   filtered: boolean; validatingId: string | null
 }) {
-  return <ResourceTable kind="gateway" label="Self-hosted Gateway 列表" headers={resourceHeaders("gateways")}>
+  return <ResourceTable kind="gateway" label="自托管网关列表" headers={resourceHeaders("gateways")}>
     {Boolean(provisionError) && <div role="row"><div role="cell" aria-colspan={5}><InfrastructureErrorNotice>{errorMessage(provisionError)}</InfrastructureErrorNotice></div></div>}
     {provisionItems.map(({ operation: current, target }) => <SelfHostedGatewayProvisionProgress key={current.id} operation={current} target={target} available={provisioningAvailable} retrying={retryingId === current.id} error={retryError?.id === current.id ? retryError.error : null} onRetry={id => onRetryProvision?.(id)} onBootstrap={onProvisionBootstrap} />)}
     {entries.map(entry => {
       const connected = gatewayEvidence(entry).state === "ready"
       const models = gatewayPublishedModels(entry)
       return <article className="model-list-row infrastructure-resource-row gateway" role="row" key={entry.deployment.id}>
-        <div className="model-primary-cell" role="cell"><span className="model-list-icon gateway-child-icon" data-model-family="apim">{connected ? <Wifi size={15} /> : <WifiOff size={15} />}</span><div><b title={entry.deployment.display_name}>{entry.deployment.display_name}</b><code title={`${entry.deployment.native_gateway_id} · ${entry.deployment.hosting_mode.toUpperCase()}`}>{entry.deployment.native_gateway_id} · {entry.deployment.hosting_mode.toUpperCase()}</code></div></div>
+        <div className="model-primary-cell" role="cell"><span className="model-list-icon gateway-child-icon" data-model-family="apim">{connected ? <Wifi size={15} /> : <WifiOff size={15} />}</span><div><b title={entry.deployment.display_name} data-no-localize>{entry.deployment.display_name}</b><span className="gateway-deployment-metadata"><code title={entry.deployment.native_gateway_id} data-no-localize>{entry.deployment.native_gateway_id}</code> · <span>{gatewayHostingLabels[entry.deployment.hosting_mode]}</span></span></div></div>
         <div className="model-runtime-cell" role="cell"><b title={`${entry.target.target.service_name} · ${entry.target.target.resource_group}`}>{entry.target.target.service_name}</b><span title={models.map(model => model.display_name).join("、")}>{entry.published_models_available === false ? "模型关系需升级 API" : publishedModelSummary(models.length, entry.target.target.api_id)}</span></div>
-        <div className="model-pricing-cell" role="cell"><b title={entry.deployment.endpoint_url ?? undefined}>{entry.deployment.endpoint_url ?? "Endpoint 未配置"}</b><span title={entry.configuration_endpoint}>Configuration · {entry.configuration_endpoint}</span></div>
+        <div className="model-pricing-cell" role="cell"><b title={entry.deployment.endpoint_url ?? undefined} data-no-localize={Boolean(entry.deployment.endpoint_url) || undefined}>{entry.deployment.endpoint_url ?? "端点未配置"}</b><span title={entry.configuration_endpoint}><span>配置地址</span> · <span data-no-localize>{entry.configuration_endpoint}</span></span></div>
         <div className="model-status-cell" role="cell"><GatewayReadiness entry={entry} /></div>
-        <InfrastructureActions name={entry.deployment.display_name} checkLabel="验证连接" editLabel="编辑 Gateway 名称" removeLabel="从 Turnstile 移除 Gateway" busy={busy} checkDisabled={!lifecycleAvailable || !entry.deployment.endpoint_url} removeDisabled={!lifecycleAvailable} checking={validatingId === entry.deployment.id} onCheck={() => onValidate(entry.deployment.id)} onEdit={() => onEdit(entry)} onBinding={() => onChange(entry)} onBootstrap={entry.deployment.provisioning_operation_id && onBootstrap ? () => onBootstrap(entry) : undefined} onRemove={() => onRemove(entry)} />
+        <InfrastructureActions name={entry.deployment.display_name} checkLabel="验证连接" editLabel="编辑网关名称" removeLabel="从 Turnstile 移除网关" busy={busy} checkDisabled={!lifecycleAvailable || !entry.deployment.endpoint_url} removeDisabled={!lifecycleAvailable} checking={validatingId === entry.deployment.id} onCheck={() => onValidate(entry.deployment.id)} onEdit={() => onEdit(entry)} onBinding={() => onChange(entry)} onBootstrap={entry.deployment.provisioning_operation_id && onBootstrap ? () => onBootstrap(entry) : undefined} onRemove={() => onRemove(entry)} />
       </article>
     })}
-    {!entries.length && !provisionItems.length && !provisionError && <InfrastructureEmpty icon={filtered ? <Search size={27} /> : <Server size={27} />} label={filtered ? "没有匹配的 Self-hosted Gateway" : "尚未添加 Self-hosted Gateway"} />}
+    {!entries.length && !provisionItems.length && !provisionError && <InfrastructureEmpty icon={filtered ? <Search size={27} /> : <Server size={27} />} label={filtered ? "没有匹配的自托管网关" : "尚未添加自托管网关"} />}
   </ResourceTable>
 }
 
@@ -368,7 +370,7 @@ function InfrastructureActions({ name, checkLabel, editLabel = "编辑 APIM 名�
       {onBinding && <button type="button" className="model-edit-action" aria-label="APIM 绑定" title="APIM 绑定" disabled={busy} onClick={onBinding}><Link2 size={14} /></button>}
       {!menuActions && <button type="button" className="model-delete-action" aria-label={removeLabel} title={removeLabel} disabled={busy || removeDisabled} onClick={onRemove}><Trash2 size={14} /></button>}
       <DropdownMenu><DropdownMenuTrigger render={<button type="button" className={menuActions ? "infrastructure-menu-trigger model-edit-action" : "infrastructure-menu-trigger"} aria-label="更多操作" title={name} disabled={busy} />}><MoreHorizontal size={15} /></DropdownMenuTrigger><DropdownMenuContent align="end" className="infrastructure-row-menu">
-        {onAttach && <DropdownMenuItem disabled={busy || attachDisabled} title={attachDisabled ? "此 APIM 当前不支持挂载 Self-hosted Gateway" : undefined} onClick={onAttach}><Plus size={14} />新建 Self-hosted Gateway</DropdownMenuItem>}
+        {onAttach && <DropdownMenuItem disabled={busy || attachDisabled} title={attachDisabled ? "此 APIM 当前不支持挂载自托管网关" : undefined} onClick={onAttach}><Plus size={14} />新建自托管网关</DropdownMenuItem>}
         {onBootstrap && <DropdownMenuItem disabled={busy} onClick={onBootstrap}><Download size={14} />启动配置</DropdownMenuItem>}
         <DropdownMenuItem disabled={busy || checkDisabled} onClick={onCheck}><RefreshCw size={14} />{checkLabel}</DropdownMenuItem>
         {onEdit && <DropdownMenuItem disabled={busy} onClick={onEdit}><Pencil size={14} />{editLabel}</DropdownMenuItem>}
@@ -376,12 +378,12 @@ function InfrastructureActions({ name, checkLabel, editLabel = "编辑 APIM 名�
         <DropdownMenuItem variant="destructive" disabled={busy || removeDisabled} onClick={onRemove}><Trash2 size={14} />{removeLabel}</DropdownMenuItem>
       </DropdownMenuContent></DropdownMenu>
     </>}
-    {disclosure ? <button type="button" className="connection-provider-chevron apim-row-chevron" aria-label={disclosure.expanded ? "折叠 Gateway" : "展开 Gateway"} aria-expanded={disclosure.expanded} aria-controls={disclosure.controls} onClick={disclosure.onToggle}><ChevronRight size={15} /></button> : !gatewayNameActions && <span className="apim-row-chevron-placeholder" aria-hidden="true" />}
+    {disclosure ? <button type="button" className="connection-provider-chevron apim-row-chevron" aria-label={disclosure.expanded ? "折叠网关" : "展开网关"} aria-expanded={disclosure.expanded} aria-controls={disclosure.controls} onClick={disclosure.onToggle}><ChevronRight size={15} /></button> : !gatewayNameActions && <span className="apim-row-chevron-placeholder" aria-hidden="true" />}
   </div>
 }
 
 function resourceHeaders(mode: InfrastructureTab) {
-  return mode === "apim" ? ["APIM 实例", "Endpoints", "关联资源", "状态", ""] : ["Gateway", "所属 APIM / 模型", "Endpoints", "状态", ""]
+  return mode === "apim" ? ["APIM 实例", "端点", "关联资源", "状态", ""] : ["网关", "所属 APIM / 模型", "端点", "状态", ""]
 }
 
 function ResourceTable({ kind, label, headers, children }: { kind: "apim" | "gateway"; label: string; headers: string[]; children: React.ReactNode }) {
@@ -434,10 +436,10 @@ function InfrastructureNameEditor({ kind, identity, name, supported, available =
   const [value, setValue] = useState(name)
   const valid = available && gatewayNameFormValid(value, name)
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent className={`registry-editor-dialog infrastructure-editor-dialog apim-name-editor-dialog${kind === "gateway" ? " gateway-name-editor-dialog" : ""}`} finalFocus={false}><form className="registry-editor" onSubmit={event => { event.preventDefault(); if (supported && !busy && valid) onSubmit(value.trim()) }}>
-    <DialogHeader className="registry-editor-header"><DialogTitle>{kind === "apim" ? "编辑 APIM 名称" : "编辑 Gateway 名称"}</DialogTitle><DialogDescription data-no-localize>{identity}</DialogDescription></DialogHeader><EditorClose busy={busy} />
+    <DialogHeader className="registry-editor-header"><DialogTitle>{kind === "apim" ? "编辑 APIM 名称" : "编辑网关名称"}</DialogTitle><DialogDescription data-no-localize>{identity}</DialogDescription></DialogHeader><EditorClose busy={busy} />
     <div className="registry-editor-body infrastructure-editor-body"><Field label="Turnstile 显示名称"><Input name="name" value={value} maxLength={120} disabled={busy} onChange={event => setValue(event.target.value)} autoFocus /></Field>
-      {!supported && <div className="infrastructure-warning" role="status"><CircleAlert size={15} /><span>{kind === "apim" ? "当前后端版本不支持修改 APIM 显示名称" : "当前后端版本不支持修改 Gateway 显示名称"}</span></div>}
-      {!available && <InfrastructureErrorNotice>所选 Gateway 已不可用</InfrastructureErrorNotice>}{Boolean(error) && <div className="registry-error" role="alert">{errorMessage(error)}</div>}
+      {!supported && <div className="infrastructure-warning" role="status"><CircleAlert size={15} /><span>{kind === "apim" ? "当前后端版本不支持修改 APIM 显示名称" : "当前后端版本不支持修改网关显示名称"}</span></div>}
+      {!available && <InfrastructureErrorNotice>所选网关已不可用</InfrastructureErrorNotice>}{Boolean(error) && <div className="registry-error" role="alert">{errorMessage(error)}</div>}
     </div><DialogFooter className="registry-editor-footer"><DialogClose render={<Button type="button" variant="outline" disabled={busy} />}>取消</DialogClose><Button type="submit" disabled={!supported || busy || !valid}>{busy ? <RefreshCw size={14} className="spin" /> : <Save size={14} />}{busy ? "正在保存" : "保存"}</Button></DialogFooter>
   </form></DialogContent></Dialog>
 }
@@ -450,12 +452,12 @@ function ApimEditor({ busy, error, onClose, onSubmit }: { busy: boolean; error: 
     <DialogHeader className="registry-editor-header"><DialogTitle>关联已有 APIM 配置</DialogTitle><DialogDescription>验证现有 Azure API Management 实例后保存到 Turnstile。</DialogDescription></DialogHeader><EditorClose busy={busy} />
     <div className="registry-editor-body infrastructure-editor-body">
       <Field label="实例名称"><Input name="name" value={value.name} disabled={busy} onChange={event => update("name", event.target.value)} autoFocus /></Field>
-      <Field label="Management endpoint"><Input name="management_endpoint" value={value.management_endpoint} disabled={busy} onChange={event => update("management_endpoint", event.target.value)} placeholder="https://management.azure.com/subscriptions/.../service/..." /></Field>
-      <div className="infrastructure-field-grid"><Field label="Tenant ID"><Input name="tenant_id" value={value.tenant_id} disabled={busy} onChange={event => update("tenant_id", event.target.value)} /></Field><Field label="Subscription ID"><Input name="subscription_id" value={value.subscription_id} disabled={busy} onChange={event => update("subscription_id", event.target.value)} /></Field></div>
-      <div className="infrastructure-field-grid"><Field label="Resource group"><Input name="resource_group" value={value.resource_group} disabled={busy} onChange={event => update("resource_group", event.target.value)} /></Field><Field label="APIM service name"><Input name="service_name" value={value.service_name} disabled={busy} onChange={event => update("service_name", event.target.value)} /></Field></div>
-      <Field label="Gateway endpoint"><Input name="gateway_endpoint" value={value.gateway_endpoint} disabled={busy} onChange={event => update("gateway_endpoint", event.target.value)} placeholder="https://example.azure-api.net/api-path" /></Field>
-      <div className="infrastructure-field-grid"><Field label="API ID"><Input name="api_id" value={value.api_id} disabled={busy} onChange={event => update("api_id", event.target.value)} /></Field><Field label="Management authentication"><Input value="System-managed identity" disabled /></Field></div>
-      <div className="infrastructure-field-grid"><Field label="Dashboard subscription"><Input name="dashboard_subscription_id" value={value.dashboard_subscription_id} disabled={busy} onChange={event => update("dashboard_subscription_id", event.target.value)} /></Field><Field label="Probe subscription"><Input name="probe_subscription_id" value={value.probe_subscription_id} disabled={busy} onChange={event => update("probe_subscription_id", event.target.value)} /></Field></div>
+      <Field label="管理地址"><Input name="management_endpoint" value={value.management_endpoint} disabled={busy} onChange={event => update("management_endpoint", event.target.value)} placeholder="https://management.azure.com/subscriptions/.../service/..." /></Field>
+      <div className="infrastructure-field-grid"><Field label="租户 ID"><Input name="tenant_id" value={value.tenant_id} disabled={busy} onChange={event => update("tenant_id", event.target.value)} /></Field><Field label="订阅 ID"><Input name="subscription_id" value={value.subscription_id} disabled={busy} onChange={event => update("subscription_id", event.target.value)} /></Field></div>
+      <div className="infrastructure-field-grid"><Field label="资源组"><Input name="resource_group" value={value.resource_group} disabled={busy} onChange={event => update("resource_group", event.target.value)} /></Field><Field label="APIM 服务名称"><Input name="service_name" value={value.service_name} disabled={busy} onChange={event => update("service_name", event.target.value)} /></Field></div>
+      <Field label="网关地址"><Input name="gateway_endpoint" value={value.gateway_endpoint} disabled={busy} onChange={event => update("gateway_endpoint", event.target.value)} placeholder="https://example.azure-api.net/api-path" /></Field>
+      <div className="infrastructure-field-grid"><Field label="API ID"><Input name="api_id" value={value.api_id} disabled={busy} onChange={event => update("api_id", event.target.value)} /></Field><Field label="管理认证方式"><Input value="系统分配的托管身份" disabled /></Field></div>
+      <div className="infrastructure-field-grid"><Field label="控制台订阅"><Input name="dashboard_subscription_id" value={value.dashboard_subscription_id} disabled={busy} onChange={event => update("dashboard_subscription_id", event.target.value)} /></Field><Field label="探测订阅"><Input name="probe_subscription_id" value={value.probe_subscription_id} disabled={busy} onChange={event => update("probe_subscription_id", event.target.value)} /></Field></div>
       {Boolean(error) && <div className="registry-error">{errorMessage(error)}</div>}
     </div><DialogFooter className="registry-editor-footer"><DialogClose render={<Button type="button" variant="outline" disabled={busy} />}>取消</DialogClose><Button type="submit" disabled={busy || !valid}>{busy ? <RefreshCw className="spin" size={14} /> : <Plus size={14} />}{busy ? "正在验证" : "验证并添加"}</Button></DialogFooter>
   </form></DialogContent></Dialog>
@@ -473,12 +475,12 @@ function GatewayEditor({ targets, initialTargetId, available, busy, error, onClo
   const valid = available && Boolean(selected) && gatewayFormValid(value)
   const invalidEndpoint = Boolean(value.endpoint_url.trim()) && !isGatewayEndpoint(value.endpoint_url)
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent className="registry-editor-dialog infrastructure-editor-dialog gateway-attachment-dialog" finalFocus={false}><form className="registry-editor" onSubmit={event => { event.preventDefault(); if (valid && !busy) onSubmit(targetId, gatewayFormPayload(value)) }}>
-    <DialogHeader className="registry-editor-header"><DialogTitle>关联已有 Gateway</DialogTitle><DialogDescription>已有 APIM Gateway 配置</DialogDescription></DialogHeader><EditorClose busy={busy} />
-    <div className="registry-editor-body infrastructure-editor-body"><TargetSelect targets={choices} value={targetId} onChange={setTargetId} disabled={busy || initialTargetId !== null} /><Field label="Configuration endpoint"><Input value={selected?.configuration_endpoint ?? ""} readOnly /></Field>
-      <div className="infrastructure-field-grid"><Field label="Gateway 名称"><Input name="display_name" value={value.display_name} disabled={busy} maxLength={120} onChange={event => update("display_name", event.target.value)} autoFocus /></Field><Field label="APIM Gateway ID"><Input name="native_gateway_id" value={value.native_gateway_id} disabled={busy} maxLength={80} onChange={event => update("native_gateway_id", event.target.value)} /></Field></div>
-      <div><Field label="Gateway endpoint"><Input name="endpoint_url" type="url" value={value.endpoint_url} disabled={busy} aria-invalid={invalidEndpoint} aria-describedby={invalidEndpoint ? endpointErrorId : undefined} onChange={event => update("endpoint_url", event.target.value)} placeholder="https://gateway.example.com/api-path" /></Field>{invalidEndpoint && <span className="infrastructure-field-error" id={endpointErrorId}>使用 HTTPS URL，不得包含凭据、查询参数或片段。</span>}</div>
-      <div className="infrastructure-field-grid"><Field label="位置（可选）"><Input name="location" value={value.location ?? ""} disabled={busy} maxLength={128} onChange={event => update("location", event.target.value)} /></Field><Field label="运行环境"><Select value={value.hosting_mode ?? "kubernetes"} disabled={busy} onValueChange={next => update("hosting_mode", next ?? "other")}><SelectTrigger className="registry-select-trigger" aria-label="运行环境"><SelectValue>{(value.hosting_mode ?? "kubernetes").replaceAll("_", " ").toUpperCase()}</SelectValue></SelectTrigger><SelectContent>{["aks", "kubernetes", "arc", "container_apps", "docker", "other"].map(item => <SelectItem key={item} value={item}>{item.replaceAll("_", " ").toUpperCase()}</SelectItem>)}</SelectContent></Select></Field></div>
-      {!available && <div className="infrastructure-warning" role="status"><CircleAlert size={15} /><span>当前 API 不支持挂载 Self-hosted Gateway</span></div>}{available && !selected && <div className="infrastructure-warning" role="status"><CircleAlert size={15} /><span>所选 APIM 当前不可挂载 Self-hosted Gateway</span></div>}{Boolean(error) && <div className="registry-error" role="alert">{errorMessage(error)}</div>}
+    <DialogHeader className="registry-editor-header"><DialogTitle>关联已有网关</DialogTitle><DialogDescription>已有 APIM 网关配置</DialogDescription></DialogHeader><EditorClose busy={busy} />
+    <div className="registry-editor-body infrastructure-editor-body"><TargetSelect targets={choices} value={targetId} onChange={setTargetId} disabled={busy || initialTargetId !== null} /><Field label="配置地址"><Input value={selected?.configuration_endpoint ?? ""} readOnly /></Field>
+      <div className="infrastructure-field-grid"><Field label="网关名称"><Input name="display_name" value={value.display_name} disabled={busy} maxLength={120} onChange={event => update("display_name", event.target.value)} autoFocus /></Field><Field label="APIM 网关 ID"><Input name="native_gateway_id" value={value.native_gateway_id} disabled={busy} maxLength={80} onChange={event => update("native_gateway_id", event.target.value)} /></Field></div>
+      <div><Field label="网关地址"><Input name="endpoint_url" type="url" value={value.endpoint_url} disabled={busy} aria-invalid={invalidEndpoint} aria-describedby={invalidEndpoint ? endpointErrorId : undefined} onChange={event => update("endpoint_url", event.target.value)} placeholder="https://gateway.example.com/api-path" /></Field>{invalidEndpoint && <span className="infrastructure-field-error" id={endpointErrorId}>使用 HTTPS URL，不得包含凭据、查询参数或片段。</span>}</div>
+      <div className="infrastructure-field-grid"><Field label="位置（可选）"><Input name="location" value={value.location ?? ""} disabled={busy} maxLength={128} onChange={event => update("location", event.target.value)} /></Field><Field label="运行环境"><Select value={value.hosting_mode ?? "kubernetes"} disabled={busy} onValueChange={next => update("hosting_mode", next ?? "other")}><SelectTrigger className="registry-select-trigger" aria-label="运行环境"><SelectValue>{gatewayHostingLabels[value.hosting_mode ?? "kubernetes"]}</SelectValue></SelectTrigger><SelectContent>{["aks", "kubernetes", "arc", "container_apps", "docker", "other"].map(item => <SelectItem key={item} value={item}>{gatewayHostingLabels[item]}</SelectItem>)}</SelectContent></Select></Field></div>
+      {!available && <div className="infrastructure-warning" role="status"><CircleAlert size={15} /><span>当前 API 不支持挂载自托管网关</span></div>}{available && !selected && <div className="infrastructure-warning" role="status"><CircleAlert size={15} /><span>所选 APIM 当前不可挂载自托管网关</span></div>}{Boolean(error) && <div className="registry-error" role="alert">{errorMessage(error)}</div>}
     </div><DialogFooter className="registry-editor-footer"><DialogClose render={<Button type="button" variant="outline" disabled={busy} />}>取消</DialogClose><Button type="submit" disabled={busy || !valid}>{busy ? <RefreshCw className="spin" size={14} /> : <Plus size={14} />}{busy ? "正在保存" : "保存关联"}</Button></DialogFooter>
   </form></DialogContent></Dialog>
 }
@@ -503,10 +505,10 @@ function GatewayAssociationEditor({ entry, targets, canChangeAssociation, lifecy
     if (valid && !busy) onSubmit({ apim_target_id: targetId, native_gateway_id: entry.deployment.native_gateway_id, display_name: entry.deployment.display_name, endpoint_url: endpoint.trim(), location: entry.deployment.location, hosting_mode: entry.deployment.hosting_mode === "azure_managed" ? "other" : entry.deployment.hosting_mode, release_gate: entry.deployment.release_gate })
   }}>
     <DialogHeader className="registry-editor-header"><DialogTitle>APIM 绑定</DialogTitle><DialogDescription data-no-localize>{entry.deployment.display_name}</DialogDescription></DialogHeader><EditorClose busy={busy} />
-    <div className="registry-editor-body infrastructure-editor-body"><TargetSelect targets={choices} value={targetId} onChange={setTargetId} disabled={busy || Boolean(blocked)} /><Field label="APIM Gateway ID"><Input value={entry.deployment.native_gateway_id} readOnly /></Field><Field label="Configuration endpoint"><Input value={selected?.configuration_endpoint ?? entry.configuration_endpoint} readOnly /></Field><Field label="Gateway endpoint"><Input type="url" value={endpoint} readOnly={Boolean(blocked) || targetId === currentTargetId} disabled={busy} onChange={event => setEndpoint(event.target.value)} /></Field>
+    <div className="registry-editor-body infrastructure-editor-body"><TargetSelect targets={choices} value={targetId} onChange={setTargetId} disabled={busy || Boolean(blocked)} /><Field label="APIM 网关 ID"><Input value={entry.deployment.native_gateway_id} readOnly /></Field><Field label="配置地址"><Input value={selected?.configuration_endpoint ?? entry.configuration_endpoint} readOnly /></Field><Field label="网关地址"><Input type="url" value={endpoint} readOnly={Boolean(blocked) || targetId === currentTargetId} disabled={busy} onChange={event => setEndpoint(event.target.value)} /></Field>
       {models.length > 0 && <div className="infrastructure-dependencies"><b>已发布模型</b>{models.map(model => <span key={model.id}><span title={model.display_name}>{model.display_name}</span><code title={model.model_key}>{model.model_key}</code></span>)}</div>}
       {blocked && <div className="infrastructure-warning" role="status"><CircleAlert size={15} /><span>{blocked}</span></div>}
-      {!blocked && targetId !== currentTargetId && <div className="infrastructure-warning"><ArrowRightLeft size={15} /><span>保存后请自行更新Gateway运行环境中的Configuration endpoint和认证配置；Turnstile不会远程修改或重启Gateway。</span></div>}
+      {!blocked && targetId !== currentTargetId && <div className="infrastructure-warning"><ArrowRightLeft size={15} /><span>保存后请自行更新网关运行环境中的配置地址和认证配置；Turnstile 不会远程修改或重启网关。</span></div>}
       {Boolean(error) && <div className="registry-error">{errorMessage(error)}</div>}
     </div><DialogFooter className="registry-editor-footer"><DialogClose render={<Button type="button" variant="outline" disabled={busy} />}>{blocked ? "关闭" : "取消"}</DialogClose>{!blocked && <Button type="submit" disabled={busy || !valid}>{busy ? <RefreshCw className="spin" size={14} /> : <Link2 size={14} />}<span>保存新关联</span></Button>}</DialogFooter>
   </form></DialogContent></Dialog>
@@ -526,9 +528,9 @@ function RemovalDialog({ target, preview, loading, busy, error, onClose, onConfi
   const models = preview?.models ?? []
   const gateways = preview && "self_hosted_gateways" in preview ? preview.self_hosted_gateways : []
   return <AlertDialog open onOpenChange={open => { if (!open && !busy) onClose() }}><AlertDialogContent className="model-delete-dialog infrastructure-remove-dialog" onClick={event => event.stopPropagation()}><div className="model-delete-body">
-    <AlertDialogTitle>{target.kind === "apim" ? "移除 APIM 实例" : "移除 Self-hosted Gateway"}</AlertDialogTitle><AlertDialogDescription>只会移除Turnstile中的配置和关联，不会删除或修改用户的Azure资源、Gateway或运行环境。</AlertDialogDescription>
+    <AlertDialogTitle>{target.kind === "apim" ? "移除 APIM 实例" : "移除自托管网关"}</AlertDialogTitle><AlertDialogDescription>只会移除 Turnstile 中的配置和关联，不会删除或修改用户的 Azure 资源、网关或运行环境。</AlertDialogDescription>
     {loading && <div className="infrastructure-preview-loading"><RefreshCw className="spin" size={14} />检查关联资源</div>}
-    {gateways.length > 0 && <div className="infrastructure-dependencies"><b>关联 Gateway</b>{gateways.map(gateway => <span key={gateway.id}><span title={gateway.display_name}>{gateway.display_name}</span><code title={gateway.native_gateway_id}>{gateway.native_gateway_id}</code></span>)}</div>}
+    {gateways.length > 0 && <div className="infrastructure-dependencies"><b>关联网关</b>{gateways.map(gateway => <span key={gateway.id}><span title={gateway.display_name} data-no-localize>{gateway.display_name}</span><code title={gateway.native_gateway_id}>{gateway.native_gateway_id}</code></span>)}</div>}
     {models.length > 0 && <div className="infrastructure-dependencies"><b>已发布模型</b>{models.map(model => <span key={model.id}><span title={model.display_name}>{model.display_name}</span><code title={model.model_key}>{model.model_key}</code></span>)}</div>}
     {preview && !preview.removal_allowed && <div className="infrastructure-warning"><CircleAlert size={15} /><span>{preview.blockers.join("；")}</span></div>}{Boolean(error) && <div className="registry-error">{errorMessage(error)}</div>}
   </div><AlertDialogFooter className="model-delete-footer"><AlertDialogCancel disabled={busy}>取消</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={busy || loading || !preview?.removal_allowed} onClick={onConfirm}>{busy ? "正在移除" : "从 Turnstile 移除"}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>

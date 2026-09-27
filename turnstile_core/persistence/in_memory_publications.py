@@ -9,8 +9,10 @@ from uuid import UUID, uuid4
 from ..domain.control_plane import (
     GatewayPublication,
     GatewayPublicationIntent,
+    publication_credential_evidence,
     publication_materialized_named_values,
     publication_model_id,
+    publication_provisioning_completed,
 )
 from ..domain.gateway_targets import apim_target_route_binding_id_for
 from .repository_support import (
@@ -330,15 +332,16 @@ class InMemoryPublicationRepositoryMixin:
         now = datetime.now(UTC)
         materialized = publication_materialized_named_values(
             GatewayPublication.model_validate(publication),
-            provisioning_completed=any(
-                item.get("publication_id") == publication_id
-                and item.get("from_status") == "validating"
-                and item.get("to_status") == "provisioning"
-                for item in self.gateway_publication_audit
-            ),
+            provisioning_completed=publication_provisioning_completed([
+                item for item in self.gateway_publication_audit
+                if item.get("publication_id") == publication_id
+            ]),
         )
         preserved_manifest: dict[str, Any] = (
-            {"named_values": materialized} if credential_ciphertext is None and materialized else {}
+            {"named_values": materialized, "credential_evidence": publication_credential_evidence(
+                GatewayPublication.model_validate(publication),
+                {name: "present" for name in materialized},
+            )} if credential_ciphertext is None and materialized else {}
         )
         oauth_credentials = publication["resource_manifest"].get("oauth_credentials")
         if credential_ciphertext is None and isinstance(oauth_credentials, list):
@@ -386,6 +389,11 @@ class InMemoryPublicationRepositoryMixin:
             self.gateway_publication_secrets[publication_id] = credential_ciphertext
         else:
             self.gateway_publication_secrets.pop(publication_id, None)
+        self.gateway_publication_audit.append({
+            "id": uuid4(), "publication_id": publication_id, "from_status": "failed",
+            "to_status": "queued", "actor": created_by,
+            "detail": {"image_probe_authorization": image_probe_authorization}, "created_at": now,
+        })
         return publication
 
     def resume_gateway_publication_authorization(
@@ -1023,6 +1031,7 @@ class InMemoryPublicationRepositoryMixin:
         paused = status == "awaiting_authorization"
         if terminal:
             publication["completed_at"] = publication["updated_at"]
+        if terminal or (expected_status == "validating" and status == "provisioning"):
             self.delete_gateway_publication_credential(publication_id)
         outbox = next(
             item
@@ -1474,12 +1483,17 @@ class InMemoryPublicationRepositoryMixin:
         return publication
 
     def invocation_route(
-        self, runtime_id: UUID | None, model_id: UUID | None
+        self, runtime_id: UUID | None, model_id: UUID | None,
+        *, gateway_profile_id: UUID | None = None, gateway_deployment_id: UUID | None = None,
     ) -> dict[str, Any] | None:
+        if (gateway_profile_id is None) != (gateway_deployment_id is None):
+            return None
+        if gateway_profile_id is not None and model_id is None:
+            return None
         candidates = [model for model in self.models if model["enabled"]]
         if model_id is not None:
             candidates = [model for model in candidates if model["id"] == model_id]
-        if runtime_id is not None:
+        if runtime_id is not None and gateway_profile_id is None:
             candidates = [model for model in candidates if model["runtime_id"] == runtime_id]
         if runtime_id is None and model_id is None:
             candidates = [model for model in candidates if model["is_default"]]
@@ -1489,7 +1503,10 @@ class InMemoryPublicationRepositoryMixin:
         routes = [row for row in self.apim_target_route_bindings.values()
                   if row["logical_model_id"] == model["id"]]
         enabled_routes = sorted(
-            (row for row in routes if row["enabled"]),
+            (row for row in routes if row["enabled"] and (
+                row["apim_target_id"] == gateway_profile_id if gateway_profile_id is not None
+                else row["is_default_serving"]
+            )),
             key=lambda row: (not row["is_default_serving"], row["created_at"], str(row["id"])),
         )
         if routes and not enabled_routes:
@@ -1498,8 +1515,52 @@ class InMemoryPublicationRepositoryMixin:
         runtime = self._require(
             self.runtimes, binding["runtime_id"] if binding else model["runtime_id"], "runtime",
         )
-        provider = self._require(self.providers, model["provider_id"], "provider")
+        provider = self._require(self.providers, runtime["provider_id"], "provider")
         gateway = self._find(self.gateways, runtime.get("gateway_profile_id"))
+        if binding is not None and (
+            not gateway or not binding.get("current_publication_id")
+            or binding["current_publication_id"]
+            != self.effective_gateway_releases.get(gateway["id"])
+        ):
+            return None
+        if gateway_profile_id is not None and (
+            not gateway or gateway["id"] != gateway_profile_id
+            or (runtime_id is not None and runtime["id"] != runtime_id)
+        ):
+            return None
+        target = self.apim_targets.get(gateway["id"]) if gateway else None
+        selected_deployment = None
+        if gateway:
+            scope = binding["deployment_scope"] if binding else None
+            eligible = []
+            for deployment in self.gateway_deployments.values():
+                if (deployment["apim_target_id"] != gateway["id"]
+                        or deployment.get("retired_at") is not None
+                        or deployment["declared_state"] != "present"
+                        or deployment["reachability_state"] == "unreachable"
+                        or not deployment.get("endpoint_url")
+                        or (gateway_deployment_id is not None
+                            and deployment["id"] != gateway_deployment_id)):
+                    continue
+                if scope is None and deployment["kind"] != "managed":
+                    continue
+                if (scope and scope["mode"] == "selected"
+                        and deployment["id"] not in scope["deployment_ids"]):
+                    continue
+                if deployment["kind"] == "self_hosted":
+                    inventory = self.gateway_deployment_inventories.get(deployment["id"], {})
+                    if not target or not any(
+                        api_id.casefold() == target["api_id"].casefold()
+                        for api_id in inventory.get("associated_api_ids", [])
+                    ):
+                        continue
+                eligible.append(deployment)
+            preferred = "managed" if not scope or scope["mode"] == "all" else "self_hosted"
+            eligible.sort(key=lambda row: (row["kind"] != preferred, str(row["id"])))
+            if eligible:
+                selected_deployment = eligible[0]
+            elif binding is not None or target is not None or gateway_profile_id is not None:
+                return None
         if (
             not runtime["enabled"]
             or not provider["enabled"]
@@ -1535,7 +1596,15 @@ class InMemoryPublicationRepositoryMixin:
             "gateway_id": gateway["id"] if gateway else None,
             "gateway_name": gateway["name"] if gateway else None,
             "gateway_implementation": gateway["implementation"] if gateway else None,
-            "gateway_base_url": gateway["base_url"] if gateway else None,
+            "gateway_base_url": selected_deployment["endpoint_url"] if selected_deployment
+            else gateway["base_url"] if gateway else None,
+            "gateway_deployment_id": selected_deployment["id"] if selected_deployment else None,
+            "native_gateway_id": selected_deployment["native_gateway_id"]
+            if selected_deployment else None,
+            "gateway_target": target,
+            "gateway_deployment": selected_deployment,
+            "gateway_inventory": self.gateway_deployment_inventories.get(selected_deployment["id"])
+            if selected_deployment else None,
             "gateway_auth_type": gateway["auth_type"] if gateway else None,
             "gateway_credential_ciphertext": gateway["credential_ciphertext"] if gateway else None,
             "gateway_config": gateway["config"] if gateway else {},
@@ -1592,6 +1661,40 @@ class InMemoryPublicationRepositoryMixin:
     def _published_image_profile(self, model: Mapping[str, Any]) -> object:
         raise NotImplementedError
 
+    def runtime_diagnostic_contexts(
+        self, selections: Sequence[tuple[UUID, UUID, UUID, UUID]],
+    ) -> Sequence[dict[str, Any]]:
+        contexts = []
+        for runtime_id, model_id, gateway_id, deployment_id in selections:
+            runtime = self._find(self.runtimes, runtime_id)
+            model = self._find(self.models, model_id)
+            deployment = self.gateway_deployments.get(deployment_id)
+            binding = next((row for row in self.apim_target_route_bindings.values()
+                            if row["logical_model_id"] == model_id
+                            and row["apim_target_id"] == gateway_id), None)
+            scope = binding["deployment_scope"] if binding else None
+            publication = self._find(
+                self.gateway_publications, self.effective_gateway_releases.get(gateway_id),
+            )
+            published = next((row for row in (publication or {}).get("desired_spec", {}).get(
+                "bindings", [],
+            ) if model and row["model"]["model_key"].casefold() == model["model_key"].casefold()
+                and str(row.get("runtime_id")) == str(runtime_id)), None)
+            contexts.append({
+                "runtime_id": runtime_id, "model_id": model_id,
+                "gateway_profile_id": gateway_id, "gateway_deployment_id": deployment_id,
+                "runtime": runtime, "model": model, "model_metadata": model,
+                "provider": self._find(self.providers, runtime["provider_id"]) if runtime else None,
+                "gateway": self._find(self.gateways, gateway_id),
+                "target": self.apim_targets.get(gateway_id), "deployment": deployment,
+                "binding": binding, "published_route": published,
+                "deployment_in_scope": (
+                    scope["mode"] == "all" or deployment_id in scope["deployment_ids"]
+                    if scope else bool(deployment and deployment["kind"] == "managed")
+                ),
+            })
+        return deepcopy(contexts)
+
     def update_runtime_health(
         self, runtime_id: UUID, status: str, message: str, checked_at: datetime
     ) -> None:
@@ -1603,3 +1706,23 @@ class InMemoryPublicationRepositoryMixin:
                 last_checked_at=checked_at,
                 updated_at=checked_at,
             )
+
+    def claim_runtime_diagnostic(
+        self, runtime_id: UUID, marker: str, checked_at: datetime, before: datetime,
+    ) -> bool:
+        runtime = self._find(self.runtimes, runtime_id)
+        if runtime is None or not runtime["enabled"] or (
+            runtime.get("last_checked_at") is not None and runtime["last_checked_at"] > before
+        ):
+            return False
+        self.update_runtime_health(runtime_id, "unknown", marker, checked_at)
+        return True
+
+    def finish_runtime_diagnostic(
+        self, runtime_id: UUID, marker: str, status: str, message: str, checked_at: datetime,
+    ) -> bool:
+        runtime = self._find(self.runtimes, runtime_id)
+        if runtime is None or runtime.get("health_message") != marker:
+            return False
+        self.update_runtime_health(runtime_id, status, message, checked_at)
+        return True

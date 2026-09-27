@@ -15,6 +15,16 @@ export class ApiError extends Error {
 
 export const SESSION_EXPIRED_EVENT = "turnstile:session-expired"
 
+async function responseErrorDetail(response: Response, path: string) {
+  const text = await response.text()
+  if (!text) return path
+  try {
+    const body = JSON.parse(text) as { detail?: unknown }
+    if (typeof body.detail === "string" && body.detail.trim()) return body.detail
+  } catch {}
+  return text
+}
+
 async function applicationSessionExpired() {
   try {
     const profile = await fetch(apiUrl("/api/v1/auth/me"), {
@@ -42,7 +52,7 @@ export const request = async <T,>(
     window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
   }
   if (!response.ok) {
-    throw new ApiError(response.status, `API ${response.status}: ${await response.text() || path}`)
+    throw new ApiError(response.status, `API ${response.status}: ${await responseErrorDetail(response, path)}`)
   }
   if (response.status === 204) return undefined as T
   const contentType = response.headers.get("content-type") ?? ""

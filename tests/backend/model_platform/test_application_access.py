@@ -16,9 +16,11 @@ from tests.backend.model_platform.control_plane_support import (
 from tests.platform.api.api_support import _usage_record
 from turnstile_core.domain.application_access import (
     GatewayApplicationAvatarUpdate,
+    GatewayApplicationBudgetUpdate,
     GatewayApplicationDiscovery,
     GatewayApplicationDiscoveryItem,
     GatewayApplicationSubscriptionCreate,
+    GatewayApplicationSubscriptionKeyRotation,
     GatewayApplicationSubscriptionProvisionSpec,
     UsageApplicationAttribution,
     application_id_for,
@@ -80,7 +82,7 @@ def _discovery(
     )
 
 
-@pytest.mark.parametrize("state", ["current", "unavailable", "legacy"])
+@pytest.mark.parametrize("state", ["current", "unavailable", "prepared", "legacy"])
 def test_application_detail_uses_execution_balance_without_false_legacy_fallback(
     state: str,
 ) -> None:
@@ -93,6 +95,10 @@ def test_application_detail_uses_execution_balance_without_false_legacy_fallback
         "finalized_upper_bound_tokens": 20 if state == "current" else None,
         "available_tokens": 99780 if state == "current" else None,
         "ledger_snapshot_at": now if state == "current" else None,
+        "ledger_read_at": now if state == "current" else None,
+        "ledger_version": 7 if state == "current" else None,
+        "ledger_balance_tokens": -25 if state == "current" else None,
+        "policy_pending": state == "current",
     }))
     service = ApplicationAccessService(
         repository, sync_available=True, read_execution_budget=reader,
@@ -104,10 +110,67 @@ def test_application_detail_uses_execution_balance_without_false_legacy_fallback
     assert detail.budget is not None
     if state == "legacy":
         assert detail.budget.used_tokens == 0
+        assert detail.budget.ledger_source == "snapshot"
+        assert detail.budget.ledger_status == "snapshot"
     else:
         assert detail.budget.used_tokens == 125
         assert detail.budget.available_tokens == (99780 if state == "current" else None)
         assert detail.budget.ledger_snapshot_at == (now if state == "current" else None)
+        assert detail.budget.ledger_source == "execution"
+        assert detail.budget.ledger_status == state
+        assert detail.budget.ledger_read_at == (now if state == "current" else None)
+        assert detail.budget.ledger_version == (7 if state == "current" else None)
+        assert detail.budget.ledger_balance_tokens == (-25 if state == "current" else None)
+        assert detail.budget.policy_pending is (state == "current")
+
+
+@pytest.mark.parametrize("projected", [250, 100, None])
+def test_budget_save_projects_rate_and_returns_actual_readback(projected: int | None) -> None:
+    repository = InMemoryRepository()
+    projector = Mock(side_effect=RuntimeError("transport") if projected is None else None)
+    reader = Mock(return_value=projected)
+    service = ApplicationAccessService(
+        repository, sync_available=True, project_rate_limit=projector, read_rate_limit=reader,
+    )
+    service.sync_discovery(_discovery("unit-tpm", discovered_at=datetime.now(UTC)), "unit-worker")
+    application_id = application_id_for(APIM_ID, "unit-tpm")
+    result = service.update_application_budget(application_id, GatewayApplicationBudgetUpdate(
+        token_limit=100000, tokens_per_minute=250, enforce=True, warning_threshold_percent=80,
+    ), "unit-owner")
+    projector.assert_called_once_with(application_id)
+    reader.assert_called_once_with(application_id)
+    assert result.budget is not None
+    assert result.budget.tokens_per_minute == 250
+    assert result.budget.projected_tokens_per_minute == projected
+    assert result.budget.tpm_sync_status == ("projected" if projected == 250 else "pending")
+
+
+def test_application_keys_resolve_the_stored_target_without_default_fallback() -> None:
+    repository = InMemoryRepository()
+    resolver = Mock()
+    client = resolver.resolve.return_value
+    client.application_subscription_keys.return_value = ("unit-primary", "unit-secondary")
+    service = ApplicationAccessService(
+        repository, sync_available=True, key_management_available=True,
+        key_client_resolver=resolver,
+    )
+    now = datetime.now(UTC)
+    other_target = UUID(int=47)
+    service.sync_discovery(_discovery("unit-key", discovered_at=now).model_copy(
+        update={"gateway_profile_id": other_target},
+    ), "unit-worker")
+    application_id = application_id_for(other_target, "unit-key")
+    subscription_id = application_subscription_id_for(other_target, "unit-key")
+    secret = service.reveal_application_subscription_key(application_id, subscription_id, "primary")
+    assert secret.value == "unit-primary"
+    resolver.resolve.assert_called_once_with(other_target)
+    resolver.reset_mock()
+    service.rotate_application_subscription_key(
+        application_id, subscription_id, "secondary",
+        GatewayApplicationSubscriptionKeyRotation(confirmation="unit-key"),
+    )
+    resolver.resolve.assert_called_once_with(other_target)
+    client.regenerate_application_subscription_key.assert_called_once_with("unit-key", "secondary")
 
 
 def test_owner_subscription_create_normalizes_human_fields() -> None:
@@ -220,11 +283,15 @@ def test_usage_application_attribution_is_immutable_and_drives_ledger() -> None:
     repository.write_token_usage(record, attribution)
     repository.write_token_usage(
         record,
-        attribution.model_copy(update={"application_admission": "confirmed"}),
+        attribution.model_copy(update={
+            "application_admission": "confirmed",
+            "application_name_snapshot": "Renamed Application",
+        }),
     )
 
     stored = repository.usage_application_attributions[record.id]
     assert stored.application_admission == "confirmed"
+    assert stored.application_name_snapshot == application_name
     view = service.applications().items[0]
     assert view.usage.total_tokens == 125
     assert view.budget is not None

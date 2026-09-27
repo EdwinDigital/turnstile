@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -51,11 +52,17 @@ from turnstile_core.domain.control_plane import (
     GatewayRateLimitResilience,
     ModelCreateTarget,
     ModelTarget,
+    PublicationStatus,
     RuntimeTarget,
+    publication_credential_evidence,
+    publication_credential_states,
+    publication_failure,
     publication_materialized_named_values,
     publication_model_id,
+    publication_provisioning_completed,
     publication_retry_requires_credential,
 )
+from turnstile_core.domain.gateway_targets import GatewayServingDeployment
 from turnstile_core.domain.runtime_models import (
     ModelConnectionCreate,
     ModelVendorKey,
@@ -67,6 +74,7 @@ from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
     BackendPoolResource,
 )
+from turnstile_core.integrations.apim_control_plane_contract import CredentialSourceMissingError
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository_publications import PostgreSqlPublicationRepositoryMixin
 from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
@@ -75,6 +83,67 @@ from turnstile_core.services.control_plane import (
     ControlPlaneConflictError,
     ControlPlaneUnavailableError,
 )
+
+
+def test_publication_view_exposes_only_recorded_serving_targets() -> None:
+    repository = InMemoryRepository()
+    publication = GatewayControlPlaneService(repository).publish(
+        external_tenant_foundry_publication(repository), "unit-owner",
+    )
+    assert GatewayPublicationView.from_publication(publication).target_deployments is None
+    deployment = GatewayServingDeployment.model_validate({
+        "deployment_id": str(UUID(int=71)), "native_gateway_id": "unit-edge",
+        "kind": "self_hosted", "endpoint_url": "https://edge.example.test/unit/llm",
+        "release_gate": "required",
+    })
+    binding = publication.desired_spec.bindings[-1].model_copy(update={
+        "serving_deployments": (deployment,),
+    })
+    scoped = publication.model_copy(update={"desired_spec": publication.desired_spec.model_copy(
+        update={"bindings": [*publication.desired_spec.bindings[:-1], binding]},
+    )})
+    view = GatewayPublicationView.from_publication(scoped)
+    assert view.target_deployments == (deployment,)
+    assert view.model_dump(mode="json")["target_deployments"] == [
+        deployment.model_dump(mode="json"),
+    ]
+    assert "unit-secret" not in view.model_dump_json()
+    assert "desired_spec" not in view.model_dump()
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("opaque upstream secret", "publication_failed"),
+    ("The current APIM policy changed after publication was queued", "parent_policy_changed"),
+    ('APIM management failed: {"code":"AuthorizationFailed","status":403}',
+     "publisher_authorization_failed"),
+    ('Publisher permission preflight failed: {"code":"publisher_permissions_unverified"}',
+     "publisher_permissions_unverified"),
+    ('Publisher permission preflight failed: {"code":"publisher_permissions_missing",'
+     '"missing_actions":["Microsoft.ApiManagement/service/apis/write"],'
+     '"request_id":"00000000-0000-4000-8000-000000000123"}', "publisher_permissions_missing"),
+    ('Publisher permission preflight failed: {"code":"publisher_permissions_missing",'
+     '"missing_actions":["opaque upstream secret"]}', "publication_failed"),
+])
+def test_publication_failure_is_structured_and_never_echoes_raw_errors(
+    message: str, expected: str,
+) -> None:
+    repository = InMemoryRepository()
+    publication = GatewayControlPlaneService(repository).publish(
+        external_tenant_foundry_publication(repository), "unit-owner",
+    )
+    assert publication_failure(publication) is None
+    failed = publication.model_copy(update={
+        "status": PublicationStatus.FAILED, "error_message": message,
+    })
+    result = publication_failure(failed, stage=PublicationStatus.VALIDATING)
+    assert result is not None and result.code == expected
+    assert result.stage is PublicationStatus.VALIDATING
+    assert "opaque upstream secret" not in result.model_dump_json()
+    view = GatewayPublicationView.from_publication(failed)
+    assert view.failure is not None and view.failure.code == expected
+    if expected == "publisher_permissions_missing":
+        assert result.request_id == UUID("00000000-0000-4000-8000-000000000123")
+        assert result.missing_actions == ["Microsoft.ApiManagement/service/apis/write"]
 
 
 def test_legacy_publication_hash_omits_only_empty_deployment_fields() -> None:
@@ -1609,7 +1678,7 @@ def test_retry_credential_evidence_controls_the_public_view(evidence: str) -> No
             }
         )
 
-    required = evidence == "none"
+    required = evidence != "revision"
     assert publication_retry_requires_credential(publication) is required
     view = GatewayPublicationView.from_publication(publication)
     assert view.retry_requires_credential is required
@@ -1627,10 +1696,43 @@ def test_retry_credential_evidence_does_not_invent_a_key_for_an_unrelated_resour
         update={"resource_manifest": {"named_values": [None, False, "unrelated-key"]}}
     )
     assert publication_retry_requires_credential(publication) is True
-    assert publication_materialized_named_values(publication) == ["unrelated-key"]
+    assert publication_materialized_named_values(publication) == []
     materialized = publication_materialized_named_values(publication, provisioning_completed=True)
     assert publication.desired_spec.bindings[-1].named_value_name in materialized
     assert publication.resource_manifest["named_values"] == [None, False, "unrelated-key"]
+
+
+def test_retry_credential_evidence_is_bound_and_missing_overrides_old_success() -> None:
+    repository = InMemoryRepository()
+    publication = GatewayControlPlaneService(repository).publish(
+        external_tenant_foundry_publication(repository), "unit-owner",
+    )
+    reference = publication.desired_spec.bindings[-1].named_value_name
+    assert reference is not None
+    observed = publication_credential_evidence(publication, {reference: "present"})
+    present = publication.model_copy(update={
+        "resource_manifest": {"credential_evidence": observed},
+    })
+    assert publication_credential_states(present) == {reference: "present"}
+    assert publication_retry_requires_credential(present) is False
+    for state in ("missing", "unverified"):
+        evidence = publication_credential_evidence(publication, {reference: state})
+        missing = publication.model_copy(update={
+            "apim_revision": "old-candidate",
+            "resource_manifest": {"credential_evidence": evidence, "named_values": [reference]},
+        })
+        assert publication_retry_requires_credential(missing) is True
+    stale = present.model_copy(update={"resource_manifest": {
+        **present.resource_manifest, "credential_generation": "replacement",
+    }})
+    assert publication_credential_states(stale) == {}
+    assert publication_retry_requires_credential(stale) is True
+    assert publication_provisioning_completed([
+        {"from_status": "validating", "to_status": "provisioning"},
+        {"from_status": "failed", "to_status": "queued"},
+    ]) is False
+    with pytest.raises(ValueError, match="unrelated binding"):
+        publication_credential_evidence(publication, {"foreign": "present"})
 
 
 def test_retry_credential_evidence_never_requires_a_key_for_managed_identity() -> None:
@@ -1734,9 +1836,9 @@ def test_retry_reuses_materialized_credentials_and_the_same_publication(
     assert retried.generation == publication.generation
     assert retried.status.value == "queued"
     assert retried.apim_revision is None
-    assert retried.resource_manifest == {
-        "named_values": [publication.desired_spec.bindings[-1].named_value_name]
-    }
+    reference = publication.desired_spec.bindings[-1].named_value_name
+    assert retried.resource_manifest["named_values"] == [reference]
+    assert publication_credential_states(retried) == {reference: "present"}
     assert repository.gateway_publication_credential(publication.id) is None
     assert len(repository.gateway_publications) == 1
     assert len(repository.gateway_publication_outbox) == 1
@@ -1744,6 +1846,50 @@ def test_retry_reuses_materialized_credentials_and_the_same_publication(
     repeated = worker.run_once("retry-worker")
     assert repeated is not None and repeated.status.value == "provisioning"
     assert repository.gateway_publication_credential(publication.id) is None
+
+
+def test_credential_preparation_does_not_clear_secret_after_lease_loss() -> None:
+    repository = InMemoryRepository()
+    cipher = CredentialCipher(Fernet.generate_key())
+    service = GatewayControlPlaneService(repository, cipher)
+    publication = service.publish(external_tenant_foundry_publication(repository), "unit-owner")
+    client = FakeApimClient()
+    worker = GatewayPublicationWorker(repository, client, client.policy, cipher=cipher)
+    worker.run_once("worker")
+    original_ensure = client.ensure_backend
+
+    def lose_lease(backend: Any) -> None:
+        original_ensure(backend)
+        repository.gateway_publication_outbox[0]["lease_expires_at"] = (
+            datetime.now(UTC) - timedelta(seconds=1)
+        )
+
+    client.ensure_backend = lose_lease  # type: ignore[method-assign]
+    worker.run_once("worker")
+    current = repository.get_gateway_publication(publication.id)
+    assert current is not None and current["status"] == "validating"
+    assert repository.gateway_publication_credential(publication.id) is not None
+    assert "credential_evidence" not in current["resource_manifest"]
+
+
+def test_missing_credential_observation_is_preserved_on_worker_failure() -> None:
+    repository = InMemoryRepository()
+    cipher = CredentialCipher(Fernet.generate_key())
+    service = GatewayControlPlaneService(repository, cipher)
+    publication = service.publish(external_tenant_foundry_publication(repository), "unit-owner")
+    client = FakeApimClient()
+    worker = GatewayPublicationWorker(repository, client, client.policy, cipher=cipher)
+    worker.run_once("worker")
+
+    def missing(named_value: Any) -> None:
+        raise CredentialSourceMissingError(named_value.id)
+
+    client.ensure_named_value = missing  # type: ignore[method-assign]
+    failed = worker.run_once("worker")
+    assert failed is not None and failed.status == "failed"
+    reference = publication.desired_spec.bindings[-1].named_value_name
+    assert publication_credential_states(failed) == {reference: "missing"}
+    assert publication_retry_requires_credential(service.publication(publication.id))
 
 
 def test_retry_replacement_key_clears_old_materialization_for_reprovisioning() -> None:
@@ -1787,7 +1933,11 @@ def test_retry_postgresql_preserves_audit_proven_credentials_in_one_requeue() ->
     row["status"] = "failed"
     row["resource_manifest"] = {}
     connection = MagicMock()
-    connection.execute.return_value.fetchone.side_effect = [None, {"exists": 1}, row]
+    connection.execute.return_value.fetchone.side_effect = [None, row]
+    connection.execute.return_value.fetchall.return_value = [
+        {"from_status": "queued", "to_status": "validating"},
+        {"from_status": "validating", "to_status": "provisioning"},
+    ]
 
     PostgreSqlPublicationRepositoryMixin._requeue_gateway_publication(
         connection, row, "owner@example.com", None
@@ -1795,13 +1945,17 @@ def test_retry_postgresql_preserves_audit_proven_credentials_in_one_requeue() ->
 
     calls = connection.execute.call_args_list
     audit = next(
-        call for call in calls if "SELECT 1 FROM gateway_publication_audit" in call.args[0]
+        call for call in calls if "SELECT from_status, to_status" in call.args[0]
     )
     assert audit.args[1] == (publication.id,)
+    assert "ORDER BY created_at, id" in audit.args[0]
     update = next(call for call in calls if "UPDATE gateway_publication SET" in call.args[0])
-    assert update.args[1][0].obj == {
-        "named_values": [publication.desired_spec.bindings[-1].named_value_name]
-    }
+    manifest = update.args[1][0].obj
+    reference = publication.desired_spec.bindings[-1].named_value_name
+    assert manifest["named_values"] == [reference]
+    assert publication_credential_states(publication.model_copy(update={
+        "resource_manifest": manifest,
+    })) == {reference: "present"}
     assert "apim_revision = NULL" in update.args[0]
     assert any("DELETE FROM gateway_publication_secret" in call.args[0] for call in calls)
     assert not any("INSERT INTO gateway_publication (" in call.args[0] for call in calls)

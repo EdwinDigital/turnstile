@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -10,6 +13,7 @@ from pydantic import (
     HttpUrl,
     SecretStr,
     SerializerFunctionWrapHandler,
+    ValidationError,
     model_serializer,
     model_validator,
 )
@@ -712,6 +716,110 @@ def publication_model_id(publication_id: UUID, model_key: str) -> UUID:
     return uuid5(publication_id, model_key)
 
 
+class PublicationCredentialResource(StrictModel):
+    name: str = Field(min_length=1)
+    binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    state: Literal["present", "missing", "unverified"]
+
+
+class PublicationCredentialEvidence(StrictModel):
+    version: Literal[1] = 1
+    publication_id: UUID
+    gateway_profile_id: UUID
+    resources: tuple[PublicationCredentialResource, ...]
+
+    @model_validator(mode="after")
+    def unique_resources(self) -> PublicationCredentialEvidence:
+        if len({resource.name for resource in self.resources}) != len(self.resources):
+            raise ValueError("Credential evidence must contain unique resources")
+        return self
+
+
+def _credential_binding_documents(publication: GatewayPublication) -> dict[str, set[str]]:
+    documents: dict[str, set[str]] = {}
+    for binding in publication.desired_spec.bindings:
+        sources: list[GatewayModelBinding | GatewayBackendPoolMember] = [binding]
+        if binding.backend_pool is not None:
+            sources.extend(binding.backend_pool.members)
+        for source in sources:
+            if source.named_value_name is None:
+                continue
+            secret_id = (
+                source.key_vault_secret_id if isinstance(source, GatewayModelBinding) else None
+            )
+            provider_id = source.provider_id if isinstance(source, GatewayModelBinding) else None
+            documents.setdefault(source.named_value_name, set()).add(json.dumps({
+                "name": source.named_value_name, "auth": source.auth_strategy.value,
+                "key_vault_secret_id": str(secret_id) if secret_id is not None else None,
+                "backend_url": str(source.backend_url or "").rstrip("/"),
+                "runtime_id": str(source.runtime_id or ""), "provider_id": str(provider_id or ""),
+            }, sort_keys=True, separators=(",", ":")))
+    return documents
+
+
+def _credential_binding_digest(publication: GatewayPublication, documents: set[str]) -> str:
+    payload = {"bindings": sorted(documents),
+               "credential_generation": publication.resource_manifest.get("credential_generation")}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def publication_credential_evidence(
+    publication: GatewayPublication,
+    states: Mapping[str, Literal["present", "missing", "unverified"]],
+) -> dict[str, object]:
+    references = _credential_binding_documents(publication)
+    if not set(states).issubset(references):
+        raise ValueError("Credential evidence refers to an unrelated binding")
+    return PublicationCredentialEvidence(
+        publication_id=publication.id, gateway_profile_id=publication.gateway_profile_id,
+        resources=tuple(PublicationCredentialResource(
+            name=name, binding_sha256=_credential_binding_digest(publication, references[name]),
+            state=state,
+        ) for name, state in sorted(states.items())),
+    ).model_dump(mode="json")
+
+
+def publication_credential_states(
+    publication: GatewayPublication,
+) -> dict[str, Literal["present", "missing", "unverified"]] | None:
+    if "credential_evidence" not in publication.resource_manifest:
+        return None
+    try:
+        evidence = PublicationCredentialEvidence.model_validate(
+            publication.resource_manifest["credential_evidence"],
+        )
+    except ValidationError:
+        return {}
+    if (evidence.publication_id != publication.id
+            or evidence.gateway_profile_id != publication.gateway_profile_id):
+        return {}
+    references = _credential_binding_documents(publication)
+    return {resource.name: resource.state for resource in evidence.resources
+            if resource.name in references
+            and resource.binding_sha256 == _credential_binding_digest(
+                publication, references[resource.name],
+            )}
+
+
+def publication_provisioning_completed(audit: Sequence[Mapping[str, object]]) -> bool:
+    completed = False
+    for event in audit:
+        if event.get("to_status") == "queued":
+            completed = False
+        elif event.get("from_status") == "validating" and event.get("to_status") == "provisioning":
+            completed = True
+    return completed
+
+
+def publication_missing_credential_source(publication: GatewayPublication) -> bool:
+    states = publication_credential_states(publication)
+    if states is not None and publication.desired_spec.bindings:
+        reference = publication.desired_spec.bindings[-1].named_value_name
+        return reference is not None and states.get(reference) == "missing"
+    return (publication.status is PublicationStatus.FAILED
+            and publication.error_code == "CredentialSourceMissingError")
+
+
 def publication_materialized_named_values(
     publication: GatewayPublication,
     *,
@@ -730,17 +838,19 @@ def publication_materialized_named_values(
         or binding.named_value_name is None
     ):
         return []
-    raw_names = publication.resource_manifest.get("named_values")
+    states = publication_credential_states(publication)
+    if states is not None:
+        return [name for name, state in states.items() if state == "present"]
+    confirmed = publication.apim_revision is not None or provisioning_completed
+    raw_names = publication.resource_manifest.get("named_values") if confirmed else None
     names = (
         [value for value in raw_names if isinstance(value, str)]
         if isinstance(raw_names, list)
         else []
     )
-    if binding.named_value_name not in names and (
-        publication.apim_revision is not None
-        or provisioning_completed
-        or binding.runtime_config.get("credential_provisioned") is True
-    ):
+    if publication_missing_credential_source(publication):
+        return [reference for reference in names if reference != binding.named_value_name]
+    if binding.named_value_name not in names and confirmed:
         names.append(binding.named_value_name)
     return names
 
@@ -763,9 +873,136 @@ def publication_retry_requires_credential(publication: GatewayPublication) -> bo
     )
 
 
+PUBLICATION_REQUIRED_ACTIONS = (
+    "Microsoft.ApiManagement/service/read",
+    "Microsoft.ApiManagement/service/apis/read",
+    "Microsoft.ApiManagement/service/apis/write",
+    "Microsoft.ApiManagement/service/apis/policies/read",
+    "Microsoft.ApiManagement/service/apis/policies/write",
+    "Microsoft.ApiManagement/service/apis/operations/read",
+    "Microsoft.ApiManagement/service/apis/operations/policies/read",
+    "Microsoft.ApiManagement/service/apis/operations/policies/write",
+    "Microsoft.ApiManagement/service/apis/releases/read",
+    "Microsoft.ApiManagement/service/apis/releases/write",
+    "Microsoft.ApiManagement/service/backends/read",
+    "Microsoft.ApiManagement/service/backends/write",
+    "Microsoft.ApiManagement/service/namedValues/read",
+    "Microsoft.ApiManagement/service/namedValues/write",
+)
+PUBLICATION_RECOVERY_ACTIONS = (
+    "Microsoft.ApiManagement/service/apis/read",
+    "Microsoft.ApiManagement/service/apis/policies/read",
+)
+PUBLICATION_PROBE_ACTIONS = (
+    "Microsoft.ApiManagement/service/subscriptions/read",
+    "Microsoft.ApiManagement/service/subscriptions/listSecrets/action",
+)
+PUBLICATION_OAUTH_ACTIONS = tuple(
+    f"Microsoft.ApiManagement/service/{resource}/{action}"
+    for resource in (
+        "authorizationProviders", "authorizationProviders/authorizations",
+        "authorizationProviders/authorizations/accessPolicies",
+    ) for action in ("read", "write")
+)
+
+
+class GatewayPublicationFailure(StrictModel):
+    code: Literal[
+        "publisher_permissions_missing", "publisher_permissions_unverified",
+        "publisher_authorization_failed", "parent_policy_changed", "credential_source_missing",
+        "apim_infrastructure_upgrade_required", "publication_failed",
+    ]
+    message: str
+    stage: PublicationStatus | None = None
+    request_id: UUID | None = None
+    http_status: Literal[401, 403] | None = None
+    missing_actions: list[str] = Field(default_factory=list)
+
+
+def publication_failure(
+    publication: GatewayPublication, *, stage: PublicationStatus | None = None,
+) -> GatewayPublicationFailure | None:
+    if publication.status is not PublicationStatus.FAILED:
+        return None
+    failure = GatewayPublicationFailure(
+        code="publication_failed", message="Publication failed; review its diagnostic reference.",
+        stage=stage,
+    )
+    if publication.error_code == "InfrastructureUpgradeRequiredError":
+        return failure.model_copy(update={
+            "code": "apim_infrastructure_upgrade_required",
+            "message": (
+                "The gateway infrastructure must be upgraded before publishing image models. "
+                "Ask the deployment administrator to run the APIM infrastructure upgrade."
+            ),
+        })
+    if publication_missing_credential_source(publication):
+        return failure.model_copy(update={
+            "code": "credential_source_missing",
+            "message": "The APIM credential resource is missing; provide the API key to retry.",
+        })
+    message = publication.error_message or ""
+    if not isinstance(message, str) or len(message) > 8192:
+        return failure
+    if message == "The current APIM policy changed after publication was queued":
+        return failure.model_copy(update={
+            "code": "parent_policy_changed",
+            "message": (
+                "The APIM parent policy differs from the queued snapshot; review before retrying."
+            ),
+        })
+    preflight = message.startswith("Publisher permission preflight failed: ")
+    management = message.startswith("APIM management failed: ")
+    if not (preflight or management):
+        return failure
+    try:
+        details = json.loads(message.split(": ", 1)[1])
+    except (ValueError, TypeError):
+        return failure
+    if not isinstance(details, dict):
+        return failure
+    request_id = None
+    try:
+        if isinstance(details.get("request_id"), str):
+            request_id = UUID(details["request_id"])
+    except ValueError:
+        pass
+    if preflight:
+        allowed = {*PUBLICATION_REQUIRED_ACTIONS, *PUBLICATION_PROBE_ACTIONS,
+                   *PUBLICATION_OAUTH_ACTIONS}
+        supplied = details.get("missing_actions", [])
+        if not isinstance(supplied, list) or any(
+            not isinstance(action, str) or action not in allowed for action in supplied
+        ):
+            return failure
+        missing = sorted(set(supplied))
+        code = details.get("code")
+        if code == "publisher_permissions_missing" and missing:
+            return failure.model_copy(update={
+                "code": code, "request_id": request_id, "missing_actions": missing,
+                "message": "The Publisher identity lacks required APIM publication permissions.",
+            })
+        if code == "publisher_permissions_unverified" and not missing:
+            return failure.model_copy(update={
+                "code": code, "request_id": request_id,
+                "message": (
+                    "The Publisher identity's APIM publication permissions could not be verified."
+                ),
+            })
+    if (management and details.get("code") == "AuthorizationFailed"
+            and type(details.get("status")) is int and details["status"] in {401, 403}):
+        return failure.model_copy(update={
+            "code": "publisher_authorization_failed", "request_id": request_id,
+            "http_status": details["status"],
+            "message": "Azure rejected the Publisher identity's APIM management request.",
+        })
+    return failure
+
+
 class GatewayPublicationView(StrictModel):
     id: UUID
     gateway_profile_id: UUID
+    target_deployments: tuple[GatewayServingDeployment, ...] | None = None
     generation: int
     publication_kind: PublicationKind
     model_key: str
@@ -773,6 +1010,7 @@ class GatewayPublicationView(StrictModel):
     status: PublicationStatus
     error_code: str | None
     error_message: str | None
+    failure: GatewayPublicationFailure | None = None
     authorization: (
         GatewayAuthorizationRequirement | DatabricksAuthorizationRequirement
         | DatabricksOAuthAuthorizationRequirement | None
@@ -840,9 +1078,16 @@ class GatewayPublicationView(StrictModel):
             publication.status is PublicationStatus.FAILED
             and publication.error_code == "InfrastructureUpgradeRequiredError"
         )
+        failure = publication_failure(publication)
         return cls(
             id=publication.id,
             gateway_profile_id=publication.gateway_profile_id,
+            target_deployments=(
+                publication.desired_spec.bindings[-1].serving_deployments or None
+                if publication.publication_kind in {
+                    PublicationKind.MODEL_ADD, PublicationKind.CREDENTIAL_ROTATION,
+                } else None
+            ),
             generation=publication.generation,
             publication_kind=publication.publication_kind,
             model_key=model_key,
@@ -858,10 +1103,9 @@ class GatewayPublicationView(StrictModel):
                 else None
             ),
             error_message=(
-                "The gateway infrastructure must be upgraded before publishing image models. "
-                "Ask the deployment administrator to run the APIM infrastructure upgrade."
-                if infrastructure_upgrade_required else None
+                failure.message if failure and failure.code != "publication_failed" else None
             ),
+            failure=failure,
             authorization=authorization,
             retry_can_authorize_image_probes=can_authorize_probes,
             retry_requires_credential=publication_retry_requires_credential(publication),
@@ -968,6 +1212,7 @@ class GatewayReleaseSummary(StrictModel):
     model_key: str
     display_name: str
     status: PublicationStatus
+    failure: GatewayPublicationFailure | None = None
     apim_revision: str | None
     policy_sha256: str | None
     desired_spec_sha256: str

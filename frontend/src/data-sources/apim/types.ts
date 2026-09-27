@@ -1,3 +1,50 @@
+export type BudgetDelegationReadiness = {
+  gateway_profile_id: string
+  native_gateway_id: string
+  revision: string
+  checked_at: string
+  ready: boolean
+  protocol_mode: "prepared" | "paused" | "active"
+  verification: { application_id: string; model_ids: string[] } | null
+  checks: Array<{
+    case: "valid_identity" | "wrong_audience" | "missing_person" | "current_fenced" | "candidate_fenced"
+    expected_status: number
+    actual_status: number | null
+    native_gateway_id: string | null
+    expected_error_code: string | null
+    actual_error_code: string | null
+  }>
+}
+
+export type BudgetLedgerSummary = {
+  scope: { scope_type: "person" | "application"; scope_id: string; period_start: string }
+  epoch: string
+  version: number
+  token_limit: number
+  enforce: boolean
+  enabled: boolean
+  confirmed_tokens: number
+  active_reserved_tokens: number
+  upper_bound_tokens: number
+  updated_at: string
+}
+
+export type BudgetExecutionVerification = {
+  gateway_profile_id: string
+  native_gateway_id: string
+  revision: string
+  checked_at: string
+  request_id: string
+  actual_status: number
+  invocation: ModelInvocationResponse | null
+  scopes: Array<{
+    before: BudgetLedgerSummary
+    after: BudgetLedgerSummary | null
+    attempt: { state: string; reserved_tokens: number; actual_tokens: number | null } | null
+  }>
+  settled: boolean
+}
+
 export type MetricTotals = {
   et: number
   total_tokens: number
@@ -100,7 +147,15 @@ export type TrendApiResponse = {
 
 export type UsageRequestSummary = {
   request_id: string
-  correlation_id: string
+  correlation_id: string | null
+  trace_id?: string | null
+  usage_available?: boolean
+  platform_outcome?: "dispatched" | "succeeded" | "failed" | null
+  gateway_status_code?: number | null
+  upstream_request_id?: string | null
+  apim_target_id?: string | null
+  gateway_deployment_id?: string | null
+  native_gateway_id?: string | null
   timestamp: string
   organization_id: string
   organization_name: string
@@ -120,7 +175,7 @@ export type UsageRequestSummary = {
   completion_tokens: number
   total_tokens: number
   latency_ms: number
-  status_code: number
+  status_code: number | null
   estimated_cost: number
   cost_available?: boolean | null
   error_message: string | null
@@ -144,7 +199,7 @@ export type UsageRequestDetail = UsageRequestSummary & {
   ingest_error: string | null
   reconciled_at: string | null
   estimated: boolean
-  ingest_source: "eventhub" | "backfill" | "gateway" | "policy"
+  ingest_source: "eventhub" | "backfill" | "gateway" | "policy" | "platform"
   budget_admission: string | null
   model_admission: string | null
 }
@@ -693,6 +748,7 @@ export type ModelRuntime = {
   health_status: "unknown" | "available" | "unavailable"
   health_message: string | null
   last_checked_at: string | null
+  diagnostic?: RuntimeHealth | null
   created_at: string
   updated_at: string
 }
@@ -847,6 +903,8 @@ export type PriceSyncResponse = {
 }
 
 export type ModelRegistry = {
+  explicit_gateway_selection_supported?: boolean
+  runtime_diagnostics_supported?: boolean
   gateway_name_edit_supported?: boolean
   apim_target_topology_available?: boolean
   self_hosted_gateway_enabled?: boolean
@@ -926,9 +984,25 @@ export type GatewayPublicationCreate = {
   }
 }
 
+export type GatewayPublicationFailure = {
+  code: "publisher_permissions_missing" | "publisher_permissions_unverified" | "publisher_authorization_failed" | "parent_policy_changed" | "credential_source_missing" | "apim_infrastructure_upgrade_required" | "publication_failed"
+  message: string
+  stage: GatewayPublicationStatus | null
+  request_id: string | null
+  http_status: 401 | 403 | null
+  missing_actions: string[]
+}
+
 export type GatewayPublication = {
   id: string
   gateway_profile_id: string
+  target_deployments?: Array<{
+    deployment_id: string
+    native_gateway_id: string
+    kind: "managed" | "self_hosted"
+    endpoint_url: string
+    release_gate: "required" | "optional"
+  }> | null
   generation: number
   publication_kind: "model_add" | "model_remove" | "credential_rotation" | "route_reconcile"
   model_key: string
@@ -936,6 +1010,7 @@ export type GatewayPublication = {
   status: GatewayPublicationStatus
   error_code: string | null
   error_message: string | null
+  failure?: GatewayPublicationFailure | null
   authorization: {
     kind: "azure_rbac"
     principal_id: string
@@ -1122,6 +1197,7 @@ export type GatewayReleaseSummary = {
   model_key: string
   display_name: string
   status: GatewayPublicationStatus
+  failure?: GatewayPublicationFailure | null
   apim_revision: string | null
   policy_sha256: string | null
   desired_spec_sha256: string
@@ -1269,6 +1345,14 @@ export type GatewayApplicationBudget = {
   oldest_reservation_at?: string | null
   available_tokens?: number | null
   ledger_snapshot_at?: string | null
+  ledger_source?: "snapshot" | "execution"
+  ledger_status?: "snapshot" | "current" | "unavailable" | "prepared"
+  ledger_read_at?: string | null
+  ledger_version?: number | null
+  ledger_balance_tokens?: number | null
+  policy_pending?: boolean
+  projected_tokens_per_minute?: number | null
+  tpm_sync_status?: "projected" | "pending" | "unavailable"
 }
 
 export type GatewayApplicationUserUsage = {
@@ -1399,16 +1483,63 @@ export type GatewayApplicationSubscriptionProvisionAccepted = GatewayReleaseOper
   primary_key: string
 }
 
+export type RuntimeCheckSelection = { model_id: string; gateway_deployment_id: string }
+
+export type RuntimeCheckOption = RuntimeCheckSelection & {
+  model_key: string
+  model_name: string
+  gateway_profile_id: string
+  gateway_name: string
+  native_gateway_id: string
+}
+
+export type RuntimeDiagnosticAccess = {
+  status: "ready" | "missing_permissions" | "unverified"
+  reason: "permission_missing" | "permission_unverified" | "identity_unavailable" | "tenant_mismatch" | "probe_subscription_unconfigured" | null
+  scope: string
+  api_principal_id: string | null
+  tenant_id: string
+  subscription_id: string
+  resource_group: string
+  apim_name: string
+  probe_subscription_id: string
+  required_actions: string[]
+  missing_actions: string[]
+  checked_at: string
+}
+
+export type RuntimeCheckPlan = {
+  runtime_id: string
+  options: RuntimeCheckOption[]
+  unavailable_reason: string | null
+  access: RuntimeDiagnosticAccess | null
+  max_output_tokens: 64
+  request_limit: 1
+}
+
 export type RuntimeHealth = {
   runtime_id: string
   status: "unknown" | "available" | "unavailable"
   message: string
   checked_at: string
+  check_kind?: "legacy" | "model_inference"
+  outcome?: "passed" | "blocked" | "configuration_error" | "upstream_error" | "inconclusive" | null
+  selection?: RuntimeCheckOption | null
+  request_id?: string | null
+  correlation_id?: string | null
+  http_status?: number | null
+  latency_ms?: number | null
+  error_code?: string | null
+  valid_until?: string | null
+  configuration_fingerprint?: string | null
+  configuration_status?: "current" | "changed" | "unverified"
+  configuration_checked_at?: string | null
 }
 
 export type ModelInvocationResponse = {
   request_id: string
-  correlation_id: string
+  correlation_id: string | null
+  upstream_request_id?: string | null
   content: string
   provider: string
   runtime: string

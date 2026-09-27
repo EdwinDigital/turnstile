@@ -103,6 +103,7 @@ def _service(
     actually offered and told, which is where the interesting regressions live.
     """
     repository = InMemoryRepository()
+    repository.gateways[0]["base_url"] = "https://gateway.example.test/turnstile/llm"
     repository.write_token_usage(_usage())
     repository.write_token_usage(
         _usage(

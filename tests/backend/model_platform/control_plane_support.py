@@ -176,6 +176,13 @@ class FakeApimClient:
         self.probe_counts: dict[str, int] = {}
         self.fail_probe_at: dict[str, int] = {}
         self.last_gc_retained_ids: set[str] = set()
+        self.permission_checks: list[bool] = []
+
+    def verify_publication_permissions(
+        self, compiled: object, *, recovery_only: bool = False,
+    ) -> None:
+        del compiled
+        self.permission_checks.append(recovery_only)
 
     def ensure_backend(self, backend: BackendResource) -> None:
         self.backends[backend.id] = backend

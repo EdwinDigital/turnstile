@@ -1,7 +1,8 @@
-import { Save, X } from "lucide-react"
+import { LoaderCircle, Plug, Save, TriangleAlert, X } from "lucide-react"
 import { useState } from "react"
 
 import type {
+  ApimTargetTopologyList,
   BrandKey,
   ModelConnectionCreate,
   ModelConnectionUpdate,
@@ -9,6 +10,7 @@ import type {
   ModelRuntime,
   ModelVendorKey,
 } from "../../data-sources/apim/types"
+import { apimGatewayProfiles } from "../../lib/gateway-topology"
 import {
   GatewayBrandLogo,
   ProviderBrandLogo,
@@ -103,6 +105,9 @@ function isBedrockRuntimeUrl(value: string) {
 
 export function ConnectionDialog({
   registry,
+  topology = null,
+  topologyLoading = false,
+  topologyError = null,
   runtime,
   busy,
   error,
@@ -112,6 +117,9 @@ export function ConnectionDialog({
   onAdopt,
 }: {
   registry: ModelRegistry
+  topology?: ApimTargetTopologyList | null
+  topologyLoading?: boolean
+  topologyError?: string | null
   runtime?: ModelRuntime
   busy: boolean
   error: string | null
@@ -149,7 +157,7 @@ export function ConnectionDialog({
       }))),
     ...(runtime ? [] : [{
       value: "template:openai_compatible",
-      name: "OpenAI-compatible",
+        name: "OpenAI-compatible API",
       brandKey: "generic" as const,
       openaiCompatible: true,
     }]),
@@ -159,21 +167,15 @@ export function ConnectionDialog({
     : undefined
   const gateways = runtime
     ? runtimeGateway ? [runtimeGateway] : []
-    : registry.gateways.filter(
-        (gateway) => gateway.enabled && gateway.implementation === "apim",
-      )
+    : apimGatewayProfiles(registry.gateways, topology, registry.apim_target_topology_available === true)
   const [providerValue, setProviderValue] = useState(
     runtime?.provider_id
       ?? providerOptions.find((provider) => provider.brandKey === "microsoft_foundry")?.value
       ?? providerOptions[0]?.value
       ?? "",
   )
-  const [gatewayId, setGatewayId] = useState(
-    runtime?.gateway_profile_id
-      ?? gateways.find((gateway) => gateway.is_default)?.id
-      ?? gateways[0]?.id
-      ?? "",
-  )
+  const [selectedGatewayId, setGatewayId] = useState<string | null>(runtime?.gateway_profile_id ?? null)
+  const gatewayId = selectedGatewayId ?? gateways.find(gateway => gateway.is_default)?.id ?? gateways[0]?.id ?? ""
   const [foundryAuthMode, setFoundryAuthMode] = useState<FoundryAuthMode>(
     runtime?.config.auth_strategy === "named_value_api_key"
       ? "api_key"
@@ -211,7 +213,6 @@ export function ConnectionDialog({
       && typeof oauth.client_id === "string" ? oauth.client_id : ""
   })
   const [enabled, setEnabled] = useState(runtime?.enabled ?? true)
-  const [isDefault, setIsDefault] = useState(runtime?.is_default ?? false)
   // Kept as a string so an empty box stays empty rather than becoming a zero discount.
   const [discountPercent, setDiscountPercent] = useState(
     runtime?.price_discount_percent?.toString() ?? "",
@@ -220,6 +221,8 @@ export function ConnectionDialog({
 
   const provider = providerOptions.find((item) => item.value === providerValue)
   const gateway = gateways.find((item) => item.id === gatewayId)
+  const topologyBlocked = !editing && registry.apim_target_topology_available === true
+    && (topologyLoading || Boolean(topologyError) || !topology)
   const openaiCompatible = provider?.openaiCompatible === true
   const foundry = provider?.brandKey === "microsoft_foundry"
     || runtime?.runtime_kind === "foundry"
@@ -256,11 +259,12 @@ export function ConnectionDialog({
       onUpdate({
         name: connectionName.trim(),
         enabled,
-        is_default: isDefault,
+        is_default: enabled && runtime.is_default,
         price_discount_percent: discount ? Number(discount) : null,
       })
       return
     }
+    if (topologyBlocked) return setFormError(topologyError ?? "加载资源拓扑")
     if (!provider) return setFormError("请选择提供方。")
     const templateBrand = openaiCompatible ? "openai_compatible" : provider.brandKey === "microsoft_foundry"
       || provider.brandKey === "amazon_bedrock"
@@ -322,9 +326,10 @@ export function ConnectionDialog({
         <button type="button" className="registry-editor-close" onClick={onClose} disabled={busy} aria-label="关闭"><X size={16} /></button>
 
         <div className="registry-editor-body connection-dialog-body">
+          {topologyBlocked && <div className={`simple-target-state${topologyError ? " error" : ""}`} role={topologyError ? "alert" : "status"}>{topologyError ? <TriangleAlert size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{topologyError ?? "加载资源拓扑"}</span></div>}
           <div className="form-grid">
             <div className="registry-field">
-              <span className="registry-field-label-row"><span className="registry-field-label">提供方</span>{editing && <FieldHelp>提供方、APIM 网关、Endpoint 和认证方式共同定义已发布路由。要更换连接身份，请添加新连接并迁移模型。</FieldHelp>}</span>
+              <span className="registry-field-label-row"><span className="registry-field-label">{editing ? "API 服务商" : "接入类型"}</span>{editing && <FieldHelp>提供方、APIM 网关、Endpoint 和认证方式共同定义已发布路由。要更换连接身份，请添加新连接并迁移模型。</FieldHelp>}</span>
               <Select value={providerValue} onValueChange={(value) => {
                 if (!value) return
                 setProviderValue(value)
@@ -332,18 +337,18 @@ export function ConnectionDialog({
                 setModelVendor(modelVendorFromMetadata(selected?.config, selected?.name ?? ""))
                 setFormError(null)
               }} disabled={busy || editing}>
-                <SelectTrigger className="registry-select-trigger" aria-label="提供方">
-                  <SelectValue>{provider ? <span className="registry-option"><ProviderBrandLogo brand={providerOptionBrand(provider)} size={15} /><span>{provider.name}</span></span> : "选择提供方"}</SelectValue>
+                <SelectTrigger className="registry-select-trigger" aria-label={editing ? "API 服务商" : "接入类型"}>
+                  <SelectValue>{provider ? <span className="registry-option">{provider.openaiCompatible ? <Plug size={15} /> : <ProviderBrandLogo brand={providerOptionBrand(provider)} size={15} />}<span>{provider.name}</span></span> : "选择接入类型"}</SelectValue>
                 </SelectTrigger>
                 <SelectContent align="start" alignItemWithTrigger={false}>
-                  {providerOptions.map((item) => <SelectItem key={item.value} value={item.value}><span className="registry-option"><ProviderBrandLogo brand={providerOptionBrand(item)} size={15} /><span>{item.name}</span></span></SelectItem>)}
+                  {providerOptions.map((item) => <SelectItem key={item.value} value={item.value}><span className="registry-option">{item.openaiCompatible ? <Plug size={15} /> : <ProviderBrandLogo brand={providerOptionBrand(item)} size={15} />}<span>{item.name}</span></span></SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
             <div className="registry-field">
-              <span className="registry-field-label">APIM 网关</span>
-              {editing && !runtimeGateway ? <Input value="本地 CLI / 直连" disabled /> : <Select value={gatewayId} onValueChange={(value) => { if (value) { setGatewayId(value); setFormError(null) } }} disabled={busy || editing}>
-                <SelectTrigger className="registry-select-trigger" aria-label="APIM 网关">
+              <span className="registry-field-label">APIM 实例</span>
+              {editing && !runtimeGateway ? <Input value="本地 CLI / 直连" disabled /> : <Select value={gatewayId} items={gateways.map(item => ({ value: item.id, label: item.name }))} onValueChange={(value) => { if (value) { setGatewayId(value); setFormError(null) } }} disabled={busy || editing || topologyBlocked}>
+                <SelectTrigger className="registry-select-trigger" aria-label="APIM 实例">
                   <SelectValue>{gateway ? <span className="registry-option"><GatewayBrandLogo brand={gatewayBrandFromIdentity(`${gateway.name} ${gateway.implementation}`)} size={15} /><span>{gateway.name}</span></span> : "选择 APIM 网关"}</SelectValue>
                 </SelectTrigger>
                 <SelectContent align="start" alignItemWithTrigger={false}>
@@ -379,20 +384,20 @@ export function ConnectionDialog({
             <div className="registry-field"><span className="registry-field-label-row"><label className="registry-field-label" htmlFor="bedrock-runtime-url">Bedrock Runtime URL</label><FieldHelp>首次为此连接添加模型时，再提供一次性 API Key。</FieldHelp></span><Input id="bedrock-runtime-url" type="url" value={bedrockRuntimeUrl} onChange={(event) => setBedrockRuntimeUrl(event.target.value)} disabled={busy || editing} placeholder="https://bedrock-runtime.ap-southeast-2.amazonaws.com" /></div>
           </>}
 
-          {openaiCompatible && <>
-            <div className="registry-field"><span className="registry-field-label">API 服务商</span>
+          {openaiCompatible && <div className="openai-compatible-identity-grid">
+            <div className="registry-field"><span className="registry-field-label-row"><span className="registry-field-label">API 服务商</span><FieldHelp>选择提供此 API 的服务商，而不是模型原厂。此选项用于连接身份和品牌展示，不会改变 API 协议。</FieldHelp></span>
               <ModelVendorSelect value={modelVendor} onChange={setModelVendor} disabled={busy || editing} />
             </div>
             <div className="registry-field"><span className="registry-field-label-row">
-              <label className="registry-field-label" htmlFor="openai-base-url">Base URL</label>
-              <FieldHelp>首次为此连接添加模型时，再提供一次性 API Key。</FieldHelp>
+              <label className="registry-field-label" htmlFor="openai-base-url">API Base URL</label>
+              <FieldHelp>填写提供方的 HTTPS API Base URL。首次为此连接发布模型时，再提供一次性 API Key。</FieldHelp>
             </span><Input id="openai-base-url" type="url" value={openaiBaseUrl}
               onChange={(event) => setOpenaiBaseUrl(event.target.value)} disabled={busy || editing}
               placeholder="https://api.example.com/v1" />
             </div>
-          </>}
+          </div>}
 
-          {editing && !adopting && <div className="form-switches"><div className="registry-checkbox-field"><Checkbox id="connection-enabled" checked={enabled} onCheckedChange={(checked) => { const next = checked === true; setEnabled(next); if (!next) setIsDefault(false) }} disabled={busy} /><label htmlFor="connection-enabled">启用</label></div><div className="registry-checkbox-field"><Checkbox id="connection-default" checked={isDefault} onCheckedChange={(checked) => { const next = checked === true; setIsDefault(next); if (next) setEnabled(true) }} disabled={busy} /><label htmlFor="connection-default">设为默认</label></div></div>}
+          {editing && !adopting && <div className="form-switches"><div className="registry-checkbox-field"><Checkbox id="connection-enabled" checked={enabled} onCheckedChange={(checked) => setEnabled(checked === true)} disabled={busy} /><label htmlFor="connection-enabled">启用</label></div></div>}
           {editing && !adopting && <div className="registry-field">
             <div className="registry-field-label-row">
               <label htmlFor="connection-discount" className="registry-field-label">默认折扣</label>
@@ -413,7 +418,7 @@ export function ConnectionDialog({
         <DialogFooter className="registry-editor-footer">
           {legacyDatabricks && !adopting && onAdopt && <Button type="button" variant="outline" className="connection-adopt-action" onClick={() => setAdopting(true)} disabled={busy || registry.databricks_connections_supported !== true}>接管连接</Button>}
           <Button type="button" variant="outline" onClick={onClose} disabled={busy}>取消</Button>
-          <Button type="button" onClick={submit} disabled={busy || databricksUnavailable || !providerOptions.length || (!editing && !gateways.length)}>{editing && !adopting && <Save size={14} />}{busy ? "正在保存" : adopting ? "验证并接管" : editing ? "保存更改" : "添加连接"}</Button>
+          <Button type="button" onClick={submit} disabled={busy || topologyBlocked || databricksUnavailable || !providerOptions.length || (!editing && !gateway)}>{editing && !adopting && <Save size={14} />}{busy ? "正在保存" : adopting ? "验证并接管" : editing ? "保存更改" : "添加连接"}</Button>
         </DialogFooter>
       </div>
     </DialogContent>

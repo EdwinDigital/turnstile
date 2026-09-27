@@ -23,7 +23,10 @@ from ..domain.models import (
     OptimizationEventCreate,
     ReconciledUsage,
     TokenUsageRecord,
+    UsageRequestDetail,
+    UsageRequestSummary,
 )
+from ..domain.runtime_models import PlatformInvocationAttempt, PlatformInvocationCompletion
 from .in_memory_applications import InMemoryApplicationRepositoryMixin
 from .in_memory_assistant import InMemoryAssistantRepositoryMixin
 from .in_memory_billable_requests import InMemoryBillableRequestRepositoryMixin
@@ -91,7 +94,22 @@ class InMemoryRepository(
     InMemoryGatewayTargetRepositoryMixin,
     QueryRepository,
 ):
+    def begin_platform_invocation(self, attempt: PlatformInvocationAttempt) -> None:
+        if attempt.request_id in self.invocation_attempts:
+            raise ValueError("Platform invocation attempt already exists")
+        self.invocation_attempts[attempt.request_id] = attempt.model_copy(deep=True)
+
+    def finish_platform_invocation(self, completion: PlatformInvocationCompletion) -> None:
+        if completion.request_id not in self.invocation_attempts:
+            raise ValueError("Platform invocation attempt does not exist")
+        previous = self.invocation_completions.get(completion.request_id)
+        if previous is not None and previous != completion:
+            raise ValueError("Platform invocation completion is immutable")
+        self.invocation_completions[completion.request_id] = completion.model_copy(deep=True)
+
     def __init__(self) -> None:
+        self.invocation_attempts: dict[str, PlatformInvocationAttempt] = {}
+        self.invocation_completions: dict[str, PlatformInvocationCompletion] = {}
         self.apim_targets: dict[UUID, dict[str, Any]] = {}
         self.gateway_deployments: dict[UUID, dict[str, Any]] = {}
         self.apim_target_route_bindings: dict[UUID, dict[str, Any]] = {}
@@ -848,11 +866,89 @@ class InMemoryRepository(
             key=lambda item: (-int(item["total_tokens"]), str(item["name"])),
         )[:limit]
 
+    def _platform_usage(self, attempt: PlatformInvocationAttempt) -> TokenUsageRecord | None:
+        completion = self.invocation_completions.get(attempt.request_id)
+        if completion is None or completion.gateway_correlation_id is None:
+            return None
+        candidates = []
+        for record in self.usage_records:
+            if (record.request_id != attempt.request_id or record.usage_domain != "apim"
+                    or record.correlation_id != completion.gateway_correlation_id
+                    or record.user_id != attempt.metadata.user_id
+                    or record.model_id != str(attempt.model_id)
+                    or record.runtime != attempt.runtime_name):
+                continue
+            application = self.usage_application_attributions.get(record.id)
+            if attempt.application_id is not None and (
+                application is None or application.application_id != attempt.application_id
+            ):
+                continue
+            candidates.append(record)
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _unmatched_invocation(self, attempt: PlatformInvocationAttempt) -> dict[str, Any]:
+        completion = self.invocation_completions.get(attempt.request_id)
+        metadata = attempt.metadata
+        return UsageRequestDetail(
+            request_id=attempt.request_id, trace_id="platform:" + attempt.request_id,
+            correlation_id=completion.gateway_correlation_id if completion else None,
+            timestamp=attempt.started_at,
+            organization_id=metadata.organization_id, organization_name=metadata.organization,
+            department_id=metadata.department_id, department_name=metadata.department,
+            project_id=metadata.project_id, project_name=metadata.project,
+            agent_id=metadata.agent_id, agent_name=metadata.agent,
+            user_id=metadata.user_id, user_name=metadata.user,
+            model_id=str(attempt.model_id), model_name=attempt.model_name,
+            request_source=metadata.request_source, runtime=attempt.runtime_name,
+            apim_target_id=attempt.apim_target_id,
+            gateway_deployment_id=attempt.gateway_deployment_id,
+            native_gateway_id=attempt.native_gateway_id,
+            prompt_tokens=0, completion_tokens=0, total_tokens=0, cached_tokens=0,
+            latency_ms=completion.latency_ms if completion else 0,
+            status_code=completion.status_code if completion else None,
+            estimated_cost=0, cost_available=False, usage_available=False,
+            platform_outcome=completion.outcome if completion else "dispatched",
+            upstream_request_id=completion.upstream_request_id if completion else None,
+            error_message="Platform invocation " + str(completion.failure_kind)
+            if completion and completion.outcome == "failed" else None,
+            provider=attempt.provider_name, workflow=metadata.workflow,
+            run_id=metadata.run_id, turn_index=metadata.turn_index,
+            estimated=True, ingest_source="platform", ingest_error="platform_usage_unavailable",
+        ).model_dump()
+
     @staticmethod
-    def _request_summary(record: TokenUsageRecord) -> dict[str, Any]:
+    def _matches_trace(row: Mapping[str, Any], filters: UsageFilters) -> bool:
+        for field, value in vars(filters).items():
+            if value is None or value == ():
+                continue
+            if isinstance(value, tuple):
+                if row[field] not in value:
+                    return False
+            elif row[field] != value:
+                return False
+        return True
+
+    def _request_summary(self, record: TokenUsageRecord) -> dict[str, Any]:
+        attempt = self.invocation_attempts.get(record.request_id)
+        if attempt is not None:
+            matched = self._platform_usage(attempt)
+            if matched is None or matched.id != record.id:
+                attempt = None
+        completion = self.invocation_completions.get(record.request_id) if attempt else None
+        available = not record.estimated or (
+            record.input_tokens + record.cached_tokens + record.output_tokens > 0
+        )
         return {
             "request_id": record.request_id,
             "correlation_id": record.correlation_id,
+            "trace_id": "platform:" + attempt.request_id if attempt else record.id,
+            "usage_available": available,
+            "platform_outcome": completion.outcome if completion else None,
+            "gateway_status_code": record.status_code,
+            "upstream_request_id": completion.upstream_request_id if completion else None,
+            "apim_target_id": attempt.apim_target_id if attempt else None,
+            "gateway_deployment_id": attempt.gateway_deployment_id if attempt else None,
+            "native_gateway_id": attempt.native_gateway_id if attempt else None,
             "timestamp": record.ts,
             "organization_id": record.organization_id,
             "organization_name": record.organization,
@@ -871,32 +967,41 @@ class InMemoryRepository(
             "prompt_tokens": record.input_tokens,
             "completion_tokens": record.output_tokens,
             "total_tokens": record.input_tokens + record.cached_tokens + record.output_tokens,
-            "latency_ms": record.latency_ms,
-            "status_code": record.status_code,
+            "latency_ms": completion.latency_ms if completion else record.latency_ms,
+            "status_code": completion.status_code if completion else record.status_code,
             "estimated_cost": record.estimated_cost,
-            "cost_available": record.estimated_cost > 0 or (
+            "cost_available": available and (record.estimated_cost > 0 or (
                 record.input_price_per_million is not None
                 and record.output_price_per_million is not None
-            ),
-            "error_message": record.error_message,
+            )),
+            "error_message": "Platform invocation " + str(completion.failure_kind)
+            if completion and completion.outcome == "failed" else record.error_message,
         }
 
     def list_usage_requests(
         self, from_: datetime, to: datetime, filters: UsageFilters, limit: int
     ) -> list[dict[str, Any]]:
-        records = sorted(
-            self._usage_between(from_, to, filters),
-            key=lambda record: record.ts,
-            reverse=True,
-        )
-        return [self._request_summary(record) for record in records[:limit]]
+        summaries = [self._request_summary(record)
+                     for record in self._usage_between(from_, to, UsageFilters())]
+        for attempt in self.invocation_attempts.values():
+            if from_ <= attempt.started_at < to and self._platform_usage(attempt) is None:
+                detail = self._unmatched_invocation(attempt)
+                summaries.append({key: value for key, value in detail.items()
+                                  if key in UsageRequestSummary.model_fields})
+        return sorted((row for row in summaries if self._matches_trace(row, filters)),
+                      key=lambda row: row["timestamp"], reverse=True)[:limit]
 
     def get_usage_request(self, request_id: str) -> dict[str, Any] | None:
+        platform = self.invocation_attempts.get(request_id.removeprefix("platform:"))
+        matched = self._platform_usage(platform) if platform else None
+        if platform is not None and matched is None:
+            return self._unmatched_invocation(platform)
         records = [
             record
             for record in self.usage_records
             if record.usage_domain == "apim"
-            and (record.correlation_id == request_id or record.request_id == request_id)
+              and (record.correlation_id == request_id or record.request_id == request_id
+                  or record.id == request_id or (matched is not None and matched.id == record.id))
         ]
         exact_matches = [record for record in records if record.correlation_id == request_id]
         record = max(

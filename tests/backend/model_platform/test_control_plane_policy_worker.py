@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import UUID
 from xml.etree import ElementTree
 
@@ -43,7 +43,10 @@ from turnstile_core.integrations.apim_control_plane import (
     PolicyCompilationError,
     RetryablePublicationError,
 )
-from turnstile_core.integrations.apim_control_plane_contract import ImageProbeJournal
+from turnstile_core.integrations.apim_control_plane_contract import (
+    ImageProbeJournal,
+    PublisherPermissionError,
+)
 from turnstile_core.integrations.apim_policy_components import (
     parse_policy,
     serialize_policy,
@@ -616,6 +619,80 @@ def test_worker_promotes_only_after_dependencies_policies_and_probes() -> None:
     assert call_names.index("api-policy") < call_names.index("probe")
     assert call_names.index("probe") < call_names.index("promote")
     assert repository.effective_gateway_releases[APIM_ID] == publication.id
+
+def test_publication_permission_failure_precedes_all_resource_writes() -> None:
+    repository = InMemoryRepository()
+    GatewayControlPlaneService(repository).publish(bedrock_publication(), "unit-owner")
+    client = FakeApimClient()
+    worker = GatewayPublicationWorker(repository, client, client.policy)
+    failure = PublisherPermissionError(
+        missing_actions=["Microsoft.ApiManagement/service/backends/write"],
+    )
+    with patch.object(client, "verify_publication_permissions", side_effect=failure):
+        failed = worker.run_once("worker")
+    assert failed is not None and failed.status == "failed"
+    assert failed.error_code == "PublisherPermissionError"
+    assert client.calls == []
+
+
+def test_publication_retry_limit_is_checked_before_resolving_credentials() -> None:
+    repository = InMemoryRepository()
+    GatewayControlPlaneService(repository).publish(bedrock_publication(), "unit-owner")
+    resolver = Mock()
+    worker = GatewayPublicationWorker(repository, resolver, FakeApimClient().policy)
+    failed = worker.run_once("worker", max_attempts=0)
+    assert failed is not None and failed.error_code == "max_attempts_exceeded"
+    resolver.resolve.assert_not_called()
+
+
+@pytest.mark.parametrize("unknown_current", [False, True])
+def test_promoted_publication_recovers_without_repeating_writes_or_probes(
+    unknown_current: bool,
+) -> None:
+    repository = InMemoryRepository()
+    GatewayControlPlaneService(repository).publish(bedrock_publication(), "unit-owner")
+    client = FakeApimClient()
+    worker = GatewayPublicationWorker(repository, client, client.policy)
+    for _ in range(5):
+        worker.run_once("worker")
+
+    def interrupted(revision: str, release_name: str) -> None:
+        client.current = None if unknown_current else revision
+        raise RuntimeError("Promotion response lost")
+
+    with patch.object(client, "promote_revision", side_effect=interrupted):
+        pending = worker.run_once("worker")
+    assert pending is not None and pending.status == "promoting"
+    client.current = pending.apim_revision
+    before = list(client.calls)
+    with patch.object(worker._client_resolver, "resolve", wraps=worker._client_resolver.resolve
+                      ) as resolve:
+        active = worker.run_once("worker", max_attempts=0)
+    assert active is not None and active.status == "active"
+    assert resolve.call_args.kwargs["include_probe_credentials"] is False
+    assert client.permission_checks[-1] is True
+    assert client.calls == before
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_parent_snapshot_accepts_xml_roundtrip_but_rejects_drift_before_writes(
+    changed: bool,
+) -> None:
+    repository = InMemoryRepository()
+    GatewayControlPlaneService(repository).publish(bedrock_publication(), "unit-owner")
+    client = FakeApimClient()
+    worker = GatewayPublicationWorker(repository, client, client.policy)
+    for _ in range(3):
+        worker.run_once("worker")
+    client.policy = serialize_policy(parse_policy(client.policy))
+    if changed:
+        client.policy = client.policy.replace("</policies>", "<!--changed--></policies>")
+    client.calls.clear()
+    result = worker.run_once("worker")
+    assert result is not None and result.status == ("failed" if changed else "verifying")
+    if changed:
+        assert client.calls == [("current-policy", "1")]
+
 
 def test_foundry_publication_waits_for_rbac_and_resumes_the_same_candidate() -> None:
     class AuthorizationClient(FakeApimClient):

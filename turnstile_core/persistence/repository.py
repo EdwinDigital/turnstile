@@ -22,6 +22,7 @@ from ..domain.models import (
     ReconciledUsage,
     TokenUsageRecord,
 )
+from ..domain.runtime_models import PlatformInvocationAttempt, PlatformInvocationCompletion
 from .repository_applications import PostgreSqlApplicationRepositoryMixin
 from .repository_assistant import PostgreSqlAssistantRepositoryMixin
 from .repository_billable_requests import PostgreSqlBillableRequestRepositoryMixin
@@ -74,6 +75,26 @@ class PostgreSqlOpsDbProxy(
     PostgreSqlGatewayTargetRepositoryMixin,
     QueryRepository,
 ):
+    def begin_platform_invocation(self, attempt: PlatformInvocationAttempt) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "INSERT INTO platform_invocation_attempt (request_id, started_at, snapshot) "
+                "VALUES (%s, %s, %s)",
+                (attempt.request_id, attempt.started_at, Jsonb(attempt.model_dump(mode="json"))),
+            )
+
+    def finish_platform_invocation(self, completion: PlatformInvocationCompletion) -> None:
+        document = Jsonb(completion.model_dump(mode="json"))
+        with self._connection() as connection:
+            row = connection.execute(
+                "UPDATE platform_invocation_attempt SET completion = %s "
+                "WHERE request_id = %s AND (completion IS NULL OR completion = %s) "
+                "RETURNING request_id",
+                (document, completion.request_id, document),
+            ).fetchone()
+        if row is None:
+            raise ValueError("Platform invocation completion is missing or immutable")
+
     def gateway_application_usage_activity(
         self,
         application_id: UUID,
@@ -1038,6 +1059,9 @@ class PostgreSqlOpsDbProxy(
             rows = connection.execute(
                 f"""SELECT
                         usage.request_id, usage.correlation_id,
+                        usage.trace_id, usage.usage_available, usage.platform_outcome,
+                        usage.gateway_status_code, usage.upstream_request_id,
+                        usage.apim_target_id, usage.gateway_deployment_id, usage.native_gateway_id,
                         usage.ts AS timestamp,
                         usage.organization_id,
                         usage.organization AS organization_name,
@@ -1054,11 +1078,11 @@ class PostgreSqlOpsDbProxy(
                             + usage.output_tokens)::BIGINT AS total_tokens,
                         usage.latency_ms, usage.status_code,
                         usage.estimated_cost::DOUBLE PRECISION,
-                        (usage.estimated_cost > 0
+                        (usage.usage_available AND (usage.estimated_cost > 0
                          OR (usage.input_price_per_million IS NOT NULL
-                             AND usage.output_price_per_million IS NOT NULL)) AS cost_available,
+                             AND usage.output_price_per_million IS NOT NULL))) AS cost_available,
                         usage.error_message
-                    FROM token_usage usage
+                    FROM invocation_request_trace usage
                     WHERE usage.ts >= %s AND usage.ts < %s{filter_sql}
                         AND usage.usage_domain = 'apim'
                     ORDER BY usage.ts DESC LIMIT %s""",
@@ -1071,6 +1095,9 @@ class PostgreSqlOpsDbProxy(
             row = connection.execute(
                 """SELECT
                         usage.request_id, usage.correlation_id,
+                        usage.trace_id, usage.usage_available, usage.platform_outcome,
+                        usage.gateway_status_code, usage.upstream_request_id,
+                        usage.apim_target_id, usage.gateway_deployment_id, usage.native_gateway_id,
                         usage.ts AS timestamp,
                         usage.organization_id,
                         usage.organization AS organization_name,
@@ -1087,9 +1114,9 @@ class PostgreSqlOpsDbProxy(
                             + usage.output_tokens)::BIGINT AS total_tokens,
                         usage.latency_ms, usage.status_code,
                         usage.estimated_cost::DOUBLE PRECISION,
-                        (usage.estimated_cost > 0
+                            (usage.usage_available AND (usage.estimated_cost > 0
                          OR (usage.input_price_per_million IS NOT NULL
-                             AND usage.output_price_per_million IS NOT NULL)) AS cost_available,
+                                AND usage.output_price_per_million IS NOT NULL))) AS cost_available,
                         usage.error_message, usage.provider, usage.workflow,
                         usage.run_id, usage.turn_index, usage.cached_tokens,
                         usage.cache_write_tokens, usage.estimated,
@@ -1099,13 +1126,15 @@ class PostgreSqlOpsDbProxy(
                         usage.ingest_source, usage.ingest_error,
                         usage.reconciled_at, usage.budget_admission,
                         usage.model_admission
-                    FROM token_usage usage
-                    WHERE (usage.correlation_id = %s OR usage.request_id = %s)
+                    FROM invocation_request_trace usage
+                    WHERE (usage.correlation_id = %s OR usage.request_id = %s
+                        OR usage.trace_id = %s OR usage.id = %s)
                         AND usage.usage_domain = 'apim'
-                    ORDER BY CASE WHEN usage.correlation_id = %s THEN 0 ELSE 1 END,
+                    ORDER BY CASE WHEN usage.trace_id = %s THEN 0
+                        WHEN usage.correlation_id = %s THEN 1 ELSE 2 END,
                         usage.ts DESC, usage.id DESC
                     LIMIT 1""",
-                (request_id, request_id, request_id),
+                (request_id, request_id, request_id, request_id, request_id, request_id),
             ).fetchone()
         return dict(row) if row is not None else None
 

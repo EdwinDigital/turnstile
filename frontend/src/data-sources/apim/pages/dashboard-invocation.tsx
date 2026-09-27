@@ -11,6 +11,8 @@ import {
 } from "../../../components/ui/select"
 import { useAuth } from "../../../providers/auth-provider"
 import { ButtonGroup } from "../../../components/ui/button-group"
+import { Input } from "../../../components/ui/input"
+import { gatewayInvocationChoices, resolveInvocationModel } from "../../../lib/gateway-topology"
 import { dataSource } from "../api"
 import { finopsQueries, invalidateFinOps } from "../queries"
 import type { EnterpriseEntityCatalog, ImageGenerationOptions, ImageInvocationResponse, ModelInvocationResponse } from "../types"
@@ -69,6 +71,22 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
   }, [sessionUser?.email, userId, users]);
   const [invocationTarget, setInvocationTarget] = useState(DEFAULT_MODEL_OPTION);
   const [imageMode, setImageMode] = useState(false);
+  const [gatewaySelection, setGatewaySelection] = useState<{ targetId: string | null; deploymentId: string | null }>({ targetId: null, deploymentId: null });
+  const selectedDirectModelId = invocationTarget.startsWith(MODEL_TARGET_PREFIX)
+    ? invocationTarget.slice(MODEL_TARGET_PREFIX.length) : "";
+  const explicitGatewayAvailable = registry.data?.explicit_gateway_selection_supported === true;
+  const topology = useQuery({ ...finopsQueries.apimTargets(), enabled: explicitGatewayAvailable && Boolean(selectedDirectModelId) });
+  const invocationGateways = registry.data && selectedDirectModelId
+    ? gatewayInvocationChoices(registry.data.gateways, topology.data ?? null, selectedDirectModelId)
+      .filter(choice => choice.kind === "managed" || registry.data?.self_hosted_gateway_enabled === true)
+    : [];
+  const selectedGateway = invocationGateways.find(choice => choice.targetId === gatewaySelection.targetId && choice.deploymentId === gatewaySelection.deploymentId);
+  const explicitGateway = gatewaySelection.targetId !== null;
+  const observedGatewayStream = topology.data?.items.some(item => item.target.gateway_profile_id === gatewaySelection.targetId
+    && item.target.capabilities.response_observer === "supported") === true;
+  const gatewayReady = !explicitGateway || (explicitGatewayAvailable && !topology.isLoading && !topology.error && Boolean(selectedGateway?.selectable));
+  const invocationModel = resolveInvocationModel(registry.data?.models ?? [], invocationTarget === DEFAULT_MODEL_OPTION ? null : selectedDirectModelId, imageMode);
+  const selectedModelUnavailable = Boolean(selectedDirectModelId) && !invocationModel;
   const [imageOptions, setImageOptions] = useState<ImageGenerationOptions>({});
   const [imageResult, setImageResult] = useState<ImageInvocationResponse | null>(null);
   const imageProfile = imageMode && invocationTarget.startsWith(MODEL_TARGET_PREFIX)
@@ -77,6 +95,9 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
   const [prompt, setPrompt] = useState(
     "Return one short recommendation for reducing model cost.",
   );
+  const [outputLimit, setOutputLimit] = useState(String(INVOCATION_MAX_OUTPUT_TOKENS));
+  const maxOutputTokens = Number(outputLimit);
+  const validOutputLimit = Number.isSafeInteger(maxOutputTokens) && maxOutputTokens >= 1 && maxOutputTokens <= 1_000_000;
   const [result, setResult] = useState<(ModelInvocationResponse & { requested_max_output_tokens?: number }) | null>(null);
   const [isInvoking, setIsInvoking] = useState(false);
   const [invokeError, setInvokeError] = useState<string | null>(null);
@@ -105,13 +126,8 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
     );
   };
   const invoke = async () => {
-    if (!registry.data) return;
-    const selectedModelId = invocationTarget.startsWith(MODEL_TARGET_PREFIX)
-      ? invocationTarget.slice(MODEL_TARGET_PREFIX.length)
-      : "";
-    const candidates = registry.data.models.filter(item => item.enabled && item.capabilities.includes("image_generation") === imageMode);
-    const model = candidates.find(item => item.id === selectedModelId)
-      ?? (imageMode ? undefined : candidates.find(item => item.is_default) ?? candidates[0]);
+    if (!registry.data || !gatewayReady || isInvoking || (!imageMode && !validOutputLimit)) return;
+    const model = invocationModel;
     if (!model) return;
     if (imageMode && (registry.data.image_generation_supported !== true
       || registry.data.image_configuration_schema_version !== 4 || !imageProfile)) return;
@@ -130,8 +146,9 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
     setImageResult(null);
     try {
       const invocation = {
-        runtime_id: model.runtime_id,
+        runtime_id: explicitGateway ? undefined : model.runtime_id,
         model_id: model.id,
+        ...(explicitGateway ? { gateway_profile_id: gatewaySelection.targetId, gateway_deployment_id: gatewaySelection.deploymentId } : {}),
         metadata: {
           organization_id: entities.organizations[0].id,
           organization: entities.organizations[0].name,
@@ -158,22 +175,24 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
           turn_index: 1,
         },
         messages: [{ role: "user", content: prompt }],
-        max_output_tokens: INVOCATION_MAX_OUTPUT_TOKENS,
-        stream: true,
+        max_output_tokens: maxOutputTokens,
+        stream: !explicitGateway || observedGatewayStream,
       };
       if (imageMode) {
         const response = await dataSource.generateImage({
-          ...imageOptions, model_id: model.id, runtime_id: model.runtime_id,
+          ...imageOptions, model_id: model.id, runtime_id: explicitGateway ? undefined : model.runtime_id,
+          ...(explicitGateway ? { gateway_profile_id: gatewaySelection.targetId, gateway_deployment_id: gatewaySelection.deploymentId } : {}),
           metadata: invocation.metadata, prompt, n: 1, stream: false,
         });
         setImageResult(response);
       } else {
         const response = await dataSource.invokeModel(invocation);
-        setResult({ ...response, requested_max_output_tokens: INVOCATION_MAX_OUTPUT_TOKENS });
+        setResult({ ...response, requested_max_output_tokens: maxOutputTokens });
       }
       void invalidateFinOps(queryClient);
     } catch (error) {
       setInvokeError(queryError(error));
+      void invalidateFinOps(queryClient);
     } finally {
       setIsInvoking(false);
     }
@@ -197,12 +216,14 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
   const imageAvailable = registry.data?.image_generation_supported === true
     && registry.data.image_configuration_schema_version === 4;
   const canInvoke = !isInvoking && Boolean(prompt.trim() && userId && projectId && agentId)
+    && gatewayReady && Boolean(invocationModel) && (imageMode || validOutputLimit)
     && (!imageMode || (imageAvailable && Boolean(selectedModel && imageProfile)));
   const selectMode = (images: boolean) => {
     if (isInvoking || imageMode === images) return;
     setImageMode(images);
     setImageOptions({});
     setInvocationTarget(DEFAULT_MODEL_OPTION);
+    setGatewaySelection({ targetId: null, deploymentId: null });
     setResult(null);
     setImageResult(null);
     setInvokeError(null);
@@ -251,15 +272,16 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
               disabled={isInvoking}
               onValueChange={(next) => {
                 setInvocationTarget(next ?? DEFAULT_MODEL_OPTION);
+                setGatewaySelection({ targetId: null, deploymentId: null });
                 setImageOptions({});
                 setImageResult(null);
                 setResult(null);
                 setInvokeError(null);
               }}
             >
-              <SelectTrigger aria-label="调用目标" title={selectedModel?.display_name ?? (imageMode ? "选择图片模型" : "默认可用模型")}>
+              <SelectTrigger aria-label="调用目标" title={selectedModelUnavailable ? "所选模型不可用" : selectedModel?.display_name ?? (imageMode ? "选择图片模型" : "默认可用模型")}>
                 <SelectValue>
-                  {selectedModel?.display_name ?? (imageMode ? "选择图片模型" : "默认可用模型")}
+                  {selectedModelUnavailable ? "所选模型不可用" : selectedModel?.display_name ?? (imageMode ? "选择图片模型" : "默认可用模型")}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent align="start" alignItemWithTrigger={false}>
@@ -273,9 +295,39 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
                 ))}
               </SelectContent>
             </Select>
+            {selectedModelUnavailable && <div className="invoke-error" role="alert">所选模型不可用</div>}
           </div>
+          {explicitGatewayAvailable && selectedDirectModelId && <>
+            <div className="invoke-select">
+              <span>APIM 实例</span>
+              <Select value={gatewaySelection.targetId ?? DEFAULT_MODEL_OPTION} disabled={isInvoking || topology.isLoading || Boolean(topology.error)} onValueChange={value => {
+                const targetId = value && value !== DEFAULT_MODEL_OPTION ? value : null;
+                const first = invocationGateways.find(choice => choice.targetId === targetId && choice.selectable);
+                setGatewaySelection({ targetId, deploymentId: first?.deploymentId ?? null });
+                setInvokeError(null);
+              }}>
+                <SelectTrigger aria-label="APIM 实例"><SelectValue>{explicitGateway ? registry.data?.gateways.find(item => item.id === gatewaySelection.targetId)?.name ?? "选择 APIM 实例" : "默认路由"}</SelectValue></SelectTrigger>
+                <SelectContent align="start" alignItemWithTrigger={false}>
+                  <SelectItem value={DEFAULT_MODEL_OPTION}>默认路由</SelectItem>
+                  {registry.data?.gateways.filter(target => invocationGateways.some(choice => choice.targetId === target.id)).map(target => <SelectItem value={target.id} key={target.id}>{target.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            {explicitGateway && <div className="invoke-select">
+              <span>网关</span>
+              <Select value={gatewaySelection.deploymentId} disabled={isInvoking || topology.isLoading || Boolean(topology.error)} onValueChange={value => setGatewaySelection(current => ({ ...current, deploymentId: value }))}>
+                <SelectTrigger aria-label="网关"><SelectValue>{selectedGateway?.name ?? "选择网关"}</SelectValue></SelectTrigger>
+                <SelectContent align="start" alignItemWithTrigger={false}>
+                  {invocationGateways.filter(choice => choice.targetId === gatewaySelection.targetId).map(choice => <SelectItem key={choice.value} value={choice.deploymentId!} disabled={!choice.selectable} title={choice.reason ?? choice.endpoint ?? undefined}>{choice.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>}
+            {topology.error && <div className="invoke-error" role="alert">{queryError(topology.error)}</div>}
+            {explicitGateway && !topology.isLoading && !gatewayReady && <div className="invoke-error" role="alert">请选择可用的网关。</div>}
+          </>}
           {imageMode && imageProfile && <ImageOptions value={imageOptions} onChange={setImageOptions} disabled={isInvoking} />}
           {imageMode && registry.data?.image_configuration_schema_version !== 4 && <div className="invoke-error" role="alert">后端尚未支持图像参数透传</div>}
+          {!imageMode && <label className="invoke-select"><span>最大输出 Tokens</span><Input type="number" aria-label="最大输出 Tokens" min={1} max={1_000_000} step={1} value={outputLimit} disabled={isInvoking} aria-invalid={!validOutputLimit} onChange={event => setOutputLimit(event.target.value)} /></label>}
           <div className="invoke-prompt">
             <span>Prompt</span>
             <div className="invoke-composer">
@@ -362,8 +414,9 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
               </div>
               <div>
                 <dt>Correlation ID</dt>
-                <dd>{result.correlation_id}</dd>
+                <dd>{result.correlation_id ?? "未知"}</dd>
               </div>
+              {result.upstream_request_id && <div><dt>Upstream Request ID</dt><dd data-no-localize>{result.upstream_request_id}</dd></div>}
             </dl>
             <div className="invoke-result-content">
               <span>响应内容</span>

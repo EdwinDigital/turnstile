@@ -1075,7 +1075,7 @@ function GovernanceSignalDialog({ signal, rule, requests, onClose, onOpenRequest
 }) {
   const scopedRequests = signalScopeRequests(rule, requests)
   const linkedRequest = signal?.request_id ? requests.find((request) => request.request_id === signal.request_id) : undefined
-  const failedRequests = scopedRequests.filter((request) => request.status_code >= 400).length
+  const failedRequests = scopedRequests.filter(requestTraceFailed).length
   return <Dialog open={signal != null} onOpenChange={(open) => { if (!open) onClose() }}>
     {signal && <DialogContent className="registry-editor-dialog governance-signal-dialog" finalFocus={false}>
       <div className="registry-editor">
@@ -1125,6 +1125,15 @@ function GovernanceSignalDialog({ signal, rule, requests, onClose, onOpenRequest
   </Dialog>
 }
 
+export function requestTraceId(request: UsageRequestSummary): string {
+  return request.trace_id ?? request.correlation_id ?? request.request_id;
+}
+
+export function requestTraceFailed(request: UsageRequestSummary): boolean {
+  return request.platform_outcome === "failed"
+    || (request.status_code != null && request.status_code >= 400);
+}
+
 function RequestTrace({
   filters,
   models,
@@ -1142,8 +1151,8 @@ function RequestTrace({
   const overview = useQuery(finopsQueries.executiveOverview(filters))
   const volumeTrend = useQuery(finopsQueries.trends(filters, "none", "day"))
   const detail = useQuery(finopsQueries.requestDetail(selected ?? ""))
-  const firstRequestId = query.data?.[0]?.correlation_id ?? null
-  const selectedCorrelationId = detail.data?.correlation_id ?? selected
+  const firstRequestId = query.data?.[0] ? requestTraceId(query.data[0]) : null
+  const selectedTraceId = detail.data ? requestTraceId(detail.data) : selected
   useEffect(() => {
     if (!selected && firstRequestId) setSelected(firstRequestId)
   }, [firstRequestId, selected])
@@ -1166,18 +1175,20 @@ function RequestTrace({
   const attemptPositions = new Map<string, { index: number; total: number }>();
   for (const attempts of attemptsByRequest.values()) {
     attempts.sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)
-      || left.correlation_id.localeCompare(right.correlation_id));
+      || requestTraceId(left).localeCompare(requestTraceId(right)));
     attempts.forEach((item, index) => {
-      attemptPositions.set(item.correlation_id, { index: index + 1, total: attempts.length });
+      attemptPositions.set(requestTraceId(item), { index: index + 1, total: attempts.length });
     });
   }
   const normalizedSearch = searchText.trim().toLocaleLowerCase();
   const visibleRows = requestRows.filter((item) => {
     const matchesStatus = statusFilter === "all"
-      || (statusFilter === "success" ? item.status_code < 400 : item.status_code >= 400);
+      || (item.status_code != null && (statusFilter === "success" ? !requestTraceFailed(item) : requestTraceFailed(item)));
     const matchesSearch = !normalizedSearch || [
       item.request_id,
       item.correlation_id,
+      item.trace_id,
+      item.upstream_request_id,
       item.agent_name,
       item.model_name,
       item.user_name,
@@ -1244,12 +1255,12 @@ function RequestTrace({
           </div>
           {visibleRows.map((item) => (
             <TraceRow
-              key={item.correlation_id}
+              key={requestTraceId(item)}
               item={item}
-              active={selectedCorrelationId === item.correlation_id}
-              onClick={() => setSelected(item.correlation_id)}
+              active={selectedTraceId === requestTraceId(item)}
+              onClick={() => setSelected(requestTraceId(item))}
               costAvailable={estimateRequestCost(item, models) !== null}
-              attempt={attemptPositions.get(item.correlation_id)}
+              attempt={attemptPositions.get(requestTraceId(item))}
             />
           ))}
           {!visibleRows.length && <div className="trace-no-results">没有符合条件的请求</div>}
@@ -1354,9 +1365,8 @@ function RequestTraceDetail({
     ];
   // Gateway-log reconciliation measures input/output but cannot measure streamed cache usage.
   // Keep those known buckets visible without presenting the legacy numeric cache zero as fact.
-  const inputOutputMeasured = !request.estimated
-    || Boolean(request.reconciled_at)
-    || request.status_code >= 400;
+  const inputOutputMeasured = request.usage_available
+    ?? (!request.estimated || Boolean(request.reconciled_at));
   const cacheUsageUnmeasured = request.ingest_error === "stream_cache_usage_unavailable";
   const state = usageState(!inputOutputMeasured, request.timestamp);
   const usagePlaceholder = state === "pending" ? "待对账" : "不可用";
@@ -1376,13 +1386,17 @@ function RequestTraceDetail({
   const modelWarning = modelAdmissionWarnings[request.model_admission ?? ""];
   return <div className="trace-detail-content">
     <div className="trace-detail-hero">
-      <span className={request.status_code >= 400 ? "failed" : "success"}>{request.status_code}</span>
+      <span className={request.status_code == null ? "" : requestTraceFailed(request) ? "failed" : "success"}>{request.status_code ?? "未知"}</span>
       <div><b>{request.model_name}</b><small>{new Date(request.timestamp).toLocaleString(getIntlLocale())}</small></div>
       <strong>{formatLatency(request.latency_ms)}</strong>
     </div>
     {errorMessage && <div className="trace-error"><CircleAlert size={15} /><div><b>{request.ingest_source === "policy" ? "策略拒绝" : "请求失败"}</b><span>{errorMessage}</span></div></div>}
     {admissionWarning && <div className="trace-error" data-tone={admissionWarning.tone}><CircleAlert size={15} /><div><b>{admissionWarning.title}</b><span>{admissionWarning.detail}</span></div></div>}
     {modelWarning && <div className="trace-error" data-tone={modelWarning.tone}><CircleAlert size={15} /><div><b>{modelWarning.title}</b><span>{modelWarning.detail}</span></div></div>}
+    {request.platform_outcome && <TraceFacts title="调用结果" facts={[
+      ["Turnstile", request.platform_outcome === "failed" ? "失败" : request.platform_outcome === "succeeded" ? "成功" : "未知"],
+      ["网关", request.gateway_status_code == null ? "未知" : String(request.gateway_status_code)],
+    ]} />}
     <section className="trace-detail-section">
       <h3>处理链路</h3>
       <div className="trace-path">
@@ -1415,6 +1429,7 @@ function RequestTraceDetail({
     <TraceFacts title="追踪标识" mono facts={[
       ["Request ID", request.request_id],
       ["Correlation ID", request.correlation_id],
+      ["Upstream Request ID", request.upstream_request_id],
       ["Run ID", request.run_id],
       ["Turn", String(request.turn_index)],
     ]} />
@@ -1454,7 +1469,7 @@ export function RequestCostCalculation({ request }: { request: UsageRequestDetai
   </div>;
 }
 
-function TraceFacts({ title, facts, mono = false }: { title: string; facts: Array<[string, string]>; mono?: boolean }) {
+function TraceFacts({ title, facts, mono = false }: { title: string; facts: Array<[string, string | null | undefined]>; mono?: boolean }) {
   return <section className="trace-detail-section">
     <h3>{title}</h3>
     <dl className={`trace-facts ${mono ? "mono" : ""}`}>
@@ -1463,7 +1478,7 @@ function TraceFacts({ title, facts, mono = false }: { title: string; facts: Arra
   </section>
 }
 
-function TraceRow({
+export function TraceRow({
   item,
   active,
   onClick,
@@ -1476,18 +1491,16 @@ function TraceRow({
   costAvailable: boolean;
   attempt: { index: number; total: number } | undefined;
 }) {
-  // The list contract carries no `estimated` flag, but a successful call never truly consumes zero
-  // tokens: those zeros identify a row that is still waiting for reconciliation.
-  const state = usageState(item.status_code < 400 && item.total_tokens === 0, item.timestamp);
+  const state = usageState(!(item.usage_available ?? item.total_tokens > 0), item.timestamp);
   const placeholder = state === "pending" ? "待对账" : "不可用";
   return (
     <button className={`trace-row ${active ? "active" : ""}`} onClick={onClick}>
-      <span className={`trace-row-status ${item.status_code >= 400 ? "failed" : "success"}`}>
-        {item.status_code}
+      <span className={`trace-row-status ${item.status_code == null ? "" : requestTraceFailed(item) ? "failed" : "success"}`}>
+        {item.status_code ?? "未知"}
       </span>
       <div>
         <b>{item.model_name}</b>
-        <code title={`Correlation ID: ${item.correlation_id}`}>{attempt && attempt.total > 1 ? `#${attempt.index}/${attempt.total} · ${item.request_id}` : item.request_id}</code>
+        <code title={`Correlation ID: ${item.correlation_id ?? "未知"}`}>{attempt && attempt.total > 1 ? `#${attempt.index}/${attempt.total} · ${item.request_id}` : item.request_id}</code>
       </div>
       <small>{state === "measured" ? `${compact.format(item.total_tokens)} tokens` : placeholder}</small>
       <strong>

@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from typing import Literal
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, JsonValue, field_validator
+from pydantic import ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from .image_profiles import (
     IMAGE_RESPONSE_SAFETY_BYTES,
@@ -55,7 +55,9 @@ class ImageGenerationOptions(ResolvedImageOptions):
     def resolve(self, value: object) -> ResolvedImageOptions:
         validate_image_profile(value)
         return ResolvedImageOptions.model_validate(
-            self.model_dump(exclude={"metadata", "model_id", "runtime_id"}, exclude_unset=True)
+            self.model_dump(exclude={
+                "metadata", "model_id", "runtime_id", "gateway_profile_id", "gateway_deployment_id",
+            }, exclude_unset=True)
         )
 
 
@@ -63,6 +65,14 @@ class ImageInvocationRequest(ImageGenerationOptions):
     metadata: InvocationMetadata
     model_id: UUID
     runtime_id: UUID | None = None
+    gateway_profile_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_gateway_selection(self) -> ImageInvocationRequest:
+        if (self.gateway_profile_id is None) != (self.gateway_deployment_id is None):
+            raise ValueError("APIM instance and Gateway must be selected together")
+        return self
 
     @field_validator("metadata")
     @classmethod

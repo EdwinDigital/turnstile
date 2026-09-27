@@ -1,4 +1,218 @@
 schemas:
+  BudgetDelegationCheck:
+    type: object
+    additionalProperties: false
+    required: [case, expected_status, actual_status]
+    properties:
+      case: {type: string, enum: [valid_identity, wrong_audience, missing_person, current_fenced, candidate_fenced]}
+      expected_status: {type: integer}
+      actual_status: {type: [integer, 'null']}
+      native_gateway_id: {type: [string, 'null'], default: null}
+      expected_error_code: {type: [string, 'null'], default: null}
+      actual_error_code: {type: [string, 'null'], default: null}
+  BudgetExecutionVerificationOptions:
+    type: object
+    additionalProperties: false
+    required: [application_id, model_ids]
+    properties:
+      application_id: {type: string, format: uuid}
+      model_ids: {type: array, items: {type: string, format: uuid}}
+  BudgetDelegationReadiness:
+    type: object
+    additionalProperties: false
+    required: [gateway_profile_id, native_gateway_id, revision, checked_at, ready, checks]
+    properties:
+      gateway_profile_id: {type: string, format: uuid}
+      native_gateway_id: {type: string}
+      revision: {type: string}
+      checked_at: {type: string, format: date-time}
+      ready: {type: boolean}
+      checks: {type: array, items: {$ref: ../../openapi.yaml#/components/schemas/BudgetDelegationCheck}}
+      protocol_mode: {type: string, enum: [prepared, paused, active], default: prepared}
+      verification:
+        anyOf:
+        - {$ref: ../../openapi.yaml#/components/schemas/BudgetExecutionVerificationOptions}
+        - {type: 'null'}
+        default: null
+  BudgetExecutionVerificationRequest:
+    type: object
+    additionalProperties: false
+    required: [application_id, model_id]
+    properties:
+      application_id: {type: string, format: uuid}
+      model_id: {type: string, format: uuid}
+  BudgetExecutionScopeReadback:
+    type: object
+    additionalProperties: false
+    required: [before, after, attempt]
+    properties:
+      before: {$ref: ../../openapi.yaml#/components/schemas/LedgerSummary}
+      after:
+        anyOf:
+        - {$ref: ../../openapi.yaml#/components/schemas/LedgerSummary}
+        - {type: 'null'}
+      attempt:
+        anyOf:
+        - {$ref: ../../openapi.yaml#/components/schemas/LedgerAttempt}
+        - {type: 'null'}
+  BudgetExecutionVerification:
+    type: object
+    additionalProperties: false
+    required: [gateway_profile_id, native_gateway_id, revision, checked_at, request_id, actual_status, invocation, scopes, settled]
+    properties:
+      gateway_profile_id: {type: string, format: uuid}
+      native_gateway_id: {type: string}
+      revision: {type: string}
+      checked_at: {type: string, format: date-time}
+      request_id: {type: string}
+      actual_status: {type: integer}
+      invocation:
+        anyOf:
+        - {$ref: ../../model-gateway.openapi.yaml#/components/schemas/ModelInvocationResponse}
+        - {type: 'null'}
+      scopes: {type: array, items: {$ref: ../../openapi.yaml#/components/schemas/BudgetExecutionScopeReadback}}
+      settled: {type: boolean}
+  LedgerScope:
+    type: object
+    additionalProperties: false
+    required: [scope_type, scope_id, period_start]
+    properties:
+      scope_type: {type: string, enum: [person, application]}
+      scope_id: {type: string, minLength: 1, maxLength: 255}
+      period_start: {type: string, format: date}
+  LedgerSummary:
+    type: object
+    additionalProperties: false
+    required: [epoch, scope, token_limit, enforce, updated_at]
+    properties:
+      protocol_version: {type: integer, const: 2, default: 2}
+      epoch: {type: string, format: uuid}
+      scope: {$ref: ../../openapi.yaml#/components/schemas/LedgerScope}
+      version: {type: integer, minimum: 0, default: 0}
+      policy_revision: {type: integer, minimum: 0, default: 0}
+      token_limit: {type: integer, minimum: 0, maximum: 9223372036854775807}
+      enforce: {type: boolean}
+      enabled: {type: boolean, default: true}
+      confirmed_tokens: {type: integer, minimum: 0, maximum: 9223372036854775807, default: 0}
+      active_reserved_tokens: {type: integer, minimum: 0, maximum: 9223372036854775807, default: 0}
+      upper_bound_tokens: {type: integer, minimum: 0, maximum: 9223372036854775807, default: 0}
+      updated_at: {type: string, format: date-time}
+  LedgerAttemptIdentity:
+    type: object
+    additionalProperties: false
+    required: [scope, gateway_profile_id, native_gateway_id, correlation_id, model_id, admitted_at]
+    properties:
+      scope: {$ref: ../../openapi.yaml#/components/schemas/LedgerScope}
+      gateway_profile_id: {type: string, format: uuid}
+      native_gateway_id: {type: string, minLength: 1, maxLength: 80}
+      correlation_id: {type: string, minLength: 1, maxLength: 255}
+      model_id: {type: string, minLength: 1, maxLength: 255}
+      admitted_at: {type: string, format: date-time}
+  LedgerAttempt:
+    type: object
+    additionalProperties: false
+    required: [identity, epoch, state, reserved_tokens, updated_at]
+    properties:
+      identity: {$ref: ../../openapi.yaml#/components/schemas/LedgerAttemptIdentity}
+      epoch: {type: string, format: uuid}
+      state: {type: string, enum: [reserved, dispatching, uncertain, settled, upper_bound, cancelled]}
+      reserved_tokens: {type: integer, minimum: 1, maximum: 9223372036854775807}
+      actual_tokens: {type: [integer, 'null'], minimum: 0, maximum: 9223372036854775807, default: null}
+      evidence_revision: {type: integer, minimum: 0, default: 0}
+      evidence_key: {type: [string, 'null'], minLength: 1, maxLength: 512, default: null}
+      evidence_rank: {type: integer, enum: [0, 2, 3], default: 0}
+      completion_evidence: {type: [object, 'null'], additionalProperties: true, default: null}
+      updated_at: {type: string, format: date-time}
+  RuntimeCheckSelection:
+    type: object
+    additionalProperties: false
+    required: [model_id, gateway_deployment_id]
+    properties:
+      model_id: {type: string, format: uuid}
+      gateway_deployment_id: {type: string, format: uuid}
+  RuntimeCheckOption:
+    type: object
+    additionalProperties: false
+    required: [model_id, gateway_deployment_id, model_key, model_name, gateway_profile_id, gateway_name, native_gateway_id]
+    properties:
+      model_id: {type: string, format: uuid}
+      gateway_deployment_id: {type: string, format: uuid}
+      model_key: {type: string}
+      model_name: {type: string}
+      gateway_profile_id: {type: string, format: uuid}
+      gateway_name: {type: string}
+      native_gateway_id: {type: string}
+  RuntimeDiagnosticAccess:
+    type: object
+    additionalProperties: false
+    required: [scope, tenant_id, subscription_id, resource_group, apim_name, probe_subscription_id, required_actions, checked_at]
+    properties:
+      status: {type: string, enum: [ready, missing_permissions, unverified], default: unverified}
+      reason:
+        type: [string, 'null']
+        enum: [permission_missing, permission_unverified, identity_unavailable, tenant_mismatch, probe_subscription_unconfigured, null]
+      scope: {type: string}
+      api_principal_id: {type: [string, 'null'], format: uuid}
+      tenant_id: {type: string, format: uuid}
+      subscription_id: {type: string, format: uuid}
+      resource_group: {type: string}
+      apim_name: {type: string}
+      probe_subscription_id: {type: string}
+      required_actions: {type: array, items: {type: string}}
+      missing_actions: {type: array, items: {type: string}}
+      checked_at: {type: string, format: date-time}
+  RuntimeCheckPlan:
+    type: object
+    additionalProperties: false
+    required: [runtime_id, options]
+    properties:
+      runtime_id: {type: string, format: uuid}
+      options:
+        type: array
+        items: {$ref: ../../openapi.yaml#/components/schemas/RuntimeCheckOption}
+      unavailable_reason: {type: [string, 'null']}
+      access:
+        oneOf:
+        - {$ref: ../../openapi.yaml#/components/schemas/RuntimeDiagnosticAccess}
+        - {type: 'null'}
+      max_output_tokens: {type: integer, const: 64, default: 64}
+      request_limit: {type: integer, const: 1, default: 1}
+  RuntimeHealth:
+    type: object
+    additionalProperties: false
+    required: [runtime_id, status, message, checked_at]
+    properties:
+      runtime_id: {type: string, format: uuid}
+      status: {type: string, enum: [unknown, available, unavailable]}
+      message: {type: string}
+      checked_at: {type: string, format: date-time}
+      check_kind: {type: string, enum: [legacy, model_inference], default: legacy}
+      outcome:
+        type: [string, 'null']
+        enum: [passed, blocked, configuration_error, upstream_error, inconclusive, null]
+      selection:
+        oneOf:
+        - {$ref: ../../openapi.yaml#/components/schemas/RuntimeCheckOption}
+        - {type: 'null'}
+      request_id: {type: [string, 'null']}
+      correlation_id: {type: [string, 'null']}
+      http_status: {type: [integer, 'null']}
+      latency_ms: {type: [integer, 'null']}
+      error_code: {type: [string, 'null']}
+      valid_until:
+        type: [string, 'null']
+        format: date-time
+        description: Legacy expiry; historical diagnostic outcomes do not expire.
+      configuration_fingerprint:
+        type: [string, 'null']
+        maxLength: 80
+        description: Server-owned digest of persisted call configuration, not secrets.
+      configuration_status:
+        type: string
+        enum: [current, changed, unverified]
+        default: unverified
+        description: Configuration comparison, not current availability.
+      configuration_checked_at: {type: [string, 'null'], format: date-time}
   MultiTargetPublicationChildCreate:
     type: object
     additionalProperties: false
@@ -105,12 +319,32 @@ schemas:
       Provider JSON passthrough except for model routing and platform metadata. The selected
       model overrides any caller-supplied provider model field. No size, quality or format
       defaults are inserted. Serialized UTF-8 request bytes plus the output reservation
-      are reserved before dispatch, bounded by the published v4 profile.
+      are reserved before dispatch, bounded by the published v4 profile. Explicit Gateway
+      selection requires both target and deployment IDs; neither is forwarded to the provider.
+    allOf:
+    - if:
+        required: [gateway_profile_id]
+        properties:
+          gateway_profile_id: {type: string}
+      then:
+        required: [gateway_deployment_id]
+        properties:
+          gateway_deployment_id: {type: string, format: uuid}
+    - if:
+        required: [gateway_deployment_id]
+        properties:
+          gateway_deployment_id: {type: string}
+      then:
+        required: [gateway_profile_id]
+        properties:
+          gateway_profile_id: {type: string, format: uuid}
     properties:
       metadata:
         $ref: ../../openapi.yaml#/components/schemas/ImageInvocationMetadata
       model_id: {type: string, format: uuid}
       runtime_id: {type: [string, 'null'], format: uuid, default: null}
+      gateway_profile_id: {type: [string, 'null'], format: uuid, default: null}
+      gateway_deployment_id: {type: [string, 'null'], format: uuid, default: null}
       prompt: {writeOnly: true, description: Provider-owned JSON prompt value.}
       size: {description: Optional provider-owned JSON value.}
       quality: {description: Optional provider-owned JSON value.}
@@ -296,6 +530,14 @@ schemas:
     - runtimes
     - models
     properties:
+      explicit_gateway_selection_supported:
+        type: boolean
+        default: false
+        description: Explicit target and serving deployment selection is enabled.
+      runtime_diagnostics_supported:
+        type: boolean
+        default: false
+        description: Owner-scoped, explicit model and Gateway diagnostics are available.
       gateway_name_edit_supported:
         type: boolean
         default: false
@@ -350,6 +592,11 @@ schemas:
         type: array
         items:
           type: object
+          properties:
+            diagnostic:
+              oneOf:
+              - {$ref: ../../openapi.yaml#/components/schemas/RuntimeHealth}
+              - {type: 'null'}
       models:
         type: array
         items:
@@ -977,6 +1224,32 @@ schemas:
         properties:
           price_source: {enum: [azure_retail, anthropic]}
           context_price_references: {minItems: 2, maxItems: 2}
+  GatewayPublicationFailure:
+    type: object
+    additionalProperties: false
+    required: [code, message]
+    properties:
+      code:
+        type: string
+        enum: [publisher_permissions_missing, publisher_permissions_unverified,
+          publisher_authorization_failed, parent_policy_changed, credential_source_missing,
+          apim_infrastructure_upgrade_required, publication_failed]
+      message:
+        type: string
+      stage:
+        type: [string, 'null']
+        enum: [queued, validating, provisioning, building_revision, verifying,
+          awaiting_authorization, promoting, active, failed, superseded, rolling_back,
+          rolled_back, null]
+      request_id:
+        type: [string, 'null']
+        format: uuid
+      http_status:
+        type: [integer, 'null']
+        enum: [401, 403, null]
+      missing_actions:
+        type: array
+        items: {type: string}
   GatewayPublication:
     type: object
     additionalProperties: false
@@ -1001,6 +1274,28 @@ schemas:
       gateway_profile_id:
         type: string
         format: uuid
+      target_deployments:
+        type: [array, 'null']
+        description: Recorded serving deployments for this publication, not inferred from current defaults.
+        items:
+          type: object
+          additionalProperties: false
+          required: [deployment_id, native_gateway_id, kind, endpoint_url, release_gate]
+          properties:
+            deployment_id:
+              type: string
+              format: uuid
+            native_gateway_id:
+              type: string
+            kind:
+              type: string
+              enum: [managed, self_hosted]
+            endpoint_url:
+              type: string
+              format: uri
+            release_gate:
+              type: string
+              enum: [required, optional]
       generation:
         type: integer
         minimum: 1
@@ -1038,6 +1333,10 @@ schemas:
         type:
         - string
         - 'null'
+      failure:
+        oneOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationFailure
+        - type: 'null'
       authorization:
         oneOf:
         - $ref: ../../openapi.yaml#/components/schemas/GatewayAuthorizationRequirement
@@ -1372,6 +1671,10 @@ schemas:
     - created_at
     - completed_at
     properties:
+      failure:
+        oneOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationFailure
+        - type: 'null'
       id:
         type: string
         format: uuid

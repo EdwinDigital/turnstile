@@ -176,6 +176,23 @@ def test_client_cache_is_bound_to_target_fingerprint() -> None:
     assert builder.call_count == 2
 
 
+def test_recovery_client_does_not_read_or_reuse_probe_credentials() -> None:
+    repository, credentials, builder = registered(), Mock(), Mock(side_effect=lambda config: Mock())
+    credentials.resolve.return_value = SecretStr("unit-probe-key")
+    resolver = AzureApimPublisherClientResolver(
+        apim_target_client_config_resolver(repository, configured(), credentials), builder,
+    )
+    regular = resolver.resolve(TARGET)
+    credentials.reset_mock()
+    recovery = resolver.resolve(TARGET, include_probe_credentials=False)
+    credentials.resolve.assert_not_called()
+    assert recovery.target_identity_sha256 == regular.target_identity_sha256
+    assert recovery.client is not regular.client
+    assert builder.call_args.args[0].apim_probe_subscription_key is None
+    assert resolver.resolve(TARGET, include_probe_credentials=False).client is recovery.client
+    assert builder.call_count == 2
+
+
 def test_probe_credential_client_ignores_ambient_target_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -183,7 +200,10 @@ def test_probe_credential_client_ignores_ambient_target_settings(
     monkeypatch.setenv("APIM_SERVICE_NAME", "unrelated-default")
     with patch(
         "turnstile_core.integrations.apim_target_client_factory.AzureApimSubscriptionKeyClient"
-    ) as client:
+    ) as client, patch(
+        "turnstile_core.integrations.apim_target_client_factory.AzureApimProbeAccessChecker"
+    ) as access:
+        access.return_value.check.return_value.status = "ready"
         client.return_value.application_subscription_keys.return_value = ("unit-key", "unit-other")
         assert AzureApimTargetProbeCredentialResolver().resolve(
             target(probe_subscription_id="unit-probe")

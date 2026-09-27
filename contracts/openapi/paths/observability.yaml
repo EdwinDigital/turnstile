@@ -1,4 +1,45 @@
 paths:
+  /api/v1/observability/requests:
+    get:
+      operationId: listUsageRequests
+      summary: List formal usage and nonbilling platform request traces
+      description: Platform-only rows have usage_available and cost_available false until uniquely matched formal telemetry arrives. Trace results do not feed billing or budget totals.
+      security: [{sessionCookie: []}]
+      parameters:
+      - {name: from, in: query, required: true, schema: {type: string, format: date-time}}
+      - {name: to, in: query, required: true, schema: {type: string, format: date-time}}
+      - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+      - {name: organization_id, in: query, schema: {type: string}}
+      - {name: department_id, in: query, schema: {type: string}}
+      - {name: project_id, in: query, schema: {type: string}}
+      - {name: agent_id, in: query, schema: {type: string}}
+      - {name: model_id, in: query, schema: {type: string}}
+      - {name: user_id, in: query, schema: {type: string}}
+      - {name: runtime, in: query, style: form, explode: true, schema: {type: array, items: {type: string}}}
+      - {name: status_code, in: query, schema: {type: integer, minimum: 100, maximum: 599}}
+      responses:
+        '200':
+          description: Request trace page
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/UsageRequestListResponse}
+        '401': {$ref: ../../openapi.yaml#/components/responses/ErrorResponse}
+  /api/v1/observability/requests/{request_id}:
+    get:
+      operationId: getUsageRequest
+      summary: Read a platform trace or formal request
+      description: Accepts a stable platform trace ID, recorded row ID, actual Gateway correlation ID or caller request ID. Legacy caller IDs resolve the latest matching request.
+      security: [{sessionCookie: []}]
+      parameters:
+      - {name: request_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Request detail with separate platform and Gateway outcomes
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/UsageRequestDetail}
+        '401': {$ref: ../../openapi.yaml#/components/responses/ErrorResponse}
+        '404': {$ref: ../../openapi.yaml#/components/responses/ErrorResponse}
   /api/v1/anomaly-rules:
     get:
       tags:

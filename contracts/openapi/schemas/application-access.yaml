@@ -103,7 +103,7 @@ schemas:
         format: date
       token_limit:
         type: integer
-        minimum: 1
+        minimum: 0
       tokens_per_minute:
         type: integer
         minimum: 1
@@ -159,6 +159,14 @@ schemas:
         type: [string, 'null']
         format: date-time
         default: null
+      ledger_source: {type: string, enum: [snapshot, execution], default: snapshot}
+      ledger_status: {type: string, enum: [snapshot, current, unavailable, prepared], default: snapshot}
+      ledger_read_at: {type: [string, 'null'], format: date-time, default: null}
+      ledger_version: {type: [integer, 'null'], minimum: 0, default: null}
+      ledger_balance_tokens: {type: [integer, 'null'], default: null}
+      policy_pending: {type: boolean, default: false}
+      projected_tokens_per_minute: {type: [integer, 'null'], minimum: 1, maximum: 2147483647, default: null}
+      tpm_sync_status: {type: string, enum: [projected, pending, unavailable], default: unavailable}
   GatewayApplicationBudgetUpdate:
     type: object
     additionalProperties: false
@@ -174,6 +182,7 @@ schemas:
       tokens_per_minute:
         type: integer
         minimum: 1
+        maximum: 2147483647
       enforce:
         type: boolean
       warning_threshold_percent:

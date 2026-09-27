@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Any, NoReturn
 from urllib.parse import unquote, urlsplit
@@ -15,7 +15,9 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 
 from turnstile_core.config import Settings
+from turnstile_core.domain.application_access import application_id_for
 from turnstile_core.domain.billable_requests import BillableBudgetExceeded, BillableRequestPlan
+from turnstile_core.domain.gateway_targets import ApimTarget, GatewayDeployment
 from turnstile_core.domain.images import ImageInvocationRequest, ImageInvocationResponse
 from turnstile_core.domain.models import TokenUsageRecord
 from turnstile_core.domain.runtime_models import (
@@ -37,6 +39,8 @@ from turnstile_core.domain.runtime_models import (
     ModelInvocationResponse,
     ModelVendorKey,
     OAuthClientCredentialsConfig,
+    PlatformInvocationAttempt,
+    PlatformInvocationCompletion,
     PriceCatalogModel,
     PriceCatalogModelsResponse,
     PriceCatalogOption,
@@ -50,6 +54,8 @@ from turnstile_core.domain.runtime_models import (
     ProviderWrite,
     RegistryResponse,
     Runtime,
+    RuntimeCheckPlan,
+    RuntimeCheckSelection,
     RuntimeHealth,
     RuntimeKind,
     RuntimeWrite,
@@ -75,6 +81,8 @@ from turnstile_core.pricing.context import (
 )
 from turnstile_core.pricing.sync import plan_price_sync
 from turnstile_core.security import CredentialCipher, credential_hint
+
+from .runtime_diagnostics import RuntimeDiagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +273,10 @@ class ModelRuntimeService:
             row for row in rows["runtimes"] if row["id"] not in copilot_runtime_ids
         ]
         runtime_ids = {row["id"] for row in runtimes}
+        diagnostics = RuntimeDiagnostics(self._repository, self._settings).project_results(runtimes)
         return RegistryResponse(
+            runtime_diagnostics_supported=True,
+            explicit_gateway_selection_supported=self._settings.apim_target_registry_enabled,
             gateway_name_edit_supported=True,
             apim_target_topology_available=self._settings.apim_target_registry_enabled,
             self_hosted_gateway_enabled=self._settings.self_hosted_gateway_enabled,
@@ -280,7 +291,8 @@ class ModelRuntimeService:
                 GatewayProfile.model_validate(self._public_secret(row)) for row in rows["gateways"]
             ],
             providers=[Provider.model_validate(self._public_secret(row)) for row in providers],
-            runtimes=[Runtime.model_validate(row) for row in runtimes],
+            runtimes=[Runtime.model_validate({**row, "diagnostic": diagnostics.get(row["id"])})
+                      for row in runtimes],
             models=[
                 ManagedModel.model_validate(row)
                 for row in rows["models"]
@@ -1013,18 +1025,15 @@ class ModelRuntimeService:
         self._save("model", values, item_id)
         return self.registry()
 
-    def check_runtime(self, runtime_id: UUID) -> RuntimeHealth:
-        route = self._repository.invocation_route(runtime_id, None)
-        if route is None:
-            raise HTTPException(
-                status_code=409, detail="Runtime has no enabled model or is disabled"
-            )
-        route = self._decrypt_route(route)
-        result = self._router.adapter(route).check(route)
-        self._repository.update_runtime_health(
-            runtime_id, result.status.value, result.message, result.checked_at
+    def runtime_check_plan(self, runtime_id: UUID) -> RuntimeCheckPlan:
+        return RuntimeDiagnostics(self._repository, self._settings).plan(runtime_id)
+
+    def check_runtime(
+        self, runtime_id: UUID, selection: RuntimeCheckSelection, *, actor: str,
+    ) -> RuntimeHealth:
+        return RuntimeDiagnostics(self._repository, self._settings).check(
+            runtime_id, selection, actor,
         )
-        return result
 
     def _assert_model_allowed(
         self,
@@ -1043,7 +1052,7 @@ class ModelRuntimeService:
         inference path.
         """
         user_id = request.metadata.user_id
-        if not user_id or user_id == "system-runtime-health-check":
+        if not user_id:
             return
         policies = self._repository.list_user_model_policies([user_id])
         policy = next((row for row in policies if str(row["user_id"]) == user_id), None)
@@ -1202,20 +1211,67 @@ class ModelRuntimeService:
         )
 
     def _invocation_deployment_route(self, route: dict[str, Any]) -> dict[str, Any]:
+        if route.get("gateway_implementation") == GatewayKind.APIM:
+            try:
+                endpoint = urlsplit(str(route.get("gateway_base_url") or ""))
+                valid_endpoint = (
+                    endpoint.scheme == "https" and bool(endpoint.hostname)
+                    and not endpoint.username and not endpoint.password
+                    and not endpoint.query and not endpoint.fragment
+                    and endpoint.port in (None, 443)
+                )
+            except ValueError:
+                valid_endpoint = False
+            uses_route_endpoint = (
+                route.get("gateway_deployment_id") is not None
+                or route.get("gateway_deployments") is None
+            )
+            if uses_route_endpoint and not valid_endpoint:
+                raise HTTPException(status_code=503, detail="Gateway route is not verified")
+            selected_id = route.get("gateway_deployment_id")
+            if selected_id is not None:
+                target, deployment = route.get("gateway_target"), route.get("gateway_deployment")
+                try:
+                    if not isinstance(target, Mapping) or not isinstance(deployment, Mapping):
+                        raise ValueError("Registered Gateway metadata is missing")
+                    if (str(target.get("gateway_profile_id")) != str(route.get("gateway_id"))
+                            or str(deployment.get("id")) != str(selected_id)
+                            or deployment.get("native_gateway_id") != route.get("native_gateway_id")
+                            or str(deployment.get("endpoint_url")).rstrip("/")
+                            != str(route.get("gateway_base_url")).rstrip("/")):
+                        raise ValueError("Selected Gateway does not match its route")
+                    RuntimeDiagnostics(self._repository, self._settings)._validate_endpoint(
+                        ApimTarget.model_validate({
+                            key: target[key] for key in ApimTarget.model_fields
+                        }),
+                        GatewayDeployment.model_validate({
+                            key: deployment[key] for key in GatewayDeployment.model_fields
+                        }),
+                    )
+                    return route
+                except (KeyError, TypeError, ValueError) as error:
+                    raise HTTPException(
+                        status_code=503, detail="Gateway route is not verified",
+                    ) from error
+            if route.get("gateway_target") is not None:
+                raise HTTPException(
+                    status_code=503, detail="Registered Gateway deployment is missing",
+                )
         deployments = route.get("gateway_deployments")
         if route.get("gateway_implementation") != GatewayKind.APIM or deployments is None:
             return route
         for deployment in deployments:
-            endpoint = str(deployment.get("endpoint_url") or "").rstrip("/")
+            deployment_endpoint = str(deployment.get("endpoint_url") or "").rstrip("/")
             try:
-                parsed = urlsplit(endpoint)
+                parsed = urlsplit(deployment_endpoint)
                 deployment_id = UUID(str(deployment["deployment_id"]))
+                valid_port = parsed.port in (None, 443)
             except (KeyError, ValueError):
                 continue
             if (
                 parsed.scheme != "https" or not parsed.hostname
                 or parsed.username is not None or parsed.password is not None
-                or parsed.query or parsed.fragment
+                or parsed.query or parsed.fragment or not valid_port
             ):
                 continue
             if deployment["kind"] != "managed":
@@ -1228,50 +1284,45 @@ class ModelRuntimeService:
                 approved = str(deployment.get("approved_endpoint_url") or "").rstrip("/")
                 if (
                     parsed.hostname.casefold() not in declared_hosts
-                    and (trusted is None or str(trusted).rstrip("/") != endpoint)
-                    and approved != endpoint
+                    and (trusted is None or str(trusted).rstrip("/") != deployment_endpoint)
+                    and approved != deployment_endpoint
                 ):
                     continue
             return {
-                **route, "gateway_base_url": endpoint,
+                **route, "gateway_base_url": deployment_endpoint,
                 "gateway_deployment_id": str(deployment_id),
             }
         raise HTTPException(
             status_code=503, detail="No trusted serving Gateway deployment is available",
         )
 
-    def _record_invocation_failure(
-        self, request: ModelInvocationRequest, route: dict[str, Any],
-        error: GatewayInvocationError, headers: dict[str, str], latency_ms: int,
-    ) -> None:
-        metadata = request.metadata
-        request_id = headers["x-request-id"]
-        correlation_id = headers["x-correlation-id"]
-        try:
-            price = model_price_from_values(route)
-            self._repository.write_token_usage(TokenUsageRecord(
-                id=correlation_id, request_id=request_id, correlation_id=correlation_id,
-                ts=datetime.now(UTC), team=metadata.department or "unattributed",
-                organization=metadata.organization, organization_id=metadata.organization_id,
-                department=metadata.department, department_id=metadata.department_id,
-                project=metadata.project, project_id=metadata.project_id,
-                user=metadata.user, user_id=metadata.user_id,
-                agent=metadata.agent, agent_id=metadata.agent_id,
-                workflow=metadata.workflow, run_id=metadata.run_id,
-                turn_index=metadata.turn_index, provider="unattributed",
-                model=str(route["display_name"]), model_id=str(route["model_id"]),
-                runtime=str(route["runtime_name"]), request_source=metadata.request_source,
-                usage_domain=metadata.usage_domain, input_tokens=0, cached_tokens=0,
-                output_tokens=0, et=0.0,
-                et_coeff_m=self._settings.model_coefficients.get("default", 1.0),
-                latency_ms=latency_ms, status=str(error.status_code), status_code=error.status_code,
-                estimated_cost=0.0, estimated=True, ingest_source="gateway",
-                ingest_error="gateway_invocation_usage_unavailable",
-                error_message=str(error)[:2000],
-                price_context_snapshot=price.model_dump(mode="json") if price else None,
-            ))
-        except Exception:
-            logger.exception("Failed invocation trace could not be written for %s", request_id)
+    def _invocation_route(
+        self, request: ModelInvocationRequest | ImageInvocationRequest,
+    ) -> dict[str, Any] | None:
+        if request.gateway_profile_id is not None:
+            if not self._settings.apim_target_registry_enabled:
+                raise HTTPException(
+                    status_code=503, detail="Explicit APIM Gateway selection is not enabled",
+                )
+            route = self._repository.invocation_route(
+                request.runtime_id, request.model_id,
+                gateway_profile_id=request.gateway_profile_id,
+                gateway_deployment_id=request.gateway_deployment_id,
+            )
+            if route is not None and (
+                str(route.get("gateway_id")) != str(request.gateway_profile_id)
+                or str(route.get("gateway_deployment_id")) != str(request.gateway_deployment_id)
+                or route.get("gateway_implementation") != GatewayKind.APIM
+            ):
+                raise HTTPException(
+                    status_code=409, detail="Resolved Gateway does not match selection",
+                )
+        else:
+            route = self._repository.invocation_route(request.runtime_id, request.model_id)
+        if (route is not None and route.get("gateway_implementation") == GatewayKind.APIM
+                and not route.get("gateway_base_url") and self._settings.apim_gateway_url):
+            route = {**route, "gateway_base_url": self._settings.apim_gateway_url}
+        return route
 
     def invoke(
         self,
@@ -1282,7 +1333,7 @@ class ModelRuntimeService:
         enforce_user_model_access: bool = True,
     ) -> ModelInvocationResponse:
         request_id = request_id or str(uuid4())
-        route = self._repository.invocation_route(request.runtime_id, request.model_id)
+        route = self._invocation_route(request)
         if route is None:
             raise HTTPException(
                 status_code=404, detail="No enabled model route matches the request"
@@ -1312,11 +1363,19 @@ class ModelRuntimeService:
             route.get("gateway_implementation") == GatewayKind.APIM
             and not route.get("gateway_credential")
             and self._settings.apim_dashboard_subscription_key
+              and (not route.get("gateway_target")
+                  or route.get("gateway_id") == self._settings.apim_gateway_profile_id)
         ):
             route["gateway_credential"] = (
                 self._settings.apim_dashboard_subscription_key.get_secret_value()
             )
             route["gateway_auth_type"] = "api_key"
+        return self._invoke_resolved(request, route, request_id, timeout_ms=timeout_ms)
+
+    def _invoke_resolved(
+        self, request: ModelInvocationRequest, route: dict[str, Any], request_id: str,
+        *, timeout_ms: int | None = None, application_id: UUID | None = None,
+    ) -> ModelInvocationResponse:
         if timeout_ms is not None:
             runtime_config = dict(route.get("runtime_config") or {})
             configured_timeout = float(runtime_config.get("timeout_seconds", 120))
@@ -1326,26 +1385,79 @@ class ModelRuntimeService:
             )
             route["runtime_config"] = runtime_config
         route["request_id"] = request_id
+        target = route.get("gateway_target") or {}
+        subscription_id = target.get("dashboard_subscription_id")
+        target_id = UUID(str(route["gateway_id"])) if route.get("gateway_id") else None
+        attempt = PlatformInvocationAttempt(
+            request_id=request_id, started_at=datetime.now(UTC),
+            metadata=request.metadata.model_copy(update={
+                "model_id": str(route["model_id"]), "model": str(route["display_name"]),
+                "runtime": str(route["runtime_name"]),
+            }),
+            model_id=UUID(str(route["model_id"])), model_key=str(route["model_key"]),
+            model_name=str(route["display_name"]), runtime_id=UUID(str(route["runtime_id"])),
+            runtime_name=str(route["runtime_name"]), provider_name=str(route["provider_name"]),
+            apim_target_id=target_id, gateway_deployment_id=route.get("gateway_deployment_id"),
+            native_gateway_id=route.get("native_gateway_id"),
+            apim_service_id=target.get("arm_resource_id"),
+            application_id=application_id if application_id is not None else (
+                application_id_for(target_id, subscription_id)
+                if target_id is not None and subscription_id else None
+            ),
+        )
+        try:
+            self._repository.begin_platform_invocation(attempt)
+        except Exception as error:
+            logger.error("Invocation recording unavailable request_id=%s error_type=%s",
+                         request_id, type(error).__name__)
+            raise HTTPException(
+                status_code=503, detail="Invocation recording is unavailable; no request was sent",
+                headers={"x-request-id": request_id},
+            ) from None
         started = time.monotonic()
         try:
             result = self._router.adapter(route).invoke(request, route)
         except GatewayInvocationError as error:
             headers = dict(error.headers)
-            headers.setdefault("x-request-id", request_id)
-            headers.setdefault("x-correlation-id", headers["x-request-id"])
-            self._record_invocation_failure(request, route, error, headers, elapsed_ms(started))
+            upstream_request_id = headers.get("x-request-id") or headers.get("request-id")
+            if upstream_request_id:
+                headers["x-upstream-request-id"] = upstream_request_id
+            headers["x-request-id"] = request_id
+            recorded = self._finish_invocation(PlatformInvocationCompletion.model_validate({
+                "request_id": request_id, "completed_at": datetime.now(UTC), "outcome": "failed",
+                "status_code": error.status_code, "latency_ms": elapsed_ms(started),
+                "gateway_correlation_id": headers.get("x-correlation-id"),
+                "upstream_request_id": upstream_request_id or headers.get("x-ms-request-id")
+                or headers.get("apim-request-id"), "failure_kind": error.failure_kind,
+            }))
+            headers["x-platform-trace-state"] = "recorded" if recorded else "pending"
             raise HTTPException(
                 status_code=error.status_code,
                 detail=str(error),
                 headers=headers,
             ) from error
+        except Exception as error:
+            self._finish_invocation(PlatformInvocationCompletion(
+                request_id=request_id, completed_at=datetime.now(UTC), outcome="failed",
+                status_code=502, latency_ms=elapsed_ms(started), failure_kind="internal_error",
+            ))
+            logger.error("Invocation failed request_id=%s error_type=%s",
+                         request_id, type(error).__name__)
+            raise HTTPException(status_code=502, detail="Gateway invocation failed",
+                                headers={"x-request-id": request_id}) from None
 
         latency_ms = elapsed_ms(started)
-        correlation_id = result.correlation_id or request_id
+        self._finish_invocation(PlatformInvocationCompletion(
+            request_id=request_id, completed_at=datetime.now(UTC), outcome="succeeded",
+            status_code=200, latency_ms=latency_ms, gateway_correlation_id=result.correlation_id,
+            upstream_request_id=result.upstream_request_id,
+        ))
+        correlation_id = result.correlation_id
         estimated_cost = self._estimated_cost(route, result.usage)
         return ModelInvocationResponse(
             request_id=request_id,
             correlation_id=correlation_id,
+            upstream_request_id=result.upstream_request_id,
             content=result.content,
             tool_calls=list(result.tool_calls) or None,
             provider=str(route["provider_name"]),
@@ -1357,11 +1469,20 @@ class ModelRuntimeService:
             estimated_cost=estimated_cost,
         )
 
+    def _finish_invocation(self, completion: PlatformInvocationCompletion) -> bool:
+        try:
+            self._repository.finish_platform_invocation(completion)
+        except Exception as error:
+            logger.error("Invocation outcome pending request_id=%s error_type=%s",
+                         completion.request_id, type(error).__name__)
+            return False
+        return True
+
     def generate_image(
         self, request: ImageInvocationRequest, *, role: str
     ) -> ImageInvocationResponse:
         request_id = str(uuid4())
-        route = self._repository.invocation_route(request.runtime_id, request.model_id)
+        route = self._invocation_route(request)
         if route is None:
             raise HTTPException(status_code=404, detail="No enabled image model route matches")
         if role not in (route.get("model_allowed_roles") or []) or role not in (
@@ -1385,7 +1506,11 @@ class ModelRuntimeService:
         route = self._decrypt_route(route)
         if not route.get("gateway_base_url") and self._settings.apim_gateway_url:
             route["gateway_base_url"] = self._settings.apim_gateway_url
-        if not route.get("gateway_credential") and self._settings.apim_dashboard_subscription_key:
+        use_dashboard_key = not route.get("gateway_target") or (
+            route.get("gateway_id") == self._settings.apim_gateway_profile_id
+        )
+        if (not route.get("gateway_credential") and self._settings.apim_dashboard_subscription_key
+            and use_dashboard_key):
             route["gateway_credential"] = (
                 self._settings.apim_dashboard_subscription_key.get_secret_value()
             )

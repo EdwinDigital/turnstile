@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Box,
   CheckCircle2,
+  ChevronRight,
   CircleDashed,
   History,
   KeyRound,
@@ -15,6 +16,7 @@ import {
   RotateCcw,
   ScanSearch,
   Search,
+  Send,
   ShieldAlert,
   ShieldCheck,
   X,
@@ -32,7 +34,8 @@ import {
   AlertDialogTitle,
 } from "../components/ui/alert-dialog"
 import { Button } from "../components/ui/button"
-import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog"
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,6 +46,7 @@ import { useIsMobile } from "../hooks/use-mobile"
 import { ApiError, dataSource } from "../data-sources/apim/api"
 import { finopsKeys, finopsQueries } from "../data-sources/apim/queries"
 import type {
+  GatewayPublicationFailure,
   GatewayReleaseChangeSet,
   GatewayReleaseDetail,
   GatewayReleaseRole,
@@ -198,19 +202,20 @@ function ReleaseListRow({ release, selected, onSelect }: {
   </button>
 }
 
-function ChangeColumn({ title, added, removed, changed }: {
+function ChangeColumn({ title, added, removed, changed, planned }: {
   title: string
   added: string[]
   removed: string[]
   changed: string[]
+  planned: boolean
 }) {
   const empty = !added.length && !removed.length && !changed.length
   return <div className="gateway-release-change-column">
     <h3>{title}</h3>
     {empty ? <p>没有语义变更</p> : <div className="gateway-release-change-list">
-      {added.map((value) => <span className="added" key={`added-${value}`}><b>已新增</b><code title={value} data-no-localize>{value}</code></span>)}
-      {removed.map((value) => <span className="removed" key={`removed-${value}`}><b>已移除</b><code title={value} data-no-localize>{value}</code></span>)}
-      {changed.map((value) => <span className="changed" key={`changed-${value}`}><b>已变更</b><code title={value} data-no-localize>{value}</code></span>)}
+      {added.map((value) => <span className="added" key={`added-${value}`}><b>{planned ? "拟新增" : "已新增"}</b><code title={value} data-no-localize>{value}</code></span>)}
+      {removed.map((value) => <span className="removed" key={`removed-${value}`}><b>{planned ? "拟移除" : "已移除"}</b><code title={value} data-no-localize>{value}</code></span>)}
+      {changed.map((value) => <span className="changed" key={`changed-${value}`}><b>{planned ? "拟变更" : "已变更"}</b><code title={value} data-no-localize>{value}</code></span>)}
     </div>}
   </div>
 }
@@ -244,6 +249,35 @@ function GatewayCleanupStatus({ operation }: { operation: GatewayReleaseOperatio
   </div>
 }
 
+function PublicationFailureNotice({ failure, publicationId }: {
+  failure: GatewayPublicationFailure
+  publicationId: string
+}) {
+  const messages: Record<GatewayPublicationFailure["code"], string> = {
+    publisher_permissions_missing: "Publisher 缺少此 APIM 的模型发布权限。请由部署管理员核对授权后再重试。",
+    publisher_permissions_unverified: "无法核验 Publisher 的发布权限，当前发布步骤已停止。",
+    publisher_authorization_failed: "Azure 拒绝了 Publisher 的 APIM 管理请求。请核对发布身份的授权。",
+    parent_policy_changed: "APIM 父策略与排队时的快照不一致，请核对变化后再重试。",
+    credential_source_missing: "APIM 凭据资源尚未创建，请重新提供 API Key 后重试。",
+    apim_infrastructure_upgrade_required: "网关基础设施需要升级，请联系部署管理员。",
+    publication_failed: "发布未完成，请使用任务 ID 查询诊断记录。",
+  }
+  return <div className="gateway-publication-failure" role="alert">
+    <AlertTriangle size={16} aria-hidden="true" />
+    <div>
+      <b>发布失败原因</b>
+      <p>{messages[failure.code] ?? messages.publication_failed}</p>
+      <dl>
+        {failure.stage && <div><dt>失败阶段</dt><dd>{auditStatusLabels[failure.stage] ?? failure.stage}</dd></div>}
+        {failure.http_status && <div><dt>HTTP</dt><dd data-no-localize>{failure.http_status}</dd></div>}
+        <div><dt>任务 ID</dt><dd><code data-no-localize>{publicationId}</code></dd></div>
+        {failure.request_id && <div><dt>Azure Request ID</dt><dd><code data-no-localize>{failure.request_id}</code></dd></div>}
+      </dl>
+      {failure.missing_actions.length > 0 && <details><summary>缺少权限</summary><ul>{failure.missing_actions.map(action => <li key={action}><code data-no-localize>{action}</code></li>)}</ul></details>}
+    </div>
+  </div>
+}
+
 function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, operation, onPin, onCheck, onRollback, showMobileActions }: {
   release: GatewayReleaseDetail | undefined
   loading: boolean
@@ -260,6 +294,13 @@ function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, o
   if (loading) return <div className="gateway-release-detail-state"><RefreshCw className="spin" size={20} />加载网关发布详情</div>
   if (!release) return <div className="gateway-release-detail-state"><History size={24} />选择一个网关发布版本</div>
   const changes = release.diff_from_base.changes
+  const plannedChanges = release.status !== "active" && release.status !== "superseded"
+    && !release.audit.some(event => event.to_status === "active")
+  const failure = release.status === "failed" ? release.failure ?? {
+    code: "publication_failed" as const, message: "",
+    stage: [...release.audit].reverse().find(event => event.to_status === "failed")?.from_status ?? null,
+    request_id: null, http_status: null, missing_actions: [],
+  } : null
   const isCurrentRelease = release.role === "current"
   const liveStatus = release.dependencies.live_status
   const readinessTitle = isCurrentRelease ? "线上配置状态" : "回滚就绪状态"
@@ -298,6 +339,7 @@ function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, o
             <div><dt>操作者</dt><dd>{release.created_by}</dd></div>
           </dl>
           {showMobileActions && renderReleaseActions("mobile")}
+          {failure && <PublicationFailureNotice failure={failure} publicationId={release.id} />}
           {release.status === "queued" && <div className="gateway-release-operation queued" role="status">
             <CircleDashed size={15} />
             <div><b>已排队，尚未开始</b><span>正在等待 Publication Worker 处理。</span></div>
@@ -308,11 +350,11 @@ function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, o
           </div>}
         </section>
 
-        <section className="gateway-release-card gateway-release-changes-card">
-          <header className="gateway-release-card-head"><div><h2>相对基础版本的变更</h2></div><span data-no-localize>{changeCount(changes)}</span></header>
+        <section className="gateway-release-card gateway-release-changes-card" data-state={plannedChanges ? "planned" : "applied"}>
+          <header className="gateway-release-card-head"><div><h2>{plannedChanges ? "计划变更" : "相对基础版本的变更"}</h2>{plannedChanges && <span className="gateway-release-change-state">未确认生效</span>}</div><span data-no-localize>{changeCount(changes)}</span></header>
           <div className="gateway-release-change-grid">
-            <ChangeColumn title="模型" added={changes.added_models} removed={changes.removed_models} changed={changes.changed_models} />
-            <ChangeColumn title="APIM 后端池" added={changes.added_backend_pools} removed={changes.removed_backend_pools} changed={changes.changed_backend_pools} />
+            <ChangeColumn title="模型" added={changes.added_models} removed={changes.removed_models} changed={changes.changed_models} planned={plannedChanges} />
+            <ChangeColumn title="APIM 后端池" added={changes.added_backend_pools} removed={changes.removed_backend_pools} changed={changes.changed_backend_pools} planned={plannedChanges} />
           </div>
         </section>
 
@@ -359,6 +401,130 @@ function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, o
   </div>
 }
 
+function BudgetVerificationDialog({ gatewayId, onClose }: { gatewayId: string; onClose: () => void }) {
+  const { user } = useAuth()
+  const owner = user?.role === "owner"
+  const [targetId, setTargetId] = useState(gatewayId)
+  const [execution, setExecution] = useState(false)
+  const [applicationId, setApplicationId] = useState("")
+  const [modelId, setModelId] = useState("")
+  const [sent, setSent] = useState(false)
+  const sending = useRef(false)
+  const registry = useQuery({ ...finopsQueries.registry(), enabled: owner })
+  const applications = useQuery({ ...finopsQueries.gatewayApplications(), enabled: owner && execution })
+  const readiness = useMutation({ mutationFn: (id: string) => dataSource.checkBudgetDelegation(id), retry: false })
+  const invocation = useMutation({ mutationFn: () => dataSource.verifyBudgetExecution(targetId, applicationId, modelId), retry: false })
+  const targets = (registry.data?.gateways ?? []).filter(target => target.enabled && target.implementation === "apim")
+  const result = readiness.data?.gateway_profile_id === targetId ? readiness.data : undefined
+  const verification = result?.ready && result.protocol_mode === "paused" ? result.verification : null
+  const applicationOptions = (applications.data?.items ?? []).filter(application =>
+    application.id === verification?.application_id && application.gateway_profile_id === targetId
+    && application.status === "active" && !application.system_managed)
+  const selectedApplication = applicationOptions.find(application => application.id === applicationId)
+  const modelOptions = (registry.data?.models ?? []).filter(model =>
+    verification?.model_ids.includes(model.id) && model.enabled && !model.capabilities.includes("image_generation")
+    && registry.data?.runtimes.some(runtime => runtime.id === model.runtime_id && runtime.enabled && runtime.gateway_profile_id === targetId)
+    && selectedApplication && (!selectedApplication.model_policy_configured || selectedApplication.allowed_model_ids.includes(model.id)))
+  const busy = readiness.isPending || invocation.isPending
+  const canCheck = owner && !busy && targets.some(target => target.id === targetId)
+  const canSend = owner && !busy && !sent && Boolean(selectedApplication) && modelOptions.some(model => model.id === modelId)
+  const error = registry.error ?? (execution ? applications.error ?? invocation.error : readiness.error)
+  const check = async () => {
+    if (!canCheck || sending.current) return
+    sending.current = true
+    try { await readiness.mutateAsync(targetId) } catch {}
+    finally { sending.current = false }
+  }
+  const send = async () => {
+    if (!canSend || sending.current) return
+    sending.current = true
+    setSent(true)
+    try { await invocation.mutateAsync() } catch {}
+    finally { sending.current = false }
+  }
+  const cases = { valid_identity: "有效身份", wrong_audience: "错误受众", missing_person: "缺少人员身份", current_fenced: "当前路径围栏", candidate_fenced: "候选路径围栏" }
+  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}>
+    <DialogContent className="gateway-budget-dialog">
+      <DialogHeader><DialogTitle>{execution ? "联合账本验证" : "预算委托验证"}</DialogTitle><DialogDescription className="sr-only">{execution ? "候选双作用域账本" : "候选身份验证结果"}</DialogDescription></DialogHeader>
+      {!execution ? <>
+        <label className="registry-field gateway-budget-target"><span className="registry-field-label">网关</span>
+          <Select value={targets.some(target => target.id === targetId) ? targetId : null} items={targets.map(target => ({ value: target.id, label: target.name }))} disabled={busy || !owner || !targets.length} onValueChange={value => { if (!busy && value) { setTargetId(value); readiness.reset() } }}>
+            <SelectTrigger aria-label="网关"><SelectValue placeholder="选择网关" /></SelectTrigger>
+            <SelectContent align="start" alignItemWithTrigger={false}>{targets.map(target => <SelectItem key={target.id} value={target.id}><span data-no-localize>{target.name}</span></SelectItem>)}</SelectContent>
+          </Select>
+        </label>
+        {readiness.isPending && <div className="gateway-budget-state" role="status"><RefreshCw size={15} className="spin" /><span>正在验证身份</span></div>}
+        {result && <div className="gateway-budget-preview">
+          <div className={`gateway-budget-state ${result.ready ? "success" : "error"}`} role="status">{result.ready ? <CheckCircle2 size={15} /> : <XCircle size={15} />}<span>{result.protocol_mode === "paused" ? result.ready ? "围栏验证通过" : "围栏验证未通过" : result.ready ? "身份验证通过" : "身份验证未通过"}</span></div>
+          <p>HTTP 实际 / 预期</p>
+          <dl><div><dt>Revision</dt><dd><code data-no-localize>{result.revision}</code></dd></div><div><dt>网关</dt><dd><code data-no-localize>{result.native_gateway_id}</code></dd></div>
+            {result.checks.map(item => <div key={`${item.native_gateway_id}:${item.case}`}><dt>{cases[item.case]}</dt><dd>{item.actual_status ?? "—"} / {item.expected_status}{item.expected_error_code && <><br /><code>{item.native_gateway_id}</code><br /><code>{item.actual_error_code ?? "—"}</code></>}</dd></div>)}
+            <div><dt>UTC</dt><dd>{result.checked_at}</dd></div>
+          </dl>
+        </div>}
+      </> : <div className="gateway-budget-fields">
+        <span className="gateway-budget-gateway" data-no-localize>{targets.find(target => target.id === targetId)?.name}</span>
+        <label className="registry-field"><span className="registry-field-label">Application</span>
+          <Select value={selectedApplication?.id ?? null} items={applicationOptions.map(application => ({ value: application.id, label: application.display_name }))} disabled={busy || sent || !applicationOptions.length} onValueChange={value => { setApplicationId(value ?? ""); setModelId("") }}>
+            <SelectTrigger aria-label="Application"><SelectValue placeholder={applications.isLoading ? "正在加载应用" : applicationOptions.length ? "选择应用" : "暂无可用应用"} /></SelectTrigger>
+            <SelectContent align="start" alignItemWithTrigger={false}>{applicationOptions.map(application => <SelectItem key={application.id} value={application.id}><span data-no-localize>{application.display_name}</span></SelectItem>)}</SelectContent>
+          </Select>
+        </label>
+        <label className="registry-field"><span className="registry-field-label">模型</span>
+          <Select value={modelOptions.some(model => model.id === modelId) ? modelId : null} items={modelOptions.map(model => ({ value: model.id, label: model.display_name }))} disabled={busy || sent || !modelOptions.length} onValueChange={value => setModelId(value ?? "")}>
+            <SelectTrigger aria-label="模型"><SelectValue placeholder={modelOptions.length ? "选择模型" : "暂无可用模型"} /></SelectTrigger>
+            <SelectContent align="start" alignItemWithTrigger={false}>{modelOptions.map(model => <SelectItem key={model.id} value={model.id}><span data-no-localize>{model.display_name}</span></SelectItem>)}</SelectContent>
+          </Select>
+        </label>
+        <div className="gateway-budget-limit"><span>最大输出 Tokens</span><strong>32</strong></div>
+        {invocation.isPending && <div className="gateway-budget-state" role="status"><RefreshCw size={15} className="spin" /><span>正在验证账本</span></div>}
+        {invocation.data && <div className="gateway-budget-results">
+          <div role="status">HTTP {invocation.data.actual_status} · {invocation.data.settled ? "结算完成" : "尚未确认结算"}</div><code data-no-localize>{invocation.data.request_id}</code>
+          {invocation.data.scopes.map(scope => <section className="gateway-budget-scope" key={scope.before.scope.scope_type}>
+            <strong>{scope.before.scope.scope_type === "person" ? "Person" : "Application"}</strong><code data-no-localize>{scope.before.scope.scope_id}</code>
+            <dl><div><dt>调用前已确认</dt><dd>{scope.before.confirmed_tokens}</dd></div><div><dt>调用后已确认</dt><dd>{scope.after?.confirmed_tokens ?? "—"}</dd></div><div><dt>待结算 Tokens</dt><dd>{scope.after?.active_reserved_tokens ?? "—"}</dd></div><div><dt>实际 Tokens</dt><dd>{scope.attempt?.actual_tokens ?? "—"}</dd></div><div><dt>状态</dt><dd>{scope.attempt?.state ?? "—"}</dd></div><div><dt>账本版本</dt><dd>{scope.after?.version ?? "—"}</dd></div></dl>
+          </section>)}
+        </div>}
+      </div>}
+      {registry.isLoading && <div className="gateway-budget-state" role="status"><RefreshCw className="spin" size={15} /><span>正在加载调用配置</span></div>}
+      {error && <div className="gateway-budget-state error" role="alert"><AlertTriangle size={15} /><span>{String(error)}</span></div>}
+      <DialogFooter>
+        {!execution ? <><Button variant="outline" disabled={!canCheck} onClick={() => void check()}><ShieldCheck size={13} />验证预算委托</Button><Button variant="outline" disabled={busy || !verification?.model_ids.length} title={!verification?.model_ids.length ? "仅限已验证的隔离候选" : undefined} onClick={() => { if (!busy && verification?.model_ids.length) setExecution(true) }}><Layers3 size={13} />联合账本验证</Button></> : <Button variant="outline" disabled={!canSend} onClick={() => void send()}><Send size={13} />发送验证请求</Button>}
+        <Button variant="outline" disabled={busy} onClick={onClose}>关闭</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+}
+
+function GatewayReleaseGroups({ items, selectedId, collapsedGatewayIds, onToggle, onSelect, location }: {
+  items: GatewayReleaseSummary[]
+  selectedId: string | null
+  collapsedGatewayIds: ReadonlySet<string>
+  onToggle: (gatewayId: string) => void
+  onSelect: (releaseId: string) => void
+  location: "drawer" | "rail"
+}) {
+  const groups = new Map<string, { name: string; releases: GatewayReleaseSummary[] }>()
+  for (const release of items) {
+    const group = groups.get(release.gateway_profile_id)
+    if (group) group.releases.push(release)
+    else groups.set(release.gateway_profile_id, { name: release.gateway_name, releases: [release] })
+  }
+  return <>{[...groups].map(([gatewayId, group]) => {
+    const collapsed = collapsedGatewayIds.has(gatewayId)
+    const contentId = `gateway-release-group-${location}-${gatewayId}`
+    return <section className="gateway-release-group" aria-label={group.name} key={gatewayId}>
+      <button type="button" className="gateway-release-group-trigger" aria-expanded={!collapsed} aria-controls={contentId} onClick={() => onToggle(gatewayId)}>
+        <ChevronRight className="gateway-release-group-caret" size={13} aria-hidden="true" />
+        <span title={group.name} data-no-localize>{group.name}</span><i aria-hidden="true" /><small>{group.releases.length}</small>
+      </button>
+      <div id={contentId} className="gateway-release-group-content" role="group" hidden={collapsed}>
+        {group.releases.map(release => <div role="listitem" key={release.id}><ReleaseListRow release={release} selected={release.id === selectedId} onSelect={() => onSelect(release.id)} /></div>)}
+      </div>
+    </section>
+  })}</>
+}
+
 export function GatewayReleasesPage({
   releaseDrawerOpen,
   onReleaseDrawerOpenChange,
@@ -374,8 +540,10 @@ export function GatewayReleasesPage({
   const [selectedId, setSelectedId] = useState<string | null>(releaseFromUrl)
   const [search, setSearch] = useState("")
   const [filter, setFilter] = useState<ReleaseFilter>("all")
+  const [collapsedGatewayIds, setCollapsedGatewayIds] = useState(() => new Set<string>())
   const [rollbackId, setRollbackId] = useState<string | null>(null)
   const [activeOperationId, setActiveOperationId] = useState<string | null>(null)
+  const [budgetGatewayId, setBudgetGatewayId] = useState<string | null>(null)
   const {
     width,
     minWidth,
@@ -390,6 +558,7 @@ export function GatewayReleasesPage({
     maxWidth: RELEASE_PANE_MAX,
   })
   const items = releases.data?.items ?? []
+  const selectedGatewayId = items.find(release => release.id === selectedId)?.gateway_profile_id
   const visible = useMemo(() => {
     const normalized = search.trim().toLocaleLowerCase()
     return items.filter((release) => (filter === "all" || release.role === filter)
@@ -453,6 +622,12 @@ export function GatewayReleasesPage({
     setReleaseInUrl(id)
     if (closeDrawer) onReleaseDrawerOpenChange(false)
   }
+  const toggleGatewayGroup = (gatewayId: string) => setCollapsedGatewayIds(current => {
+    const next = new Set(current)
+    if (next.has(gatewayId)) next.delete(gatewayId)
+    else next.add(gatewayId)
+    return next
+  })
   const apiMissing = releases.error instanceof ApiError && releases.error.status === 404
   const busy = protectionMutation.isPending || integrityMutation.isPending || rollbackMutation.isPending || gcMutation.isPending || Boolean(operation.data?.worker_available && !operationTerminal)
   const releaseActionError = protectionMutation.error ?? integrityMutation.error ?? rollbackMutation.error
@@ -472,8 +647,7 @@ export function GatewayReleasesPage({
       </div>
     </div>
     <div className="gateway-release-list" role="list" aria-label="网关发布列表">
-      <div className="gateway-release-list-section-label"><span>网关发布</span><i /></div>
-      {visible.map((release) => <div role="listitem" key={release.id}><ReleaseListRow release={release} selected={release.id === selectedId} onSelect={() => chooseRelease(release.id, closeOnSelect)} /></div>)}
+      <GatewayReleaseGroups items={visible} selectedId={selectedId} collapsedGatewayIds={collapsedGatewayIds} onToggle={toggleGatewayGroup} onSelect={id => chooseRelease(id, closeOnSelect)} location={closeOnSelect ? "drawer" : "rail"} />
       {!visible.length && <div className="gateway-release-list-empty">没有匹配的网关发布</div>}
     </div>
     <footer>{`${visible.length} 个网关发布`}</footer>
@@ -483,12 +657,14 @@ export function GatewayReleasesPage({
     <header className="smh-page-header gateway-releases-header">
       <div><span className="smh-header-icon"><History size={17} /></span><h1>网关发布</h1><span>{releases.isLoading ? "—" : items.length}</span></div>
       <div className="smh-header-actions">
+        {user?.role === "owner" && selectedGatewayId && <Button variant="outline" onClick={() => setBudgetGatewayId(selectedGatewayId)}><ShieldCheck size={13} />验证预算委托</Button>}
         {releases.data && !operationsEnabled && <span className="gateway-release-worker-state" title="检查依赖、回滚和清理计划暂不可用。"><AlertTriangle size={13} />Release Worker 未部署</span>}
         {user?.role === "owner" && detail.data ? <Button variant="outline" disabled={busy || !operationsEnabled} onClick={() => gcMutation.mutate(detail.data!.gateway_profile_id)} title={operationsEnabled ? "扫描整个 Gateway 的闲置 APIM 资源" : "Release Worker 未部署"}><ScanSearch size={13} />扫描闲置资源</Button> : <span className="gateway-releases-readonly"><ShieldAlert size={13} />只读</span>}
       </div>
     </header>
-    {isMobile && user?.role === "owner" && detail.data && <div className="gateway-release-mobile-maintenance">
-      <Button variant="outline" disabled={busy || !operationsEnabled} onClick={() => gcMutation.mutate(detail.data!.gateway_profile_id)} title={operationsEnabled ? "扫描整个 Gateway 的闲置 APIM 资源" : "Release Worker 未部署"}><ScanSearch size={13} />扫描闲置资源</Button>
+    {isMobile && user?.role === "owner" && selectedGatewayId && <div className="gateway-release-mobile-maintenance">
+      <Button variant="outline" onClick={() => setBudgetGatewayId(selectedGatewayId)}><ShieldCheck size={13} />验证预算委托</Button>
+      {detail.data && <Button variant="outline" disabled={busy || !operationsEnabled} onClick={() => gcMutation.mutate(detail.data!.gateway_profile_id)} title={operationsEnabled ? "扫描整个 Gateway 的闲置 APIM 资源" : "Release Worker 未部署"}><ScanSearch size={13} />扫描闲置资源</Button>}
     </div>}
     {gcMutation.error && <div className="gateway-release-gateway-error" role="alert"><AlertTriangle size={14} /><span>{String(gcMutation.error)}</span></div>}
     {gatewayOperation && <GatewayCleanupStatus operation={gatewayOperation} />}
@@ -510,6 +686,7 @@ export function GatewayReleasesPage({
         <div ref={releaseDrawerPortalRef} className="gateway-release-drawer-portals" />
       </DialogContent>
     </Dialog>}
+    {budgetGatewayId && user?.role === "owner" && <BudgetVerificationDialog gatewayId={budgetGatewayId} onClose={() => setBudgetGatewayId(null)} />}
     <AlertDialog open={Boolean(rollbackId)} onOpenChange={(open) => { if (!open && !rollbackMutation.isPending) setRollbackId(null) }}>
       <AlertDialogContent className="gateway-release-rollback-dialog">
         <AlertDialogHeader>

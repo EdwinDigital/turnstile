@@ -344,13 +344,16 @@ def test_connections_own_the_runtime_inventory_and_detail_route() -> None:
     assert 'url.searchParams.set("tab", "connections")' in page
     assert "function RuntimeWorkspace" not in page
     assert "function ConnectionRow" in page
-    assert 'aria-label="按健康状态筛选"' in page
+    assert 'aria-label="按诊断结果筛选"' in page
     assert 'className="connection-health-action"' in page
-    assert 'className="connection-default-action"' in page
+    assert 'className="connection-default-action"' not in page
     assert "onCheckRuntime" in page
-    assert "onDefaultRuntime" in page
+    assert "onDefaultRuntime" not in page
     assert "useQueries" in page
-    assert "function runtimeWithTelemetryHealth" in page
+    assert 'from "../lib/runtime-health"' in page
+    assert "function probeRuntimeHealth" not in page
+    assert "dataSource.checkRuntime(runtime.id, selection)" in page
+    assert "<RuntimeDiagnosticDialog" in page
     assert "runtimeWithTelemetryHealth(runtime, runtimeRequests)" in page
     assert "runtimeHealthQueries[index]?.data ?? []" in page
     assert "loadingRuntimeHealthIds.has(runtime.id)" in page

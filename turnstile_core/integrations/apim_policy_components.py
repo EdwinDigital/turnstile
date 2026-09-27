@@ -59,6 +59,11 @@ def parse_policy(source: str) -> ET.Element:
     return ET.fromstring(preserve_attribute_whitespace(source), parser=parser)
 
 
+def policy_document_digest(source: str) -> str:
+    canonical = ET.canonicalize(preserve_attribute_whitespace(source), with_comments=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def serialize_policy(root: ET.Element) -> str:
     fragments = re.split(
         r"(<!--.*?-->|<[^>]*>)", ET.tostring(root, encoding="unicode"), flags=re.DOTALL

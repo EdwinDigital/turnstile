@@ -1,4 +1,6 @@
 import type {
+  BudgetDelegationReadiness,
+  BudgetExecutionVerification,
   GatewayDeploymentTopology,
   SelfHostedGatewayAssociationChange,
   SelfHostedGatewayBootstrap,
@@ -66,6 +68,8 @@ import type {
   PeopleBudgetFilter,
   RunDetail,
   RuntimeHealth,
+  RuntimeCheckPlan,
+  RuntimeCheckSelection,
   TokenBudgetResponse,
   EnforcementMode,
   TokenBudgetBulkResult,
@@ -148,6 +152,8 @@ function normalizeRegistry(registry: ModelRegistry): ModelRegistry {
   const runtimeIds = new Set(runtimes.map((runtime) => runtime.id))
   return {
     gateway_name_edit_supported: registry.gateway_name_edit_supported === true,
+    runtime_diagnostics_supported: registry.runtime_diagnostics_supported === true,
+    explicit_gateway_selection_supported: registry.explicit_gateway_selection_supported === true,
     apim_target_topology_available: registry.apim_target_topology_available === true,
     self_hosted_gateway_enabled: registry.self_hosted_gateway_enabled === true,
     context_pricing_supported: registry.context_pricing_supported === true,
@@ -345,6 +351,13 @@ export const dataSource = {
     workflow: string; label: string; notes: string; occurred_at: string; comparison_window_days: number
   }) => writeJson<OptimizationEvent>("/api/v1/observability/optimization-events", value),
   registry: () => request<ModelRegistry>("/api/v1/model-management").then(normalizeRegistry),
+  checkBudgetDelegation: (gatewayId: string) => writeJson<BudgetDelegationReadiness>(
+    `/api/v1/model-management/gateways/${encodeURIComponent(gatewayId)}/budget-readiness`, {},
+  ),
+  verifyBudgetExecution: (gatewayId: string, applicationId: string, modelId: string) => writeJson<BudgetExecutionVerification>(
+    `/api/v1/model-management/gateways/${encodeURIComponent(gatewayId)}/budget-execution-verification`,
+    { application_id: applicationId, model_id: modelId },
+  ),
   apimOnboardingOperations: async (): Promise<ApimOnboardingOperations | null> => {
     try { return await request<ApimOnboardingOperations>("/api/v1/model-management/apim-onboarding") }
     catch (error) {
@@ -625,8 +638,11 @@ export const dataSource = {
       `/api/v1/model-management/gateways/${encodeURIComponent(gatewayId)}/credentials/rotate`,
       { model_key: modelKey, ...(kind === "oauth_m2m" ? { oauth_client_secret: credential } : { api_key: credential }) },
     ).then(normalizeGatewayPublication),
-  checkRuntime: (id: string) => request<RuntimeHealth>(
-    `/api/v1/model-management/runtimes/${id}/check`, { method: "POST" },
+  runtimeCheckPlan: (id: string) => request<RuntimeCheckPlan>(
+    `/api/v1/model-management/runtimes/${encodeURIComponent(id)}/check`, { cache: "no-store" },
+  ),
+  checkRuntime: (id: string, selection: RuntimeCheckSelection) => writeJson<RuntimeHealth>(
+    `/api/v1/model-management/runtimes/${encodeURIComponent(id)}/check`, selection,
   ),
   invokeModel: (value: Record<string, unknown>) => writeJson<ModelInvocationResponse>(
     "/api/v1/model-gateway/invoke", value,

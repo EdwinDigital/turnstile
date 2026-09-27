@@ -31,6 +31,7 @@ from ..domain.models import (
     ReconciledUsage,
     TokenUsageRecord,
 )
+from ..domain.runtime_models import PlatformInvocationAttempt, PlatformInvocationCompletion
 from .repository_support import UsageFilters
 
 
@@ -59,6 +60,12 @@ class OpsDbProxy(Protocol):
 
 
 class QueryRepository(ABC):
+    @abstractmethod
+    def begin_platform_invocation(self, attempt: PlatformInvocationAttempt) -> None: ...
+
+    @abstractmethod
+    def finish_platform_invocation(self, completion: PlatformInvocationCompletion) -> None: ...
+
     @abstractmethod
     def finish_apim_onboarding_operation(
         self, operation_id: UUID, worker_id: str, credential_ciphertext: bytes,
@@ -978,10 +985,26 @@ class QueryRepository(ABC):
 
     @abstractmethod
     def invocation_route(
-        self, runtime_id: UUID | None, model_id: UUID | None
+        self, runtime_id: UUID | None, model_id: UUID | None,
+        *, gateway_profile_id: UUID | None = None, gateway_deployment_id: UUID | None = None,
     ) -> dict[str, Any] | None: ...
 
     @abstractmethod
     def update_runtime_health(
         self, runtime_id: UUID, status: str, message: str, checked_at: datetime
     ) -> None: ...
+
+    @abstractmethod
+    def runtime_diagnostic_contexts(
+        self, selections: Sequence[tuple[UUID, UUID, UUID, UUID]],
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def claim_runtime_diagnostic(
+        self, runtime_id: UUID, marker: str, checked_at: datetime, before: datetime,
+    ) -> bool: ...
+
+    @abstractmethod
+    def finish_runtime_diagnostic(
+        self, runtime_id: UUID, marker: str, status: str, message: str, checked_at: datetime,
+    ) -> bool: ...

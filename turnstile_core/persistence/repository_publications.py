@@ -11,8 +11,10 @@ from psycopg.types.json import Jsonb
 from ..domain.control_plane import (
     GatewayPublication,
     GatewayPublicationIntent,
+    publication_credential_evidence,
     publication_materialized_named_values,
     publication_model_id,
+    publication_provisioning_completed,
 )
 from ..domain.gateway_targets import apim_target_route_binding_id_for
 from .repository_support import (
@@ -359,19 +361,20 @@ class PostgreSqlPublicationRepositoryMixin:
             connection, UUID(str(publication["gateway_profile_id"])),
             publication["desired_spec"] if desired_spec is None else desired_spec,
         )
-        provisioning_completed = connection.execute(
-            """SELECT 1 FROM gateway_publication_audit
-               WHERE publication_id = %s
-                 AND from_status = 'validating' AND to_status = 'provisioning'
-               LIMIT 1""",
+        provisioning_audit = connection.execute(
+            "SELECT from_status, to_status FROM gateway_publication_audit "
+            "WHERE publication_id = %s ORDER BY created_at, id",
             (publication["id"],),
-        ).fetchone()
+        ).fetchall()
         materialized = publication_materialized_named_values(
             GatewayPublication.model_validate(publication),
-            provisioning_completed=provisioning_completed is not None,
+            provisioning_completed=publication_provisioning_completed(provisioning_audit),
         )
         preserved_manifest: dict[str, Any] = (
-            {"named_values": materialized} if credential_ciphertext is None and materialized else {}
+            {"named_values": materialized, "credential_evidence": publication_credential_evidence(
+                GatewayPublication.model_validate(publication),
+                {name: "present" for name in materialized},
+            )} if credential_ciphertext is None and materialized else {}
         )
         oauth_credentials = publication["resource_manifest"].get("oauth_credentials")
         if credential_ciphertext is None and isinstance(oauth_credentials, list):
@@ -1180,7 +1183,7 @@ class PostgreSqlPublicationRepositoryMixin:
                 return None
             terminal = status in {"active", "failed", "rolled_back"}
             paused = status == "awaiting_authorization"
-            if terminal:
+            if terminal or (expected_status == "validating" and status == "provisioning"):
                 connection.execute(
                     "DELETE FROM gateway_publication_secret WHERE publication_id = %s",
                     (publication_id,),
@@ -1723,13 +1726,21 @@ class PostgreSqlPublicationRepositoryMixin:
         return cast(dict[str, Any], row)
 
     def invocation_route(
-        self, runtime_id: UUID | None, model_id: UUID | None
+        self, runtime_id: UUID | None, model_id: UUID | None,
+        *, gateway_profile_id: UUID | None = None, gateway_deployment_id: UUID | None = None,
     ) -> dict[str, Any] | None:
+        if (gateway_profile_id is None) != (gateway_deployment_id is None):
+            return None
+        if gateway_profile_id is not None and model_id is None:
+            return None
         conditions = [
             "model.enabled",
             "runtime.enabled",
             "provider.enabled",
             "(gateway.id IS NULL OR gateway.enabled)",
+            "(route_binding.id IS NULL OR route_binding.current_publication_id = publication.id)",
+            "(selected_deployment.value IS NOT NULL OR "
+            "(route_binding.id IS NULL AND invocation_target.gateway_profile_id IS NULL))",
             """(route_binding.id IS NOT NULL OR NOT EXISTS (
                 SELECT 1 FROM apim_target_route_binding stored_route
                 WHERE stored_route.logical_model_id = model.id
@@ -1747,6 +1758,15 @@ class PostgreSqlPublicationRepositoryMixin:
         if runtime_id is not None and model_id is not None:
             conditions.append("runtime.id = %s")
             parameters.append(runtime_id)
+        route_selection = "AND route.is_default_serving"
+        deployment_selection = ""
+        join_parameters: list[Any] = []
+        if gateway_profile_id is not None:
+            route_selection = "AND route.apim_target_id = %s"
+            deployment_selection = "WHERE value->>'deployment_id' = %s"
+            join_parameters = [gateway_profile_id, str(gateway_deployment_id)]
+            conditions.extend(["gateway.id = %s", "selected_deployment.value IS NOT NULL"])
+            parameters.append(gateway_profile_id)
         with self._connection() as connection:
             row = connection.execute(
                 f"""SELECT
@@ -1773,7 +1793,13 @@ class PostgreSqlPublicationRepositoryMixin:
                     provider.credential_ciphertext AS provider_credential_ciphertext,
                     gateway.id AS gateway_id, gateway.name AS gateway_name,
                     gateway.implementation AS gateway_implementation,
-                    gateway.base_url AS gateway_base_url,
+                    COALESCE(selected_deployment.value->>'endpoint_url', gateway.base_url)
+                        AS gateway_base_url,
+                    (selected_deployment.value->>'deployment_id')::uuid AS gateway_deployment_id,
+                    selected_deployment.value->>'native_gateway_id' AS native_gateway_id,
+                    to_jsonb(invocation_target) AS gateway_target,
+                    selected_deployment.value->'deployment' AS gateway_deployment,
+                    selected_deployment.value->'inventory' AS gateway_inventory,
                     gateway.auth_type AS gateway_auth_type,
                     gateway.credential_ciphertext AS gateway_credential_ciphertext,
                     gateway.config AS gateway_config,
@@ -1784,16 +1810,19 @@ class PostgreSqlPublicationRepositoryMixin:
                 LEFT JOIN LATERAL (
                     SELECT route.* FROM apim_target_route_binding route
                     WHERE route.logical_model_id = model.id AND route.enabled
+                        {route_selection}
                     ORDER BY route.is_default_serving DESC, route.created_at, route.id
                     LIMIT 1
                 ) route_binding ON TRUE
                 JOIN model_runtime runtime
                     ON runtime.id = COALESCE(route_binding.runtime_id, model.runtime_id)
-                JOIN model_provider provider ON provider.id = model.provider_id
+                JOIN model_provider provider ON provider.id = runtime.provider_id
                 LEFT JOIN managed_model_price price ON price.model_id = model.id
                                 LEFT JOIN managed_model_metadata model_metadata
                                     ON model_metadata.model_id = model.id
                 LEFT JOIN gateway_profile gateway ON gateway.id = runtime.gateway_profile_id
+                LEFT JOIN apim_target_metadata invocation_target
+                    ON invocation_target.gateway_profile_id = gateway.id
                 LEFT JOIN effective_gateway_release effective
                     ON effective.gateway_profile_id = runtime.gateway_profile_id
                 LEFT JOIN gateway_publication publication
@@ -1811,6 +1840,19 @@ class PostgreSqlPublicationRepositoryMixin:
                         'kind', deployment.kind,
                         'native_gateway_id', deployment.native_gateway_id,
                         'endpoint_url', deployment.endpoint_url,
+                        'deployment', to_jsonb(deployment),
+                        'inventory', jsonb_build_object(
+                            'associated_api_ids', COALESCE((
+                                SELECT jsonb_agg(association.api_id)
+                                FROM gateway_deployment_api_association association
+                                WHERE association.deployment_id = deployment.id
+                            ), '[]'::jsonb),
+                            'hostname_configurations', COALESCE((
+                                SELECT jsonb_agg(jsonb_build_object('hostname', hostname.hostname))
+                                FROM gateway_deployment_hostname_inventory hostname
+                                WHERE hostname.deployment_id = deployment.id
+                            ), '[]'::jsonb)
+                        ),
                         'approved_endpoint_url', CASE
                             WHEN provision.operation_kind = 'self_hosted_gateway_provision'
                                 AND provision.status = 'succeeded'
@@ -1837,30 +1879,92 @@ class PostgreSqlPublicationRepositoryMixin:
                             FROM gateway_deployment_hostname_inventory hostname
                             WHERE hostname.deployment_id = deployment.id
                         ), '[]'::jsonb)
-                    ) ORDER BY (deployment.kind = 'managed') DESC, deployment.id) AS items
+                    ) ORDER BY CASE WHEN route_binding.deployment_scope_mode = 'selected'
+                        THEN (deployment.kind = 'self_hosted')
+                        ELSE (deployment.kind = 'managed') END DESC, deployment.id) AS items
                     FROM gateway_deployment deployment
                     LEFT JOIN gateway_release_operation provision
                         ON provision.id = deployment.provisioning_operation_id
                     LEFT JOIN apim_target_metadata approved_target
                         ON approved_target.gateway_profile_id = deployment.apim_target_id
-                    WHERE deployment.apim_target_id = route_binding.apim_target_id
+                    WHERE deployment.apim_target_id = gateway.id
                         AND deployment.retired_at IS NULL
                         AND deployment.declared_state = 'present'
                         AND deployment.reachability_state <> 'unreachable'
                         AND deployment.endpoint_url IS NOT NULL
-                        AND (route_binding.deployment_scope_mode = 'all' OR EXISTS (
+                        AND ((route_binding.id IS NULL AND deployment.kind = 'managed')
+                            OR route_binding.deployment_scope_mode = 'all' OR EXISTS (
                             SELECT 1 FROM apim_target_route_binding_deployment selected
                             WHERE selected.route_binding_id = route_binding.id
                                 AND selected.apim_target_id = route_binding.apim_target_id
                                 AND selected.gateway_deployment_id = deployment.id
                         ))
+                        AND (deployment.kind = 'managed' OR EXISTS (
+                            SELECT 1 FROM gateway_deployment_api_association association
+                            WHERE association.deployment_id = deployment.id
+                                AND lower(association.api_id) = lower(invocation_target.api_id)
+                        ))
                 ) deployments ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT value FROM jsonb_array_elements(COALESCE(deployments.items, '[]'::jsonb))
+                    {deployment_selection}
+                    LIMIT 1
+                ) selected_deployment ON TRUE
                 WHERE {" AND ".join(conditions)}
                 ORDER BY model.is_default DESC, model.created_at
                 LIMIT 1""",
-                parameters,
+                [*join_parameters, *parameters],
             ).fetchone()
         return cast(dict[str, Any] | None, row)
+
+    def runtime_diagnostic_contexts(
+        self, selections: Sequence[tuple[UUID, UUID, UUID, UUID]],
+    ) -> Sequence[dict[str, Any]]:
+        if not selections:
+            return []
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT requested.runtime_id, requested.model_id,
+                          requested.gateway_profile_id, requested.gateway_deployment_id,
+                          to_jsonb(runtime) AS runtime, to_jsonb(provider) AS provider,
+                          to_jsonb(gateway) AS gateway, to_jsonb(model) AS model,
+                          to_jsonb(metadata) AS model_metadata, to_jsonb(target) AS target,
+                          to_jsonb(deployment) AS deployment, to_jsonb(route) AS binding,
+                          CASE WHEN route.id IS NULL THEN deployment.kind = 'managed'
+                               ELSE route.deployment_scope_mode = 'all' OR EXISTS (
+                                   SELECT 1 FROM apim_target_route_binding_deployment selected
+                                   WHERE selected.route_binding_id = route.id
+                                     AND selected.apim_target_id = requested.gateway_profile_id
+                                     AND selected.gateway_deployment_id = deployment.id
+                               ) END AS deployment_in_scope,
+                          published.value AS published_route
+                   FROM unnest(%s::uuid[], %s::uuid[], %s::uuid[], %s::uuid[])
+                       AS requested(runtime_id, model_id, gateway_profile_id, gateway_deployment_id)
+                   LEFT JOIN model_runtime runtime ON runtime.id = requested.runtime_id
+                   LEFT JOIN managed_model model ON model.id = requested.model_id
+                   LEFT JOIN managed_model_metadata metadata ON metadata.model_id = model.id
+                   LEFT JOIN model_provider provider ON provider.id = runtime.provider_id
+                   LEFT JOIN gateway_profile gateway ON gateway.id = requested.gateway_profile_id
+                   LEFT JOIN apim_target_metadata target ON target.gateway_profile_id = gateway.id
+                   LEFT JOIN gateway_deployment deployment
+                       ON deployment.id = requested.gateway_deployment_id
+                   LEFT JOIN apim_target_route_binding route
+                       ON route.logical_model_id = model.id AND route.apim_target_id = gateway.id
+                   LEFT JOIN effective_gateway_release effective
+                       ON effective.gateway_profile_id = gateway.id
+                   LEFT JOIN gateway_publication publication
+                       ON publication.id = effective.publication_id
+                   LEFT JOIN LATERAL (
+                       SELECT value FROM jsonb_array_elements(
+                           COALESCE(publication.desired_spec->'bindings', '[]'::jsonb)
+                       ) binding
+                       WHERE lower(value->'model'->>'model_key') = lower(model.model_key)
+                         AND value->>'runtime_id' = requested.runtime_id::text
+                       LIMIT 1
+                   ) published ON TRUE""",
+                tuple([selection[index] for selection in selections] for index in range(4)),
+            ).fetchall()
+        return cast(Sequence[dict[str, Any]], rows)
 
     def update_runtime_health(
         self, runtime_id: UUID, status: str, message: str, checked_at: datetime
@@ -1871,3 +1975,27 @@ class PostgreSqlPublicationRepositoryMixin:
                    last_checked_at=%s, updated_at=now() WHERE id=%s""",
                 (status, message, checked_at, runtime_id),
             )
+
+    def claim_runtime_diagnostic(
+        self, runtime_id: UUID, marker: str, checked_at: datetime, before: datetime,
+    ) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "UPDATE model_runtime SET health_status='unknown', health_message=%s, "
+                "last_checked_at=%s, updated_at=now() WHERE id=%s AND enabled "
+                "AND (last_checked_at IS NULL OR last_checked_at <= %s) RETURNING id",
+                (marker, checked_at, runtime_id, before),
+            ).fetchone()
+        return row is not None
+
+    def finish_runtime_diagnostic(
+        self, runtime_id: UUID, marker: str, status: str, message: str, checked_at: datetime,
+    ) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "UPDATE model_runtime SET health_status=%s, health_message=%s, "
+                "last_checked_at=%s, updated_at=now() "
+                "WHERE id=%s AND health_message=%s RETURNING id",
+                (status, message, checked_at, runtime_id, marker),
+            ).fetchone()
+        return row is not None

@@ -16,6 +16,7 @@ something is missing reports success while checking nothing.
 
 from __future__ import annotations
 
+import json
 from functools import cache
 from pathlib import Path
 from typing import cast
@@ -113,8 +114,8 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 98
-    assert len(schemas) == 223
+    assert len(paths) == 104
+    assert len(schemas) == 242
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -126,6 +127,133 @@ def test_openapi_root_is_a_small_domain_index() -> None:
         "model-platform.yaml",
         "observability.yaml",
     }
+
+
+def test_budget_diagnostics_contract_matches_public_fields_and_owner_routes() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    for name in (
+        "BudgetDelegationCheck", "BudgetDelegationReadiness", "BudgetExecutionVerificationOptions",
+        "BudgetExecutionVerificationRequest", "BudgetExecutionVerification",
+        "BudgetExecutionScopeReadback",
+        "LedgerScope", "LedgerSummary", "LedgerAttemptIdentity", "LedgerAttempt",
+    ):
+        assert set(cast(dict[str, object], documented[name]["properties"])) == set(
+            actual[name]["properties"],
+        )
+        assert documented[name]["additionalProperties"] is False
+    for suffix in ("budget-readiness", "budget-execution-verification"):
+        path = f"/api/v1/model-management/gateways/{{gateway_profile_id}}/{suffix}"
+        route = _documented_paths()[path]
+        assert cast(dict[str, object], route["post"])["security"] == [{"sessionCookie": []}]
+
+
+def test_invocation_contract_matches_runtime_identity_tools_and_usage() -> None:
+    document = _yaml_document((CONTRACT.parent / "model-gateway.openapi.yaml").resolve())
+    components = cast(dict[str, object], document["components"])
+    documented = cast(dict[str, dict[str, object]], components["schemas"])
+    actual = app.openapi()["components"]["schemas"]
+
+    def normalize(value: object) -> object:
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "properties" and isinstance(item, dict):
+                result[key] = {name: normalize(schema) for name, schema in item.items()}
+            elif key not in {"title", "description"}:
+                result[key] = normalize(item)
+        declared_types = result.get("type")
+        if isinstance(declared_types, list):
+            nullable_variants = [
+                {"type": "null"} if kind == "null" else {**result, "type": kind}
+                for kind in declared_types
+            ]
+            return {"anyOf": sorted(
+                nullable_variants, key=lambda item: json.dumps(item, sort_keys=True),
+            )}
+        if "oneOf" in result:
+            result["anyOf"] = result.pop("oneOf")
+        variants = result.get("anyOf")
+        if isinstance(variants, list):
+            result["anyOf"] = sorted(variants, key=lambda item: json.dumps(item, sort_keys=True))
+        return result
+
+    for name in (
+        "InvocationMetadata", "ToolFunctionDefinition", "ToolDefinition", "ToolFunctionCall",
+        "ToolCall", "ChatMessage", "ModelInvocationRequest", "InvocationUsage",
+        "ModelInvocationResponse",
+    ):
+        described = dict(documented[name])
+        described.pop("allOf", None)
+        assert normalize(described) == normalize(actual[name]), name
+
+
+def test_platform_invocation_trace_contract_preserves_unknown_and_explicit_identity() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    fields = cast(dict[str, dict[str, object]], documented["UsageRequestSummary"]["properties"])
+    assert set(fields) == set(actual["UsageRequestSummary"]["properties"])
+    assert fields["correlation_id"]["type"] == ["string", "null"]
+    assert fields["status_code"]["type"] == ["integer", "null"]
+    assert fields["usage_available"]["default"] is True
+    for path in ("/api/v1/observability/requests", "/api/v1/observability/requests/{request_id}"):
+        assert "get" in _documented_paths()[path]
+
+
+def test_image_invocation_contract_requires_a_complete_gateway_selection() -> None:
+    schema = _documented_schemas()["ImageInvocationRequest"]
+    conditions = cast(list[dict[str, object]], schema["allOf"])
+    selections = (
+        ("gateway_profile_id", "gateway_deployment_id"),
+        ("gateway_deployment_id", "gateway_profile_id"),
+    )
+    for (selected, counterpart), condition in zip(selections, conditions, strict=True):
+        assert condition["if"] == {
+            "required": [selected], "properties": {selected: {"type": "string"}},
+        }
+        assert condition["then"] == {
+            "required": [counterpart],
+            "properties": {counterpart: {"type": "string", "format": "uuid"}},
+        }
+    fields = cast(dict[str, dict[str, object]], schema["properties"])
+    assert fields["n"]["const"] == 1
+    assert fields["stream"]["const"] is False
+
+
+def test_runtime_diagnostic_contract_has_explicit_selection_and_owner_routes() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    for name in ("RuntimeCheckSelection", "RuntimeCheckOption", "RuntimeCheckPlan",
+                 "RuntimeDiagnosticAccess", "RuntimeHealth"):
+        assert set(cast(dict[str, object], documented[name]["properties"])) == set(
+            actual[name]["properties"],
+        )
+        assert documented[name]["additionalProperties"] is False
+    plan = cast(dict[str, dict[str, object]], documented["RuntimeCheckPlan"]["properties"])
+    assert plan["max_output_tokens"]["const"] == 64
+    assert plan["request_limit"]["const"] == 1
+    path = _documented_paths()["/api/v1/model-management/runtimes/{runtime_id}/check"]
+    for method in ("get", "post"):
+        operation = cast(dict[str, object], path[method])
+        assert operation["security"] == [{"sessionCookie": []}]
+        assert method in app.openapi()["paths"][
+            "/api/v1/model-management/runtimes/{runtime_id}/check"
+        ]
+
+
+def test_publication_failure_contract_matches_safe_response_fields() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]["GatewayPublicationFailure"]
+    failure = documented["GatewayPublicationFailure"]
+    properties = cast(dict[str, dict[str, object]], failure["properties"])
+    assert set(properties) == set(actual["properties"])
+    assert properties["code"]["enum"] == actual["properties"]["code"]["enum"]
+    assert failure["additionalProperties"] is False
+    for name in ("GatewayPublication", "GatewayReleaseSummary"):
+        assert "failure" in cast(dict[str, object], documented[name]["properties"])
 
 
 def test_gateway_target_contract_matches_actual_structures_and_owner_operations() -> None:

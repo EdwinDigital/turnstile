@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from unittest.mock import Mock
 from uuid import UUID
 from xml.etree import ElementTree
 
@@ -39,7 +40,11 @@ from turnstile_core.integrations.ledger import (
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.application_access import ApplicationAccessService
-from turnstile_core.services.application_provisioning_ledger import prepare_application_ledger
+from turnstile_core.services.application_provisioning_ledger import (
+    prepare_application_ledger,
+    project_application_rate_limit,
+    read_application_rate_limit,
+)
 from turnstile_core.services.control_plane import (
     ControlPlaneConflictError,
     ControlPlaneUnavailableError,
@@ -133,6 +138,34 @@ def _materialized_application() -> tuple[
         gateway_id, spec, "owner@example.com"
     )
     return repository, gateway_id, spec
+
+
+def test_rate_projection_retries_conflicts_preserves_quota_and_never_writes_balances() -> None:
+    repository, _gateway_id, spec = _materialized_application()
+    partition = application_partition_key(spec.application_id, datetime.now(UTC).strftime("%Y-%m"))
+    store = Mock(spec=TableStorageLedger)
+    row = {"Limit": 3000, "Enforce": True, "TokensPerMinute": 25, "Custom": "preserved"}
+    store.read_versioned_entity.side_effect = [
+        (dict(row), '"one"'), ({**row, "Limit": 4000}, '"two"'),
+        ({**row, "Limit": 4000, "TokensPerMinute": 100}, '"three"'),
+    ]
+    store.replace_if_match.side_effect = [False, True]
+    assert project_application_rate_limit(repository, store, spec.application_id) == 100
+    assert store.replace_if_match.call_count == 2
+    last = store.replace_if_match.call_args.args
+    assert last == (partition, "Q", {
+        "Limit": 4000, "Enforce": True, "TokensPerMinute": 100, "Custom": "preserved",
+    }, '"two"')
+    store.upsert.assert_not_called()
+    store.insert_if_missing.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "100", 2147483648])
+def test_rate_readback_rejects_invalid_values(value: object) -> None:
+    store = Mock(spec=TableStorageLedger)
+    store.read_versioned_entity.return_value = ({"TokensPerMinute": value}, '"unit"')
+    with pytest.raises(ValueError, match="invalid"):
+        read_application_rate_limit(store, UUID(int=1))
 
 
 def test_application_ledger_prepare_preserves_confirmed_usage_and_reservations() -> None:

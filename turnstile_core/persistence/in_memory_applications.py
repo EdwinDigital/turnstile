@@ -847,8 +847,9 @@ class InMemoryApplicationRepositoryMixin:
     ) -> None:
         existing = self.usage_application_attributions.get(usage_id)
         if existing is not None:
-            immutable = existing.model_copy(update={"application_admission": None})
-            incoming = attribution.model_copy(update={"application_admission": None})
+            identity_projection = {"application_admission": None, "application_name_snapshot": ""}
+            immutable = existing.model_copy(update=identity_projection)
+            incoming = attribution.model_copy(update=identity_projection)
             if immutable != incoming:
                 raise ValueError("Usage application attribution is immutable")
             if existing.application_admission is None:

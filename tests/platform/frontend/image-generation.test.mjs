@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { runInNewContext } from "node:vm"
 
 import { generatedImageBlob, imageDownloadFilename } from "../../../frontend/src/data-sources/apim/image-generation.ts"
+import * as gatewayTopology from "../../../frontend/src/lib/gateway-topology.ts"
 
 const apiSource = readFileSync(new URL("../../../frontend/src/data-sources/apim/api.ts", import.meta.url), "utf8")
 const normalizationStart = apiSource.indexOf("const LEGACY_CLOUD_CODE_PROVIDER_ID")
@@ -22,6 +23,69 @@ const invocationBundle = await rolldown({ input: invocationEntry, external: id =
 let invocationComponent
 try { invocationComponent = (await invocationBundle.generate({ format: "cjs" })).output[0].code }
 finally { await invocationBundle.close() }
+
+for (const imageMode of [false, true]) test(`invocation UI submits explicit Gateway identity and blocks stale selection, image=${imageMode}`, async () => {
+  const registry = normalizeRegistry({ ...emptyRegistry, explicit_gateway_selection_supported: true, self_hosted_gateway_enabled: true,
+    image_generation_supported: true, image_configuration_schema_version: 4,
+    gateways: [{ id: "gateway", name: "Unit APIM", implementation: "apim", enabled: true }],
+    runtimes: [{ id: "runtime", name: "Unit runtime", config: {} }],
+    models: [{ id: "model", runtime_id: "runtime", model_key: "unit-model", display_name: "Unit model", enabled: true, capabilities: [imageMode ? "image_generation" : "chat"], image_profile: { version: 4 } }],
+  })
+  const topology = { items: [{ target: { gateway_profile_id: "gateway", service_name: "unit-apim", api_id: "unit-api", drift_state: "in_sync", capabilities: { response_observer: "unsupported" } },
+    deployments: [{ deployment: { id: "edge", apim_target_id: "gateway", native_gateway_id: "native-edge", display_name: "Edge", kind: "self_hosted", declared_state: "present", endpoint_url: "https://edge.example.test", retired_at: null },
+      inventory: { associated_api_ids: ["unit-api"] }, published_models: [{ id: "model" }] }],
+  }] }
+  const slots = [], requests = []
+  let cursor = 0
+  const imports = {
+    react: { useState(initial) { const index = cursor++; if (!(index in slots)) slots[index] = typeof initial === "function" ? initial() : initial;
+      return [slots[index], value => { slots[index] = typeof value === "function" ? value(slots[index]) : value }] }, useEffect() {}, useMemo: callback => callback() },
+    "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
+    "@tanstack/react-query": { useQuery: options => ({ data: options.queryKey?.[0] === "targets" ? topology : registry }), useQueryClient: () => ({}) },
+    "../../../providers/auth-provider": { useAuth: () => ({ user: { email: "unit@example.com", role: "member" } }) },
+    "../../../lib/gateway-topology": gatewayTopology,
+    "../queries": { finopsQueries: { registry: () => ({}), apimTargets: () => ({ queryKey: ["targets"] }) }, invalidateFinOps() {} },
+    "../api": { dataSource: {
+      invokeModel: async value => { requests.push(value); return { request_id: "unit-request", correlation_id: null, gateway: "apim", content: "OK", usage: null } },
+      generateImage: async value => { requests.push(value); return { request_id: "unit-request" } },
+    } },
+    "./dashboard-shared": { PanelTitle: "PanelTitle", queryError: error => error.message, formatLatency: () => "1 ms" },
+  }
+  const exports = {}
+  runInNewContext(invocationComponent, { exports, crypto: { randomUUID: () => "unit-run" }, require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }) })
+  const entities = { organizations: [{ id: "org", name: "Org" }], departments: [{ id: "department", name: "Department" }], projects: [{ id: "project", name: "Project", parent_id: "department" }], agents: [{ id: "agent", name: "Agent", parent_id: "project" }], users: [] }
+  const nodes = value => Array.isArray(value) ? value.flatMap(nodes) : value && typeof value === "object" ? [value, ...nodes(value.props?.children)] : []
+  const find = predicate => { cursor = 0; return nodes(exports.AgentInvocation({ entities })).find(predicate) }
+  const submit = () => find(node => node.type === "button" && node.props.className === "primary-button")
+  if (imageMode) find(node => node.type === "button" && node.props.children?.includes("文生图")).props.onClick()
+  find(node => node.type === "Select" && node.props.value === "__default__").props.onValueChange("model:model")
+  find(node => node.type === "Select" && node.props.value === "__default__").props.onValueChange("gateway")
+  find(node => node.type === "textarea").props.onChange({ target: { value: "Unit prompt" } })
+  if (!imageMode) {
+    const limit = () => find(node => node.type === "Input" && node.props["aria-label"] === "最大输出 Tokens")
+    limit().props.onChange({ target: { value: "0" } })
+    assert.equal(submit().props.disabled, true)
+    submit().props.onClick()
+    assert.equal(requests.length, 0)
+    limit().props.onChange({ target: { value: "64" } })
+  }
+  assert.equal(submit().props.disabled, false)
+  submit().props.onClick()
+  await nextTurn()
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].gateway_profile_id, "gateway")
+  assert.equal(requests[0].gateway_deployment_id, "edge")
+  assert.equal(requests[0].runtime_id, undefined)
+  assert.equal(requests[0].max_output_tokens, imageMode ? undefined : 64)
+  assert.equal(requests[0].stream, false)
+  topology.items[0].deployments[0].deployment.retired_at = "2026-01-01T00:00:00Z"
+  assert.equal(submit().props.disabled, true)
+  submit().props.onClick()
+  registry.models[0].enabled = false
+  assert.equal(submit().props.disabled, true)
+  submit().props.onClick()
+  assert.equal(requests.length, 1)
+})
 
 for (const apiFormat of ["openai_chat", "anthropic_messages", undefined]) {
   test(`text invocation preserves provider sampling defaults for ${apiFormat ?? "unspecified"}`, async () => {
@@ -43,9 +107,10 @@ for (const apiFormat of ["openai_chat", "anthropic_messages", undefined]) {
         useEffect() {}, useMemo: callback => callback(),
       },
       "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
-      "@tanstack/react-query": { useQuery: () => ({ data: registry }), useQueryClient: () => ({}) },
+      "@tanstack/react-query": { useQuery: options => ({ data: options.queryKey?.[0] === "targets" ? null : registry }), useQueryClient: () => ({}) },
       "../../../providers/auth-provider": { useAuth: () => ({ user: { email: "unit@example.com", name: "Unit", role: "member" } }) },
-      "../queries": { finopsQueries: { registry: () => ({}) }, invalidateFinOps() {} },
+      "../queries": { finopsQueries: { registry: () => ({}), apimTargets: () => ({ queryKey: ["targets"] }) }, invalidateFinOps() {} },
+      "../../../lib/gateway-topology": gatewayTopology,
       "../api": { dataSource: { invokeModel: async request => { requests.push(request); return { content: "OK" } } } },
       "./dashboard-shared": { PanelTitle: "PanelTitle", queryError: error => error.message },
     }
@@ -91,9 +156,10 @@ for (const [enabled, version, allowed, rejected] of [[true, 4, true, false], [tr
     }
     const imports = {
       react: hooks, "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
-      "@tanstack/react-query": { useQuery: () => ({ data: registry }), useQueryClient: () => ({}) },
+      "@tanstack/react-query": { useQuery: options => ({ data: options.queryKey?.[0] === "targets" ? null : registry }), useQueryClient: () => ({}) },
       "../../../providers/auth-provider": { useAuth: () => ({ user: { email: "unit@example.com", name: "Unit", role: "member" } }) },
-      "../queries": { finopsQueries: { registry: () => ({}) }, invalidateFinOps() {} },
+      "../queries": { finopsQueries: { registry: () => ({}), apimTargets: () => ({ queryKey: ["targets"] }) }, invalidateFinOps() {} },
+      "../../../lib/gateway-topology": gatewayTopology,
       "../api": { dataSource: { generateImage: request => { requests.push(request); return pendingRequest.promise } } },
       "./dashboard-shared": { PanelTitle: "PanelTitle", queryError: error => error.message },
     }

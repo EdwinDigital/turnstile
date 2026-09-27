@@ -46,19 +46,19 @@ export function SelfHostedGatewayCreateDialog({ targets, initialTargetId, availa
         try { await start.mutateAsync(request.current) } catch {}
         finally { submitting.current = false }
       }}>
-        <DialogHeader className="registry-editor-header"><DialogTitle>新建 Self-hosted Gateway</DialogTitle><DialogDescription>Docker · APIM 配置与 API 关联</DialogDescription></DialogHeader>
+        <DialogHeader className="registry-editor-header"><DialogTitle>新建自托管网关</DialogTitle><DialogDescription>Docker · APIM 配置与 API 关联</DialogDescription></DialogHeader>
         <DialogClose render={<Button type="button" variant="ghost" size="icon-sm" className="registry-editor-close" disabled={start.isPending} />}><X size={16} /><span className="sr-only">关闭</span></DialogClose>
         <div className="registry-editor-body infrastructure-editor-body">
           <div className="registry-field"><span className="registry-field-label">APIM 实例</span><Select value={targetId} disabled={locked || initialTargetId !== null} onValueChange={next => setTargetId(next ?? "")}><SelectTrigger className="registry-select-trigger" aria-label="APIM 实例"><SelectValue>{selected?.target.service_name ?? "选择 APIM 实例"}</SelectValue></SelectTrigger><SelectContent>{choices.map(item => <SelectItem key={item.target.gateway_profile_id} value={item.target.gateway_profile_id}>{item.target.service_name}</SelectItem>)}</SelectContent></Select></div>
-          <label className="registry-field" htmlFor={`${prefix}-name`}><span className="registry-field-label">Gateway 名称</span><Input id={`${prefix}-name`} name="display_name" autoFocus required maxLength={120} value={value.display_name} disabled={locked} onChange={event => update("display_name", event.target.value)} /></label>
-          <label className="registry-field" htmlFor={`${prefix}-endpoint`}><span className="registry-field-label">Gateway endpoint</span><Input id={`${prefix}-endpoint`} name="endpoint_url" type="url" required value={value.endpoint_url} disabled={locked} aria-invalid={invalidEndpoint} aria-describedby={invalidEndpoint ? `${prefix}-endpoint-error` : undefined} placeholder={`https://gateway.example.com/${selected?.target.api_path ?? "api-path"}`} onChange={event => update("endpoint_url", event.target.value)} /></label>
+          <label className="registry-field" htmlFor={`${prefix}-name`}><span className="registry-field-label">网关名称</span><Input id={`${prefix}-name`} name="display_name" autoFocus required maxLength={120} value={value.display_name} disabled={locked} onChange={event => update("display_name", event.target.value)} /></label>
+          <label className="registry-field" htmlFor={`${prefix}-endpoint`}><span className="registry-field-label">网关地址</span><Input id={`${prefix}-endpoint`} name="endpoint_url" type="url" required value={value.endpoint_url} disabled={locked} aria-invalid={invalidEndpoint} aria-describedby={invalidEndpoint ? `${prefix}-endpoint-error` : undefined} placeholder={`https://gateway.example.com/${selected?.target.api_path ?? "api-path"}`} onChange={event => update("endpoint_url", event.target.value)} /></label>
           {invalidEndpoint && <span className="infrastructure-field-error" id={`${prefix}-endpoint-error`}>使用 HTTPS URL，不得包含凭据、查询参数或片段。</span>}
           <label className="registry-field" htmlFor={`${prefix}-location`}><span className="registry-field-label">位置（可选）</span><Input id={`${prefix}-location`} name="location" maxLength={128} value={value.location ?? ""} disabled={locked} onChange={event => update("location", event.target.value)} /></label>
           <label className="gateway-endpoint-confirmation"><Checkbox checked={value.endpoint_control_confirmed} disabled={locked} onCheckedChange={checked => setValue(current => ({ ...current, endpoint_control_confirmed: checked === true }))} /><span>我控制此服务器及 HTTPS 地址，允许 Turnstile 向此地址发送网关验证和模型调用凭据。</span></label>
-          {(!available || !selected) && <div className="infrastructure-warning" role="status"><CircleAlert size={15} /><span>{!available ? "平台网关创建能力尚未启用" : "没有已同步且支持 Self-hosted Gateway 的 APIM 实例"}</span></div>}
+          {(!available || !selected) && <div className="infrastructure-warning" role="status"><CircleAlert size={15} /><span>{!available ? "平台网关创建能力尚未启用" : "没有已同步且支持自托管网关的 APIM 实例"}</span></div>}
           {start.error && <div className="registry-error" role="alert">{errorMessage(start.error)}</div>}
         </div>
-        <DialogFooter className="registry-editor-footer apim-onboarding-footer"><Button type="button" variant="ghost" disabled={start.isPending} onClick={() => onAdopt(initialTargetId)}><Link2 size={14} />关联已有 Gateway</Button><DialogClose render={<Button type="button" variant="outline" disabled={start.isPending} />}>取消</DialogClose><Button type="submit" disabled={!valid || start.isPending}>{start.isPending ? <RefreshCw className="spin" size={14} /> : <Plus size={14} />}{start.isPending ? "正在提交" : request.current ? "重试提交" : "创建 Gateway"}</Button></DialogFooter>
+        <DialogFooter className="registry-editor-footer apim-onboarding-footer"><Button type="button" variant="ghost" disabled={start.isPending} onClick={() => onAdopt(initialTargetId)}><Link2 size={14} />关联已有网关</Button><DialogClose render={<Button type="button" variant="outline" disabled={start.isPending} />}>取消</DialogClose><Button type="submit" disabled={!valid || start.isPending}>{start.isPending ? <RefreshCw className="spin" size={14} /> : <Plus size={14} />}{start.isPending ? "正在提交" : request.current ? "重试提交" : "创建网关"}</Button></DialogFooter>
       </form>
     </DialogContent>
   </Dialog>
@@ -75,17 +75,17 @@ export function SelfHostedGatewayProvisionProgress({ operation, target, availabl
   const name = configuration?.display_name ?? nativeId
   const endpoint = configuration?.endpoint_url ?? ""
   const deploymentId = operation.checkpoint.deployment_id
-  const status = failed ? "创建失败" : complete ? "待启动" : operation.worker_available ? "正在创建 Gateway" : "创建已排队，Worker 当前不可用"
+  const status = failed ? "创建失败" : complete ? "待启动" : operation.worker_available ? "正在创建网关" : "创建已排队，后台处理服务当前不可用"
   const steps = [
     { label: "创建 APIM 网关配置", done: complete || operation.checkpoint.apim_gateway_created === true },
     { label: "关联 API", done: complete || operation.checkpoint.api_associated === true },
     { label: "读回确认", done: complete },
   ]
-  return <section className="connection-provider-group gateway-provision-item" role="rowgroup" aria-label={name || "Gateway 创建任务"} data-operation-id={operation.id}>
+  return <section className="connection-provider-group gateway-provision-item" role="rowgroup" aria-label={name || "网关创建任务"} data-operation-id={operation.id}>
     <article className="model-list-row infrastructure-resource-row gateway gateway-provision-row" role="row">
       <div className="model-primary-cell connection-provider-identity" role="cell"><span className="model-list-icon gateway-child-icon" data-model-family="apim"><Server size={15} /></span><div><b title={name} data-no-localize>{name}</b><code title={nativeId} data-no-localize>{nativeId}</code></div></div>
       <div className="model-runtime-cell" role="cell"><b title={target?.target.service_name} data-no-localize>{target?.target.service_name ?? operation.gateway_profile_id}</b><span data-no-localize>{target?.target.api_id}</span></div>
-      <div className="model-pricing-cell" role="cell"><b title={endpoint} data-no-localize>{endpoint || "Endpoint 未配置"}</b><span title={target?.configuration_endpoint} data-no-localize>{target?.configuration_endpoint}</span></div>
+      <div className="model-pricing-cell" role="cell"><b title={endpoint} data-no-localize={Boolean(endpoint) || undefined}>{endpoint || "端点未配置"}</b><span><span>配置地址</span> · <span title={target?.configuration_endpoint} data-no-localize>{target?.configuration_endpoint}</span></span></div>
       <div className="model-status-cell" role="cell"><span className={`gateway-readiness gateway-provision-status ${failed ? "unavailable" : "warning"}`} role="status"><span>{failed ? <CircleAlert size={13} /> : complete ? <CheckCircle2 size={13} /> : <RefreshCw size={13} className={operation.worker_available || retrying ? "spin" : ""} />}{status}</span></span></div>
       <div className="model-row-actions infrastructure-row-actions" role="cell">
         {failed && <button type="button" className="gateway-provision-action" disabled={!available || retrying} aria-label="重试创建" title="重试创建" onClick={() => onRetry(operation.id)}><RefreshCw size={14} className={retrying ? "spin" : ""} /></button>}
@@ -114,6 +114,7 @@ export function SelfHostedGatewayBootstrapDialog({ deploymentId, name, onClose, 
   const controller = useRef<AbortController | null>(null)
   const downloads = useRef(new Set<string>())
   const command = summary ? containerAction === "renew" ? summary.renewal_command : summary.docker_command : ""
+  const formatHours = (value: number) => new Intl.NumberFormat(locale, { style: "unit", unit: "hour", unitDisplay: "long" }).format(value)
   useEffect(() => () => {
     controller.current?.abort()
     credential.current = null
@@ -144,13 +145,13 @@ export function SelfHostedGatewayBootstrapDialog({ deploymentId, name, onClose, 
     URL.revokeObjectURL(url); downloads.current.delete(url)
   }
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="registry-editor-dialog infrastructure-editor-dialog gateway-bootstrap-dialog" finalFocus={false}>
-    <div className="registry-editor"><DialogHeader className="registry-editor-header"><DialogTitle>Gateway 启动配置</DialogTitle><DialogDescription data-no-localize>{name}</DialogDescription></DialogHeader>
+    <div className="registry-editor"><DialogHeader className="registry-editor-header"><DialogTitle>网关启动配置</DialogTitle><DialogDescription data-no-localize>{name}</DialogDescription></DialogHeader>
       <DialogClose render={<Button type="button" variant="ghost" size="icon-sm" className="registry-editor-close" />}><X size={16} /><span className="sr-only">关闭</span></DialogClose>
       <div className="registry-editor-body infrastructure-editor-body">
-        <div className="registry-field"><span className="registry-field-label">Token 有效期</span><Select value={String(hours)} disabled={busy} onValueChange={value => setHours(Number(value ?? 24))}><SelectTrigger className="registry-select-trigger" aria-label="Token 有效期"><SelectValue>{hours} h</SelectValue></SelectTrigger><SelectContent>{[1, 24, 168, 720].map(value => <SelectItem key={value} value={String(value)}>{value} h</SelectItem>)}</SelectContent></Select></div>
+        <div className="registry-field"><span className="registry-field-label">令牌有效期</span><Select value={String(hours)} disabled={busy} onValueChange={value => setHours(Number(value ?? 24))}><SelectTrigger className="registry-select-trigger" aria-label="令牌有效期"><SelectValue><span data-no-localize>{formatHours(hours)}</span></SelectValue></SelectTrigger><SelectContent>{[1, 24, 168, 720].map(value => <SelectItem key={value} value={String(value)}><span data-no-localize>{formatHours(value)}</span></SelectItem>)}</SelectContent></Select></div>
         <Button type="button" variant="outline" disabled={busy} onClick={load}><RefreshCw size={14} className={busy ? "spin" : ""} />{busy ? "正在获取" : summary ? "重新生成启动配置" : "获取启动配置"}</Button>
         {summary && <>
-          <dl className="gateway-bootstrap-metadata"><dt>APIM Gateway ID</dt><dd data-no-localize><code>{summary.native_gateway_id}</code></dd><dt>Configuration endpoint</dt><dd data-no-localize><code>{summary.configuration_endpoint}</code></dd><dt>官方镜像</dt><dd data-no-localize><code>{summary.image}</code></dd><dt>到期时间</dt><dd data-no-localize><time dateTime={summary.expires_at}>{new Date(summary.expires_at).toLocaleString(locale, { timeZone: timezone, timeZoneName: "short" })}</time></dd></dl>
+          <dl className="gateway-bootstrap-metadata"><dt>APIM 网关 ID</dt><dd data-no-localize><code>{summary.native_gateway_id}</code></dd><dt>配置地址</dt><dd data-no-localize><code>{summary.configuration_endpoint}</code></dd><dt>官方镜像</dt><dd data-no-localize><code>{summary.image}</code></dd><dt>到期时间</dt><dd data-no-localize><time dateTime={summary.expires_at}>{new Date(summary.expires_at).toLocaleString(locale, { timeZone: timezone, timeZoneName: "short" })}</time></dd></dl>
           <Button type="button" variant="outline" onClick={download}><Download size={14} />下载环境文件</Button>
           <div className="infrastructure-warning"><CircleAlert size={15} /><span>环境文件含短期凭据。仅保存在该服务器，不要提交到 Git 或分享。</span></div>
           <div className="registry-field"><span className="registry-field-label">容器操作</span><Select value={containerAction} onValueChange={value => { setContainerAction(value ?? "start"); setCopied(false) }}><SelectTrigger className="registry-select-trigger" aria-label="容器操作"><SelectValue>{containerAction === "start" ? "首次启动" : "续期并重建此容器"}</SelectValue></SelectTrigger><SelectContent><SelectItem value="start">首次启动</SelectItem><SelectItem value="renew">续期并重建此容器</SelectItem></SelectContent></Select></div>

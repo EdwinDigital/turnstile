@@ -9,7 +9,7 @@ info:
 servers:
   - url: http://localhost:8000
 security:
-  - bearerAuth: []
+  - sessionCookie: []
 paths:
   /api/v1/model-gateway/images/generations:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-gateway~1images~1generations
@@ -17,6 +17,7 @@ paths:
     post:
       operationId: invokeModel
       summary: Invoke the selected or default model runtime
+      description: Requires session, model access and budget checks. Explicit Gateway selection requires both target and deployment IDs and an eligible model. A nonbilling attempt is recorded before dispatch. Actual correlation and upstream request IDs remain separate; unknown outcomes do not authorize automatic retries.
       requestBody:
         required: true
         content:
@@ -43,6 +44,10 @@ paths:
           description: The APIM product subscription exceeded its token-per-minute limit
         '404':
           description: No enabled route matched the request
+        '503':
+          description: The route is unverified or invocation recording is unavailable; recording failure prevents dispatch
+        '504':
+          description: Gateway timeout; the platform trace remains available without invented usage
         '502':
           description: The configured gateway could not be reached or returned an unsupported response
   /api/v1/model-management:
@@ -63,29 +68,77 @@ components:
     InvocationMetadata:
       type: object
       additionalProperties: false
-      required: [organization, department, project, agent, user, workflow, model, runtime, run_id, turn_index]
+      required: [organization_id, organization, department_id, department, project_id, project,
+        agent_id, agent, user_id, user, workflow, model_id, model, runtime, request_source, run_id]
       properties:
+        organization_id: { type: string, minLength: 1, maxLength: 255 }
         organization: { type: string, minLength: 1, maxLength: 255 }
+        department_id: { type: string, minLength: 1, maxLength: 255 }
         department: { type: string, minLength: 1, maxLength: 255 }
+        project_id: { type: string, minLength: 1, maxLength: 255 }
         project: { type: string, minLength: 1, maxLength: 255 }
+        agent_id: { type: string, minLength: 1, maxLength: 255 }
         agent: { type: string, minLength: 1, maxLength: 255 }
+        user_id: { type: string, minLength: 1, maxLength: 255 }
         user: { type: string, minLength: 1, maxLength: 255 }
         workflow: { type: string, minLength: 1, maxLength: 255 }
+        model_id: { type: string, minLength: 1, maxLength: 255 }
         model:
           type: string
+          minLength: 1
+          maxLength: 255
           description: Model UUID, model key, display name, or `default`.
         runtime:
           type: string
+          minLength: 1
+          maxLength: 255
           description: Runtime UUID, runtime name, or `default`.
+        request_source: { type: string, minLength: 1, maxLength: 255 }
+        usage_domain: { type: string, enum: [apim, github_copilot], default: apim }
         run_id: { type: string, minLength: 1, maxLength: 255 }
-        turn_index: { type: integer, minimum: 1 }
+        turn_index: { type: integer, minimum: 1, default: 1 }
+    ToolFunctionDefinition:
+      type: object
+      additionalProperties: false
+      required: [name, description, parameters]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        description: { type: string, minLength: 1, maxLength: 4000 }
+        parameters: { type: object, additionalProperties: true }
+    ToolDefinition:
+      type: object
+      additionalProperties: false
+      required: [function]
+      properties:
+        type: { type: string, const: function, default: function }
+        function: { $ref: '#/components/schemas/ToolFunctionDefinition' }
+    ToolFunctionCall:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        arguments: { type: string, maxLength: 100000, default: '{}' }
+    ToolCall:
+      type: object
+      additionalProperties: false
+      required: [id, function]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 255 }
+        type: { type: string, const: function, default: function }
+        function: { $ref: '#/components/schemas/ToolFunctionCall' }
     ChatMessage:
       type: object
       additionalProperties: false
-      required: [role, content]
+      required: [role]
       properties:
-        role: { type: string, enum: [system, user, assistant] }
-        content: { type: string, minLength: 1, maxLength: 200000 }
+        role: { type: string, enum: [system, user, assistant, tool] }
+        content: { type: [string, 'null'], maxLength: 200000 }
+        tool_calls:
+          type: [array, 'null']
+          maxItems: 20
+          items: { $ref: '#/components/schemas/ToolCall' }
+        tool_call_id: { type: [string, 'null'], minLength: 1, maxLength: 255 }
     ModelInvocationRequest:
       type: object
       additionalProperties: false
@@ -94,17 +147,46 @@ components:
         metadata: { $ref: '#/components/schemas/InvocationMetadata' }
         runtime_id: { type: [string, 'null'], format: uuid }
         model_id: { type: [string, 'null'], format: uuid }
+        gateway_profile_id: { type: [string, 'null'], format: uuid }
+        gateway_deployment_id: { type: [string, 'null'], format: uuid }
         messages:
           type: array
           minItems: 1
           maxItems: 100
           items: { $ref: '#/components/schemas/ChatMessage' }
+        tools:
+          type: [array, 'null']
+          maxItems: 32
+          items: { $ref: '#/components/schemas/ToolDefinition' }
         temperature: { type: [number, 'null'], minimum: 0, maximum: 2 }
-        max_output_tokens: { type: [integer, 'null'], minimum: 1 }
+        max_output_tokens: { type: [integer, 'null'], minimum: 1, maximum: 1000000 }
+        response_format:
+          anyOf:
+            - { type: string, const: json_object }
+            - { type: 'null' }
         stream:
           type: boolean
-          const: false
-          description: Streaming will use a future dedicated SSE operation.
+          default: false
+          description: Provider streaming is consumed and returned as one normalized response.
+      allOf:
+        - if:
+            required: [gateway_profile_id]
+            properties:
+              gateway_profile_id: {type: string}
+          then:
+            required: [model_id, gateway_deployment_id]
+            properties:
+              model_id: {type: string, format: uuid}
+              gateway_deployment_id: {type: string, format: uuid}
+        - if:
+            required: [gateway_deployment_id]
+            properties:
+              gateway_deployment_id: {type: string}
+          then:
+            required: [model_id, gateway_profile_id]
+            properties:
+              model_id: {type: string, format: uuid}
+              gateway_profile_id: {type: string, format: uuid}
     InvocationUsage:
       type: object
       additionalProperties: false
@@ -112,19 +194,25 @@ components:
       properties:
         input_tokens: { type: integer, minimum: 0 }
         cached_tokens: { type: integer, minimum: 0 }
+        cache_write_tokens: { type: integer, minimum: 0, default: 0 }
         output_tokens: { type: integer, minimum: 0 }
         estimated: { type: boolean }
     ModelInvocationResponse:
       type: object
       additionalProperties: false
-      required: [request_id, content, provider, runtime, model, gateway, latency_ms]
+      required: [request_id, content, provider, runtime, model, gateway, latency_ms, usage]
       properties:
-        request_id: { type: string, format: uuid }
+        request_id: { type: string }
+        correlation_id: {type: [string, 'null'], description: 'Actual Gateway correlation ID, never a fallback caller or upstream ID.'}
+        upstream_request_id: {type: [string, 'null']}
         content: { type: string }
+        tool_calls:
+          type: [array, 'null']
+          items: { $ref: '#/components/schemas/ToolCall' }
         provider: { type: string }
         runtime: { type: string }
         model: { type: string }
-        gateway: { type: string, enum: [local-cli, apim, litellm, direct] }
+        gateway: { type: string }
         latency_ms: { type: integer, minimum: 0 }
         usage:
           oneOf:
@@ -134,7 +222,6 @@ components:
 x-gateway-adapters:
   internal-schema: ModelInvocationRequest
   implementations:
-    - local-cli
     - apim
     - litellm
     - direct

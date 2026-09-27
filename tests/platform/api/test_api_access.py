@@ -106,7 +106,21 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         route for route in copilot_protected.routes if isinstance(route, APIRoute)
     ]
 
-    assert len(apim_routes) == 107
+    assert len(apim_routes) == 110
+    budget_diagnostic_routes = [
+        route for route in apim_routes
+        if route.path.endswith(("/budget-readiness", "/budget-execution-verification"))
+    ]
+    assert len(budget_diagnostic_routes) == 2
+    for route in budget_diagnostic_routes:
+        assert any(dependency.call is require_owner_session
+                   for dependency in route.dependant.dependencies)
+    diagnostic_routes = [route for route in apim_routes
+                         if route.path == "/api/v1/model-management/runtimes/{runtime_id}/check"]
+    assert len(diagnostic_routes) == 2
+    for route in diagnostic_routes:
+        assert any(dependency.call is require_owner_session
+                   for dependency in route.dependant.dependencies)
     lifecycle_routes = [route for route in apim_routes if "self-hosted-gateway" in route.path]
     assert len(lifecycle_routes) == 10
     for route in lifecycle_routes:

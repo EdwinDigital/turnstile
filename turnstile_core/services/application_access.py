@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Any, Literal, Never
@@ -32,6 +33,7 @@ from ..domain.application_access import (
 from ..domain.models import TrendResponse
 from ..integrations.apim_control_plane_contract import (
     ApimSubscriptionKeyClient,
+    ApimSubscriptionKeyClientResolver,
     PolicyCompilationError,
 )
 from ..persistence.repository import QueryRepository
@@ -40,6 +42,8 @@ from .control_plane import (
     ControlPlaneNotFoundError,
     ControlPlaneUnavailableError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _period_bounds(moment: datetime | None = None) -> tuple[date, date]:
@@ -71,19 +75,27 @@ class ApplicationAccessService:
         key_management_available: bool = False,
         key_management_unavailable_reason: str | None = None,
         key_client: ApimSubscriptionKeyClient | None = None,
+        key_client_resolver: ApimSubscriptionKeyClientResolver | None = None,
         default_token_limit: int = 100_000,
         default_tokens_per_minute: int = 100_000,
         read_execution_budget: Callable[[UUID, date], Mapping[str, Any] | None] | None = None,
+        project_rate_limit: Callable[[UUID], int | None] | None = None,
+        read_rate_limit: Callable[[UUID], int | None] | None = None,
     ) -> None:
         self._repository = repository
         self._read_execution_budget = read_execution_budget
+        self._project_rate_limit = project_rate_limit
+        self._read_rate_limit = read_rate_limit
         self._sync_available = sync_available
         self._sync_unavailable_reason = sync_unavailable_reason
         self._provisioning_available = provisioning_available
         self._provisioning_unavailable_reason = provisioning_unavailable_reason
-        self._key_management_available = key_management_available and key_client is not None
+        self._key_management_available = key_management_available and (
+            key_client is not None or key_client_resolver is not None
+        )
         self._key_management_unavailable_reason = key_management_unavailable_reason
         self._key_client = key_client
+        self._key_client_resolver = key_client_resolver
         self._default_token_limit = default_token_limit
         self._default_tokens_per_minute = default_tokens_per_minute
 
@@ -181,6 +193,20 @@ class ApplicationAccessService:
                        if field in GatewayApplicationBudget.model_fields},
                 })
                 summary = summary.model_copy(update={"budget": updated_budget})
+        if summary.budget is not None and self._read_rate_limit is not None:
+            rate = None
+            rate_status = "unavailable"
+            try:
+                rate = self._read_rate_limit(application_id)
+                rate_status = "projected" if rate == summary.budget.tokens_per_minute else "pending"
+            except Exception as error:
+                logger.warning(
+                    "Application rate readback failed error_type=%s", type(error).__name__,
+                )
+            summary = summary.model_copy(update={"budget": GatewayApplicationBudget.model_validate({
+                **summary.budget.model_dump(),
+                "projected_tokens_per_minute": rate, "tpm_sync_status": rate_status,
+            })})
         subscriptions = [
             GatewayApplicationSubscription.model_validate(item)
             for item in self._repository.list_gateway_application_subscriptions([application_id])
@@ -253,8 +279,8 @@ class ApplicationAccessService:
         key_kind: Literal["primary", "secondary"],
     ) -> GatewayApplicationSubscriptionKeySecret:
         subscription = self._key_subscription(application_id, application_subscription_id)
-        client = self._require_key_client()
         try:
+            client = self._require_key_client(UUID(str(subscription["gateway_profile_id"])))
             primary_key, secondary_key = client.application_subscription_keys(
                 str(subscription["apim_subscription_id"])
             )
@@ -276,8 +302,8 @@ class ApplicationAccessService:
         apim_subscription_id = str(subscription["apim_subscription_id"])
         if request.confirmation != apim_subscription_id:
             raise ValueError("confirmation must match the APIM subscription ID")
-        client = self._require_key_client()
         try:
+            client = self._require_key_client(UUID(str(subscription["gateway_profile_id"])))
             client.regenerate_application_subscription_key(apim_subscription_id, key_kind)
         except (httpx.HTTPError, PolicyCompilationError) as error:
             self._raise_key_management_error(error)
@@ -308,12 +334,16 @@ class ApplicationAccessService:
             raise ControlPlaneConflictError("APIM subscription is cancelled")
         return subscription
 
-    def _require_key_client(self) -> ApimSubscriptionKeyClient:
-        if not self._key_management_available or self._key_client is None:
+    def _require_key_client(self, gateway_profile_id: UUID) -> ApimSubscriptionKeyClient:
+        if not self._key_management_available:
             raise ControlPlaneUnavailableError(
                 self._key_management_unavailable_reason
                 or "Application subscription key management is unavailable"
             )
+        if self._key_client_resolver is not None:
+            return self._key_client_resolver.resolve(gateway_profile_id)
+        if self._key_client is None:
+            raise ControlPlaneUnavailableError("Application subscription key client is unavailable")
         return self._key_client
 
     @staticmethod
@@ -368,6 +398,13 @@ class ApplicationAccessService:
         )
         if row is None:
             raise ControlPlaneNotFoundError("Application not found")
+        if self._project_rate_limit is not None:
+            try:
+                self._project_rate_limit(application_id)
+            except Exception as error:
+                logger.warning(
+                    "Application rate projection pending error_type=%s", type(error).__name__,
+                )
         return self.application(application_id)
 
     def update_application_model_access(

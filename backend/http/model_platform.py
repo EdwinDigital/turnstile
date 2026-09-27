@@ -11,6 +11,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 
 from turnstile_core.config import get_settings
+from turnstile_core.domain.budget_delegation import (
+    BudgetDelegationReadiness,
+    BudgetExecutionVerification,
+    BudgetExecutionVerificationRequest,
+)
 from turnstile_core.domain.control_plane import (
     ApimOnboardingOperations,
     GatewayBackendPoolConfig,
@@ -77,6 +82,8 @@ from turnstile_core.domain.runtime_models import (
     PriceSyncResponse,
     ProviderWrite,
     RegistryResponse,
+    RuntimeCheckPlan,
+    RuntimeCheckSelection,
     RuntimeHealth,
     RuntimeWrite,
     TrafficGenerationPlan,
@@ -94,12 +101,14 @@ from turnstile_core.services.control_plane import (
     ControlPlaneUnavailableError,
 )
 
+from ..services.budget_diagnostics import BudgetDiagnostics
 from ..services.gateway_targets import register_existing_apim_target
 from ..services.traffic import TrafficGenerator
 from .dependencies import Repository
 from .publication_auth import PublicationOwner
 from .service_dependencies import (
     ApimOnboardingServiceDependency,
+    ApplicationAccessServiceDependency,
     Authorization,
     ControlPlaneService,
     RuntimeService,
@@ -1230,18 +1239,68 @@ def rotate_gateway_credential(
     return GatewayPublicationView.from_publication(publication)
 
 
+@protected_router.get(
+    "/api/v1/model-management/runtimes/{runtime_id}/check",
+    response_model=RuntimeCheckPlan,
+)
+def runtime_check_plan(
+    runtime_id: UUID, service: RuntimeService, identity: OwnerSession, response: Response,
+) -> RuntimeCheckPlan:
+    response.headers["Cache-Control"] = "no-store"
+    return service.runtime_check_plan(runtime_id)
+
+
 @protected_router.post(
     "/api/v1/model-management/runtimes/{runtime_id}/check",
     response_model=RuntimeHealth,
 )
 def check_runtime(
     runtime_id: UUID,
+    selection: RuntimeCheckSelection,
     service: RuntimeService,
     identity: OwnerSession,
-    authorization: Authorization = None,
+    response: Response,
 ) -> RuntimeHealth:
-    service.authorize(identity.role, authorization, manage=True)
-    return service.check_runtime(runtime_id)
+    response.headers["Cache-Control"] = "no-store"
+    return service.check_runtime(runtime_id, selection, actor=identity.email)
+
+
+@protected_router.post(
+    "/api/v1/model-management/gateways/{gateway_profile_id}/budget-readiness",
+    response_model=BudgetDelegationReadiness,
+)
+def check_gateway_budget_readiness(
+    gateway_profile_id: UUID, service: RuntimeService, identity: OwnerSession, response: Response,
+) -> BudgetDelegationReadiness:
+    response.headers["Cache-Control"] = "no-store"
+    return BudgetDiagnostics(service).readiness(gateway_profile_id, identity.email)
+
+
+@protected_router.post(
+    "/api/v1/model-management/gateways/{gateway_profile_id}/budget-execution-verification",
+    response_model=BudgetExecutionVerification,
+)
+def verify_gateway_budget_execution(
+    gateway_profile_id: UUID, write: BudgetExecutionVerificationRequest,
+    service: RuntimeService, applications: ApplicationAccessServiceDependency,
+    identity: OwnerSession, response: Response,
+) -> BudgetExecutionVerification:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return BudgetDiagnostics(service).execute(
+            gateway_profile_id, write, identity.email, applications,
+        )
+    except ControlPlaneNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from None
+    except ControlPlaneConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    except ControlPlaneUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from None
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.warning("Budget verification unavailable error_type=%s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="Budget verification is unavailable") from None
 
 
 @protected_router.post("/api/v1/model-gateway/invoke", response_model=ModelInvocationResponse)
@@ -1277,6 +1336,14 @@ def _bind_invocation_identity(
     repository: Repository,
     settings: Config,
 ) -> InvocationRequest:
+    diagnostic_user = request.metadata.user_id.casefold() in {
+        "system-runtime-health-check", "system-runtime-diagnostic",
+    }
+    diagnostic_source = request.metadata.request_source.casefold() in {
+        "runtime-health-check", "runtime-diagnostic",
+    }
+    if diagnostic_user or diagnostic_source:
+        raise HTTPException(status_code=403, detail="Use the Owner runtime diagnostic endpoint")
     if identity.role != "owner":
         requested_user_id = request.metadata.user_id.casefold()
         if requested_user_id == identity.email.casefold():

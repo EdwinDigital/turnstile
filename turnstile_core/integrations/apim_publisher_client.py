@@ -31,6 +31,9 @@ from ..domain.application_access import (
 )
 from ..domain.billable_requests import BillableRequestOutcome
 from ..domain.control_plane import (
+    PUBLICATION_OAUTH_ACTIONS,
+    PUBLICATION_RECOVERY_ACTIONS,
+    PUBLICATION_REQUIRED_ACTIONS,
     ApiFormat,
     AuthStrategy,
     GatewayModelBinding,
@@ -56,14 +59,18 @@ from .apim_control_plane_contract import (
     BackendCircuitBreakerResource,
     BackendPoolResource,
     BackendResource,
+    CompiledGatewayRelease,
+    CredentialSourceMissingError,
     ImageProbeJournal,
     InfrastructureUpgradeRequiredError,
     NamedValueResource,
     OAuthCredentialResource,
     OperationResource,
     PolicyCompilationError,
+    PublisherPermissionError,
     ReleaseGcPlanEvidence,
     RetryablePublicationError,
+    missing_management_actions,
 )
 from .apim_policy_compiler import ApimPolicyCompiler
 from .apim_policy_components import parent_readback_matches
@@ -113,6 +120,29 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
     def _headers(self) -> dict[str, str]:
         token = self._token_provider.token(self._MANAGEMENT_RESOURCE)
         return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def verify_publication_permissions(
+        self, compiled: CompiledGatewayRelease, *, recovery_only: bool = False,
+    ) -> None:
+        required = PUBLICATION_RECOVERY_ACTIONS if recovery_only else PUBLICATION_REQUIRED_ACTIONS + (
+            PUBLICATION_OAUTH_ACTIONS if compiled.oauth_credentials else ()
+        )
+        request_id = None
+        try:
+            response = self._client.get(
+                self._base + "/providers/Microsoft.Authorization/permissions",
+                params={"api-version": "2022-04-01"}, headers=self._headers(),
+                timeout=10.0, follow_redirects=False,
+            )
+            correlation = response.headers.get("x-ms-request-id", "")
+            if re.fullmatch(r"[a-fA-F0-9-]{36}", correlation):
+                request_id = str(UUID(correlation))
+            response.raise_for_status()
+            missing = missing_management_actions(response.json(), required)
+        except (httpx.HTTPError, RuntimeError, ValueError, KeyError):
+            raise PublisherPermissionError(request_id=request_id) from None
+        if missing:
+            raise PublisherPermissionError(missing_actions=missing, request_id=request_id)
 
     def _request(
         self,
@@ -651,14 +681,8 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
         observed = self._request("GET", path, allow_not_found=True)
         if observed.status_code != 404:
             properties = observed.json().get("properties") or {}
+            self._validate_named_value(named_value, properties)
             observed_secret = (properties.get("keyVault") or {}).get("secretIdentifier")
-            if (
-                named_value.key_vault_secret_id is not None
-                and observed_secret != named_value.key_vault_secret_id
-            ):
-                raise PolicyCompilationError(
-                    f"Named value {named_value.id} points to a different Key Vault secret"
-                )
             if named_value.value is not None:
                 if observed_secret is not None:
                     raise PolicyCompilationError(
@@ -688,11 +712,10 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
                         }
                     },
                 )
+                self._read_named_value(named_value, path)
             return
         if named_value.key_vault_secret_id is None and named_value.value is None:
-            raise PolicyCompilationError(
-                f"Named value {named_value.id} has no credential source"
-            )
+            raise CredentialSourceMissingError(named_value.id)
         write_properties: dict[str, object] = {
             "displayName": named_value.id,
             "secret": True,
@@ -712,6 +735,23 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
             path,
             json_body={"properties": write_properties},
         )
+        self._read_named_value(named_value, path)
+
+    def _read_named_value(self, named_value: NamedValueResource, path: str) -> None:
+        observed = self._request("GET", path, allow_not_found=True)
+        if observed.status_code == 404:
+            raise RetryablePublicationError("APIM credential resource is not yet readable")
+        self._validate_named_value(named_value, observed.json().get("properties") or {})
+
+    @staticmethod
+    def _validate_named_value(named_value: NamedValueResource, properties: Mapping[str, Any]) -> None:
+        if properties.get("provisioningState") not in {None, "Succeeded"}:
+            raise RetryablePublicationError("APIM credential resource is not ready")
+        if properties.get("secret") is not True:
+            raise PolicyCompilationError("APIM credential resource is not marked secret")
+        observed_secret = (properties.get("keyVault") or {}).get("secretIdentifier")
+        if observed_secret != named_value.key_vault_secret_id:
+            raise PolicyCompilationError("APIM credential resource has a different credential source")
 
     @staticmethod
     def _publication_tag(publication_id: str) -> str:

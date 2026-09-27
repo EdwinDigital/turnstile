@@ -24,6 +24,7 @@ const normalizeRegistry = runInNewContext(`${stripTypeScriptTypes(normalization)
 function registry(overrides = {}) {
   return {
     image_generation_supported: true, image_configuration_schema_version: 4,
+    self_hosted_gateway_enabled: true,
     gateways: [{ id: "gateway", name: "Gateway", implementation: "apim", enabled: true }],
     providers: [{ id: "provider", name: "Foundry", provider_kind: "microsoft_foundry", brand_key: "microsoft_foundry", enabled: true }],
     runtimes: [{ id: "connection", name: "Foundry connection", gateway_profile_id: "gateway", provider_id: "provider", provider_name: "Foundry", brand_key: "microsoft_foundry", enabled: true,
@@ -112,6 +113,50 @@ function readyTopology() {
   }] }
 }
 
+test("failed publication shows its recorded target and does not assert current serving health", () => {
+  const publication = {
+    id: "publication", gateway_profile_id: "gateway", status: "failed", publication_kind: "model_add",
+    model_key: "unit-model", target_deployments: [{ deployment_id: "edge", native_gateway_id: "edge", kind: "self_hosted" }],
+    failure: { code: "credential_source_missing" }, retry_requires_credential: true,
+  }
+  const view = harness(registry(), publication, undefined, readyTopology())
+  const rendered = text(view.render())
+  assert.ok(rendered.includes("目标网关"))
+  assert.ok(rendered.includes("自托管网关"))
+  assert.ok(rendered.includes("unit-apim"))
+  assert.ok(rendered.includes("APIM 凭据资源尚未创建"))
+  assert.ok(rendered.includes("生效状态未确认"))
+  assert.ok(!rendered.includes("当前模型继续正常服务"))
+  assert.equal(view.find(node => node.props?.["data-deployment-id"] === "managed"), undefined)
+})
+
+test("scoped publication selectors show APIM and Gateway identities with labels and type icons", () => {
+  const view = harness(registry(), undefined, undefined, readyTopology())
+  assert.ok(view.find(node => node.type === "SelectTrigger" && node.props["aria-label"] === "APIM 实例"))
+  assert.ok(view.find(node => node.type === "SelectTrigger" && node.props["aria-label"] === "网关"))
+  const selected = () => view.find(node => node.props?.className === "gateway-api-select-value")
+  assert.equal(text(selected()), "managedAzure API Management")
+  assert.equal(selected().props.children[0].type, "GatewayBrandLogo")
+  view.select("gateway:managed", "gateway:edge")
+  assert.equal(text(selected()), "edge自托管网关")
+  assert.equal(selected().props.children[0].type, "Server")
+  const control = view.find(node => node.type === "Select" && node.props.value === "gateway:edge")
+  assert.deepEqual(Array.from(control.props.items, item => [item.value, item.label]), [
+    ["gateway:managed", "managed"], ["gateway:edge", "edge"],
+  ])
+  const option = view.find(node => node.type === "SelectItem" && node.props.value === "gateway:edge")
+  assert.equal(option.props.children.props.className, "gateway-api-select-option")
+  assert.equal(text(option), "edge自托管网关")
+})
+
+test("self-hosted publication choices require an explicitly enabled capability", () => {
+  for (const enabled of [true, false, undefined]) {
+    const view = harness(registry({ self_hosted_gateway_enabled: enabled }), undefined, undefined, readyTopology())
+    assert.ok(view.find(node => node.type === "SelectItem" && node.props.value === "gateway:managed"))
+    assert.equal(Boolean(view.find(node => node.type === "SelectItem" && node.props.value === "gateway:edge")), enabled === true)
+  }
+})
+
 test("explicit deployment choice submits only its target and selected scope", async () => {
   const view = harness(registry(), undefined, undefined, readyTopology())
   view.select("gateway:managed", "gateway:edge")
@@ -130,7 +175,7 @@ test("a removed explicit deployment blocks publication without choosing another"
   view.topology.data.items[0].deployments.pop()
   await view.submit()
   assert.equal(view.writes.length, 0)
-  assert.ok(text(view.render()).includes("Select an available Gateway deployment"))
+  assert.ok(text(view.render()).includes("请选择可用的网关。"))
 })
 
 test("disabled target scoping preserves the legacy publication payload", async () => {

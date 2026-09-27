@@ -23,6 +23,7 @@ from tests.backend.model_platform.control_plane_support import (
 )
 from tests.backend.model_platform.test_gateway_targets import TARGET, target
 from turnstile_core.domain.control_plane import (
+    PUBLICATION_REQUIRED_ACTIONS,
     ApiFormat,
     GatewayBackendPoolConfig,
     GatewayBackendPoolMember,
@@ -56,10 +57,56 @@ from turnstile_core.integrations.apim_control_plane import (
     RetryablePublicationError,
 )
 from turnstile_core.integrations.apim_control_plane_contract import (
+    CredentialSourceMissingError,
     OAuthCredentialResource,
     OperationResource,
+    PublisherPermissionError,
+    missing_management_actions,
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"value": [], "nextLink": "https://example.test/next"},
+    {"value": [{"actions": ["*"], "condition": "unverified"}]},
+    {"value": [{"actions": [None]}]},
+])
+def test_permission_inventory_rejects_incomplete_evidence(payload: object) -> None:
+    with pytest.raises(ValueError):
+        missing_management_actions(payload, PUBLICATION_REQUIRED_ACTIONS)
+
+
+def test_publication_permission_preflight_preserves_public_operation_boundary() -> None:
+    publication = GatewayControlPlaneService(InMemoryRepository()).publish(
+        bedrock_publication(), "unit-owner",
+    )
+    compiled = ApimPolicyCompiler().compile(publication)
+    required = list(PUBLICATION_REQUIRED_ACTIONS)
+    assert "Microsoft.ApiManagement/service/apis/operations/write" not in required
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "GET"
+        assert request.url.path.endswith("/providers/Microsoft.Authorization/permissions")
+        return httpx.Response(200, json={"value": [{"actions": required}]})
+
+    client = AzureApimPublisherClient(
+        publisher_settings(), cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    client.verify_publication_permissions(compiled)
+    required.remove("Microsoft.ApiManagement/service/backends/write")
+    with pytest.raises(PublisherPermissionError) as error:
+        client.verify_publication_permissions(compiled)
+    assert error.value.missing_actions == ("Microsoft.ApiManagement/service/backends/write",)
+    client.verify_publication_permissions(compiled, recovery_only=True)
+    assert len(requests) == 3
+    assert missing_management_actions({"value": [
+        {"actions": ["MICROSOFT.APIMANAGEMENT/*"], "notActions": ["*/write"]},
+        {"actions": ["Microsoft.ApiManagement/service/backends/write"]},
+    ]}, ["Microsoft.ApiManagement/service/apis/read",
+         "Microsoft.ApiManagement/service/backends/write"]) == ()
 
 
 @pytest.mark.parametrize("interrupted", [None, "gateway", "association"])
@@ -1364,13 +1411,54 @@ def test_arm_client_reads_current_policy_wire_formats(
 
     assert client.current_api_policy() == ("1", expected)
 
+@pytest.mark.parametrize("observed", [
+    None, {"secret": False}, {"secret": True, "provisioningState": "Creating"},
+    {"secret": True, "keyVault": {"secretIdentifier": "https://foreign.test/secret"}},
+])
+def test_named_value_readback_rejects_unready_or_wrong_credential_sources(
+    observed: dict[str, Any] | None,
+) -> None:
+    reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal reads
+        if request.method == "GET":
+            reads += 1
+            return httpx.Response(404) if reads == 1 or observed is None else httpx.Response(
+                200, json={"properties": observed},
+            )
+        assert request.method == "PUT"
+        return httpx.Response(201)
+
+    client = AzureApimPublisherClient(
+        publisher_settings(), cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises((PolicyCompilationError, RetryablePublicationError)):
+        client.ensure_named_value(NamedValueResource(
+            id="unit-value", key_vault_secret_id=None, value="unit-test-credential",
+        ))
+    assert reads == 2
+    with pytest.raises(CredentialSourceMissingError) as missing:
+        AzureApimPublisherClient(
+            publisher_settings(), cast(Any, StubTokenProvider()),
+            httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404))),
+        ).ensure_named_value(NamedValueResource(id="unit-missing", key_vault_secret_id=None))
+    assert missing.value.named_value_id == "unit-missing"
+
+
 def test_arm_client_creates_tls_backend_and_secret_named_values() -> None:
     requests: list[httpx.Request] = []
+    resources: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.method == "GET":
+            if request.url.path in resources:
+                return httpx.Response(200, json=resources[request.url.path])
             return httpx.Response(404, json={"error": {"code": "NotFound"}})
+        if request.method == "PUT" and "/namedValues/" in request.url.path:
+            resources[request.url.path] = json.loads(request.content)
         return httpx.Response(201, json={})
 
     client = AzureApimPublisherClient(

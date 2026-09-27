@@ -5,12 +5,14 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
+from pydantic import SecretStr
 
 from ..domain.images import ImageInvocationRequest
 from ..domain.runtime_models import (
@@ -33,19 +35,71 @@ class GatewayInvocationError(RuntimeError):
         message: str,
         *,
         status_code: int = 502,
-        headers: dict[str, str] | None = None,
+        headers: Mapping[str, str] | None = None,
         usage: InvocationUsage | None = None,
+        failure_kind: str = "gateway_error",
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
-        self.headers = headers or {}
+        self.headers = _response_headers(headers or {})
         self.usage = usage
+        self.failure_kind = failure_kind
+
+
+def _response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    return {name: headers[name] for name in (
+        "x-request-id", "x-correlation-id", "request-id", "x-ms-request-id", "apim-request-id",
+        "retry-after", "x-ratelimit-remaining-tokens", "x-quota-remaining-tokens",
+    ) if name in headers and 0 < len(headers[name]) <= 512
+        and all(32 <= ord(character) < 127 for character in headers[name])}
+
+
+@contextmanager
+def _gateway_response_errors(headers: dict[str, str]) -> Iterator[None]:
+    try:
+        yield
+    except GatewayInvocationError as error:
+        error.headers = {**_response_headers(headers), **error.headers}
+        raise
+    except httpx.HTTPStatusError as error:
+        response = error.response
+        raise GatewayInvocationError(
+            f"Gateway request failed ({response.status_code}): {_http_error_detail(response)}",
+            status_code=response.status_code, headers=response.headers, failure_kind="http_error",
+        ) from error
+    except httpx.TimeoutException as error:
+        raise GatewayInvocationError(
+            "Gateway request timed out", status_code=504, headers=headers, failure_kind="timeout",
+        ) from error
+    except httpx.HTTPError as error:
+        raise GatewayInvocationError(
+            "Gateway transport failed", headers=headers, failure_kind="transport_error",
+        ) from error
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise GatewayInvocationError(
+            "Gateway returned an unsupported response schema", headers=headers,
+            failure_kind="invalid_response",
+        ) from error
+
+
+def _response_correlation(headers: Mapping[str, str], implementation: GatewayKind) -> str | None:
+    safe = _response_headers(headers)
+    if implementation is GatewayKind.APIM:
+        return safe.get("x-correlation-id")
+    return (safe.get("x-correlation-id") or safe.get("request-id")
+            or safe.get("x-ms-request-id") or safe.get("apim-request-id"))
+
+
+def _upstream_request_id(headers: Mapping[str, str]) -> str | None:
+    safe = _response_headers(headers)
+    return (safe.get("x-request-id") or safe.get("request-id")
+            or safe.get("x-ms-request-id") or safe.get("apim-request-id"))
 
 
 def _http_error_detail(response: httpx.Response) -> str:
     try:
         payload = response.json()
-    except ValueError:
+    except (ValueError, httpx.ResponseNotRead):
         return f"HTTP {response.status_code}"
     if not isinstance(payload, dict):
         return f"HTTP {response.status_code}"
@@ -66,6 +120,7 @@ class GatewayResult:
     gateway: str
     correlation_id: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    upstream_request_id: str | None = None
 
 
 class GatewayAdapter(Protocol):
@@ -234,8 +289,17 @@ class OpenAICompatibleGatewayAdapter:
         self, request: ModelInvocationRequest | ImageInvocationRequest, route: dict[str, Any]
     ) -> dict[str, str]:
         metadata = request.metadata
+        delegation = route.get("budget_delegation_token")
+        if delegation is not None and (
+            self._implementation is not GatewayKind.APIM or not isinstance(delegation, SecretStr)
+        ):
+            raise GatewayInvocationError(
+                "Budget delegation requires a trusted APIM route", status_code=503,
+            )
         return {
             **self._auth_headers(route),
+            **({"x-turnstile-delegation-token": "Bearer " + delegation.get_secret_value()}
+               if delegation is not None else {}),
             "x-request-id": str(route.get("request_id", "")),
             "x-org-id": metadata.organization_id,
             "x-org-name": metadata.organization,
@@ -304,7 +368,8 @@ class OpenAICompatibleGatewayAdapter:
             body[max_tokens_field] = request.max_output_tokens
         if request.response_format is not None:
             body["response_format"] = {"type": request.response_format}
-        try:
+        response_headers: dict[str, str] = {}
+        with _gateway_response_errors(response_headers):
             if request.stream:
                 with self._client.stream(
                     "POST",
@@ -312,11 +377,12 @@ class OpenAICompatibleGatewayAdapter:
                     headers=self._headers(request, route),
                     json=body,
                     timeout=float(runtime_config.get("timeout_seconds", 120)),
+                    follow_redirects=False,
                 ) as response:
+                    response_headers.update(_response_headers(response.headers))
                     if response.is_error:
                         response.read()
                     response.raise_for_status()
-                    response_headers = dict(response.headers)
                     events = _sse_json_events(response)
                 content = "".join(
                     str(delta.get("content") or "")
@@ -341,86 +407,42 @@ class OpenAICompatibleGatewayAdapter:
                         [message.model_dump() for message in request.messages]
                     )
                     usage = _estimate_usage(prompt, content)
-                correlation_id = (
-                    response_headers.get("x-correlation-id")
-                    or response_headers.get("x-ms-request-id")
-                    or response_headers.get("apim-request-id")
-                    or next(
-                        (str(event["id"]) for event in events if event.get("id")),
-                        None,
-                    )
-                )
+                correlation_id = _response_correlation(response_headers, self._implementation)
                 return GatewayResult(
                     content=content,
                     usage=usage,
                     gateway=self._implementation.value,
                     correlation_id=correlation_id,
+                    upstream_request_id=_upstream_request_id(response_headers),
                 )
-            response = self._client.post(
-                f"{self._base_url(route)}{path}",
+            with self._client.stream(
+                "POST", f"{self._base_url(route)}{path}",
                 headers=self._headers(request, route),
                 json=body,
                 timeout=float(runtime_config.get("timeout_seconds", 120)),
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as error:
-            response = error.response
-            propagated_headers = {
-                name: response.headers[name]
-                for name in (
-                    "x-request-id",
-                    "x-correlation-id",
-                    "retry-after",
-                    "x-ratelimit-remaining-tokens",
-                    "x-quota-remaining-tokens",
-                )
-                if name in response.headers
-            }
-            raise GatewayInvocationError(
-                f"Gateway request failed ({response.status_code}): "
-                f"{_http_error_detail(response)}",
-                status_code=response.status_code,
-                headers=propagated_headers,
-            ) from error
-        except httpx.TimeoutException as error:
-            raise GatewayInvocationError(
-                "Gateway request timed out", status_code=504
-            ) from error
-        except httpx.HTTPError as error:
-            raise GatewayInvocationError(f"Gateway request failed: {error}") from error
-        payload = response.json()
-        try:
+                follow_redirects=False,
+            ) as response:
+                response_headers.update(_response_headers(response.headers))
+                response.read()
+                response.raise_for_status()
+                payload = response.json()
             message = payload["choices"][0]["message"]
-            # A turn that only calls tools has content null, which is not a schema error.
             content = str(message.get("content") or "")
             tool_calls = tuple(
                 ToolCall.model_validate(call) for call in (message.get("tool_calls") or [])
             )
-        except (KeyError, IndexError, TypeError, ValueError) as error:
-            raise GatewayInvocationError(
-                "Gateway returned an unsupported response schema"
-            ) from error
-        if not content and not tool_calls:
-            raise GatewayInvocationError("Gateway returned neither content nor a tool call")
-        raw_usage = payload.get("usage")
-        usage = None
-        if isinstance(raw_usage, dict):
-            usage = _openai_usage(raw_usage)
-        if usage is None:
-            prompt = _prompt([message.model_dump() for message in request.messages])
-            usage = _estimate_usage(prompt, content)
-        correlation_id = (
-            response.headers.get("x-correlation-id")
-            or response.headers.get("x-ms-request-id")
-            or response.headers.get("apim-request-id")
-        )
-        return GatewayResult(
-            content=content,
-            usage=usage,
-            gateway=self._implementation.value,
-            correlation_id=correlation_id,
-            tool_calls=tool_calls,
-        )
+            if not content and not tool_calls:
+                raise GatewayInvocationError("Gateway returned neither content nor a tool call")
+            raw_usage = payload.get("usage")
+            usage = _openai_usage(raw_usage) if isinstance(raw_usage, dict) else None
+            if usage is None:
+                prompt = _prompt([message.model_dump() for message in request.messages])
+                usage = _estimate_usage(prompt, content)
+            return GatewayResult(
+                content=content, usage=usage, gateway=self._implementation.value,
+                correlation_id=_response_correlation(response_headers, self._implementation),
+                upstream_request_id=_upstream_request_id(response_headers), tool_calls=tool_calls,
+            )
 
     def check(self, route: dict[str, Any]) -> RuntimeHealth:
         from datetime import UTC, datetime
@@ -492,75 +514,41 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
         headers["anthropic-version"] = str(
             runtime_config.get("anthropic_version", "2023-06-01")
         )
-        try:
-            response = self._client.post(
-                f"{self._base_url(route)}{path}",
+        response_headers: dict[str, str] = {}
+        with _gateway_response_errors(response_headers):
+            with self._client.stream(
+                "POST", f"{self._base_url(route)}{path}",
                 headers=headers,
                 json=body,
                 timeout=float(runtime_config.get("timeout_seconds", 120)),
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as error:
-            response = error.response
-            propagated_headers = {
-                name: response.headers[name]
-                for name in (
-                    "x-request-id",
-                    "x-correlation-id",
-                    "request-id",
-                    "retry-after",
-                    "x-ratelimit-remaining-tokens",
-                    "x-quota-remaining-tokens",
+                follow_redirects=False,
+            ) as response:
+                response_headers.update(_response_headers(response.headers))
+                response.read()
+                response.raise_for_status()
+                payload = response.json()
+            raw_content = payload.get("content")
+            if not isinstance(raw_content, list):
+                raise GatewayInvocationError("Gateway returned an unsupported response schema")
+            text_blocks = [str(block["text"]) for block in raw_content
+                           if isinstance(block, dict) and block.get("type") == "text"
+                           and "text" in block]
+            if not text_blocks:
+                raise GatewayInvocationError("Gateway returned no text content")
+            raw_usage = payload.get("usage")
+            usage = None
+            if isinstance(raw_usage, dict):
+                usage = InvocationUsage(
+                    input_tokens=int(raw_usage.get("input_tokens", 0)),
+                    cached_tokens=int(raw_usage.get("cache_creation_input_tokens", 0))
+                    + int(raw_usage.get("cache_read_input_tokens", 0)),
+                    output_tokens=int(raw_usage.get("output_tokens", 0)), estimated=False,
                 )
-                if name in response.headers
-            }
-            raise GatewayInvocationError(
-                f"Gateway request failed ({response.status_code}): "
-                f"{_http_error_detail(response)}",
-                status_code=response.status_code,
-                headers=propagated_headers,
-            ) from error
-        except httpx.TimeoutException as error:
-            raise GatewayInvocationError(
-                "Gateway request timed out", status_code=504
-            ) from error
-        except httpx.HTTPError as error:
-            raise GatewayInvocationError(f"Gateway request failed: {error}") from error
-
-        payload = response.json()
-        raw_content = payload.get("content")
-        if not isinstance(raw_content, list):
-            raise GatewayInvocationError("Gateway returned an unsupported response schema")
-        text_blocks = [
-            str(block["text"])
-            for block in raw_content
-            if isinstance(block, dict) and block.get("type") == "text" and "text" in block
-        ]
-        if not text_blocks:
-            raise GatewayInvocationError("Gateway returned no text content")
-
-        raw_usage = payload.get("usage")
-        usage = None
-        if isinstance(raw_usage, dict):
-            usage = InvocationUsage(
-                input_tokens=int(raw_usage.get("input_tokens", 0)),
-                cached_tokens=int(raw_usage.get("cache_creation_input_tokens", 0))
-                + int(raw_usage.get("cache_read_input_tokens", 0)),
-                output_tokens=int(raw_usage.get("output_tokens", 0)),
-                estimated=False,
+            return GatewayResult(
+                content="\n".join(text_blocks), usage=usage, gateway=self._implementation.value,
+                correlation_id=_response_correlation(response_headers, self._implementation),
+                upstream_request_id=_upstream_request_id(response_headers),
             )
-        correlation_id = (
-            response.headers.get("x-correlation-id")
-            or response.headers.get("request-id")
-            or response.headers.get("x-ms-request-id")
-            or response.headers.get("apim-request-id")
-        )
-        return GatewayResult(
-            content="\n".join(text_blocks),
-            usage=usage,
-            gateway=self._implementation.value,
-            correlation_id=correlation_id,
-        )
 
 
 class LiteLlmGatewayAdapter(OpenAICompatibleGatewayAdapter):

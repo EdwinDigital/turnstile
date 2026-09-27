@@ -11,24 +11,426 @@ import {
 import * as gatewayTopology from "../../../frontend/src/lib/gateway-topology.ts"
 import * as gatewayForms from "../../../frontend/src/lib/gateway-forms.ts"
 import * as modelFilters from "../../../frontend/src/lib/model-inventory-filters.ts"
+import * as runtimeHealth from "../../../frontend/src/lib/runtime-health.ts"
+import { formatTimeAgo } from "../../../frontend/src/lib/time.ts"
+import * as publicationConnections from "../../../frontend/src/components/model-management/model-publication-connections.ts"
+import * as compatible from "../../../frontend/src/components/model-management/openai-compatible.ts"
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
 const { QueryClient } = frontendRequire("@tanstack/react-query")
 async function compile(path, expose = []) {
   const entry = fileURLToPath(new URL(path, import.meta.url))
-  const bundle = await rolldown({ input: entry, external: path => path !== entry, transform: { jsx: { runtime: "automatic" } }, treeshake: false,
+  const bundle = await rolldown({ input: entry, external: path => path !== entry, transform: { jsx: { runtime: "automatic" }, define: { "import.meta.env.VITE_API_BASE_URL": '""' } }, treeshake: false,
     plugins: expose.length ? [{ name: "test-component-exports", load(path) { if (path === entry) return `${readFileSync(entry, "utf8")}\nexport { ${expose.join(", ")} }` } }] : [],
   })
   try { return (await bundle.generate({ format: "cjs" })).output[0].code }
   finally { await bundle.close() }
 }
 const apiCode = await compile("../../../frontend/src/data-sources/apim/api.ts")
+const requestCode = await compile("../../../frontend/src/api/client.ts")
 const queryCode = await compile("../../../frontend/src/data-sources/apim/queries.ts")
 const onboardingCode = await compile("../../../frontend/src/components/model-management/apim-onboarding-dialog.tsx")
 const creationCode = await compile("../../../frontend/src/components/model-management/self-hosted-gateway-dialog.tsx")
 const workspaceCode = await compile("../../../frontend/src/components/model-management/apim-gateway-workspace.tsx", ["ApimTable", "GatewayTable", "GatewayChildRow", "InfrastructureActions", "ApimEditor", "GatewayEditor", "GatewayAssociationEditor", "InfrastructureNameEditor", "RemovalDialog", "InfrastructureTableLoading"])
-const pageCode = await compile("../../../frontend/src/pages/model-management-page.tsx", ["ModelWorkspace", "modelManagementTabFromUrl"])
+const pageCode = await compile("../../../frontend/src/pages/model-management-page.tsx", ["ModelWorkspace", "modelManagementTabFromUrl", "ConnectionGatewayCell", "ModelTargetGatewayCell", "ConnectionRow", "RuntimeHealth"])
+const releaseCode = await compile("../../../frontend/src/pages/gateway-releases-page.tsx", ["PublicationFailureNotice", "ChangeColumn", "GatewayReleaseGroups", "BudgetVerificationDialog"])
+const diagnosticCode = await compile("../../../frontend/src/components/model-management/runtime-diagnostic-dialog.tsx")
+const connectionCode = await compile("../../../frontend/src/components/model-management/connection-dialog.tsx")
+const traceCode = await compile("../../../frontend/src/data-sources/apim/pages/dashboard-page.tsx")
+const mobileCode = await compile("../../../frontend/src/hooks/use-mobile.ts")
+
+test("responsive controls use the model-table breakpoint and preserve the default breakpoint", () => {
+  for (const breakpoint of [undefined, 761]) {
+    const limit = breakpoint ?? 768
+    let state, effect, query
+    const listeners = new Set()
+    const viewport = { innerWidth: limit - 1, matchMedia(value) {
+      query = value
+      return { addEventListener(_event, listener) { listeners.add(listener) }, removeEventListener(_event, listener) { listeners.delete(listener) } }
+    } }
+    const exports = {}
+    const hooks = { useState: () => [state, value => { state = value }], useEffect(callback) { effect = callback } }
+    runInNewContext(mobileCode, { exports, window: viewport, require: () => hooks })
+    exports.useIsMobile(breakpoint)
+    const cleanup = effect()
+    assert.equal(query, `(max-width: ${limit - 1}px)`)
+    assert.equal(exports.useIsMobile(breakpoint), true)
+    viewport.innerWidth = limit
+    for (const listener of listeners) listener()
+    assert.equal(exports.useIsMobile(breakpoint), false)
+    viewport.innerWidth = limit - 1
+    for (const listener of listeners) listener()
+    assert.equal(exports.useIsMobile(breakpoint), true)
+    cleanup()
+    assert.equal(listeners.size, 0)
+  }
+  const page = readFileSync(new URL("../../../frontend/src/pages/model-management-page.tsx", import.meta.url), "utf8")
+  assert.ok(page.includes("const compactLayout = useIsMobile(761)"))
+})
+const buttonCode = await compile("../../../frontend/src/components/ui/button.tsx")
+
+test("shared button exposes its variant while preserving control props", () => {
+  const exports = {}
+  const imports = {
+    "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
+    "@base-ui/react/button": { Button: "ButtonPrimitive" },
+    "class-variance-authority": frontendRequire("class-variance-authority"),
+    "../../lib/utils": { cn: (...values) => values.filter(Boolean).join(" ") },
+  }
+  runInNewContext(buttonCode, { exports, require: name => imports[name] })
+  for (const variant of [undefined, "default", "outline", "secondary", "ghost", "destructive", "link"]) {
+    const button = exports.Button({ variant, disabled: true, title: "Unit action", type: "button" })
+    assert.equal(button.type, "ButtonPrimitive")
+    assert.equal(button.props["data-variant"], variant ?? "default")
+    assert.equal(button.props.disabled, true)
+    assert.equal(button.props.title, "Unit action")
+    assert.equal(button.props.type, "button")
+  }
+})
+
+test("request errors unwrap string details but retain structured validation evidence", async () => {
+  for (const [body, expected] of [
+    ['{"detail":"Identity is not ready"}', "Identity is not ready"],
+    ['{"detail":[{"loc":["body","price_source"],"msg":"Invalid"}]}', '{"detail":[{"loc":["body","price_source"],"msg":"Invalid"}]}'],
+    ["Upstream unavailable", "Upstream unavailable"], ["", "/unit"],
+  ]) {
+    const exports = {}
+    runInNewContext(requestCode, { exports, fetch: async () => new Response(body, { status: 409 }) })
+    await assert.rejects(exports.request("/unit"), error => error.status === 409 && error.message === `API 409: ${expected}`)
+  }
+})
+
+test("shared form styles cover standalone inputs and variant-aware dialog buttons", () => {
+  const stylesheet = frontendRequire("postcss").parse(readFileSync(new URL("../../../frontend/src/styles/finops.css", import.meta.url), "utf8"))
+  const rules = new Map()
+  stylesheet.walkRules(rule => { for (const selector of rule.selectors) rules.set(selector, Object.fromEntries(rule.nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value]))) })
+  assert.equal(rules.get('[data-slot="input"]').height, "32px")
+  assert.equal(rules.get('[data-slot="input"][aria-invalid="true"]')["border-color"], "var(--destructive)")
+  assert.equal(rules.get('.registry-editor-footer > [data-slot="button"][data-variant="outline"]').background, "var(--background)")
+  assert.equal(rules.get('.registry-editor-footer > [data-slot="button"][data-variant="default"]').background, "var(--primary)")
+  assert.equal(rules.get(".registry-editor-footer > button:disabled").cursor, "not-allowed")
+})
+
+test("publication summaries and budget history retain bounded source layouts", () => {
+  const rules = new Map()
+  for (const name of ["finops", "model-platform"]) {
+    const stylesheet = frontendRequire("postcss").parse(readFileSync(new URL(`../../../frontend/src/styles/${name}.css`, import.meta.url), "utf8"))
+    stylesheet.walkRules(rule => {
+      const media = rule.parent.type === "atrule" ? `${rule.parent.params}|` : ""
+      for (const selector of rule.selectors) rules.set(media + selector, Object.fromEntries(rule.nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value])))
+    })
+  }
+  assert.equal(rules.get(".budget-history-list")["grid-template-columns"], "auto minmax(0, 1fr) minmax(100px, 1.5fr) auto")
+  assert.equal(rules.get(".budget-history-list p")["min-width"], "0")
+  assert.equal(rules.get(".budget-history-list p")["text-overflow"], "ellipsis")
+  assert.equal(rules.get(".publication-connection-summary > div")["align-content"], "start")
+  assert.equal(rules.get(".publication-connection-summary dd").color, "var(--foreground)")
+  assert.equal(rules.get(".publication-connection-action:focus-visible").color, "var(--foreground)")
+  assert.equal(rules.get("(max-width: 640px)|.publication-connection-summary")["grid-template-columns"], "1fr")
+})
+
+test("publication status labels wrap without shrinking their icons", () => {
+  const stylesheet = frontendRequire("postcss").parse(readFileSync(new URL("../../../frontend/src/styles/model-platform.css", import.meta.url), "utf8"))
+  const rules = new Map()
+  stylesheet.walkRules(rule => rules.set(rule.selector, Object.fromEntries(rule.nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value]))))
+  assert.equal(rules.get(".model-publication-status")["align-items"], "flex-start")
+  assert.equal(rules.get(".model-publication-status span")["white-space"], "normal")
+  assert.equal(rules.get(".model-publication-status span")["overflow-wrap"], "anywhere")
+  assert.equal(rules.get(".model-publication-status > svg")["flex-shrink"], "0")
+  assert.equal(rules.get(".publication-model-row")["padding-block"], "8px")
+})
+
+test("budget diagnostic clients send only explicit selections with encoded target identity", async () => {
+  const calls = []
+  const api = apiHarness(async (...args) => { calls.push(args); return {} })
+  await api.checkBudgetDelegation("unit/target")
+  await api.verifyBudgetExecution("unit/target", "application", "model")
+  assert.equal(calls[0][0], "/api/v1/model-management/gateways/unit%2Ftarget/budget-readiness")
+  assert.equal(Object.keys(calls[0][1]).length, 0)
+  assert.equal(calls[1][0], "/api/v1/model-management/gateways/unit%2Ftarget/budget-execution-verification")
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1][1])), { application_id: "application", model_id: "model" })
+})
+
+test("Trace errors wrap long identities within their grid column", () => {
+  const stylesheet = frontendRequire("postcss").parse(readFileSync(new URL("../../../frontend/src/styles/finops.css", import.meta.url), "utf8"))
+  const rules = new Map()
+  stylesheet.walkRules(rule => rules.set(rule.selector, Object.fromEntries(rule.nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value]))))
+  assert.equal(rules.get(".trace-error > div")["min-width"], "0")
+  assert.equal(rules.get(".trace-error span")["min-width"], "0")
+  assert.equal(rules.get(".trace-error span")["overflow-wrap"], "anywhere")
+  assert.equal(rules.get(".trace-error span")["white-space"], "normal")
+})
+
+test("Trace status colors require explicit success or failure evidence", () => {
+  const css = readFileSync(new URL("../../../frontend/src/styles/finops.css", import.meta.url), "utf8")
+  for (const selector of [".trace-row-status", ".trace-detail-hero > span"]) {
+    const neutral = css.split(`${selector} {`, 2)[1].split("}", 1)[0]
+    assert.ok(neutral.includes("background: var(--muted)"))
+    assert.ok(neutral.includes("color: var(--muted-foreground)"))
+    const success = css.split(`${selector}.success {`, 2)[1].split("}", 1)[0]
+    assert.ok(success.includes("color: var(--success)"))
+    const failure = css.split(`${selector}.failed {`, 2)[1].split("}", 1)[0]
+    assert.ok(failure.includes("color: var(--destructive)"))
+  }
+})
+
+test("Trace rows distinguish unknown usage from measured zero and use stable platform identity", () => {
+  for (const [status, available, label] of [[504, false, "不可用"], [null, false, "不可用"], [200, true, "0 tokens"]]) {
+    const item = { request_id: "request", correlation_id: null, trace_id: "platform:request", timestamp: "2020-01-01T00:00:00Z",
+      model_name: "Unit model", status_code: status, platform_outcome: status === 504 ? "failed" : status === 200 ? "succeeded" : "dispatched",
+      usage_available: available, total_tokens: 0, estimated_cost: 0 }
+    const row = componentHarness("TraceRow", { item, active: true, onClick() {}, costAvailable: available }, { code: traceCode })
+    assert.ok(row.find(node => node.type === "small" && node.props.children === label))
+    assert.ok(row.find(node => node.type === "span" && node.props.children === (status ?? "未知")))
+    if (status == null) assert.ok(!row.find(node => node.props?.className === "trace-row-status success"))
+  }
+})
+
+test("diagnostic dialog requires explicit eligible selection and allows only one dispatch", () => {
+  const submissions = []
+  const plan = { options: [{ model_id: "model", gateway_deployment_id: "edge", model_name: "Model", model_key: "alias", gateway_name: "Edge", native_gateway_id: "native" }], access: { status: "ready", missing_actions: [], required_actions: [] } }
+  const props = { runtime: { id: "runtime", name: "Connection", enabled: true }, supported: true, busy: false, error: null, result: null, onCheck: value => submissions.push(value), onClose() {} }
+  const view = componentHarness("RuntimeDiagnosticDialog", props, { code: diagnosticCode, queryData: { "control-plane": plan } })
+  const runButton = () => view.find(node => node.type === "Button" && Array.isArray(node.props.children) && node.props.children[1] === "运行检查")
+  assert.equal(runButton().props.disabled, true)
+  view.find(node => node.type === "Select").props.onValueChange("model:edge")
+  assert.equal(runButton().props.disabled, false)
+  const click = runButton().props.onClick
+  click()
+  click()
+  assert.equal(submissions.length, 1)
+  assert.equal(submissions[0].model_id, "model")
+  assert.equal(submissions[0].gateway_deployment_id, "edge")
+  assert.equal(runButton().props.disabled, true)
+  for (const options of [{ role: "member" }, { queryData: { "control-plane": { ...plan, access: { ...plan.access, status: "unverified" } } } }]) {
+    const blocked = componentHarness("RuntimeDiagnosticDialog", props, { code: diagnosticCode, queryData: { "control-plane": plan }, ...options })
+    blocked.find(node => node.type === "Select").props.onValueChange("model:edge")
+    assert.equal(blocked.find(node => node.type === "Button" && Array.isArray(node.props.children) && node.props.children[1] === "运行检查").props.disabled, true)
+  }
+})
+
+test("connection diagnosis distinguishes historical success, policy blocks and changed configuration", () => {
+  const checkedAt = new Date(Date.now() - 30 * 86400000).toISOString()
+  const runtime = { id: "unit-runtime", enabled: true, health_status: "available", last_checked_at: checkedAt }
+  assert.equal(runtimeHealth.runtimeHealthState(runtime), "inconclusive")
+  const diagnostic = { runtime_id: runtime.id, status: "available", outcome: "passed", checked_at: checkedAt,
+    valid_until: checkedAt, configuration_status: "current" }
+  assert.equal(runtimeHealth.runtimeHealthState({ ...runtime, diagnostic }), "online")
+  assert.equal(runtimeHealth.runtimeHealthState({ ...runtime, diagnostic: { ...diagnostic, configuration_status: "changed" } }), "changed")
+  assert.equal(runtimeHealth.runtimeDiagnostic({ ...runtime, health_message: runtimeHealth.runtimeDiagnosticPrefix + JSON.stringify(diagnostic) }).configuration_status, "unverified")
+  const blocked = runtimeHealth.runtimeWithTelemetryHealth({ ...runtime, last_checked_at: null }, [{
+    request_source: "runtime-health-check", timestamp: checkedAt, status_code: 403,
+    error_message: "model_not_assigned", request_id: "unit-request", correlation_id: "unit-correlation", latency_ms: 1,
+  }])
+  assert.equal(runtimeHealth.runtimeHealthState(blocked), "blocked")
+  assert.equal(runtimeHealth.runtimeHealthState({ ...runtime, enabled: false, diagnostic }), "disabled")
+})
+
+test("connection creation waits for registered APIM inventory without replacing explicit choices", () => {
+  const writes = []
+  const props = { registry: { apim_target_topology_available: true, providers: [], gateways: [{ id: "first", name: "Unit APIM", enabled: true, implementation: "apim" }] }, topology: null, topologyLoading: true, busy: false, error: null, onClose() {}, onCreate: value => writes.push(value), onUpdate() {} }
+  const view = componentHarness("ConnectionDialog", props, { code: connectionCode })
+  assert.ok(view.find(node => node.props?.role === "status"))
+  assert.equal(view.find(node => node.type === "Select" && Array.isArray(node.props.items)).props.disabled, true)
+  props.topology = { items: [{ target: { gateway_profile_id: "first" } }] }
+  props.topologyLoading = false
+  const selector = view.find(node => node.type === "Select" && Array.isArray(node.props.items))
+  assert.equal(selector.props.value, "first")
+  assert.equal(selector.props.disabled, false)
+  selector.props.onValueChange("removed")
+  assert.equal(view.find(node => node.type === "Select" && Array.isArray(node.props.items)).props.value, "removed")
+  const submit = view.find(node => node.type === "Button" && node.props.children?.at?.(-1) === "添加连接")
+  assert.equal(submit.props.disabled, true)
+  submit.props.onClick()
+  assert.equal(writes.length, 0)
+})
+
+test("compatible connection groups provider identity with its HTTPS endpoint", () => {
+  const props = { registry: { providers: [], gateways: [{ id: "target", name: "Unit APIM", enabled: true, implementation: "apim" }] }, busy: false, error: null, onClose() {}, onCreate() {}, onUpdate() {} }
+  const view = componentHarness("ConnectionDialog", props, { code: connectionCode })
+  view.find(node => node.type === "Select" && !Array.isArray(node.props.items)).props.onValueChange("template:openai_compatible")
+  assert.ok(view.find(node => node.props?.className === "openai-compatible-identity-grid"))
+  assert.equal(view.find(node => node.props?.htmlFor === "openai-base-url").props.children, "API Base URL")
+  assert.ok(view.find(node => node.type === "FieldHelp" && node.props.children.startsWith("选择提供此 API 的服务商")))
+  assert.equal(view.find(node => node.type === "Input" && node.props.id === "openai-base-url").props.type, "url")
+})
+
+test("connection health renders valid historical timestamps without invalid dates", () => {
+  for (const checkedAt of ["2026-09-26T00:00:00Z", "invalid", undefined]) {
+    const view = componentHarness("RuntimeHealth", { state: "blocked", checkedAt }, { code: pageCode })
+    const timestamp = view.find(node => node.type === "time")
+    assert.equal(Boolean(timestamp), checkedAt === "2026-09-26T00:00:00Z")
+    if (timestamp) assert.equal(timestamp.props.dateTime, checkedAt)
+    assert.ok(view.find(node => node.type === "TriangleAlert"))
+  }
+})
+
+test("connection row opens diagnostics without an independent default-connection action", () => {
+  let checks = 0
+  const runtime = { id: "runtime", name: "Connection", runtime_kind: "foundry", enabled: true, is_default: false, config: {}, health_message: null }
+  const row = componentHarness("ConnectionRow", { runtime, models: [{ enabled: true }], topology: null,
+    busy: false, checking: false, onEdit() {}, onToggle() {}, onDelete() {}, onCheck() { checks++ } }, { code: pageCode })
+  assert.equal(row.find(node => node.props?.className === "connection-default-action"), undefined)
+  row.find(node => node.props?.title === "连接诊断").props.onClick()
+  assert.equal(checks, 1)
+})
+
+test("budget verification dialog binds validated candidates and prevents duplicate dispatch", async () => {
+  const requests = []
+  const registry = { gateways: [{ id: "target", name: "Unit APIM", enabled: true, implementation: "apim" }], runtimes: [{ id: "runtime", enabled: true, gateway_profile_id: "target" }], models: [{ id: "model", display_name: "Unit model", enabled: true, capabilities: ["chat"], runtime_id: "runtime" }] }
+  const applications = { items: [{ id: "application", display_name: "Unit app", gateway_profile_id: "target", status: "active", system_managed: false, model_policy_configured: true, allowed_model_ids: ["model"] }] }
+  const api = {
+    checkBudgetDelegation: async id => ({ gateway_profile_id: id, ready: true, protocol_mode: "paused", checks: [], verification: { application_id: "application", model_ids: ["model"] } }),
+    verifyBudgetExecution: async (...selection) => { requests.push(selection); return { actual_status: 200, settled: false, request_id: "unit-request", scopes: [] } },
+  }
+  const props = { gatewayId: "target", onClose() {} }
+  const view = componentHarness("BudgetVerificationDialog", props, { code: releaseCode, api, queryData: { registry, applications } })
+  const button = label => view.find(node => node.type === "Button" && Array.isArray(node.props.children) && node.props.children.at(-1) === label)
+  assert.equal(button("联合账本验证").props.disabled, true)
+  button("验证预算委托").props.onClick()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(button("联合账本验证").props.disabled, false)
+  button("联合账本验证").props.onClick()
+  assert.equal(button("发送验证请求").props.disabled, true)
+  view.find(node => node.type === "Select" && node.props.items?.[0]?.value === "application").props.onValueChange("application")
+  view.find(node => node.type === "Select" && node.props.items?.[0]?.value === "model").props.onValueChange("model")
+  assert.equal(button("发送验证请求").props.disabled, false)
+  const send = button("发送验证请求").props.onClick
+  send(); send()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(requests, [["target", "application", "model"]])
+  assert.equal(button("发送验证请求").props.disabled, true)
+  assert.ok(view.find(node => node.props?.role === "status" && node.props.children?.includes("尚未确认结算")))
+  const member = componentHarness("BudgetVerificationDialog", props, { code: releaseCode, api, role: "member", queryData: { registry, applications } })
+  assert.equal(member.find(node => node.type === "Button" && node.props.children?.at?.(-1) === "验证预算委托").props.disabled, true)
+})
+
+test("release groups separate same-name APIM targets and retain selection when collapsed", () => {
+  const items = [
+    { id: "release-a1", gateway_profile_id: "target-a", gateway_name: "Unit APIM" },
+    { id: "release-b1", gateway_profile_id: "target-b", gateway_name: "Unit APIM" },
+    { id: "release-a2", gateway_profile_id: "target-a", gateway_name: "Unit APIM" },
+  ]
+  const toggled = [], selected = []
+  const view = componentHarness("GatewayReleaseGroups", { items, selectedId: "release-b1", collapsedGatewayIds: new Set(["target-a"]), location: "rail", onToggle: id => toggled.push(id), onSelect: id => selected.push(id) }, { code: releaseCode })
+  assert.equal(view.find(node => node.props?.id === "gateway-release-group-rail-target-a").props.hidden, true)
+  assert.equal(view.find(node => node.props?.id === "gateway-release-group-rail-target-b").props.hidden, false)
+  const target = view.find(node => node.props?.["aria-controls"] === "gateway-release-group-rail-target-a")
+  target.props.onClick()
+  assert.deepEqual(toggled, ["target-a"])
+  const row = view.find(node => node.props?.release?.id === "release-b1")
+  assert.equal(row.props.selected, true)
+  row.props.onSelect()
+  assert.deepEqual(selected, ["release-b1"])
+})
+
+test("release failure notice uses safe categories and marks unapplied changes as planned", () => {
+  const notice = componentHarness("PublicationFailureNotice", {
+    publicationId: "unit-publication", failure: {
+      code: "publisher_permissions_missing", message: "untrusted raw error",
+      stage: "validating", http_status: 403, request_id: "azure-request-id",
+      missing_actions: ["Microsoft.ApiManagement/service/backends/write"],
+    },
+  }, { code: releaseCode })
+  assert.ok(notice.find(node => node.type === "p" && node.props.children.includes("Publisher 缺少")))
+  assert.ok(notice.find(node => node.type === "code" && node.props.children === "azure-request-id"))
+  assert.ok(notice.find(node => node.type === "details"))
+  assert.ok(!notice.find(node => node.props?.children === "untrusted raw error"))
+  for (const planned of [true, false]) {
+    const changes = componentHarness("ChangeColumn", { title: "Models", added: ["model"], removed: [], changed: [], planned }, { code: releaseCode })
+    assert.ok(changes.find(node => node.type === "b" && node.props.children === (planned ? "拟新增" : "已新增")))
+  }
+})
+
+test("model targets use recorded memberships and publication snapshots without default guesses", () => {
+  const target = topology({ apim_target_id: "first" })
+  const edge = topology({ id: "edge", apim_target_id: "first", native_gateway_id: "edge-native", kind: "self_hosted", display_name: "Docker edge" }).deployments[0]
+  target.deployments[0].published_models = [{ id: "another-model" }]
+  edge.published_models = [{ id: "model-one" }]
+  target.deployments.push(edge)
+  const inventory = { items: [target] }
+  const model = { id: "model-one" }
+  const runtime = { gateway_profile_id: "first" }
+  assert.deepEqual(gatewayTopology.modelTargetDetails(model, runtime, profiles, inventory).gateways, [
+    { id: "edge", name: "Docker edge", nativeId: "edge-native", kind: "self_hosted" },
+  ])
+  assert.deepEqual(gatewayTopology.modelTargetDetails(model, runtime, profiles, null).gateways, [])
+  edge.published_models_available = false
+  assert.deepEqual(gatewayTopology.modelTargetDetails(model, runtime, profiles, inventory).gateways, [])
+  edge.published_models_available = true
+  edge.deployment.retired_at = "2026-09-26T00:00:00Z"
+  assert.deepEqual(gatewayTopology.modelTargetDetails(model, runtime, profiles, inventory).gateways, [])
+  const publication = { gateway_profile_id: "first", target_deployments: [{ deployment_id: "edge", native_gateway_id: "edge-native", kind: "self_hosted" }] }
+  assert.equal(gatewayTopology.publicationTargetDetails(publication, profiles, inventory).gateways[0].name, "Docker edge")
+  edge.deployment.native_gateway_id = "foreign-native"
+  assert.equal(gatewayTopology.publicationTargetDetails(publication, profiles, inventory).gateways[0].name, "edge-native")
+  assert.deepEqual(gatewayTopology.publicationTargetDetails({ gateway_profile_id: "first" }, profiles, inventory).gateways, [])
+})
+
+test("invocation options require model membership and never replace a missing explicit model", () => {
+  const model = { id: "model-one", enabled: true, is_default: true, capabilities: ["chat"] }
+  assert.equal(gatewayTopology.resolveInvocationModel([model], null, false), model)
+  assert.equal(gatewayTopology.resolveInvocationModel([model], "missing", false), undefined)
+  assert.equal(gatewayTopology.resolveInvocationModel([model], null, true), undefined)
+  const target = topology({ apim_target_id: "first" })
+  const entry = target.deployments[0]
+  entry.published_models = [{ id: model.id }]
+  assert.equal(gatewayTopology.gatewayInvocationChoices(profiles, { items: [target] }, model.id).length, 1)
+  entry.published_models_available = false
+  assert.equal(gatewayTopology.gatewayInvocationChoices(profiles, { items: [target] }, model.id).length, 0)
+  entry.published_models_available = true
+  entry.deployment.reachability_state = "unreachable"
+  assert.equal(gatewayTopology.gatewayInvocationChoices(profiles, { items: [target] }, model.id)[0].selectable, false)
+  entry.deployment.retired_at = "2026-01-01T00:00:00Z"
+  assert.equal(gatewayTopology.gatewayInvocationChoices(profiles, { items: [target] }, model.id).length, 0)
+})
+
+test("Gateway inventory uses Chinese UI labels while preserving resource identities", () => {
+  const target = topology({ kind: "self_hosted", native_gateway_id: "unit-edge", display_name: "Customer Gateway", hosting_mode: "docker" })
+  const entry = { ...target.deployments[0], target, configuration_endpoint: "https://unit-service.configuration.azure-api.net" }
+  const workspace = componentHarness("ApimGatewayWorkspace", {
+    mode: "gateways", registry: { models: [], runtimes: [], gateways: profiles },
+    topology: { items: [target] }, loading: false, error: null,
+    onTabChange() {}, onToggleSidebar() {},
+  })
+  assert.equal(workspace.find(node => node.type === "h1").props.children, "网关")
+  assert.equal(workspace.find(node => node.props?.["data-tab"] === "gateways").props.children[0], "网关")
+  const table = componentHarness("GatewayTable", {
+    entries: [entry], filtered: false, busy: false, lifecycleAvailable: true, validatingId: null,
+    onEdit() {}, onValidate() {}, onChange() {}, onRemove() {},
+  })
+  const resourceTable = table.find(node => node.type?.name === "ResourceTable")
+  assert.deepEqual(Array.from(resourceTable.props.headers), ["网关", "所属 APIM / 模型", "端点", "状态", ""])
+  assert.equal(resourceTable.props.label, "自托管网关列表")
+  assert.ok(table.find(node => node.type === "b" && node.props.children === "Customer Gateway" && node.props["data-no-localize"] === true))
+  assert.ok(table.find(node => node.type === "span" && node.props.children === "配置地址"))
+  assert.ok(table.find(node => node.type === "span" && node.props.children === entry.configuration_endpoint && node.props["data-no-localize"] === true))
+})
+
+for (const tab of ["models", "connections", "gateways", "apim"]) test(`Management tab labels stay fully localized in ${tab} view`, () => {
+  const infrastructure = tab === "gateways" || tab === "apim"
+  const props = {
+    tab, mode: tab, registry: { models: [], runtimes: [], providers: [], gateways: profiles },
+    topology: { items: [topology()], total: 1 }, topologyAvailable: true,
+    loading: false, busy: false, notice: null, error: null, publications: [],
+    loadingRuntimeHealthIds: new Set(), onTabChange() {}, onToggleSidebar() {},
+  }
+  const harness = componentHarness(infrastructure ? "ApimGatewayWorkspace" : "ModelWorkspace", props, { code: infrastructure ? workspaceCode : pageCode })
+  const labels = harness.all().filter(node => node.props?.["data-tab"]).map(node => node.props.children[0])
+  assert.deepEqual(labels, ["模型", "连接", "网关", "APIM 实例"])
+})
+
+for (const locale of ["zh-CN", "zh-TW", "en", "ja", "ko"]) test(`Gateway startup duration follows ${locale} without translating secrets`, () => {
+  const harness = componentHarness("SelfHostedGatewayBootstrapDialog", {
+    deploymentId: "unit-edge", name: "Customer Gateway", onClose() {}, onValidate() {},
+  }, { code: creationCode, locale })
+  const value = harness.find(node => node.type === "SelectValue").props.children
+  assert.equal(value.props["data-no-localize"], true)
+  assert.equal(value.props.children, new Intl.NumberFormat(locale, { style: "unit", unit: "hour", unitDisplay: "long" }).format(24))
+  assert.ok(harness.find(node => node.props?.["aria-label"] === "令牌有效期"))
+  assert.ok(harness.find(node => node.type === "DialogDescription" && node.props["data-no-localize"] && node.props.children === "Customer Gateway"))
+})
 
 test("new Gateway form generates no native identity and requires endpoint control confirmation", () => {
   const form = { display_name: "  New Docker  ", endpoint_url: "https://edge.test/unit/llm", location: " ", endpoint_control_confirmed: false }
@@ -56,7 +458,7 @@ test("Gateway creation uses an idempotency header and bootstrap is never cacheab
   assert.deepEqual(JSON.parse(requests[1][1].body), { expires_in_hours: 24 })
 })
 
-function componentHarness(exportName, props, { operation = null, queryData = {}, mutationPending = false, code = workspaceCode, api = {}, role = "owner", globals = {} } = {}) {
+function componentHarness(exportName, props, { operation = null, queryData = {}, mutationPending = false, code = workspaceCode, api = {}, role = "owner", locale = "en-US", globals = {} } = {}) {
   const slots = []
   let cursor = 0
   const effects = []
@@ -95,13 +497,14 @@ function componentHarness(exportName, props, { operation = null, queryData = {},
             mutationVariables.push(value)
             try {
               const result = await options.mutationFn(value, { client: queryClient })
+              state.data = result
               await options.onSuccess?.(result, value)
               return result
             } catch (error) { state.error = error; throw error }
             finally { state.pending = false; await options.onSettled?.() }
         }
-        return { isPending: mutationPending || state.pending, error: state.error, variables: state.variables,
-          reset() { state.error = null }, mutateAsync,
+        return { isPending: mutationPending || state.pending, error: state.error, data: state.data, variables: state.variables,
+          reset() { state.error = null; state.data = undefined }, mutateAsync,
           mutate: value => {
             syncCalls.push(options)
             const pending = mutateAsync(value)
@@ -125,11 +528,25 @@ function componentHarness(exportName, props, { operation = null, queryData = {},
       storeApimTarget: async () => {},
     },
     "../../lib/gateway-topology": gatewayTopology,
+    "./model-publication-connections": publicationConnections,
+    "./openai-compatible": compatible,
+    "../brand-logos": new Proxy({ providerBrandFromMetadata: () => "generic", gatewayBrandFromIdentity: () => "apim" }, { get: (target, name) => target[name] ?? name }),
     "../../lib/gateway-forms": gatewayForms,
+    "../../lib/runtime-health": runtimeHealth,
+    "../lib/runtime-health": runtimeHealth,
+    "../lib/time": { formatTimeAgo },
+    "../locales/index": { useLocale: () => ({ locale }) },
+    "./dashboard-shared": { compact: new Intl.NumberFormat("en-US"), currency: new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }) },
     "../lib/model-inventory-filters": modelFilters,
     "../hooks/use-mobile": { useIsMobile: () => false },
     "../../providers/auth-provider": { useAuth: () => ({ user: { role } }) },
-    "../../locales": { useLocale: () => ({ locale: "en-US" }) },
+    "../providers/auth-provider": { useAuth: () => ({ user: { role } }) },
+    "../data-sources/apim/api": { dataSource: api, ApiError },
+    "../data-sources/apim/queries": { finopsQueries: {
+      registry: () => ({ queryKey: ["registry"] }),
+      gatewayApplications: () => ({ queryKey: ["applications"] }),
+    } },
+    "../../locales": { useLocale: () => ({ locale }) },
     "../../providers/timezone-provider": { useTimezone: () => ({ timezone: "UTC" }) },
     "../components/brand-logos": new Proxy({ providerBrandFromIdentity: () => "generic", gatewayBrandFromIdentity: () => "generic" }, { get: (target, name) => target[name] ?? name }),
   }
@@ -256,7 +673,7 @@ for (const mode of ["gateways", "apim"]) test(`Gateway creation stays inside its
     assert.equal(content.all().filter(node => node.type?.name === "SelfHostedGatewayProvisionProgress").length, 1)
     assert.equal(content.find(node => node.type?.name === "InfrastructureEmpty"), undefined)
     assert.equal(harness.find(node => node.props?.["data-tab"] === "gateways").props.children[1].props.children, 1)
-    assert.equal(harness.find(node => node.type === "footer").props.children, "共 1 个Gateway")
+    assert.equal(harness.find(node => node.type === "footer").props.children, "共 1 个网关")
   } else {
     assert.ok(harness.find(node => node.type?.name === "ApimTable"))
     assert.equal(harness.find(node => node.type?.name === "GatewayTable"), undefined)
@@ -286,7 +703,7 @@ test("Gateway creation shares inventory search and never duplicates or resurrect
   assert.equal(count(), 1)
   harness.find(node => node.type === "ExpandableSearch").props.onChange("no-match")
   assert.equal(table().props.provisionItems.length, 0)
-  assert.equal(harness.find(node => node.type === "footer").props.children, "共 0 个Gateway")
+  assert.equal(harness.find(node => node.type === "footer").props.children, "共 0 个网关")
   assert.equal(count(), 1)
   harness.find(node => node.type === "ExpandableSearch").props.onChange("unit-service")
   assert.equal(table().props.provisionItems.length, 1)
@@ -338,7 +755,7 @@ test("Gateway creation status, steps and retry errors belong to its own table it
   operation.error_message = null
   props.error = null
   assert.equal(retry(), undefined)
-  assert.equal(harness.find(node => node.props?.role === "status").props.children.props.children[1], "创建已排队，Worker 当前不可用")
+  assert.equal(harness.find(node => node.props?.role === "status").props.children.props.children[1], "创建已排队，后台处理服务当前不可用")
 })
 
 test("Gateway creation completion cannot open a dialog or notice across tabs", () => {
@@ -361,6 +778,45 @@ test("Gateway creation completion cannot open a dialog or notice across tabs", (
   assert.equal(harness.find(node => node.type?.name === "SelfHostedGatewayBootstrapDialog"), undefined)
   assert.equal(harness.find(node => node.props?.className === "registry-notice smh-notice"), undefined)
   assert.deepEqual(harness.invalidations, [["registry"], ["targets"]])
+})
+
+test("Connection access names the exact APIM and only its models' published gateways", () => {
+  const target = topology()
+  target.deployments[0].published_models = [{ id: "model-one" }]
+  const edge = topology({ id: "edge", native_gateway_id: "edge-native", kind: "self_hosted", display_name: "Docker edge" }).deployments[0]
+  edge.published_models = [{ id: "another-connection-model" }]
+  target.deployments.push(edge)
+  const foreign = topology({ id: "foreign", kind: "self_hosted", display_name: "Other APIM edge" })
+  foreign.target.gateway_profile_id = "another-target"
+  foreign.deployments[0].published_models = [{ id: "model-one" }]
+  const props = { runtime: { gateway_profile_id: "first", gateway_name: "Azure API Management" }, gateway: profiles[0], models: [{ id: "model-one" }], topology: { items: [target, foreign] } }
+  const harness = componentHarness("ConnectionGatewayCell", props, { code: pageCode })
+  assert.equal(harness.find(node => node.type === "b").props.children, "unit-service")
+  assert.equal(harness.find(node => node.type === "b").props.title, "unit-service · unit-api")
+  const summary = () => harness.find(node => node.type === "span" && typeof node.props.title === "string")
+  assert.equal(summary().props.title, "托管网关: Managed")
+  assert.equal(summary().props.children[0], "模型发布至 ")
+  edge.published_models.push({ id: "model-one" })
+  assert.equal(summary().props.title, "托管网关: Managed\n自托管网关: Docker edge")
+  edge.deployment.retired_at = "2026-09-26T00:00:00Z"
+  assert.equal(summary().props.title, "托管网关: Managed")
+  target.deployments[0].published_models = []
+  assert.equal(summary(), undefined)
+  assert.ok(harness.find(node => node.props?.children === "尚无已发布网关"))
+})
+
+test("Connection access keeps unavailable gateway evidence distinct from direct access", () => {
+  const props = { runtime: { gateway_profile_id: "first", gateway_name: null }, gateway: profiles[0], models: [], topology: null }
+  const harness = componentHarness("ConnectionGatewayCell", props, { code: pageCode })
+  assert.equal(harness.find(node => node.type === "b").props.children, profiles[0].base_url)
+  assert.ok(harness.find(node => node.props?.children === "网关部署信息不可用"))
+  props.gateway = undefined
+  assert.equal(harness.find(node => node.type === "b").props.children, "first")
+  props.topology = { items: [] }
+  assert.ok(harness.find(node => node.props?.children === "网关部署信息不可用"))
+  props.runtime.gateway_profile_id = null
+  assert.equal(harness.find(node => node.type === "b").props.children, "直连")
+  assert.ok(harness.find(node => node.props?.children === "提供方直连"))
 })
 
 test("the page routes apim URLs and preserves source three-tab compatibility for old backends", () => {
@@ -408,6 +864,34 @@ test("model workspace applies filters and search to models, pending rows, empty 
   assert.deepEqual(visible(), ["claude-beta"])
   search("")
   assert.deepEqual(visible(), ["gpt-alpha", "claude-beta", "deepseek-pending"])
+})
+
+test("model rows separate same-alias publications by APIM and render a dedicated target column", () => {
+  const registry = {
+    gateways: profiles,
+    providers: [{ id: "provider", name: "Foundry", brand_key: "microsoft_foundry", enabled: true }],
+    runtimes: [{ id: "connection", name: "Connection", provider_id: "provider", gateway_profile_id: "first", brand_key: "microsoft_foundry", runtime_kind: "foundry", enabled: true, config: {} }],
+    models: [{ id: "alpha", model_key: "same-alias", display_name: "Alpha", runtime_id: "connection", provider_id: "provider", capabilities: ["chat"], enabled: true }],
+  }
+  const publications = [
+    { id: "own", gateway_profile_id: "first", model_key: "same-alias", publication_kind: "model_add", status: "active", updated_at: "2026-01-01T00:00:00Z" },
+    { id: "other", gateway_profile_id: "second", model_key: "same-alias", display_name: "Another target", publication_kind: "model_add", status: "failed", updated_at: "2026-01-02T00:00:00Z" },
+  ]
+  const target = topology({ apim_target_id: "first" })
+  target.deployments[0].published_models = [{ id: "alpha" }]
+  const harness = componentHarness("ModelWorkspace", { registry, publications, topology: { items: [target] }, topologyAvailable: true, tab: "models", loadingRuntimeHealthIds: new Set() }, { code: pageCode })
+  const row = harness.find(node => node.type?.name === "ModelRow")
+  assert.equal(row.props.publication, null)
+  assert.equal(row.props.target.gateways[0].id, "managed")
+  assert.equal(harness.find(node => node.type?.name === "PublicationModelRow").props.publication.id, "other")
+  const headings = harness.all().filter(node => node.props?.role === "columnheader")
+  assert.deepEqual(headings.map(node => node.props["aria-label"]), ["模型", "运行时", "目标网关", "上下文 / 价格", "状态", "操作"])
+  const cell = componentHarness("ModelTargetGatewayCell", { target: row.props.target }, { code: pageCode })
+  assert.equal(cell.render().props.role, "cell")
+  assert.ok(cell.find(node => node.props?.["data-deployment-id"] === "managed"))
+  assert.ok(cell.find(node => node.props?.children === "托管网关"))
+  const missing = componentHarness("ModelTargetGatewayCell", { target: { gateways: [], apimName: "First", serviceName: null } }, { code: pageCode })
+  assert.ok(missing.find(node => node.props?.children === "目标未记录"))
 })
 
 test("source initialization queries honor capability presence and active-only 1.5-second polling", () => {
@@ -719,7 +1203,7 @@ test("required sibling readiness gates selected optional deployments", () => {
   target.deployments.push(topology({ id: "optional", kind: "self_hosted", release_gate: "optional" }).deployments[0])
   const choices = gatewayPublicationChoices(profiles, { items: [target] }, true)
   assert.equal(choices.length, 2)
-  assert.ok(choices.every(choice => !choice.selectable && choice.reason === "Required Gateway 未就绪"))
+  assert.ok(choices.every(choice => !choice.selectable && choice.reason === "必需网关未就绪"))
 })
 
 test("an explicit invalid selection never jumps to another APIM or deployment", () => {
@@ -869,7 +1353,7 @@ test("new Gateway creation capability fails closed and old association stays a s
   }, { code: creationCode })
   assert.equal(harness.find(node => node.props?.type === "submit").props.disabled, true)
   assert.ok(harness.find(node => node.props?.role === "status"))
-  harness.find(node => node.type === "Button" && node.props.children?.includes?.("关联已有 Gateway")).props.onClick()
+  harness.find(node => node.type === "Button" && node.props.children?.includes?.("关联已有网关")).props.onClick()
   assert.equal(adopted, true)
 })
 

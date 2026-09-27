@@ -842,6 +842,8 @@ def test_logger_identity_reference_is_read_back_without_accepting_drift(
         ({"value": [{"actions": ["*"], "notActions": ["*/write"]}]}, False),
         ({"value": [{"actions": ["*"], "notActions": []}], "nextLink": "more"}, False),
         ({"value": [{"actions": [1]}]}, False),
+        ({"value": [{"actions": ["*"], "notActions": [], "condition": "true"}]}, False),
+        ({"value": [{"actions": ["*"], "notActions": []}, None]}, False),
     ],
 )
 def test_initialization_permissions_require_complete_scoped_grants(
@@ -868,6 +870,33 @@ def test_initialization_permissions_require_complete_scoped_grants(
     else:
         with pytest.raises(PolicyCompilationError):
             client._require_permissions(request.resource_id, required)
+
+
+def test_initialization_checks_publication_permissions_before_configuration() -> None:
+    request = onboarding_request()
+    calls: list[httpx.Request] = []
+
+    def handler(call: httpx.Request) -> httpx.Response:
+        calls.append(call)
+        assert call.method == "GET"
+        if call.url.path == request.resource_id:
+            return httpx.Response(200, json={
+                "id": request.resource_id, "identity": {"type": "SystemAssigned"},
+            })
+        assert call.url.path.endswith("/providers/Microsoft.Authorization/permissions")
+        return httpx.Response(200, json={"value": [{
+            "actions": ["*"],
+            "notActions": ["Microsoft.ApiManagement/service/namedValues/write"],
+        }]})
+
+    client = AzureApimOnboardingClient(
+        request,
+        token_provider=cast(Any, StubTokenProvider()),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(PolicyCompilationError, match="namedValues/write"):
+        client.verify_initialization_permissions(governance_configuration())
+    assert len(calls) == 2
 
 
 def test_initialization_subscriptions_stage_then_activate_with_exact_etag() -> None:

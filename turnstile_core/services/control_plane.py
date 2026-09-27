@@ -64,7 +64,12 @@ from ..domain.control_plane import (
     PublicationStatus,
     SelfHostedGatewayProvisionOperations,
     StreamingMode,
+    publication_credential_evidence,
+    publication_credential_states,
+    publication_failure,
     publication_materialized_named_values,
+    publication_missing_credential_source,
+    publication_provisioning_completed,
     publication_retry_requires_credential,
 )
 from ..domain.gateway_targets import (
@@ -890,12 +895,12 @@ class GatewayControlPlaneService:
         audit = self._repository.list_gateway_publication_audit(publication_id)
         materialized = publication_materialized_named_values(
             publication,
-            provisioning_completed=any(
-                item.get("from_status") == "validating"
-                and item.get("to_status") == "provisioning"
-                for item in audit
-            ),
+            provisioning_completed=publication_provisioning_completed(audit),
         )
+        if not materialized:
+            inherited = self._inherited_named_value(publication)
+            if inherited is not None:
+                materialized = [inherited]
         if not materialized:
             return publication
         return publication.model_copy(
@@ -903,9 +908,58 @@ class GatewayControlPlaneService:
                 "resource_manifest": {
                     **publication.resource_manifest,
                     "named_values": materialized,
+                    "credential_evidence": publication.resource_manifest.get(
+                        "credential_evidence", publication_credential_evidence(
+                            publication, {name: "present" for name in materialized},
+                        ),
+                    ),
                 }
             }
         )
+
+    def _inherited_named_value(self, publication: GatewayPublication) -> str | None:
+        if (publication.publication_kind is not PublicationKind.MODEL_ADD
+                or publication_missing_credential_source(publication)):
+            return None
+        binding = publication.desired_spec.bindings[-1]
+        states = publication_credential_states(publication)
+        if states is not None and states.get(binding.named_value_name or "") != "present":
+            return None
+        if (publication.base_release_id is None or binding.runtime_id is None
+                or binding.runtime_config.get("credential_provisioned") is False
+                or binding.auth_strategy not in {
+                    AuthStrategy.NAMED_VALUE_BEARER, AuthStrategy.NAMED_VALUE_API_KEY,
+                } or binding.key_vault_secret_id is not None or binding.named_value_name is None
+                or binding.backend_url is None):
+            return None
+        row = self._repository.get_gateway_publication(publication.base_release_id)
+        if row is None:
+            return None
+        try:
+            base = GatewayPublication.model_validate(row)
+        except ValueError:
+            return None
+        recorded = base.resource_manifest.get("named_values")
+        if (base.gateway_profile_id != publication.gateway_profile_id
+                or base.status not in {PublicationStatus.ACTIVE, PublicationStatus.SUPERSEDED}
+                or base.apim_revision is None or not isinstance(recorded, list)
+                or binding.named_value_name not in recorded):
+            return None
+        for previous in base.desired_spec.bindings:
+            if (previous.named_value_name == binding.named_value_name
+                    and previous.auth_strategy == binding.auth_strategy
+                    and previous.key_vault_secret_id is None
+                    and previous.provider_id in {None, binding.provider_id}
+                    and previous.runtime_id in {None, binding.runtime_id}
+                    and previous.provider_kind == binding.provider_kind
+                    and previous.provider_brand_key == binding.provider_brand_key
+                    and previous.runtime_name == binding.runtime_name
+                    and previous.api_format == binding.api_format
+                    and previous.backend_path == binding.backend_path
+                    and str(previous.backend_url).rstrip("/")
+                    == str(binding.backend_url).rstrip("/")):
+                return binding.named_value_name
+        return None
 
     def releases(
         self, gateway_profile_id: UUID | None = None, limit: int = 100
@@ -975,10 +1029,25 @@ class GatewayControlPlaneService:
             against,
             dependencies,
         )
-        audit = [
-            GatewayReleaseAuditEvent.model_validate(row)
-            for row in self._repository.list_gateway_publication_audit(publication.id)
-        ]
+        audit = []
+        for row in self._repository.list_gateway_publication_audit(publication.id):
+            event = GatewayReleaseAuditEvent.model_validate(row)
+            if "error_message" in event.detail or "error_code" in event.detail:
+                event_failure = publication_failure(publication.model_copy(update={
+                    "status": PublicationStatus.FAILED,
+                    "error_code": event.detail.get("error_code"),
+                    "error_message": event.detail.get("error_message"),
+                }), stage=event.from_status)
+                event = event.model_copy(update={
+                    "detail": {"failure": event_failure.model_dump(mode="json")}
+                    if event_failure else {},
+                })
+            audit.append(event)
+        failure_stage = next((event.from_status for event in reversed(audit)
+                              if event.to_status is PublicationStatus.FAILED), None)
+        summary = summary.model_copy(update={
+            "failure": publication_failure(publication, stage=failure_stage),
+        })
         protection_audit = [
             GatewayReleaseProtectionAuditEvent.model_validate(row)
             for row in self._repository.list_gateway_release_protection_audit(
@@ -1518,6 +1587,7 @@ class GatewayControlPlaneService:
             model_key=view.model_key,
             display_name=view.display_name,
             status=publication.status,
+            failure=view.failure,
             apim_revision=publication.apim_revision,
             policy_sha256=publication.policy_sha256,
             desired_spec_sha256=publication.desired_spec_sha256,

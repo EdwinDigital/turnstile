@@ -304,6 +304,75 @@ Existing gateways adopt this behavior through a normal reviewed Control Plane pu
 
 The initial key is returned once with `Cache-Control: no-store`. The browser keeps it only in memory for copying, never in the DOM, URL or query cache. Terminal operation state and temporary ciphertext deletion commit together. Failed operations retain their resource and checkpoint evidence; they do not automatically delete subscriptions or regenerate credentials. Inspect an interrupted activation's live state before taking further action.
 
+Application discovery and key management use the selected APIM target, not the first or default
+instance. Creation progress can be refreshed without resubmitting the operation; successful
+creation opens the exact Application detail while the initial key remains confined to its dialog.
+
+Saving an Application budget also attempts to project its TPM to the current month's existing
+admission `Q` row. The update is conditional on the row's ETag, preserves unrelated fields and
+does not recreate missing admission state. It does not reset confirmed usage, reservations or
+model access. A failed projection does not undo the saved budget: the response remains pending
+or unavailable until readback proves that `projected_tokens_per_minute` matches the saved value.
+The detail API exposes this distinction as `tpm_sync_status` rather than inferring success from
+the database save. Routine ledger synchronization remains the recovery path.
+
+Application details retain the execution epoch and exact available balance, confirmed usage,
+pending reservations and conservative finalization evidence. Unavailable or disabled execution
+state is shown explicitly; historical usage and configured limits are not substitutes for a
+verified current balance.
+
+## Connection diagnostics
+
+Registry capability `runtime_diagnostics_supported` enables Owner-only connection checks.
+The plan and execution endpoints are `GET` and `POST`
+`/api/v1/model-management/runtimes/{runtime_id}/check`. A check requires an explicit enabled
+text model and eligible Gateway deployment on a registered, synchronized APIM target.
+It uses that target's active system-managed probe Application, never a user's subscription.
+
+The plan reports the API identity, exact subscription scope and missing permissions without
+making an inference request. The API identity needs the probe subscription read and
+`Microsoft.ApiManagement/service/subscriptions/listSecrets/action` permissions. An operator must
+review and grant missing permissions separately; checking or refreshing the plan does not change
+RBAC. Publication and initialization also check their required management permissions before
+writing. The public publisher does not gain operation-creation permission through this feature.
+
+Each confirmed check sends at most one nonstreaming request with a 64-token output limit and
+provider-default sampling. A 60-second per-Runtime cooldown prevents duplicate checks; an unknown
+outcome never authorizes an automatic replay. Normal system-probe billing still applies.
+The result stores bounded status and identity evidence, not the prompt, response or credentials.
+
+Historical outcomes do not expire into an online/offline claim. Their server-owned configuration
+fingerprint determines whether the last check still applies, configuration changed, or applicability
+cannot be verified. A permission or budget block is distinct from an upstream failure.
+Applicability compares recorded configuration only; it does not detect unobserved upstream changes
+or establish current availability without a new, explicitly requested check.
+
+## Platform invocation trace
+
+Apply `015_platform_invocation_trace` before updating the API. Every platform text invocation
+records a nonbilling identity snapshot before dispatch and a conditional immutable outcome after
+the response. Failure to record the initial snapshot prevents dispatch. A missing completion
+remains pending; it never authorizes an automatic replay.
+
+Request Trace merges an attempt with formal telemetry only when the real Gateway correlation ID
+and caller request ID identify exactly one matching user, model, Runtime and optional Application.
+The public schema does not infer Gateway attribution from a caller ID alone. Without sufficient
+evidence, the platform trace remains separate and its usage and cost are unavailable, not zero.
+Platform outcomes do not modify formal usage, historical prices, budgets or settlement records.
+
+Registry capability `explicit_gateway_selection_supported` enables an APIM and Gateway selector
+for an explicitly chosen model. Text and image requests accept `gateway_profile_id` and
+`gateway_deployment_id` only as a pair. An unavailable selection is rejected rather than replaced
+by the default route. The console omits `runtime_id` for explicit Gateway selection so the model's
+binding on that target determines the connection. Image routing fields never enter the provider
+payload; image calls retain their existing budget reservation and settlement lifecycle.
+
+Request Trace uses a stable `platform:<request_id>` identity even before telemetry arrives.
+Actual Gateway correlation and upstream request IDs remain separate and may be unknown.
+`usage_available: false` means token and cost placeholders are unavailable measurements, not zero.
+Once uniquely matched, a platform timeout and the formal Gateway status remain independently
+visible; valid measured zero is still displayed as zero.
+
 ## Atomic budget execution
 
 The execution protocol is opt-in and separate from legacy ledger projection. Migration
@@ -325,6 +394,34 @@ API, Control Plane, Telemetry and Observer must agree on the same existing ledge
 TPM projection still use legacy Q/M rows; the new S/A/D records live in separate `budget2` partitions.
 Changing limits or permissions never resets confirmed, pending or conservatively charged tokens.
 The in-memory demonstration repository deliberately rejects execution receipts.
+
+### Budget verification
+
+The Gateway Releases page offers two Owner-only, no-store operations under
+`/api/v1/model-management/gateways/{gateway_profile_id}`:
+
+- `POST /budget-readiness` checks delegation or fencing through catalog reads, without inference.
+- `POST /budget-execution-verification` sends one fixed, nonstreaming verification request with
+	a 32-token output limit and an eight-second dispatch timeout. Its body accepts only
+	`application_id` and `model_id`; the signed-in Owner determines the person identity.
+
+These operations require the selected registered target to be configured in both the execution
+target allowlist and delegation targets, with a trusted HTTPS origin and the existing Table
+ledger. They do not enable execution, grant permissions, change budgets or prepare candidates.
+The readiness result reports expected and actual status/error evidence, never a fabricated pass.
+
+Joint verification requires an exact paused protocol fence naming the validation person,
+Application, subscription and isolated Revision. All configured execution targets must be paused
+in the same epoch, and both Person and Application scopes must already be active and match that
+epoch. The Application must be active, non-system and bound to the selected APIM. Model access is
+checked for both scopes. The target fence is read again immediately before dispatch.
+
+The request uses the normal platform dispatch and nonbilling Trace recording. Delegation tokens
+are sent only to APIM and never returned in the response. Only matching settled receipts for both
+scopes, with exact measured usage, establish settlement. A timeout, missing receipt, mismatched
+identity or delayed settlement remains unconfirmed and never authorizes automatic replay.
+Each explicit verification can incur normal model charges; operational isolation and real
+accounting acceptance require separate authorization.
 
 Before reservation, request analysis walks only protocol-defined message, content and tool-result
 positions. Tool schemas, arguments, metadata and text containing JSON are business data, not new

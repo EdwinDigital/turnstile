@@ -36,6 +36,7 @@ import {
   DialogTitle,
 } from "../components/ui/dialog"
 import { Input } from "../components/ui/input"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../components/ui/dropdown-menu"
 import { Progress } from "../components/ui/progress"
 import { ResizableGridTable } from "../components/ui/resizable-table"
 import { Textarea } from "../components/ui/textarea"
@@ -43,7 +44,7 @@ import { useResizablePane } from "../components/ui/use-resizable-pane"
 import { ApplicationUsageActivityCard } from "../components/finops/application-usage-activity-card"
 import { ApplicationSubscriptionCard } from "../components/finops/application-subscription-card"
 import { ApplicationCreateDialog } from "../components/applications/application-create-dialog"
-import { APPLICATION_OPERATION_PARAMETER, applicationOperationIdFromUrl, applicationOperationTerminal, applicationProvisionStage } from "../components/applications/application-create-form"
+import { APPLICATION_OPERATION_PARAMETER, applicationOperationIdFromUrl, applicationOperationTerminal, applicationProvisionStage, provisionedApplicationId } from "../components/applications/application-create-form"
 import { ApiError, dataSource } from "../data-sources/apim/api"
 import { finopsKeys, finopsQueries } from "../data-sources/apim/queries"
 import type {
@@ -314,7 +315,8 @@ function ApplicationBudgetDialog({ application, open, writeAvailable, onOpenChan
   const valid = Number(tokenLimit) > 0
     && Number.isInteger(Number(tokenLimit))
     && Number(tokensPerMinute) > 0
-    && Number.isInteger(Number(tokensPerMinute))
+    && Number.isSafeInteger(Number(tokensPerMinute))
+    && Number(tokensPerMinute) <= 2_147_483_647
     && Number(warningThreshold) >= 1
     && Number(warningThreshold) <= 100
     && Number.isInteger(Number(warningThreshold))
@@ -405,6 +407,24 @@ function ApplicationInventoryRow({ application, category, timezone }: {
   </a>
 }
 
+function ApplicationSyncButton({ targets, busy, disabled, title, compact = false, onSync }: {
+  targets: Array<{ id: string; name: string }>
+  busy: boolean
+  disabled: boolean
+  title: string
+  compact?: boolean
+  onSync: (gatewayId: string) => void
+}) {
+  const unavailable = disabled || busy || targets.length === 0
+  const content = <><RefreshCw className={busy ? "spin" : undefined} size={compact ? 15 : 13} />{!compact && "同步 APIM"}</>
+  const trigger = <Button type="button" variant={compact ? "ghost" : "outline"} size={compact ? "icon-sm" : "default"} disabled={unavailable} aria-label="同步 APIM" title={title}>{content}</Button>
+  if (targets.length < 2) return <Button type="button" variant={compact ? "ghost" : "outline"} size={compact ? "icon-sm" : "default"} disabled={unavailable} aria-label="同步 APIM" title={title} onClick={() => { if (!unavailable && targets[0]) onSync(targets[0].id) }}>{content}</Button>
+  return <DropdownMenu>
+    <DropdownMenuTrigger render={trigger} />
+    <DropdownMenuContent align="end">{targets.map(target => <DropdownMenuItem key={target.id} disabled={unavailable} onClick={() => { if (!unavailable) onSync(target.id) }}><RefreshCw size={14} /><span data-no-localize>{target.name}</span></DropdownMenuItem>)}</DropdownMenuContent>
+  </DropdownMenu>
+}
+
 function ApplicationSyncStatus({ operation }: { operation: GatewayReleaseOperation }) {
   const terminal = ["succeeded", "failed", "restored"].includes(operation.status)
   const unavailable = operation.worker_available === false && !terminal
@@ -424,15 +444,17 @@ function ApplicationSyncStatus({ operation }: { operation: GatewayReleaseOperati
   </div>
 }
 
-function ApplicationProvisionStatus({ operation }: { operation: GatewayReleaseOperation }) {
+function ApplicationProvisionStatus({ operation, onOpen }: { operation: GatewayReleaseOperation; onOpen: (id: string) => void }) {
   const terminal = applicationOperationTerminal(operation)
   const unavailable = operation.worker_available === false && !terminal
   const title = applicationProvisionStage(operation)
   const message = unavailable ? operation.worker_unavailable_reason ?? "Release Worker 未部署。"
     : operation.error_message ?? (operation.status === "succeeded" ? "订阅已启用。" : "等待后台创建完成。")
+  const createdId = provisionedApplicationId(operation)
   return <div className={`application-sync-status ${unavailable ? "unavailable" : operation.status}`} role="status" aria-live="polite">
     {unavailable || operation.status === "failed" ? <AlertTriangle size={15} /> : terminal ? <CheckCircle2 size={15} /> : <RefreshCw className="spin" size={15} />}
     <div><b>{title}</b><span>{message}</span></div>
+    {createdId && <Button type="button" variant="outline" size="sm" onClick={() => onOpen(createdId)}>打开应用详情</Button>}
   </div>
 }
 
@@ -486,6 +508,10 @@ function ApplicationDetailView({
   const consumer = isAgent ? "智能体" : "应用"
   const quotaLabel = isAgent ? "智能体额度" : "应用额度"
   const budget = application.budget
+  const ledgerUnknown = budget?.ledger_status === "unavailable" || budget?.ledger_status === "prepared"
+  const occupiedPercent = budget && budget.token_limit > 0 && budget.available_tokens != null
+    ? Math.max(0, (budget.token_limit - budget.available_tokens) / budget.token_limit * 100)
+    : null
   const modelLabels = application.allowed_model_ids.map((id) => modelNames.get(id) ?? id)
   const showUserUsage = application.user_count > 1
     || application.users.some((user) => user.actor_type === "person")
@@ -527,20 +553,27 @@ function ApplicationDetailView({
         <section className="application-card application-budget-card">
           <header className="application-card-head"><div><WalletCards size={14} /><h2>{quotaLabel}</h2></div><div className="application-card-actions">{budget && <span className={budget.enforce ? "enforced" : "audit"}>{budget.enforce ? "阻断" : "仅记录"}</span>}{canManage && <Button type="button" variant="ghost" size="icon-sm" onClick={() => setBudgetEditorOpen(true)} aria-label="编辑应用额度" title="编辑应用额度"><Edit3 size={14} /></Button>}</div></header>
           {budget ? <div className="application-budget-body">
-            <div className="application-budget-line"><span>月度 Tokens</span><b>{formatFullCount(budget.used_tokens)} <i>/</i> {formatFullCount(budget.token_limit)}</b></div>
-            <Progress className="application-budget-progress" value={Math.min(budget.usage_percent, 100)} aria-label={`应用额度已使用 ${budget.usage_percent.toFixed(2)}%`} />
+            <div className="application-budget-line"><span>APIM 实际可用</span><b>{budget.available_tokens == null ? "—" : formatFullCount(budget.available_tokens)} <i>/</i> {formatFullCount(budget.token_limit)}</b></div>
+            {occupiedPercent !== null && <Progress className="application-budget-progress" value={Math.min(occupiedPercent, 100)} aria-label={`APIM 额度已占用 ${occupiedPercent.toFixed(2)}%`} />}
             <div className="application-budget-stats">
-              <div><span>剩余</span><b>{formatFullCount(budget.remaining_tokens)}</b></div>
-              <div><span>已使用</span><b>{budget.usage_percent.toFixed(2)}%</b></div>
+              <div><span>已确认用量</span><b>{ledgerUnknown ? "—" : formatFullCount(budget.used_tokens)}</b></div>
+              <div><span>待结算预留</span><b>{budget.pending_reserved_tokens == null ? "—" : formatFullCount(budget.pending_reserved_tokens)}</b></div>
+              <div><span>保守终态上界</span><b>{budget.finalized_upper_bound_tokens == null ? "—" : formatFullCount(budget.finalized_upper_bound_tokens)}</b></div>
+              <div><span>APIM 可用余额</span><b>{budget.available_tokens == null ? "—" : formatFullCount(budget.available_tokens)}</b></div>
+              <div><span>预留数量</span><b>{budget.pending_reservation_count == null ? "—" : formatFullCount(budget.pending_reservation_count)}</b></div>
+              <div><span>上界终态数量</span><b>{budget.finalized_upper_bound_count == null ? "—" : formatFullCount(budget.finalized_upper_bound_count)}</b></div>
               <div><span>TPM</span><b>{formatFullCount(budget.tokens_per_minute)}</b></div>
+              <div><span>已投影 TPM</span><b>{budget.projected_tokens_per_minute == null ? "—" : formatFullCount(budget.projected_tokens_per_minute)}</b></div>
+              <div><span>TPM 同步</span><b>{budget.tpm_sync_status === "projected" ? "已投影" : budget.tpm_sync_status === "pending" ? "等待同步" : "状态未知"}</b></div>
               <div><span>预警</span><b>{budget.warning_threshold_percent}%</b></div>
-              <div><span>预留占用</span><b>{budget.pending_reserved_tokens == null ? "—" : formatFullCount(budget.pending_reserved_tokens)}</b></div>
-              <div><span>上限占用</span><b>{budget.finalized_upper_bound_tokens == null ? "—" : formatFullCount(budget.finalized_upper_bound_tokens)}</b></div>
-              <div><span>可用额度</span><b>{budget.available_tokens == null ? "—" : formatFullCount(budget.available_tokens)}</b></div>
-              <div><span>待处理请求</span><b>{budget.pending_reservation_count == null ? "—" : formatFullCount(budget.pending_reservation_count)}</b></div>
             </div>
-            <div className="application-ledger-snapshot"><span>账本快照</span><time dateTime={budget.ledger_snapshot_at ?? undefined}>{budget.ledger_snapshot_at ? formatTimestamp(budget.ledger_snapshot_at, timezone) : "未同步"}</time></div>
-            {budget.stale_reservation_count != null && budget.stale_reservation_count > 0 && <div className="application-ledger-snapshot"><span>延迟结算</span><b>{formatFullCount(budget.stale_reservation_count)}</b></div>}
+            <div className={`application-budget-ledger ${budget.stale_reservation_count ? "warning" : ""}`}>
+              <span>{budget.ledger_status === "unavailable" ? "执行账本暂不可用，余额未知" : budget.ledger_status === "prepared" ? "执行账本尚未启用" : budget.ledger_status === "current" && budget.ledger_read_at ? <>执行账本 <time dateTime={budget.ledger_read_at}>{formatTimestamp(budget.ledger_read_at, timezone)}</time></> : budget.ledger_snapshot_at ? <>账本快照 <time dateTime={budget.ledger_snapshot_at}>{formatTimestamp(budget.ledger_snapshot_at, timezone)}</time></> : "等待账本快照"}</span>
+              {budget.policy_pending && <span>预算修改等待应用</span>}
+              {budget.ledger_balance_tokens != null && budget.ledger_balance_tokens < 0 && <span>已超额占用 <b>{formatFullCount(-budget.ledger_balance_tokens)}</b> Tokens</span>}
+              {budget.pending_reservation_count ? <span>{budget.stale_reservation_count ? <><b>{budget.stale_reservation_count}</b> 条等待恢复</> : "预留均在结算窗口内"}{budget.oldest_reservation_at && <> · 最早 <time>{formatTimestamp(budget.oldest_reservation_at, timezone)}</time></>}</span> : budget.pending_reservation_count === 0 && budget.ledger_snapshot_at ? <span>无待结算预留</span> : null}
+              {Boolean(budget.finalized_upper_bound_count) && <span><b>{budget.finalized_upper_bound_count}</b> 条无完整遥测，继续按请求上界计费</span>}
+            </div>
           </div> : <div className="application-card-empty"><WalletCards size={18} />未配置本月额度</div>}
         </section>
 
@@ -561,7 +594,7 @@ function ApplicationDetailView({
           <dl>
             <div><dt>{consumer}</dt><dd>已绑定</dd></div>
             <div><dt>调用身份</dt><dd>{isAgent ? "智能体" : application.application_type === "delegated_user" ? "应用 + 人员" : application.system_managed ? "系统" : "服务"}</dd></div>
-            <div><dt>额度账本</dt><dd>{budget?.ledger_snapshot_at ? "已投影" : budget ? "未同步" : "未配置"}</dd></div>
+            <div><dt>额度账本</dt><dd>{ledgerUnknown ? "状态未知" : budget?.ledger_snapshot_at ? "已投影" : budget ? "未同步" : "未配置"}</dd></div>
             <div><dt>密钥</dt><dd>{application.key_management_available && canManage ? "按需读取" : "不存储"}</dd></div>
           </dl>
         </section>
@@ -648,21 +681,34 @@ export function ApplicationsPage() {
   useEffect(() => {
     if (!operationTerminal) return
     void queryClient.invalidateQueries({ queryKey: finopsKeys.gatewayApplications })
+    const createdId = provisionedApplicationId(operation.data)
+    if (createdId) void queryClient.invalidateQueries({ queryKey: finopsKeys.gatewayApplication(createdId) })
   }, [operationTerminal, operation.data?.id, queryClient])
   const acceptOperation = (accepted: GatewayReleaseOperationAccepted) => {
+    queryClient.setQueryData(finopsKeys.gatewayReleaseOperation(accepted.operation.id), accepted.operation)
     setActiveOperationId(accepted.operation.id)
     const url = new URL(window.location.href)
     url.searchParams.set(APPLICATION_OPERATION_PARAMETER, accepted.operation.id)
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`)
   }
+  const openCreatedApplication = (id: string) => {
+    setCreateOpen(false)
+    const createdCategory = operation.data?.semantic_preview.application_type === "agent" ? "agents" : "applications"
+    window.history.pushState(null, "", applicationRouteHref(id, createdCategory))
+    window.dispatchEvent(new Event(FINOPS_NAVIGATE_EVENT))
+  }
+  const refreshCreation = () => {
+    void applications.refetch()
+    void registry.refetch()
+    if (activeOperationId) void operation.refetch()
+  }
   const syncMutation = useMutation({
     mutationFn: (gatewayId: string) => dataSource.syncGatewayApplications(gatewayId),
     onSuccess: acceptOperation,
   })
-  const gatewayId = items[0]?.gateway_profile_id
-    ?? registry.data?.gateways.find((gateway) => gateway.implementation === "apim")?.id
-    ?? null
-  const busy = syncMutation.isPending || Boolean(activeOperationId && !operationTerminal && !operation.isError)
+  const syncTargets = (registry.data?.gateways ?? []).filter(gateway => gateway.implementation === "apim" && gateway.enabled)
+  const syncTitle = applications.data?.sync_available ? "从 APIM 刷新订阅库存" : applications.data?.sync_unavailable_reason ?? "发布工作进程未部署"
+  const busy = syncMutation.isPending || Boolean(activeOperationId && !operationTerminal && !operation.isError && operation.data?.worker_available !== false)
   const modelNames = useMemo(() => new Map((registry.data?.models ?? []).map((model) => [model.id, model.display_name])), [registry.data?.models])
   const apiMissing = applications.error instanceof ApiError && applications.error.status === 404
   const consumer = category === "agents" ? "智能体" : "应用"
@@ -688,7 +734,14 @@ export function ApplicationsPage() {
     const detailConsumer = detailCategory === "agents" ? "智能体" : "应用"
     const DetailIcon = detailCategory === "agents" ? Bot : AppWindow
     return <div className="application-detail-workspace">
-    <header className="application-detail-breadcrumb"><a href={applicationRouteHref(null, detailCategory)} onClick={openApplicationRoute(null, detailCategory)}>订阅对象</a><ChevronRight size={13} /><a href={applicationRouteHref(null, detailCategory)} onClick={openApplicationRoute(null, detailCategory)}>{detailCategory === "agents" ? "智能体" : "应用"}</a><ChevronRight size={13} /><code title={detail.data?.display_name}>{detail.data?.display_name ?? applicationId}</code></header>
+    <header className="smh-page-header application-detail-breadcrumb"><div>
+      <span className="smh-header-icon"><KeyRound size={17} aria-hidden="true" /></span>
+      <nav className="application-breadcrumb-trail" aria-label="订阅对象">
+        <a href={applicationRouteHref(null, detailCategory)} onClick={openApplicationRoute(null, detailCategory)}>订阅对象</a><ChevronRight size={13} aria-hidden="true" />
+        <a href={applicationRouteHref(null, detailCategory)} onClick={openApplicationRoute(null, detailCategory)}>{detailConsumer}</a><ChevronRight size={13} aria-hidden="true" />
+        <code title={detail.data?.display_name} aria-current="page" data-no-localize>{detail.data?.display_name ?? applicationId}</code>
+      </nav>
+    </div></header>
     {detail.error ? <div className="smh-empty application-detail-error"><DetailIcon size={28} /><b>{detailCategory === "agents" ? "无法加载智能体详情" : "无法加载应用详情"}</b><span>{String(detail.error)}</span><a className="ghost-button" href={applicationRouteHref(null, detailCategory)} onClick={openApplicationRoute(null, detailCategory)}>返回{detailCategory === "agents" ? "智能体" : "应用"}</a></div>
       : <main className="application-detail"><ApplicationDetailView application={detail.data} loading={detail.isLoading} modelNames={modelNames} canEditAvatar={detail.data?.avatar_url !== undefined} canManage={user?.role === "owner"} governanceWriteAvailable={detail.data?.governance_write_available === true} models={registry.data?.models ?? []} /></main>}
   </div>
@@ -696,18 +749,19 @@ export function ApplicationsPage() {
 
   return <div className="smh-workspace applications-workspace">
     {user?.role === "owner" && mobileActionsTarget && createPortal(<div className="subscriptions-mobile-topbar-actions">
-      <Button type="button" variant="ghost" size="icon-sm" disabled={!gatewayId || !applications.data?.sync_available || busy} onClick={() => gatewayId && syncMutation.mutate(gatewayId)} aria-label="同步 APIM" title={applications.data?.sync_available ? "从 APIM 刷新订阅库存" : applications.data?.sync_unavailable_reason ?? "发布工作进程未部署"}>{busy ? <RefreshCw className="spin" size={15} /> : <RefreshCw size={15} />}</Button>
-      <Button type="button" variant="ghost" size="icon-sm" disabled={busy} onClick={() => setCreateOpen(true)} aria-label={`添加${consumer}`} title={`添加${consumer}`}><Plus size={16} /></Button>
+      <ApplicationSyncButton targets={syncTargets} busy={busy} disabled={!applications.data?.sync_available} title={syncTitle} compact onSync={targetId => syncMutation.mutate(targetId)} />
+      <Button type="button" variant="ghost" size="icon-sm" disabled={busy || applications.isLoading || registry.isLoading} onClick={() => setCreateOpen(true)} aria-label={category === "agents" ? "添加智能体" : "添加应用"} title={category === "agents" ? "添加智能体" : "添加应用"}><Plus size={16} /></Button>
     </div>, mobileActionsTarget)}
     <header className="smh-page-header applications-header">
       <div><span className="smh-header-icon"><KeyRound size={17} /></span><h1>订阅对象</h1><span>{applications.isLoading ? "—" : items.length}</span></div>
       <div className="smh-header-actions">
-        {user?.role === "owner" ? <><Button variant="outline" disabled={!gatewayId || !applications.data?.sync_available || busy} onClick={() => gatewayId && syncMutation.mutate(gatewayId)} title={applications.data?.sync_available ? "从 APIM 刷新订阅库存" : applications.data?.sync_unavailable_reason ?? "发布工作进程未部署"}>{busy ? <RefreshCw className="spin" size={13} /> : <RefreshCw size={13} />}同步 APIM</Button><Button disabled={busy} onClick={() => setCreateOpen(true)} title={`添加${consumer}`}><Plus size={14} />添加{consumer}</Button></> : <span className="applications-readonly"><ShieldAlert size={13} />只读</span>}
+        {user?.role === "owner" ? <><ApplicationSyncButton targets={syncTargets} busy={busy} disabled={!applications.data?.sync_available} title={syncTitle} onSync={targetId => syncMutation.mutate(targetId)} /><Button disabled={busy || applications.isLoading || registry.isLoading} onClick={() => setCreateOpen(true)} title={category === "agents" ? "添加智能体" : "添加应用"}><Plus size={14} />{category === "agents" ? "添加智能体" : "添加应用"}</Button></> : <span className="applications-readonly"><ShieldAlert size={13} />只读</span>}
       </div>
     </header>
     {syncMutation.error && <div className="application-error-band" role="alert"><AlertTriangle size={14} /><span>{String(syncMutation.error)}</span></div>}
     {operation.data?.operation_kind === "application_sync" && <ApplicationSyncStatus operation={operation.data} />}
-    {operation.data?.operation_kind === "application_provision" && <ApplicationProvisionStatus operation={operation.data} />}
+    {operation.data?.operation_kind === "application_provision" && <ApplicationProvisionStatus operation={operation.data} onOpen={openCreatedApplication} />}
+    {activeOperationId && operation.error && <div className="application-error-band" role="alert"><span>无法读取创建或同步进度。</span><Button type="button" variant="outline" size="sm" onClick={() => void operation.refetch()}>重新检查</Button></div>}
     <div className="subscriptions-layout" style={{ "--subscriptions-nav-width": `${navigationWidth}px` } as CSSProperties}>
       <nav className="subscriptions-local-nav" aria-label="订阅对象类别">
         <header className="subscriptions-local-heading"><span>订阅对象</span><small>{categoryCards.length}</small></header>
@@ -746,18 +800,15 @@ export function ApplicationsPage() {
       </section>
     </div>
     {createOpen && user?.role === "owner" && <ApplicationCreateDialog
+      key={category}
       gateways={registry.data?.gateways ?? []} inventory={applications.data}
       inventoryError={applications.isError || registry.isError}
       applicationType={category === "agents" ? "agent" : "service"}
       operation={operation.data} operationError={operation.error ? String(operation.error) : null}
       refreshing={applications.isFetching || registry.isFetching || operation.isFetching}
-      onRefresh={() => { void applications.refetch(); void registry.refetch(); if (activeOperationId) void operation.refetch() }}
+      onRefresh={refreshCreation}
       onClose={() => setCreateOpen(false)} onAccepted={acceptOperation}
-      onOpenApplication={(id) => {
-        setCreateOpen(false)
-        window.history.pushState(null, "", applicationRouteHref(id, category))
-        window.dispatchEvent(new Event(FINOPS_NAVIGATE_EVENT))
-      }}
+      onOpenApplication={openCreatedApplication}
     />}
   </div>
 }

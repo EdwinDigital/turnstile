@@ -1,7 +1,10 @@
-import type { ApimTargetTopology, ApimTargetTopologyList, GatewayProfile, GatewayReleaseOperation } from "../data-sources/apim/types"
+import type { ApimTargetTopology, ApimTargetTopologyList, GatewayProfile, GatewayPublication, GatewayReleaseOperation, ManagedModel, ModelRuntime } from "../data-sources/apim/types"
 
 export const MODEL_MANAGEMENT_TABS = ["models", "connections", "gateways", "apim"] as const
 export type ModelManagementTab = typeof MODEL_MANAGEMENT_TABS[number]
+export const MODEL_MANAGEMENT_TAB_LABELS: Record<ModelManagementTab, string> = {
+  models: "模型", connections: "连接", gateways: "网关", apim: "APIM 实例",
+}
 
 export type GatewayEntry = ApimTargetTopology["deployments"][number] & { target: ApimTargetTopology }
 export type GatewayEvidence = {
@@ -34,10 +37,10 @@ export function gatewayEvidence(entry: GatewayEntry): GatewayEvidence {
   const result = (state: GatewayEvidence["state"], label: string, detail: string): GatewayEvidence => ({
     state, label, detail, probedAt: deployment.last_probe_at,
   })
-  if (deployment.retired_at) return result("unavailable", "已退役", "Gateway 已从 Turnstile 移除")
-  if (deployment.declared_state === "unsupported") return result("unavailable", "不支持", "APIM 不支持此 Gateway")
-  if (deployment.declared_state === "absent") return result("unavailable", "未发现", "APIM 清单中未发现 Gateway")
-  if (!deployment.endpoint_url) return result("warning", "未配置", "Endpoint 未配置")
+  if (deployment.retired_at) return result("unavailable", "已退役", "网关已从 Turnstile 移除")
+  if (deployment.declared_state === "unsupported") return result("unavailable", "不支持", "APIM 不支持此网关")
+  if (deployment.declared_state === "absent") return result("unavailable", "未发现", "APIM 清单中未发现网关")
+  if (!deployment.endpoint_url) return result("warning", "未配置", "端点未配置")
   if (deployment.declared_state !== "present") return result("warning", "待同步", "请先同步 APIM 清单")
   if (deployment.kind === "self_hosted" && !gatewayApiAssociated(entry)) return result("warning", "未关联", "API 未关联")
   if (deployment.provisioning_operation_id && !deployment.last_probe_at) return result("warning", "待启动", "APIM 配置已创建，等待容器接入")
@@ -48,6 +51,38 @@ export function gatewayEvidence(entry: GatewayEntry): GatewayEvidence {
 
 export function apimTargetDisplayName(target: ApimTargetTopology, profiles: readonly GatewayProfile[]) {
   return profiles.find(profile => profile.id === target.target.gateway_profile_id)?.name.trim() || target.target.service_name
+}
+
+export function apimGatewayProfiles(profiles: GatewayProfile[], topology: ApimTargetTopologyList | null, topologyAvailable: boolean) {
+  return profiles.filter(profile => profile.enabled && profile.implementation === "apim"
+    && (!topologyAvailable || topology?.items.some(item => item.target.gateway_profile_id === profile.id)))
+}
+
+export function publicationTargetDetails(publication: Pick<GatewayPublication, "gateway_profile_id" | "target_deployments">, profiles: readonly GatewayProfile[], topology: ApimTargetTopologyList | null) {
+  const target = topology?.items.find(item => item.target.gateway_profile_id === publication.gateway_profile_id)
+  const profile = profiles.find(item => item.id === publication.gateway_profile_id)
+  return {
+    apimName: profile?.name.trim() || target?.target.service_name || publication.gateway_profile_id,
+    serviceName: target?.target.service_name ?? null,
+    gateways: (publication.target_deployments ?? []).map(snapshot => {
+      const current = target?.deployments.find(({ deployment }) => deployment.id === snapshot.deployment_id
+        && deployment.apim_target_id === publication.gateway_profile_id && deployment.kind === snapshot.kind
+        && deployment.native_gateway_id.toLowerCase() === snapshot.native_gateway_id.toLowerCase())?.deployment
+      return { id: snapshot.deployment_id, name: current?.display_name.trim() || snapshot.native_gateway_id,
+        nativeId: snapshot.native_gateway_id, kind: snapshot.kind }
+    }),
+  }
+}
+
+export function modelTargetDetails(model: Pick<ManagedModel, "id">, runtime: Pick<ModelRuntime, "gateway_profile_id"> | undefined, profiles: readonly GatewayProfile[], topology: ApimTargetTopologyList | null) {
+  const target = topology?.items.find(item => item.target.gateway_profile_id === runtime?.gateway_profile_id)
+  const deployments = target?.deployments.filter(entry => entry.deployment.apim_target_id === runtime?.gateway_profile_id
+    && !entry.deployment.retired_at && entry.published_models_available !== false
+    && entry.published_models.some(published => published.id === model.id)) ?? []
+  return publicationTargetDetails({ gateway_profile_id: runtime?.gateway_profile_id ?? "", target_deployments: deployments.map(({ deployment }) => ({
+    deployment_id: deployment.id, native_gateway_id: deployment.native_gateway_id, kind: deployment.kind,
+    endpoint_url: deployment.endpoint_url ?? "", release_gate: deployment.release_gate,
+  })) }, profiles, topology)
 }
 
 export function apimOnboardingOperationName(operation: Pick<GatewayReleaseOperation, "semantic_preview" | "gateway_profile_id">) {
@@ -96,14 +131,14 @@ export function pendingInventorySyncId(operations: readonly Pick<GatewayReleaseO
 export function gatewayPublicationIssue(entry: GatewayEntry): string | null {
   const { deployment, target } = entry
   if (target.target.drift_state !== "in_sync") return "APIM 清单尚未验证"
-  if (deployment.kind === "self_hosted" && target.target.capabilities.self_hosted_gateway !== "supported") return "APIM 未确认支持 Self-hosted Gateway"
+  if (deployment.kind === "self_hosted" && target.target.capabilities.self_hosted_gateway !== "supported") return "APIM 未确认支持自托管网关"
   const required = apimGatewayEntries(target).filter(item => item.deployment.release_gate === "required")
-  if (required.some(({ deployment: item }) => item.declared_state !== "present" || !item.endpoint_url || item.reachability_state !== "reachable")) return "Required Gateway 未就绪"
-  if (deployment.retired_at) return "Gateway 已退役"
-  if (deployment.declared_state !== "present") return "Gateway 未就绪"
-  if (!deployment.endpoint_url) return "Endpoint 未配置"
+  if (required.some(({ deployment: item }) => item.declared_state !== "present" || !item.endpoint_url || item.reachability_state !== "reachable")) return "必需网关未就绪"
+  if (deployment.retired_at) return "网关已退役"
+  if (deployment.declared_state !== "present") return "网关未就绪"
+  if (!deployment.endpoint_url) return "端点未配置"
   if (deployment.kind === "self_hosted" && !gatewayApiAssociated(entry)) return "API 未关联"
-  if (required.some(item => item.deployment.kind === "self_hosted" && !gatewayApiAssociated(item))) return "Required Gateway 未关联 API"
+  if (required.some(item => item.deployment.kind === "self_hosted" && !gatewayApiAssociated(item))) return "必需网关未关联 API"
   return null
 }
 
@@ -144,4 +179,28 @@ export function resolveGatewaySelection(
     ? targetChoices.find(item => item.selectable)
     : targetChoices.find(item => item.deploymentId === selection.deploymentId)
   return { targetId, choice, targetChoices }
+}
+
+export function resolveInvocationModel<Model extends Pick<ManagedModel, "id" | "enabled" | "capabilities" | "is_default">>(models: readonly Model[], modelId: string | null, imageMode: boolean) {
+  const candidates = models.filter(model => model.enabled && model.capabilities.includes("image_generation") === imageMode)
+  if (modelId !== null) return candidates.find(model => model.id === modelId)
+  return imageMode ? undefined : candidates.find(model => model.is_default) ?? candidates[0]
+}
+
+export function gatewayInvocationChoices(profiles: GatewayProfile[], topology: ApimTargetTopologyList | null, modelId: string): GatewayPublicationChoice[] {
+  const enabled = profiles.filter(profile => profile.enabled && profile.implementation === "apim")
+  return (topology?.items ?? []).filter(target => enabled.some(profile => profile.id === target.target.gateway_profile_id))
+    .flatMap(target => target.deployments.filter(entry => entry.published_models_available !== false
+      && entry.published_models.some(model => model.id === modelId) && !entry.deployment.retired_at
+      && entry.deployment.apim_target_id === target.target.gateway_profile_id).map(entry => {
+      const { deployment } = entry
+      const reason = target.target.drift_state === "drifted" ? "APIM 清单尚未验证"
+        : deployment.declared_state !== "present" || deployment.reachability_state === "unreachable" ? "Gateway 未就绪"
+        : !deployment.endpoint_url ? "Endpoint 未配置"
+        : deployment.kind === "self_hosted" && !gatewayApiAssociated({ ...entry, target }) ? "API 未关联"
+        : null
+      return { value: `${target.target.gateway_profile_id}:${deployment.id}`, targetId: target.target.gateway_profile_id,
+        deploymentId: deployment.id, name: deployment.display_name, kind: deployment.kind,
+        endpoint: deployment.endpoint_url, serviceName: target.target.service_name, selectable: reason === null, reason }
+    }))
 }

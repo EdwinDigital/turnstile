@@ -124,7 +124,15 @@ class DistributionResponse(StrictModel):
 
 class UsageRequestSummary(StrictModel):
     request_id: str
-    correlation_id: str
+    correlation_id: str | None
+    trace_id: str | None = None
+    usage_available: bool = True
+    platform_outcome: Literal["dispatched", "succeeded", "failed"] | None = None
+    gateway_status_code: int | None = Field(default=None, ge=100, le=599)
+    upstream_request_id: str | None = None
+    apim_target_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+    native_gateway_id: str | None = None
     timestamp: datetime
     organization_id: str
     organization_name: str
@@ -146,7 +154,7 @@ class UsageRequestSummary(StrictModel):
     completion_tokens: int = Field(ge=0)
     total_tokens: int = Field(ge=0)
     latency_ms: int = Field(ge=0)
-    status_code: int = Field(ge=100, le=599)
+    status_code: int | None = Field(ge=100, le=599)
     estimated_cost: float = Field(ge=0)
     cost_available: bool | None = None
     error_message: str | None

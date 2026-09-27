@@ -214,7 +214,9 @@ def test_invocation_query_uses_active_route_deployment_scope() -> None:
     assert "COALESCE(route_binding.runtime_id, model.runtime_id)" in statement
     assert "route_binding.deployment_scope_mode = 'all'" in statement
     assert "selected.gateway_deployment_id = deployment.id" in statement
-    assert "deployment.apim_target_id = route_binding.apim_target_id" in statement
+    assert "deployment.apim_target_id = gateway.id" in statement
+    assert "route_binding.current_publication_id = publication.id" in statement
+    assert "gateway_deployment_api_association" in statement
     assert "deployment.retired_at IS NULL" in statement
     assert "deployment.declared_state = 'present'" in statement
     assert "AS gateway_deployments" in statement
@@ -253,7 +255,9 @@ def test_postgres_gateway_creation_inserts_the_registration_identity(explicit_id
 
 
 @pytest.mark.parametrize("scope_mode", ["all", "selected"])
-@pytest.mark.parametrize("state", ["present", "retired", "absent", "unreachable", "disabled"])
+@pytest.mark.parametrize("state", [
+    "present", "retired", "absent", "unreachable", "disabled", "stale_release", "unassociated",
+])
 def test_invocation_route_respects_serving_scope_and_retirement(
     scope_mode: str, state: str,
 ) -> None:
@@ -274,9 +278,19 @@ def test_invocation_route_respects_serving_scope_and_retirement(
     )
     repository.upsert_gateway_deployment(managed)
     repository.upsert_gateway_deployment(edge)
+    repository.gateway_deployment_inventories[edge.id] = {
+        "associated_api_ids": [target().api_id], "hostname_configurations": [],
+    }
+    current_publication = UUID(int=72)
+    repository.gateway_publications.append({
+        "id": current_publication, "gateway_profile_id": TARGET, "status": "active",
+        "desired_spec": {"bindings": []},
+    })
+    repository.effective_gateway_releases[TARGET] = current_publication
     binding = ApimTargetRouteBinding(
         id=UUID(int=71), logical_model_id=model["id"], apim_target_id=TARGET,
         runtime_id=runtime["id"], is_default_serving=True,
+        current_publication_id=current_publication,
         deployment_scope=GatewayDeploymentScope(
             mode=GatewayDeploymentScopeMode(scope_mode),
             deployment_ids=(edge.id,) if scope_mode == "selected" else (),
@@ -291,15 +305,20 @@ def test_invocation_route_respects_serving_scope_and_retirement(
         repository.gateway_deployments[edge.id]["reachability_state"] = "unreachable"
     elif state == "disabled":
         repository.apim_target_route_bindings[binding.id]["enabled"] = False
+    elif state == "stale_release":
+        repository.effective_gateway_releases[TARGET] = UUID(int=73)
+    elif state == "unassociated":
+        repository.gateway_deployment_inventories[edge.id]["associated_api_ids"] = []
     route = repository.invocation_route(runtime["id"], model["id"])
-    if state == "disabled":
+    if state in {"disabled", "stale_release"} or (scope_mode == "selected" and state != "present"):
         assert route is None
     else:
         assert route is not None
         expected = ([str(managed.id)] if scope_mode == "all" else [])
-        if state == "present":
+        if state in {"present", "unassociated"}:
             expected.append(str(edge.id))
         assert [item["deployment_id"] for item in route["gateway_deployments"]] == expected
+        assert route["gateway_deployment_id"] == (managed.id if scope_mode == "all" else edge.id)
 
 
 @pytest.mark.parametrize("change", ["retired", "missing", "target", "native", "endpoint"])

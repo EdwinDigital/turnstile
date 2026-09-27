@@ -1,4 +1,108 @@
 paths:
+  /api/v1/model-management/gateways/{gateway_profile_id}/budget-readiness:
+    post:
+      operationId: checkGatewayBudgetReadiness
+      summary: Verify budget delegation and candidate fence identity
+      description: Owner-only bounded catalog checks on the configured target. Does not invoke a model or mutate the fence. Reports actual and expected status separately.
+      security: [{sessionCookie: []}]
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Observed identity and fence checks
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/BudgetDelegationReadiness}
+        '403': {description: Owner session or allowed write origin required}
+        '409': {description: Target or isolated candidate prerequisites are not satisfied}
+        '503': {description: Verification could not be completed}
+  /api/v1/model-management/gateways/{gateway_profile_id}/budget-execution-verification:
+    post:
+      operationId: verifyGatewayBudgetExecution
+      summary: Verify one isolated two-scope budget invocation
+      description: Requires an Owner and an exact paused candidate across every shared budget target. Uses the configured person and Application identities. Sends at most one nonstreaming request with 32 output tokens. Unknown outcomes do not authorize replay. Reads both scope receipts without mutating budgets or settlement.
+      security: [{sessionCookie: []}]
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: ../../openapi.yaml#/components/schemas/BudgetExecutionVerificationRequest}
+      responses:
+        '200':
+          description: Invocation outcome and independent before/after ledger observations
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/BudgetExecutionVerification}
+        '403': {description: Owner session or required model access missing}
+        '404': {description: Candidate Application subscription was not found}
+        '409': {description: Exact candidate or shared fence identity is not ready}
+        '422': {description: Only explicit application and model IDs are accepted}
+        '503': {description: Verification resources are unavailable}
+  /api/v1/model-management/runtimes/{runtime_id}/check:
+    parameters:
+    - name: runtime_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    get:
+      tags: [Model Management]
+      operationId: runtimeCheckPlan
+      summary: Preview an Owner connection diagnostic
+      description: Reads eligible text models, trusted Gateway routes and the API identity's scoped system-subscription permissions. Does not read subscription keys or issue inference. Historical diagnostic results do not expire; configuration applicability is not a live availability assertion.
+      security: [{sessionCookie: []}]
+      responses:
+        '200':
+          description: Explicit diagnostic choices and access evidence
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/RuntimeCheckPlan}
+        '403': {description: An Owner session is required}
+        '404': {description: Connection not found}
+    post:
+      tags: [Model Management]
+      operationId: checkRuntime
+      summary: Run one explicitly selected connection diagnostic
+      description: Requires an Owner session and same-origin checks. Rechecks target, system subscription, trusted endpoint and configuration before a single non-streaming request with at most 64 output tokens. No automatic retry. A 60-second per-connection claim prevents concurrent diagnostics; unknown outcomes are not availability or zero-cost evidence.
+      security: [{sessionCookie: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: ../../openapi.yaml#/components/schemas/RuntimeCheckSelection}
+      responses:
+        '200':
+          description: Timestamped diagnostic outcome and configuration applicability
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/RuntimeHealth}
+        '403': {description: An Owner session is required}
+        '409': {description: 'Access, target, configuration or diagnostic ownership changed'}
+        '422': {description: Explicit model and Gateway selection is required}
+        '429':
+          description: A diagnostic is running or recently completed
+          headers:
+            Retry-After:
+              schema: {type: string}
   /api/v1/model-management/rollouts:
     post:
       tags: [Model Control Plane]

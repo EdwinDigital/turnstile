@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import Mock
 from uuid import UUID
 
 import pytest
@@ -43,6 +44,7 @@ class ImageRouter(GatewayRouter):
 
 def image_fixture(assigned: bool = True) -> tuple[InMemoryRepository, ImageInvocationRequest]:
     repository = InMemoryRepository()
+    repository.gateways[0]["base_url"] = "https://gateway.example.test/turnstile/llm"
     publication = GatewayControlPlaneService(
         repository,
         apim_principal_id="unit-principal",
@@ -75,6 +77,23 @@ def test_image_service_records_exact_attempt_without_image_or_prompt() -> None:
     assert request.prompt not in str(attempt.model_dump())
     assert result.data[0].b64_json not in str(attempt.model_dump())
     assert len(router.calls) == 1
+
+
+def test_image_selection_rejects_unavailable_gateway_before_reserving_or_dispatching() -> None:
+    repository, request = image_fixture()
+    router = ImageRouter()
+    service = ModelRuntimeService(repository, Settings(apim_target_registry_enabled=True), router)
+    repository.invocation_route = Mock(return_value=None)  # type: ignore[method-assign]
+    selected = request.model_copy(update={"gateway_profile_id": UUID(int=7),
+                                          "gateway_deployment_id": UUID(int=8)})
+    with pytest.raises(HTTPException) as error:
+        service.generate_image(selected, role="owner")
+    assert error.value.status_code == 404
+    repository.invocation_route.assert_called_once_with(
+        selected.runtime_id, selected.model_id, gateway_profile_id=UUID(int=7),
+        gateway_deployment_id=UUID(int=8),
+    )
+    assert not repository.billable_requests and not router.calls
 
 
 @pytest.mark.parametrize("measured", [False, True])

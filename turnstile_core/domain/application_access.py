@@ -65,7 +65,7 @@ class GatewayApplicationUserUsage(StrictModel):
 
 class GatewayApplicationBudget(StrictModel):
     period_start: date
-    token_limit: int = Field(gt=0)
+    token_limit: int = Field(ge=0)
     tokens_per_minute: int = Field(gt=0)
     enforce: bool
     warning_threshold_percent: int = Field(ge=1, le=100)
@@ -82,6 +82,14 @@ class GatewayApplicationBudget(StrictModel):
     oldest_reservation_at: datetime | None = None
     available_tokens: int | None = Field(default=None, ge=0)
     ledger_snapshot_at: datetime | None = None
+    ledger_source: Literal["snapshot", "execution"] = "snapshot"
+    ledger_status: Literal["snapshot", "current", "unavailable", "prepared"] = "snapshot"
+    ledger_read_at: datetime | None = None
+    ledger_version: int | None = Field(default=None, ge=0)
+    ledger_balance_tokens: int | None = None
+    policy_pending: bool = False
+    projected_tokens_per_minute: int | None = Field(default=None, strict=True, gt=0, le=2147483647)
+    tpm_sync_status: Literal["projected", "pending", "unavailable"] = "unavailable"
 
 
 class GatewayApplicationLedgerState(StrictModel):
@@ -120,7 +128,7 @@ class GatewayApplicationLedgerState(StrictModel):
 
 class GatewayApplicationBudgetUpdate(StrictModel):
     token_limit: int = Field(gt=0)
-    tokens_per_minute: int = Field(gt=0)
+    tokens_per_minute: int = Field(strict=True, gt=0, le=2147483647)
     enforce: bool
     warning_threshold_percent: int = Field(ge=1, le=100)
 

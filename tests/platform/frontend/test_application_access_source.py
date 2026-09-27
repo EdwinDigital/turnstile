@@ -1,6 +1,13 @@
 from tests.support.paths import FRONTEND_SOURCE
 
 
+def test_application_creation_commands_use_complete_localization_phrases() -> None:
+    page = (FRONTEND_SOURCE / "pages/applications-page.tsx").read_text(encoding="utf-8")
+    assert page.count('category === "agents" ? "添加智能体" : "添加应用"') == 4
+    assert "添加${consumer}" not in page
+    assert "添加{consumer}" not in page
+
+
 def test_ledger_display_uses_api_balances_and_preserves_unknown_values() -> None:
     page = (FRONTEND_SOURCE / "pages/applications-page.tsx").read_text(encoding="utf-8")
     types = (FRONTEND_SOURCE / "data-sources/apim/types.ts").read_text(encoding="utf-8")
@@ -14,7 +21,9 @@ def test_ledger_display_uses_api_balances_and_preserves_unknown_values() -> None
         assert f"{field}?: number | null" in types
         assert f'budget.{field} == null ? "—" : formatFullCount(budget.{field})' in page
     assert 'budget?.ledger_snapshot_at ? "已投影"' in page
-    assert "dateTime={budget.ledger_snapshot_at ?? undefined}" in page
+    assert "dateTime={budget.ledger_snapshot_at}" in page
+    assert 'budget.ledger_status === "unavailable"' in page
+    assert 'budget.ledger_status === "prepared"' in page
     assert ".application-budget-stats > div:nth-child(2n)" in styles
     for language in ("en", "ja", "ko"):
         phrases = (FRONTEND_SOURCE / f"locales/{language}/phrases-core.ts").read_text(
@@ -132,7 +141,9 @@ def test_applications_use_two_level_inventory_and_detail_routes() -> None:
     assert "application-row-action" not in page
     assert "subscriptions-category-chevron" not in page
     assert 'className="application-detail-workspace"' in page
-    assert 'className="application-detail-breadcrumb"' in page
+    assert 'className="smh-page-header application-detail-breadcrumb"' in page
+    assert 'className="application-breadcrumb-trail"' in page
+    assert 'aria-current="page"' in page
     assert page.count("onClick={openApplicationRoute(null, detailCategory)}") >= 3
     assert '<span>{detailCategory === "agents" ? "Agents" : "Applications"}</span>' not in page
     assert "if (applicationId) {" in page

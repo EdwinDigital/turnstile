@@ -48,6 +48,16 @@ tags:
 - name: Model Router
   description: User-scoped model routing drafts, validation, version publication, and lifecycle.
 paths:
+  /api/v1/model-management/gateways/{gateway_profile_id}/budget-readiness:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1budget-readiness
+  /api/v1/model-management/gateways/{gateway_profile_id}/budget-execution-verification:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1budget-execution-verification
+  /api/v1/model-gateway/invoke:
+    $ref: ./model-gateway.openapi.yaml#/paths/~1api~1v1~1model-gateway~1invoke
+  /api/v1/observability/requests:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1requests
+  /api/v1/observability/requests/{request_id}:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1requests~1{request_id}
   /api/v1/model-management/rollouts:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1rollouts
   /api/v1/model-management/rollouts/{rollout_id}:
@@ -146,6 +156,8 @@ paths:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections
   /api/v1/model-management/gateways/{item_id}/name:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{item_id}~1name
+  /api/v1/model-management/runtimes/{runtime_id}/check:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1runtimes~1{runtime_id}~1check
   /api/v1/model-management/connections/{runtime_id}:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections~1{runtime_id}
   /api/v1/model-management/connections/{runtime_id}/adopt:
@@ -293,6 +305,26 @@ components:
     ErrorResponse:
       $ref: ./openapi/components/common.yaml#/responses/ErrorResponse
   schemas:
+    BudgetDelegationCheck:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetDelegationCheck
+    BudgetExecutionVerificationOptions:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetExecutionVerificationOptions
+    BudgetDelegationReadiness:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetDelegationReadiness
+    BudgetExecutionVerificationRequest:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetExecutionVerificationRequest
+    BudgetExecutionScopeReadback:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetExecutionScopeReadback
+    BudgetExecutionVerification:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetExecutionVerification
+    LedgerScope:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/LedgerScope
+    LedgerSummary:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/LedgerSummary
+    LedgerAttemptIdentity:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/LedgerAttemptIdentity
+    LedgerAttempt:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/LedgerAttempt
     MultiTargetPublicationChildCreate:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/MultiTargetPublicationChildCreate
     MultiTargetPublicationCreate:
@@ -449,6 +481,16 @@ components:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/DatabricksConnectionAdopt
     ModelRegistry:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelRegistry
+    RuntimeCheckSelection:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeCheckSelection
+    RuntimeCheckOption:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeCheckOption
+    RuntimeDiagnosticAccess:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeDiagnosticAccess
+    RuntimeCheckPlan:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeCheckPlan
+    RuntimeHealth:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeHealth
     GatewayProfileNameWrite:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayProfileNameWrite
     ApimTarget:
@@ -549,6 +591,8 @@ components:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayModelTarget
     BrandKey:
       $ref: ./openapi/schemas/common.yaml#/schemas/BrandKey
+    GatewayPublicationFailure:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayPublicationFailure
     GatewayPublication:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayPublication
     GatewayReleaseChangeSet:
@@ -671,6 +715,12 @@ components:
       $ref: ./openapi/schemas/observability.yaml#/schemas/RunDetail
     PageInfo:
       $ref: ./openapi/schemas/observability.yaml#/schemas/PageInfo
+    UsageRequestSummary:
+      $ref: ./openapi/schemas/observability.yaml#/schemas/UsageRequestSummary
+    UsageRequestDetail:
+      $ref: ./openapi/schemas/observability.yaml#/schemas/UsageRequestDetail
+    UsageRequestListResponse:
+      $ref: ./openapi/schemas/observability.yaml#/schemas/UsageRequestListResponse
     RunListResponse:
       $ref: ./openapi/schemas/observability.yaml#/schemas/RunListResponse
     AuditFinding:

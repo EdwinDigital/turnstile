@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { Check, Circle, Copy, Eye, EyeOff, LoaderCircle, Plug, Rocket, ShieldCheck, TriangleAlert, X } from "lucide-react"
+import { Check, Circle, Copy, Eye, EyeOff, LoaderCircle, Plug, Rocket, Server, ShieldCheck, TriangleAlert, X } from "lucide-react"
 
 import { dataSource } from "../../data-sources/apim/api"
 import { finopsKeys, finopsQueries } from "../../data-sources/apim/queries"
 import { translateForLocale, useLocale } from "../../locales/index"
-import { gatewayPublicationChoices, resolveGatewaySelection } from "../../lib/gateway-topology"
+import { gatewayPublicationChoices, publicationTargetDetails, resolveGatewaySelection } from "../../lib/gateway-topology"
 import type {
+  ApimTargetTopologyList,
   GatewayPublication,
   GatewayPublicationCreate,
   GatewayPublicationStatus,
@@ -98,6 +99,21 @@ function publicationTitle(kind: GatewayPublication["publication_kind"]) {
   return "发布模型"
 }
 
+export function PublicationTargetDetails({ publication, registry, topology }: {
+  publication: GatewayPublication
+  registry: Pick<ModelRegistry, "gateways">
+  topology: ApimTargetTopologyList | null
+}) {
+  const target = publicationTargetDetails(publication, registry.gateways, topology)
+  return <dl className="publication-target-details">
+    <div><dt>目标网关</dt><dd>{target.gateways.length ? target.gateways.map(gateway => <div key={gateway.id} data-deployment-id={gateway.id}>
+      <span data-no-localize>{gateway.name}</span><small>{gateway.kind === "managed" ? "托管网关" : "自托管网关"}</small>
+      {gateway.name !== gateway.nativeId && <code data-no-localize>{gateway.nativeId}</code>}
+    </div>) : <span>{publication.target_deployments === undefined ? "当前后端未提供 Gateway 目标" : "发布记录未保存 Gateway 目标"}</span>}</dd></div>
+    <div><dt>所属 APIM</dt><dd><span data-no-localize>{target.apimName}</span>{target.serviceName && target.serviceName !== target.apimName && <code data-no-localize>{target.serviceName}</code>}</dd></div>
+  </dl>
+}
+
 function PublicationProgress({ publication }: { publication: GatewayPublication }) {
   const stageIndex = publicationStageIndex(publication.status)
   const active = publication.status === "active"
@@ -127,7 +143,7 @@ function PublicationProgress({ publication }: { publication: GatewayPublication 
         </li>
       })}
     </ol>
-    </> : <p className="publication-progress-unavailable">发布未完成，当前 Revision 未受影响。</p>}
+    </> : <p className="publication-progress-unavailable">发布未完成，生效状态未确认。</p>}
   </section>
 }
 
@@ -240,7 +256,7 @@ export function ModelPublicationDialog({
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
-  const topology = useQuery({ ...finopsQueries.apimTargets(), enabled: !publicationId })
+  const topology = useQuery(finopsQueries.apimTargets())
   const apimGateways = registry.gateways.filter(
     (gateway) => gateway.implementation === "apim" && gateway.enabled,
   )
@@ -253,6 +269,7 @@ export function ModelPublicationDialog({
   const [deploymentId, setDeploymentId] = useState<string | null>(null)
   const scopedPublication = topology.data?.deployment_scoping_available === true
   const gatewayChoices = gatewayPublicationChoices(apimGateways, topology.data ?? null, scopedPublication)
+    .filter(choice => choice.kind === "managed" || registry.self_hosted_gateway_enabled === true)
   const deploymentSelection = resolveGatewaySelection(apimGateways, gatewayChoices, {
     targetId: gatewayId, deploymentId,
   })
@@ -533,12 +550,13 @@ export function ModelPublicationDialog({
             <Button type="button" variant="outline" onClick={() => void publication.refetch()}>重新加载</Button>
           </div>}
           {publication.data && <>
+            <PublicationTargetDetails publication={publication.data} registry={registry} topology={topology.data ?? null} />
             <PublicationProgress publication={publication.data} />
             {!superseded && <div className={`publication-safety-note ${failed || rolledBack ? "failed" : awaitingAuthorization ? "warning" : active ? "active" : "running"}`}>
               {failed || rolledBack ? <TriangleAlert size={15} /> : awaitingAuthorization ? <ShieldCheck size={15} /> : active ? <Check size={15} /> : <ShieldCheck size={15} />}
               <div>
-                <span className="publication-safety-title"><b>{failed || rolledBack ? "当前模型继续正常服务" : awaitingAuthorization ? "当前模型继续正常服务" : active ? publication.data.publication_kind === "model_remove" ? "模型已从 Turnstile 移除" : "发布完成" : "现有模型继续使用当前 Revision"}</b>{!failed && <FieldHelp>{rolledBack ? "当前模型继续正常服务" : awaitingAuthorization ? "目标提供方授权就绪后继续验证，未通过前不会切换当前 Revision。" : active ? publication.data.publication_kind === "model_remove" ? "历史用量与上游模型保留。" : "模型已发布，分配人员后即可使用" : "发布过程不会改变当前 Revision，验证通过后才切换。"}</FieldHelp>}</span>
-                {failed && <span className="publication-safety-error">{publication.data.error_message ?? "发布未完成，请使用发布 ID 查看服务日志。"}</span>}
+                <span className="publication-safety-title"><b>{failed ? "发布未完成" : rolledBack ? "已回退" : awaitingAuthorization ? "等待授权" : active ? publication.data.publication_kind === "model_remove" ? "模型已从 Turnstile 移除" : "发布完成" : "现有模型继续使用当前 Revision"}</b>{!failed && !rolledBack && <FieldHelp>{awaitingAuthorization ? "目标提供方授权就绪后继续验证，未通过前不会切换当前 Revision。" : active ? publication.data.publication_kind === "model_remove" ? "历史用量与上游模型保留。" : "模型已发布，分配人员后即可使用" : "发布过程不会改变当前 Revision，验证通过后才切换。"}</FieldHelp>}</span>
+                {failed && <span className="publication-safety-error">{publication.data.failure?.code === "credential_source_missing" ? "APIM 凭据资源尚未创建，请重新提供 API Key 后重试。" : publication.data.error_message ?? "发布未完成，请使用发布 ID 查看服务日志。"}</span>}
               </div>
             </div>}
           </>}
@@ -568,9 +586,44 @@ export function ModelPublicationDialog({
 
           {!publicationId && <>
           <section className="simple-model-section publication-target" aria-label="发布目标">
-            {apimGateways.length > 1 ? <div className="registry-field">
+            {scopedPublication ? <div className="form-grid">
+              <div className="registry-field">
+                <span className="registry-field-label">APIM 实例</span>
+                <Select value={selectedGateway?.id ?? null} items={apimGateways.map(gateway => ({ value: gateway.id, label: gateway.name }))} onValueChange={chooseGateway} disabled={publishing || topology.isPending || Boolean(topology.error)}>
+                  <SelectTrigger className="registry-select-trigger" aria-label="APIM 实例">
+                    <SelectValue>{selectedGateway ? <span className="registry-option"><GatewayBrandLogo brand={gatewayBrandFromIdentity("Azure API Management")} size={15} /><span data-no-localize>{selectedGateway.name}</span></span> : "选择 APIM 实例"}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent align="start" alignItemWithTrigger={false}>
+                    {apimGateways.map(gateway => <SelectItem key={gateway.id} value={gateway.id}><span className="registry-option"><GatewayBrandLogo brand={gatewayBrandFromIdentity("Azure API Management")} size={15} /><span data-no-localize>{gateway.name}</span></span></SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="registry-field">
+                <span className="registry-field-label">网关</span>
+                <Select value={deploymentSelection.choice?.value ?? null} items={deploymentSelection.targetChoices.map(choice => ({ value: choice.value, label: choice.name }))} disabled={publishing || topology.isPending || Boolean(topology.error) || !selectedGateway} onValueChange={value => {
+                  const choice = deploymentSelection.targetChoices.find(item => item.value === value)
+                  if (!publishing && choice?.selectable) setDeploymentId(choice.deploymentId)
+                }}>
+                  <SelectTrigger className="registry-select-trigger" aria-label="网关">
+                    <SelectValue>{deploymentSelection.choice ? <span className="gateway-api-select-value">
+                      {deploymentSelection.choice.kind === "self_hosted" ? <Server size={15} aria-hidden="true" /> : <GatewayBrandLogo brand={gatewayBrandFromIdentity("Azure API Management")} size={15} />}
+                      <span><b data-no-localize>{deploymentSelection.choice.name}</b><small>{deploymentSelection.choice.kind === "self_hosted" ? "自托管网关" : "Azure API Management"}</small></span>
+                    </span> : "选择网关"}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent align="start" alignItemWithTrigger={false}>
+                    {deploymentSelection.targetChoices.map(choice => <SelectItem key={choice.value} value={choice.value} disabled={!choice.selectable} title={choice.reason ?? choice.endpoint ?? undefined}>
+                      <span className="gateway-api-select-option">
+                        {choice.kind === "self_hosted" ? <Server size={15} aria-hidden="true" /> : <GatewayBrandLogo brand={gatewayBrandFromIdentity("Azure API Management")} size={15} />}
+                        <span><b data-no-localize>{choice.name}</b><small>{choice.reason ?? (choice.kind === "self_hosted" ? "自托管网关" : "Azure API Management")}</small></span>
+                      </span>
+                    </SelectItem>)}
+                  </SelectContent>
+                </Select>
+                {!deploymentSelection.choice?.selectable && <div className="registry-error" role="alert">{deploymentSelection.choice?.reason ?? "请选择可用的网关。"}</div>}
+              </div>
+            </div> : apimGateways.length > 1 ? <div className="registry-field">
                 <span className="registry-field-label">目标网关</span>
-                <Select value={selectedGateway?.id ?? ""} onValueChange={chooseGateway} disabled={publishing}>
+                <Select value={selectedGateway?.id ?? ""} items={apimGateways.map(gateway => ({ value: gateway.id, label: gateway.name }))} onValueChange={chooseGateway} disabled={publishing}>
                   <SelectTrigger className="registry-select-trigger" aria-label="目标网关">
                     <SelectValue>{selectedGateway ? <span className="registry-option"><GatewayBrandLogo brand={gatewayBrandFromIdentity(`${selectedGateway.name} ${selectedGateway.implementation}`)} size={15} /><span data-no-localize>{selectedGateway.name}</span></span> : "选择目标网关"}</SelectValue>
                   </SelectTrigger>
@@ -582,21 +635,6 @@ export function ModelPublicationDialog({
               <span className="registry-field-label">目标网关</span>
               <span className="registry-option"><GatewayBrandLogo brand={gatewayBrandFromIdentity(`${selectedGateway.name} ${selectedGateway.implementation}`)} size={15} /><span data-no-localize>{selectedGateway.name}</span></span>
             </div> : <div className="registry-error" role="alert">没有可用的 Azure API Management 网关。</div>}
-            {scopedPublication && <div className="registry-field">
-              <span className="registry-field-label">Gateway deployment</span>
-              <Select value={deploymentSelection.choice?.value ?? ""} disabled={publishing} onValueChange={value => {
-                const choice = deploymentSelection.targetChoices.find(item => item.value === value)
-                if (!publishing && choice?.selectable) setDeploymentId(choice.deploymentId)
-              }}>
-                <SelectTrigger className="registry-select-trigger" aria-label="Gateway deployment"><SelectValue>{deploymentSelection.choice?.name ?? "Select a Gateway deployment"}</SelectValue></SelectTrigger>
-                <SelectContent align="start" alignItemWithTrigger={false}>
-                  {deploymentSelection.targetChoices.map(choice => <SelectItem key={choice.value} value={choice.value} disabled={!choice.selectable} title={choice.reason ?? choice.endpoint ?? undefined}>
-                    <span>{choice.name} ({choice.kind === "managed" ? "Managed" : "Self-hosted"})</span>
-                  </SelectItem>)}
-                </SelectContent>
-              </Select>
-              {!deploymentSelection.choice?.selectable && <div className="registry-error" role="alert">{deploymentSelection.choice?.reason ?? "Select an available Gateway deployment"}</div>}
-            </div>}
             {topology.error && <div className="registry-error" role="alert">{topology.error.message}<Button type="button" variant="ghost" size="xs" onClick={() => void topology.refetch()}>Retry</Button></div>}
           </section>
 
@@ -607,7 +645,7 @@ export function ModelPublicationDialog({
               <Button type="button" variant="ghost" size="xs" className="publication-connection-action" onClick={onManageConnections} disabled={publishing}>管理连接</Button>
             </div>
             {apimRuntimes.length > 0 ? <div className="registry-field">
-                <Select value={selectedRuntime?.id ?? ""} onValueChange={chooseRuntime} disabled={publishing}>
+              <Select value={selectedRuntime?.id ?? ""} items={apimRuntimes.map(runtime => ({ value: runtime.id, label: runtimeChoiceLabel(runtime) }))} onValueChange={chooseRuntime} disabled={publishing}>
                   <SelectTrigger className="registry-select-trigger" aria-label="连接">
                     <SelectValue>{selectedRuntime ? <span className="registry-option">
                       {connectionLogo(selectedRuntime)}

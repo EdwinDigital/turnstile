@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import httpx
@@ -14,6 +14,9 @@ from ..domain.control_plane import (
     GatewayPublication,
     ImageProbeAuthorization,
     PublicationKind,
+    PublicationStatus,
+    publication_credential_evidence,
+    publication_credential_states,
     publication_model_id,
 )
 from ..domain.image_profiles import validate_image_profile
@@ -26,12 +29,15 @@ from ..integrations.apim_control_plane import (
 )
 from ..integrations.apim_control_plane_contract import (
     ApimPublisherClientResolver,
+    CredentialSourceMissingError,
+    PublisherPermissionError,
     ResolvedApimPublisherClient,
     coerce_apim_publisher_client_resolver,
 )
 from ..integrations.apim_policy_components import (
     component_digest,
     parse_policy,
+    policy_document_digest,
     validate_parent_policy,
     validate_parent_readback,
 )
@@ -89,43 +95,20 @@ class GatewayPublicationWorker:
         if claimed is None:
             return None
         publication = GatewayPublication.model_validate(claimed)
-        try:
-            resolved = self._client_resolver.resolve(publication.gateway_profile_id)
-            self._validate_target_identity(publication, resolved)
-        except Exception as error:
-            failed = self._repository.transition_gateway_publication(
-                publication.id, publication.status.value, "failed", {
-                    "error_code": type(error).__name__,
-                    "error_message": str(error).replace("\n", " ")[:1000],
-                }, worker_id,
-            )
-            return GatewayPublication.model_validate(failed) if failed else publication
-        client = resolved.client
-        if publication.attempt_count > max_attempts:
-            promoted_but_not_recorded = (
-                publication.status.value == "promoting"
-                and publication.apim_revision is not None
-                and client.current_revision() == publication.apim_revision
-            )
-            if promoted_but_not_recorded:
-                with WorkerLease(
-                    lambda: self._repository.renew_gateway_publication_lease(
-                        publication.id, worker_id, lease_seconds
-                    ),
-                    lease_seconds,
-                ) as lease:
-                    return self._advance(publication, worker_id, resolved, lease.heartbeat)
-            failed = self._repository.transition_gateway_publication(
-                publication.id,
-                publication.status.value,
-                "failed",
-                {
-                    "error_code": "max_attempts_exceeded",
-                    "error_message": "Gateway publication exceeded its retry limit",
-                },
-                worker_id,
-            )
-            return GatewayPublication.model_validate(failed) if failed else publication
+        client: ApimPublisherClient | None = None
+        observed_credentials: dict[str, Literal["present", "missing", "unverified"]] = {}
+
+        def failure_updates(code: str, message: str) -> dict[str, Any]:
+            updates: dict[str, Any] = {"error_code": code, "error_message": message}
+            if observed_credentials:
+                states = {**(publication_credential_states(publication) or {}),
+                          **observed_credentials}
+                updates["resource_manifest"] = {
+                    **publication.resource_manifest,
+                    "credential_evidence": publication_credential_evidence(publication, states),
+                }
+            return updates
+
         try:
             with WorkerLease(
                 lambda: self._repository.renew_gateway_publication_lease(
@@ -133,7 +116,21 @@ class GatewayPublicationWorker:
                 ),
                 lease_seconds,
             ) as lease:
-                return self._advance(publication, worker_id, resolved, lease.heartbeat)
+                if publication.attempt_count > max_attempts and not (
+                    publication.status is PublicationStatus.PROMOTING
+                    and publication.apim_revision is not None
+                ):
+                    return self._fail_attempt_limit(publication, worker_id)
+                resolved = self._client_resolver.resolve(
+                    publication.gateway_profile_id,
+                    include_probe_credentials=publication.status is not PublicationStatus.PROMOTING,
+                )
+                self._validate_target_identity(publication, resolved)
+                client = resolved.client
+                return self._advance(
+                    publication, worker_id, resolved, lease.heartbeat,
+                    max_attempts=max_attempts, observed_credentials=observed_credentials,
+                )
         except AuthorizationRequiredError:
             waiting = self._repository.transition_gateway_publication(
                 publication.id,
@@ -153,34 +150,44 @@ class GatewayPublicationWorker:
                 publication.id,
                 publication.status.value,
                 publication.status.value,
-                {"error_code": code, "error_message": message},
+                failure_updates(code, message),
                 worker_id,
             )
             return GatewayPublication.model_validate(queued) if queued else publication
         except Exception as error:
             code = type(error).__name__
-            message = str(error).replace("\n", " ")[:1000]
-            if (
-                publication.status.value == "promoting"
-                and publication.apim_revision is not None
-                and client.current_revision() == publication.apim_revision
-            ):
-                queued = self._repository.transition_gateway_publication(
-                    publication.id,
-                    publication.status.value,
-                    publication.status.value,
-                    {"error_code": code, "error_message": message},
-                    worker_id,
-                )
-                return GatewayPublication.model_validate(queued) if queued else publication
+            message = str(error).replace("\n", " ")[
+                :8192 if isinstance(error, PublisherPermissionError) else 1000
+            ]
+            if publication.status is PublicationStatus.PROMOTING and publication.apim_revision:
+                try:
+                    current_revision = client.current_revision() if client is not None else None
+                except Exception:
+                    current_revision = None
+                if current_revision is None or current_revision == publication.apim_revision:
+                    queued = self._repository.transition_gateway_publication(
+                        publication.id, publication.status.value, publication.status.value,
+                        failure_updates(code, message), worker_id,
+                    )
+                    return GatewayPublication.model_validate(queued) if queued else publication
             failed = self._repository.transition_gateway_publication(
                 publication.id,
                 publication.status.value,
                 "failed",
-                {"error_code": code, "error_message": message},
+                failure_updates(code, message),
                 worker_id,
             )
             return GatewayPublication.model_validate(failed) if failed else publication
+
+    def _fail_attempt_limit(
+        self, publication: GatewayPublication, worker_id: str,
+    ) -> GatewayPublication:
+        failed = self._repository.transition_gateway_publication(
+            publication.id, publication.status.value, "failed",
+            {"error_code": "max_attempts_exceeded",
+             "error_message": "Gateway publication exceeded its retry limit"}, worker_id,
+        )
+        return GatewayPublication.model_validate(failed) if failed else publication
 
     @staticmethod
     def _validate_target_identity(
@@ -217,10 +224,23 @@ class GatewayPublicationWorker:
         worker_id: str,
         resolved: ResolvedApimPublisherClient,
         heartbeat: Callable[[], None] | None = None,
+        *,
+        max_attempts: int = 30,
+        observed_credentials: dict[str, Literal["present", "missing", "unverified"]] | None = None,
     ) -> GatewayPublication:
+        if observed_credentials is None:
+            observed_credentials = {}
         client = resolved.client
-        registry = self._repository.registry()
         status = publication.status.value
+        already_promoted = False
+        if status == "promoting" and publication.apim_revision is not None:
+            current_revision = client.current_revision()
+            if current_revision is None:
+                raise RetryablePublicationError("APIM current revision could not be verified")
+            already_promoted = current_revision == publication.apim_revision
+        if publication.attempt_count > max_attempts and not already_promoted:
+            return self._fail_attempt_limit(publication, worker_id)
+        registry = self._repository.registry()
         canonical_parent = self._parent_policy_overrides.get(
             publication.gateway_profile_id, self._parent_policy,
         )
@@ -273,6 +293,7 @@ class GatewayPublicationWorker:
             raise PolicyCompilationError("Budget contract publication requires an execution parent")
         compiler = self._compiler_for(publication, resolved)
         compiled = compiler.compile(routed_publication)
+        client.verify_publication_permissions(compiled, recovery_only=already_promoted)
         if (execution_enabled and status in {"verifying", "promoting"}
                 and publication.policy_sha256 != compiled.policy_sha256):
             raise PolicyCompilationError("Candidate policy no longer matches the active compiler")
@@ -295,6 +316,7 @@ class GatewayPublicationWorker:
                 "apim_target_identity_sha256": resolved.target_identity_sha256,
                 "base_apim_revision": base_revision,
                 "base_policy_sha256": hashlib.sha256(live_policy.encode("utf-8")).hexdigest(),
+                "base_policy_document_sha256": policy_document_digest(live_policy),
             }
         elif status == "validating":
             encrypted = self._repository.gateway_publication_credential(publication.id)
@@ -325,15 +347,23 @@ class GatewayPublicationWorker:
                     if credential is not None and named_value.id == latest_named_value
                     else named_value
                 )
-                client.ensure_named_value(materialized)
-            if encrypted is not None:
-                self._repository.delete_gateway_publication_credential(publication.id)
+                observed_credentials[named_value.id] = "unverified"
+                try:
+                    client.ensure_named_value(materialized)
+                except CredentialSourceMissingError as error:
+                    if error.named_value_id == named_value.id:
+                        observed_credentials[named_value.id] = "missing"
+                    raise
+                observed_credentials[named_value.id] = "present"
             for backend in compiled.backends:
                 client.ensure_backend(backend)
             updates["resource_manifest"] = {
                 **publication.resource_manifest,
                 "backends": [backend.id for backend in compiled.backends],
                 "named_values": [value.id for value in compiled.named_values],
+                "credential_evidence": publication_credential_evidence(
+                    publication, observed_credentials,
+                ),
                 **({"oauth_credentials": [
                     item.config.provider_id for item in compiled.oauth_credentials
                 ]} if compiled.oauth_credentials else {}),
@@ -345,15 +375,17 @@ class GatewayPublicationWorker:
         elif status == "building_revision":
             if not publication.apim_revision:
                 raise RuntimeError("Publication is missing its APIM revision")
-            client.ensure_revision(
-                publication.apim_revision, f"Turnstile publication {publication.id}"
-            )
             base_revision, live_policy = client.current_api_policy()
             manifest = publication.resource_manifest
             live_hash = hashlib.sha256(live_policy.encode("utf-8")).hexdigest()
+            expected_document = manifest.get("base_policy_document_sha256")
+            matching_document = (
+                isinstance(expected_document, str) and len(expected_document) == 64
+                and policy_document_digest(live_policy) == expected_document
+            )
             if (
                 manifest.get("base_apim_revision") != base_revision
-                or manifest.get("base_policy_sha256") != live_hash
+                or (manifest.get("base_policy_sha256") != live_hash and not matching_document)
             ):
                 raise PolicyCompilationError(
                     "The current APIM policy changed after publication was queued"
@@ -363,6 +395,9 @@ class GatewayPublicationWorker:
                 if (execution_enabled or image_release
                     or "imageGenerationPolicyVersion" in live_policy)
                 else compiler.patch_parent_policy(live_policy)
+            )
+            client.ensure_revision(
+                publication.apim_revision, f"Turnstile publication {publication.id}"
             )
             client.put_api_policy(publication.apim_revision, parent)
             for operation in compiled.operations:
@@ -484,14 +519,14 @@ class GatewayPublicationWorker:
                     ),
                     expected_raw=publication.resource_manifest.get("parent_policy_sha256"),
                 )
-            if client.current_revision() != publication.apim_revision:
+            if not already_promoted:
                 client.promote_revision(
                     publication.apim_revision, f"turnstile-{publication.id.hex[:12]}"
                 )
-                if client.current_revision() != publication.apim_revision:
-                    raise RetryablePublicationError(
-                        "APIM did not report the promoted revision as current"
-                    )
+            if client.current_revision() != publication.apim_revision:
+                raise RetryablePublicationError(
+                    "APIM did not report the promoted revision as current"
+                )
             active = self._repository.activate_gateway_publication(publication.id, worker_id)
             return GatewayPublication.model_validate(active)
         else:

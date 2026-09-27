@@ -35,8 +35,10 @@ def test_invocation_console_includes_and_defaults_to_the_signed_in_owner() -> No
 def test_invocation_and_request_trace_use_direct_models() -> None:
     source = read_apim_dashboard_source()
 
-    assert "runtime_id: model.runtime_id" in source
+    assert "runtime_id: explicitGateway ? undefined : model.runtime_id" in source
     assert "model_id: model.id" in source
+    assert "gateway_profile_id: gatewaySelection.targetId" in source
+    assert "gateway_deployment_id: gatewaySelection.deploymentId" in source
     assert "assignedModelRouters" not in source
     assert "router_id" not in source
 
@@ -62,7 +64,10 @@ def test_request_trace_kpis_are_diagnostic_not_executive_duplicates() -> None:
     assert 'title="时延占比分布"' in request_trace
     assert '<RequestLatencyChart totals={totals} percentage />' in request_trace
     assert "<RequestHealthChart" not in request_trace
-    assert "const firstRequestId = query.data?.[0]?.correlation_id ?? null" in request_trace
+    assert (
+        "const firstRequestId = query.data?.[0] ? requestTraceId(query.data[0]) : null"
+        in request_trace
+    )
     assert "if (!selected && firstRequestId) setSelected(firstRequestId)" in request_trace
 
 
@@ -73,17 +78,17 @@ def test_request_trace_selects_attempts_without_losing_the_caller_id() -> None:
     )[0]
     trace_row = source.split("function TraceRow(", 1)[1]
 
-    assert "selectedCorrelationId = detail.data?.correlation_id ?? selected" in request_trace
-    assert "key={item.correlation_id}" in request_trace
-    assert "active={selectedCorrelationId === item.correlation_id}" in request_trace
-    assert "onClick={() => setSelected(item.correlation_id)}" in request_trace
+    assert "selectedTraceId = detail.data ? requestTraceId(detail.data) : selected" in request_trace
+    assert "key={requestTraceId(item)}" in request_trace
+    assert "active={selectedTraceId === requestTraceId(item)}" in request_trace
+    assert "onClick={() => setSelected(requestTraceId(item))}" in request_trace
     assert "key={item.request_id}" not in request_trace
     assert "attemptsByRequest.get(item.request_id)" in request_trace
-    assert "attemptPositions.set(item.correlation_id" in request_trace
+    assert "attemptPositions.set(requestTraceId(item)" in request_trace
     assert "Date.parse(left.timestamp) - Date.parse(right.timestamp)" in request_trace
-    assert "left.correlation_id.localeCompare(right.correlation_id)" in request_trace
-    assert "attempt={attemptPositions.get(item.correlation_id)}" in request_trace
-    assert "Correlation ID: ${item.correlation_id}" in trace_row
+    assert "requestTraceId(left).localeCompare(requestTraceId(right))" in request_trace
+    assert "attempt={attemptPositions.get(requestTraceId(item))}" in request_trace
+    assert 'Correlation ID: ${item.correlation_id ?? "未知"}' in trace_row
     assert "#${attempt.index}/${attempt.total}" in trace_row
     assert "item.request_id" in trace_row
 

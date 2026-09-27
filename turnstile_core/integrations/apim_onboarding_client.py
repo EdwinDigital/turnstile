@@ -4,7 +4,6 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
-from fnmatch import fnmatchcase
 from typing import Any
 from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid5
@@ -14,12 +13,17 @@ import httpx
 from pydantic import HttpUrl, ValidationError
 
 from ..config import Settings
+from ..domain.control_plane import PUBLICATION_REQUIRED_ACTIONS
 from ..domain.gateway_targets import (
     ApimOnboardingConfiguration,
     ApimOnboardingPlan,
     ApimOnboardingRequest,
 )
-from .apim_control_plane_contract import PolicyCompilationError, RetryablePublicationError
+from .apim_control_plane_contract import (
+    PolicyCompilationError,
+    RetryablePublicationError,
+    missing_management_actions,
+)
 from .apim_onboarding_policy import onboarding_logger_id
 from .apim_policy_components import component_digest, parse_policy, serialize_policy
 from .apim_publisher_client import AzureApimPublisherClient
@@ -275,25 +279,10 @@ class AzureApimOnboardingClient(AzureApimPublisherClient):
     def _require_permissions(self, scope: str, required: set[str]) -> None:
         path = scope + "/providers/Microsoft.Authorization/permissions"
         value = self._dependency_request("GET", path).json()
-        permissions = value.get("value")
-        if not isinstance(permissions, list) or value.get("nextLink"):
-            raise PolicyCompilationError("Worker permission inventory is incomplete")
-
-        def allowed(action: str) -> bool:
-            for permission in permissions:
-                actions = permission.get("actions") if isinstance(permission, dict) else None
-                denied = permission.get("notActions", []) if isinstance(permission, dict) else None
-                if not isinstance(actions, list) or not isinstance(denied, list):
-                    raise PolicyCompilationError("Worker permission inventory has an invalid shape")
-                if any(not isinstance(item, str) for item in [*actions, *denied]):
-                    raise PolicyCompilationError("Worker permission inventory has invalid actions")
-                granted = any(fnmatchcase(action.lower(), item.lower()) for item in actions)
-                excluded = any(fnmatchcase(action.lower(), item.lower()) for item in denied)
-                if granted and not excluded:
-                    return True
-            return False
-
-        missing = sorted(action for action in required if not allowed(action))
+        try:
+            missing = missing_management_actions(value, sorted(required))
+        except ValueError as error:
+            raise PolicyCompilationError(str(error)) from error
         if missing:
             raise PolicyCompilationError(
                 "Worker authorization is missing at " + scope + ": " + ", ".join(missing)
@@ -324,6 +313,7 @@ class AzureApimOnboardingClient(AzureApimPublisherClient):
         }
         if "SystemAssigned" not in str((service.get("identity") or {}).get("type", "")):
             required.add("Microsoft.ApiManagement/service/write")
+        required.update(PUBLICATION_REQUIRED_ACTIONS)
         self._require_permissions(self.request.resource_id, required)
         logger_path = f"/loggers/{onboarding_logger_id(self.request)}"
         logger = self._request("GET", logger_path, allow_not_found=True)

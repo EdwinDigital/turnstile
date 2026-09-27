@@ -22,6 +22,15 @@ git diff --check
 
 ## Database validation
 
+Migration `015_platform_invocation_trace` adds nonbilling platform call snapshots and a
+Request Trace view. Apply it before deploying the updated API. On an authorized PostgreSQL
+database, verify duplicate-start rejection, conditional immutable completion, visibility before
+telemetry, and a unique formal match on the actual Gateway correlation ID, caller request ID,
+user, model, Runtime and optional Application identity. Missing or ambiguous correlation evidence
+must remain unmatched. Confirm that platform timeouts cannot overwrite formal usage, prices or
+Gateway status, and that attempts never enter budget totals. Static SQL and in-memory tests do
+not prove migration parsing, PostgreSQL concurrency or real Gateway attribution.
+
 Migration `014_self_hosted_gateway_provisioning` adds a durable creation operation, target-scoped
 idempotency index and nullable deployment-to-operation ownership link. It does not create Azure
 resources, enable the feature, store Gateway tokens or modify usage history. Validate concurrent
@@ -44,7 +53,7 @@ Validate cross-target foreign keys, the unique enabled default route, preserved 
 and transactional inventory replacement against a separately authorized PostgreSQL environment.
 Local domain and SQL-source tests are not evidence that a migration has been applied.
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, `011_gateway_targets`, `012_apim_onboarding`, `013_multi_target_rollout`, and `014_self_hosted_gateway_provisioning`), then run the command again and verify that no migration is reapplied.
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, `011_gateway_targets`, `012_apim_onboarding`, `013_multi_target_rollout`, `014_self_hosted_gateway_provisioning`, and `015_platform_invocation_trace`), then run the command again and verify that no migration is reapplied.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
@@ -111,6 +120,48 @@ request outcomes cannot authorize a replay. Record unresolved transport errors w
 their cause to the platform without evidence.
 
 ## Browser validation
+
+### Application and budget workflows
+
+Local Application checks must cover exact APIM selection for discovery and key operations,
+creation progress recovery without duplicate submission, and successful navigation to the
+created Application. Initial keys must remain outside the DOM, URL and query cache.
+
+Budget projection tests must cover ETag conflict retries, unchanged-value idempotence, invalid
+TPM, missing admission rows, readback mismatch and preservation of all unrelated quota fields.
+Database-save success with failed Table projection must remain distinguishable from a verified
+projection. The detail UI must retain unknown execution balances rather than falling back to
+historical usage or rendering a measured-zero progress indicator.
+
+Run `tests/backend/model_platform/test_budget_diagnostics.py` for Owner and origin protection,
+strict request inputs, valid and wrong-audience delegation, exact fence error codes, isolated
+candidate requirements, both scope epochs and identities, a fence change before dispatch,
+one-request dispatch, APIM-only secret headers and immutable platform Trace. Settlement cases
+must include both exact receipts, one missing or mismatched receipt, unmeasured usage and timeout
+without replay. These tests use isolated HTTP and ledger adapters, not live budget validation.
+
+Compare the actual source and public components with identical synthetic data for release
+grouping, full release details, the two-step budget dialog, Application selection and details,
+budget editing, connection creation/editing and publication controls. Cover desktop and 390 px,
+Chinese and English, light and dark themes, expanded menus and invalid/disabled states. Verify
+fonts and images actually load and that mobile dialogs remain within the viewport. Save source
+and candidate fingerprints with results; a successful build or screenshot count alone does not
+establish feature equivalence.
+
+### Connection diagnostics and invocation Trace
+
+Local diagnostics tests must cover Owner-only plan and execution, explicit model/Gateway
+selection, exact system-probe subscription permissions, configuration changes between plan and
+dispatch, cooldown ownership, deadlines and safe historical outcomes. Invocation tests must cover
+exact target selection, unavailable selections without fallback, text output limits, image routing
+metadata exclusion and recording failure before dispatch. Test unknown usage separately from
+measured zero, and platform failures separately from formal Gateway status.
+
+Use the actual component handlers for selection and failure-state tests. Isolated component
+screenshots at desktop and 390 px verify layout only; they do not establish authenticated or
+deployed acceptance. A later authorized run must use real permissions, Gateway responses,
+persisted Trace identities and formal telemetry. Never replace that evidence with mock success
+or reuse a previous candidate's screenshots. Unknown outcomes must not be automatically replayed.
 
 ### New Self-hosted Gateway creation
 

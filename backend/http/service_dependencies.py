@@ -11,11 +11,9 @@ from fastapi import Depends, Header
 from turnstile_core.config import Settings, get_settings
 from turnstile_core.domain.control_plane import GatewayReleaseRetentionPolicy
 from turnstile_core.domain.ledger import LedgerScope
-from turnstile_core.integrations.apim_subscription_key_client import (
-    AzureApimSubscriptionKeyClient,
-)
 from turnstile_core.integrations.apim_target_client_factory import (
     AzureApimPublisherClientResolver,
+    AzureApimSubscriptionKeyClientResolver,
     apim_target_client_config_resolver,
 )
 from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
@@ -29,6 +27,10 @@ from turnstile_core.services.apim_onboarding import (
     build_apim_onboarding_service,
 )
 from turnstile_core.services.application_access import ApplicationAccessService
+from turnstile_core.services.application_provisioning_ledger import (
+    project_application_rate_limit,
+    read_application_rate_limit,
+)
 from turnstile_core.services.budget_settlement import BudgetStatusRepository, execution_budget_view
 from turnstile_core.services.control_plane import GatewayControlPlaneService
 
@@ -58,9 +60,11 @@ def _application_provisioning_available(settings: Settings) -> bool:
         settings.gateway_application_provisioning_enabled,
         settings.ledger_table_endpoint,
         settings.credential_encryption_key,
-        settings.azure_subscription_id,
-        settings.apim_resource_group,
-        settings.apim_service_name,
+        settings.apim_target_registry_enabled or all((
+            settings.azure_subscription_id,
+            settings.apim_resource_group,
+            settings.apim_service_name,
+        )),
     ))
 
 
@@ -121,6 +125,21 @@ ApimOnboardingServiceDependency = Annotated[
 
 def application_access_service(repository: Repository) -> ApplicationAccessService:
     settings = get_settings()
+    projection_available = settings.ledger_sync_enabled and bool(settings.ledger_table_endpoint)
+
+    def project_rate_limit(application_id: UUID) -> int | None:
+        assert settings.ledger_table_endpoint is not None
+        with TableStorageLedger(
+            settings.ledger_table_endpoint, settings.ledger_table_name, timeout=2,
+        ) as store:
+            return project_application_rate_limit(repository, store, application_id)
+
+    def read_rate_limit(application_id: UUID) -> int | None:
+        assert settings.ledger_table_endpoint is not None
+        with TableStorageLedger(
+            settings.ledger_table_endpoint, settings.ledger_table_name, timeout=2,
+        ) as store:
+            return read_application_rate_limit(store, application_id)
 
     def read_execution_budget(application_id: UUID, period_start: date) -> dict[str, Any] | None:
         if not isinstance(repository, BudgetStatusRepository) or not settings.ledger_table_endpoint:
@@ -141,7 +160,7 @@ def application_access_service(repository: Repository) -> ApplicationAccessServi
             settings.apim_resource_group,
             settings.apim_service_name,
         )
-    )
+    ) or settings.apim_target_registry_enabled
     key_management_available = (
         settings.gateway_application_key_management_enabled
         and key_settings_available
@@ -166,8 +185,10 @@ def application_access_service(repository: Repository) -> ApplicationAccessServi
             if key_management_available
             else "Application subscription key management is not deployed."
         ),
-        key_client=(
-            AzureApimSubscriptionKeyClient(settings)
+        key_client_resolver=(
+            AzureApimSubscriptionKeyClientResolver(apim_target_client_config_resolver(
+                repository, settings, include_probe_credentials=False,
+            ))
             if key_management_available
             else None
         ),
@@ -176,6 +197,8 @@ def application_access_service(repository: Repository) -> ApplicationAccessServi
             settings.gateway_application_default_tokens_per_minute
         ),
         read_execution_budget=read_execution_budget if settings.budget_execution_enabled else None,
+        project_rate_limit=project_rate_limit if projection_available else None,
+        read_rate_limit=read_rate_limit if projection_available else None,
     )
 
 

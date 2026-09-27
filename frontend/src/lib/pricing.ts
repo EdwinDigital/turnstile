@@ -51,6 +51,7 @@ export function estimateRequestCost(
   request: UsageRequestSummary,
   models: PricedModel[],
 ): number | null {
+  if (request.usage_available === false) return null
   if (request.estimated_cost > 0) return request.estimated_cost
   if (request.cost_available === true) return request.estimated_cost
   if (request.cost_available === false) return null
@@ -80,7 +81,7 @@ export function priceRequests<T extends UsageRequestSummary>(
 }
 
 export function requestCostCalculation(request: UsageRequestDetail) {
-  if (request.cost_available === false || (request.estimated && !request.reconciled_at)) return null
+  if (request.usage_available === false || request.cost_available === false || (request.estimated && !request.reconciled_at)) return null
   const inputRate = request.input_price_per_million
   const outputRate = request.output_price_per_million
   if (inputRate == null || outputRate == null) return null

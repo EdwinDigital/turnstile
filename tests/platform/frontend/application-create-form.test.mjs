@@ -25,6 +25,43 @@ let component
 try { component = (await bundle.generate({ format: "cjs" })).output[0].code }
 finally { await bundle.close() }
 
+const pageEntry = fileURLToPath(new URL("../../../frontend/src/pages/applications-page.tsx", import.meta.url))
+const pageBundle = await rolldown({ input: pageEntry, external: path => path !== pageEntry, transform: { jsx: { runtime: "automatic" } }, treeshake: false,
+  plugins: [{ name: "application-page-test-exports", load(path) { if (path === pageEntry) return `${readFileSync(path, "utf8")}\nexport { ApplicationSyncButton, ApplicationProvisionStatus, ApplicationDetailView };` } }],
+})
+let pageCode
+try { pageCode = (await pageBundle.generate({ format: "cjs" })).output[0].code }
+finally { await pageBundle.close() }
+
+function pageComponents() {
+  const exports = {}
+  const imports = {
+    react: { useState: initial => [initial, () => {}] },
+    "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
+    "../locales": { getIntlLocale: () => "en-US" },
+    "../providers/timezone-provider": { useTimezone: () => ({ timezone: "UTC" }) },
+    "../components/applications/application-create-form": applicationCreateForm,
+  }
+  runInNewContext(pageCode, { exports, require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }) })
+  return exports
+}
+
+test("Application sync selects one exact APIM and blocks disabled dispatch", () => {
+  const { ApplicationSyncButton } = pageComponents()
+  const calls = []
+  const props = { targets: [{ id: "first", name: "Unit APIM" }, { id: "second", name: "Unit APIM" }], busy: false, disabled: false, title: "Sync", onSync: id => calls.push(id) }
+  const control = ApplicationSyncButton(props)
+  const options = control.props.children[1].props.children
+  options[1].props.onClick()
+  assert.deepEqual(calls, ["second"])
+  ApplicationSyncButton({ ...props, busy: true }).props.children[1].props.children[0].props.onClick()
+  ApplicationSyncButton({ ...props, disabled: true, targets: [props.targets[0]] }).props.onClick()
+  ApplicationSyncButton({ ...props, targets: [] }).props.onClick()
+  assert.deepEqual(calls, ["second"])
+  ApplicationSyncButton({ ...props, targets: [props.targets[0]] }).props.onClick()
+  assert.deepEqual(calls, ["second", "first"])
+})
+
 function creationHarness() {
   const slots = []
   let cursor = 0
@@ -63,6 +100,39 @@ function creationHarness() {
 const gateway = { id: "gateway", implementation: "apim", enabled: true }
 const request = { display_name: "Unit application", subscription_id: "unit-app" }
 const applicationId = "00000000-0000-4000-8000-000000000001"
+
+test("Application budget renders actual available balance and distinguishes unknown from zero", () => {
+  const { ApplicationDetailView } = pageComponents()
+  const nodes = value => Array.isArray(value) ? value.flatMap(nodes) : value && typeof value === "object" ? [value, ...nodes(value.props?.children)] : []
+  const content = value => Array.isArray(value) ? value.map(content).join("") : value && typeof value === "object" ? content(value.props?.children) : value == null || typeof value === "boolean" ? "" : String(value)
+  for (const ledgerStatus of ["current", "unavailable", "prepared"]) {
+    const available = ledgerStatus === "current" ? 0 : null
+    const application = { application_type: "service", allowed_model_ids: [], user_count: 0, users: [], subscriptions: [], audit: [], usage: {},
+      budget: { token_limit: 1000, used_tokens: 400, remaining_tokens: 600, usage_percent: 40, tokens_per_minute: 50, warning_threshold_percent: 80,
+        ledger_status: ledgerStatus, available_tokens: available, ledger_read_at: "2026-09-26T00:00:00Z", ledger_snapshot_at: null } }
+    const tree = ApplicationDetailView({ application, loading: false, modelNames: new Map(), canManage: false, models: [] })
+    const line = nodes(tree).find(node => node.props?.className === "application-budget-line")
+    assert.ok(content(line).includes(available === 0 ? "0 / 1,000" : "— / 1,000"))
+    const progress = nodes(tree).find(node => node.props?.className === "application-budget-progress")
+    assert.equal(Boolean(progress), available !== null)
+    if (progress) assert.equal(progress.props.value, 100)
+    const ledger = nodes(tree).find(node => node.props?.className?.startsWith("application-budget-ledger"))
+    if (ledgerStatus === "unavailable") assert.ok(content(ledger).includes("余额未知"))
+    if (ledgerStatus === "prepared") assert.ok(content(ledger).includes("尚未启用"))
+  }
+})
+
+test("Application creation status opens only a successfully read-back application", () => {
+  const { ApplicationProvisionStatus } = pageComponents()
+  const opened = []
+  for (const status of ["queued", "failed", "succeeded"]) {
+    const result = ApplicationProvisionStatus({ operation: { operation_kind: "application_provision", status, checkpoint: { application_id: applicationId } }, onOpen: id => opened.push(id) })
+    const action = result.props.children.at(-1)
+    assert.equal(Boolean(action), status === "succeeded")
+    if (action) action.props.onClick()
+  }
+  assert.deepEqual(opened, [applicationId])
+})
 
 test("subscription ID normalization is locale independent and bounded", () => {
   assert.equal(applicationSubscriptionIdFromName(" Café / INVOICE "), "cafe-invoice")

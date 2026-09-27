@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
@@ -30,6 +32,48 @@ class InfrastructureUpgradeRequiredError(PolicyCompilationError):
     pass
 
 
+class CredentialSourceMissingError(PolicyCompilationError):
+    def __init__(self, named_value_id: str) -> None:
+        self.named_value_id = named_value_id
+        super().__init__(f"Named value {named_value_id} has no credential source")
+
+
+class PublisherPermissionError(PolicyCompilationError):
+    def __init__(
+        self, *, missing_actions: Sequence[str] = (), request_id: str | None = None,
+    ) -> None:
+        self.missing_actions = tuple(sorted(set(missing_actions)))
+        self.request_id = request_id
+        super().__init__("Publisher permission preflight failed: " + json.dumps({
+            "code": "publisher_permissions_missing"
+            if self.missing_actions else "publisher_permissions_unverified",
+            "missing_actions": list(self.missing_actions), "request_id": request_id,
+        }, separators=(",", ":")))
+
+
+def missing_management_actions(payload: object, required: Sequence[str]) -> tuple[str, ...]:
+    if not isinstance(payload, dict) or payload.get("nextLink"):
+        raise ValueError("Permission inventory is incomplete")
+    permissions = payload.get("value")
+    if not isinstance(permissions, list):
+        raise ValueError("Permission inventory is invalid")
+    granted: set[str] = set()
+    for permission in permissions:
+        if not isinstance(permission, dict) or permission.get("condition"):
+            raise ValueError("Permission conditions cannot be verified")
+        actions = permission.get("actions")
+        excluded = permission.get("notActions", [])
+        if (not isinstance(actions, list) or not isinstance(excluded, list)
+                or any(not isinstance(action, str) for action in [*actions, *excluded])):
+            raise ValueError("Permission inventory has invalid actions")
+        granted.update(action for action in required if any(
+            fnmatchcase(action.casefold(), allowed.casefold()) for allowed in actions
+        ) and not any(
+            fnmatchcase(action.casefold(), denied.casefold()) for denied in excluded
+        ))
+    return tuple(sorted(set(required) - granted))
+
+
 class RetryablePublicationError(RuntimeError):
     pass
 
@@ -50,7 +94,9 @@ class ResolvedApimPublisherClient:
 
 
 class ApimPublisherClientResolver(Protocol):
-    def resolve(self, gateway_profile_id: UUID) -> ResolvedApimPublisherClient: ...
+    def resolve(
+        self, gateway_profile_id: UUID, *, include_probe_credentials: bool = True,
+    ) -> ResolvedApimPublisherClient: ...
 
 
 class ApimSubscriptionKeyClientResolver(Protocol):
@@ -61,7 +107,10 @@ class FixedApimPublisherClientResolver:
     def __init__(self, client: ApimPublisherClient) -> None:
         self._client = client
 
-    def resolve(self, gateway_profile_id: UUID) -> ResolvedApimPublisherClient:
+    def resolve(
+        self, gateway_profile_id: UUID, *, include_probe_credentials: bool = True,
+    ) -> ResolvedApimPublisherClient:
+        del include_probe_credentials
         return ResolvedApimPublisherClient(
             gateway_profile_id=gateway_profile_id,
             target_identity_sha256=hashlib.sha256(
@@ -187,6 +236,10 @@ class ApimSubscriptionKeyClient(Protocol):
 
 
 class ApimPublisherClient(Protocol):
+    def verify_publication_permissions(
+        self, compiled: CompiledGatewayRelease, *, recovery_only: bool = False,
+    ) -> None: ...
+
     def ensure_backend(self, backend: BackendResource) -> None: ...
 
     def ensure_named_value(self, named_value: NamedValueResource) -> None: ...

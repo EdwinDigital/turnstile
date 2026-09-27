@@ -446,6 +446,7 @@ class Runtime(RuntimeWrite):
     health_status: HealthStatus
     health_message: str | None
     last_checked_at: datetime | None
+    diagnostic: RuntimeHealth | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -716,6 +717,8 @@ class PriceSyncDetail(StrictModel):
 
 
 class RegistryResponse(StrictModel):
+    runtime_diagnostics_supported: bool = False
+    explicit_gateway_selection_supported: bool = False
     providers: list[Provider]
     gateways: list[GatewayProfile]
     runtimes: list[Runtime]
@@ -754,11 +757,72 @@ class PriceSyncResponse(StrictModel):
     registry: RegistryResponse
 
 
+class RuntimeCheckSelection(StrictModel):
+    model_id: UUID
+    gateway_deployment_id: UUID
+
+
+class RuntimeCheckOption(RuntimeCheckSelection):
+    model_key: str
+    model_name: str
+    gateway_profile_id: UUID
+    gateway_name: str
+    native_gateway_id: str
+
+
+class RuntimeDiagnosticAccess(StrictModel):
+    status: Literal["ready", "missing_permissions", "unverified"] = "unverified"
+    reason: Literal[
+        "permission_missing", "permission_unverified", "identity_unavailable", "tenant_mismatch",
+        "probe_subscription_unconfigured",
+    ] | None = None
+    scope: str
+    api_principal_id: UUID | None = None
+    tenant_id: UUID
+    subscription_id: UUID
+    resource_group: str
+    apim_name: str
+    probe_subscription_id: str
+    required_actions: list[str]
+    missing_actions: list[str] = Field(default_factory=list)
+    checked_at: datetime
+
+
+class RuntimeCheckPlan(StrictModel):
+    runtime_id: UUID
+    options: list[RuntimeCheckOption]
+    unavailable_reason: str | None = None
+    access: RuntimeDiagnosticAccess | None = None
+    max_output_tokens: Literal[64] = 64
+    request_limit: Literal[1] = 1
+
+
 class RuntimeHealth(StrictModel):
     runtime_id: UUID
     status: HealthStatus
     message: str
     checked_at: datetime
+    check_kind: Literal["legacy", "model_inference"] = "legacy"
+    outcome: Literal[
+        "passed", "blocked", "configuration_error", "upstream_error", "inconclusive",
+    ] | None = None
+    selection: RuntimeCheckOption | None = None
+    request_id: str | None = None
+    correlation_id: str | None = None
+    http_status: int | None = None
+    latency_ms: int | None = None
+    error_code: str | None = None
+    valid_until: datetime | None = Field(
+        default=None, description="Legacy expiry; historical diagnostic outcomes do not expire.",
+    )
+    configuration_fingerprint: str | None = Field(
+        default=None, max_length=80,
+        description="Server-owned digest of persisted call configuration, not secrets.",
+    )
+    configuration_status: Literal["current", "changed", "unverified"] = Field(
+        default="unverified", description="Configuration comparison, not current availability.",
+    )
+    configuration_checked_at: datetime | None = None
 
 
 class InvocationMetadata(StrictModel):
@@ -842,12 +906,22 @@ class ModelInvocationRequest(StrictModel):
     metadata: InvocationMetadata
     runtime_id: UUID | None = None
     model_id: UUID | None = None
+    gateway_profile_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
     messages: list[ChatMessage] = Field(min_length=1, max_length=100)
     tools: list[ToolDefinition] | None = Field(default=None, max_length=32)
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
     response_format: Literal["json_object"] | None = None
     stream: bool = False
+
+    @model_validator(mode="after")
+    def require_complete_gateway_selection(self) -> ModelInvocationRequest:
+        if (self.gateway_profile_id is None) != (self.gateway_deployment_id is None):
+            raise ValueError("Gateway selection requires both target and deployment")
+        if self.gateway_profile_id is not None and self.model_id is None:
+            raise ValueError("Explicit Gateway selection requires a model")
+        return self
 
 
 class InvocationUsage(StrictModel):
@@ -866,7 +940,8 @@ class InvocationUsage(StrictModel):
 
 class ModelInvocationResponse(StrictModel):
     request_id: str
-    correlation_id: str
+    correlation_id: str | None = None
+    upstream_request_id: str | None = None
     content: str
     tool_calls: list[ToolCall] | None = None
     provider: str
@@ -876,6 +951,48 @@ class ModelInvocationResponse(StrictModel):
     latency_ms: int = Field(ge=0)
     usage: InvocationUsage | None
     estimated_cost: float | None = Field(default=None, ge=0)
+
+
+class PlatformInvocationAttempt(StrictModel):
+    schema_version: Literal[1] = 1
+    request_id: str = Field(min_length=1, max_length=512)
+    started_at: datetime
+    metadata: InvocationMetadata
+    model_id: UUID
+    model_key: str
+    model_name: str
+    runtime_id: UUID
+    runtime_name: str
+    provider_name: str
+    apim_target_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+    native_gateway_id: str | None = None
+    apim_service_id: str | None = None
+    application_id: UUID | None = None
+
+
+class PlatformInvocationCompletion(StrictModel):
+    request_id: str = Field(min_length=1, max_length=512)
+    completed_at: datetime
+    outcome: Literal["succeeded", "failed"]
+    status_code: int = Field(ge=100, le=599)
+    latency_ms: int = Field(ge=0)
+    gateway_correlation_id: str | None = Field(default=None, min_length=1, max_length=512)
+    upstream_request_id: str | None = Field(default=None, min_length=1, max_length=512)
+    failure_kind: Literal[
+        "gateway_error", "http_error", "timeout", "transport_error", "invalid_response",
+        "internal_error",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def consistent_outcome(self) -> PlatformInvocationCompletion:
+        if self.outcome == "failed" and self.failure_kind is None:
+            raise ValueError("A failed invocation requires a failure kind")
+        if self.outcome == "succeeded" and (
+            self.failure_kind is not None or not 200 <= self.status_code < 300
+        ):
+            raise ValueError("A successful invocation requires a successful response")
+        return self
 
 
 class TrafficGenerationRequest(StrictModel):
