@@ -100,6 +100,7 @@ import {
 } from "../components/model-management/model-publication-dialog"
 import { ConnectionDialog } from "../components/model-management/connection-dialog"
 import { ModelEditDialog } from "../components/model-management/model-edit-dialog"
+import { ModelAvailabilityDialog, ModelAvailabilityStatus, ModelAvailabilitySwitch, useModelAvailabilityCommand } from "../components/model-management/model-availability"
 import { RuntimeDiagnosticDialog } from "../components/model-management/runtime-diagnostic-dialog"
 import { runtimeDiagnostic, runtimeDiagnosticPrefix, runtimeHealthDescription, runtimeHealthLabels, runtimeHealthState, runtimeWithTelemetryHealth, type RuntimeHealthState } from "../lib/runtime-health"
 import { ModelInventoryFilterChips, ModelInventoryFilterMenu } from "../components/model-management/model-inventory-filter-menu"
@@ -110,6 +111,7 @@ import type {
   GatewayPublication,
   GatewayProfile,
   ManagedModel,
+  ModelAvailabilityReadback,
   ModelProvider,
   ModelRegistry,
   ModelConnectionUpdate,
@@ -178,34 +180,6 @@ function runtimePayload(runtime: ModelRuntime, patch: Partial<ModelRuntime> = {}
   }
 }
 
-function modelPayload(model: ManagedModel, patch: Partial<ManagedModel> = {}) {
-  const value = { ...model, ...patch }
-  return {
-    provider_id: value.provider_id,
-    runtime_id: value.runtime_id,
-    model_key: value.model_key,
-    display_name: value.display_name,
-    family_key: value.family_key,
-    upstream_model_id: value.upstream_model_id,
-    assignment_required: value.assignment_required,
-    enabled: value.enabled,
-    is_default: value.is_default,
-    capabilities: value.capabilities,
-    context_window: value.context_window,
-    input_cost_per_million: value.input_cost_per_million,
-    output_cost_per_million: value.output_cost_per_million,
-    cached_cost_per_million: value.cached_cost_per_million,
-    cache_write_cost_per_million: value.cache_write_cost_per_million,
-    allowed_roles: value.allowed_roles,
-    price_source: value.price_source ?? "manual",
-    price_reference: value.price_reference,
-    price_discount_percent: value.price_discount_percent,
-    ...(value.context_price_tiers?.length ? {
-      context_price_references: value.context_price_tiers.map(tier => tier.reference),
-    } : {}),
-  }
-}
-
 function gatewayPayload(gateway: GatewayProfile, patch: Partial<GatewayProfile> = {}) {
   const value = { ...gateway, ...patch }
   return {
@@ -228,6 +202,8 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   const client = useQueryClient()
   const { user } = useAuth()
   const { data, isLoading, error } = useQuery(finopsQueries.registry())
+  const availability = useQuery({ ...finopsQueries.modelAvailability(), enabled: user?.role === "owner" })
+  const [availabilityModelId, setAvailabilityModelId] = useState<string | null>(null)
   const targetTopologies = useQuery({ ...finopsQueries.apimTargets(), enabled: data?.apim_target_topology_available === true })
   const [tab, setTab] = useState<Tab>(modelManagementTabFromUrl)
   const [editor, setEditor] = useState<{ kind: Exclude<RegistryKind, "model">; item?: RegistryItem } | null>(null)
@@ -505,8 +481,6 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
       price_discount_percent: patch.price_discount_percent === undefined
         ? runtime.price_discount_percent ?? null : patch.price_discount_percent,
     } })
-  const updateModel = (model: ManagedModel, patch: Partial<ManagedModel>) =>
-    save.mutate({ kind: "model", id: model.id, value: modelPayload(model, patch) })
   const updateGateway = (gateway: GatewayProfile, patch: Partial<GatewayProfile>) =>
     save.mutate({ kind: "gateway", id: gateway.id, value: gatewayPayload(gateway, patch) })
   const openModelEditor = (model: ManagedModel) => {
@@ -540,11 +514,14 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
     window.history.replaceState(null, "", url)
   }
 
+  const availabilityByModel = new Map((user?.role !== "owner" || availability.error ? [] : availability.data?.items ?? []).map(item => [item.model_id, item]))
+  const availabilityModel = data.models.find(model => model.id === availabilityModelId)
   const overlays = <>
+    {availabilityModel && <ModelAvailabilityDialog model={availabilityModel} registry={data} readback={availabilityByModel.get(availabilityModel.id)} readError={Boolean(availability.error)} onRefresh={() => { void availability.refetch() }} onClose={() => setAvailabilityModelId(null)} />}
     {diagnosticRuntime && <RuntimeDiagnosticDialog key={diagnosticRuntime.id} runtime={diagnosticRuntime} supported={data.runtime_diagnostics_supported === true} busy={health.isPending} error={health.error ? String(health.error) : null} result={health.data ?? null} onCheck={selection => health.mutate({ runtime: diagnosticRuntime, selection })} onClose={() => { if (!health.isPending) { setDiagnosticRuntime(null); health.reset() } }} />}
     {renamingGateway && <GatewayNameDialog key={renamingGateway.id} gateway={renamingGateway} available={user?.role === "owner" && data.gateway_name_edit_supported === true} busy={renameGateway.isPending} error={renameGateway.error ? String(renameGateway.error) : null} onClose={() => { if (!renameGateway.isPending) setRenamingGateway(null) }} onSave={name => renameGateway.mutate({ id: renamingGateway.id, name })} />}
     {editor && <RegistryEditor registry={data} kind={editor.kind} item={editor.item} busy={save.isPending} onClose={() => setEditor(null)} onSave={(value) => save.mutate({ kind: editor.kind, id: editor.item?.id, value })} />}
-    {editingModel && <ModelEditDialog key={editingModel.id} registry={data} model={editingModel} busy={save.isPending} error={save.error ? String(save.error) : null} onClose={() => { if (!save.isPending) setEditingModel(null) }} onSave={(value) => save.mutate({ kind: "model", id: editingModel.id, value })} />}
+    {editingModel && <ModelEditDialog key={editingModel.id} registry={data} model={editingModel} availability={availabilityByModel.get(editingModel.id)} busy={save.isPending} error={save.error ? String(save.error) : null} onClose={() => { if (!save.isPending) setEditingModel(null) }} onSave={(value) => save.mutate({ kind: "model", id: editingModel.id, value })} />}
     {consoleOpen && <GatewayConsole registry={data} onClose={() => setConsoleOpen(false)} />}
     {publicationOpen && <ModelPublicationDialog registry={data} publicationId={publicationDialogId} onPublicationQueued={(id) => {
       trackPublication(id)
@@ -589,6 +566,8 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
       registry={effectiveRegistry}
       topology={targetTopologies.data ?? null}
       topologyAvailable={data.apim_target_topology_available === true}
+      availabilityByModel={availabilityByModel}
+      onOpenAvailability={setAvailabilityModelId}
       tab={tab}
       notice={notice}
       error={save.error}
@@ -623,7 +602,6 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
           setEditor({ kind, item })
         }
       }}
-      onToggleModel={(model) => updateModel(model, { enabled: !model.enabled })}
       onRotateCredential={setCredentialModel}
       onDeleteModel={setDeletingModel}
       onOpenPublication={showPublication}
@@ -986,10 +964,12 @@ function CredentialRotationDialog({ model, oauth = false, busy, error, onClose, 
   </Dialog>
 }
 
-function ModelWorkspace({ registry, topology, topologyAvailable, tab, notice, error, busy, canRenameGateway, checkingRuntimeId, loadingRuntimeHealthIds, removingModelKey, publications, onTabChange, onDismissNotice, onNoticeAction, onToggleSidebar, onAdd, onEdit, onToggleModel, onRotateCredential, onDeleteModel, onOpenPublication, onToggleRuntime, onCheckRuntime, onDeleteConnection, onToggleGateway, onDefaultGateway, onDeleteGateway, onRenameGateway }: {
+function ModelWorkspace({ registry, topology, topologyAvailable, availabilityByModel, onOpenAvailability, tab, notice, error, busy, canRenameGateway, checkingRuntimeId, loadingRuntimeHealthIds, removingModelKey, publications, onTabChange, onDismissNotice, onNoticeAction, onToggleSidebar, onAdd, onEdit, onRotateCredential, onDeleteModel, onOpenPublication, onToggleRuntime, onCheckRuntime, onDeleteConnection, onToggleGateway, onDefaultGateway, onDeleteGateway, onRenameGateway }: {
   registry: ModelRegistry
   topology: ApimTargetTopologyList | null
   topologyAvailable: boolean
+  availabilityByModel: Map<string, ModelAvailabilityReadback>
+  onOpenAvailability: (modelId: string) => void
   tab: Tab
   notice: Notice | null
   error: Error | null
@@ -1005,7 +985,6 @@ function ModelWorkspace({ registry, topology, topologyAvailable, tab, notice, er
   onToggleSidebar: () => void
   onAdd: (kind: RegistryKind) => void
   onEdit: (kind: RegistryKind, item: RegistryItem) => void
-  onToggleModel: (model: ManagedModel) => void
   onRotateCredential: (model: ManagedModel) => void
   onDeleteModel: (model: ManagedModel) => void
   onOpenPublication: (publicationId: string) => void
@@ -1193,7 +1172,7 @@ function ModelWorkspace({ registry, topology, topologyAvailable, tab, notice, er
             || runtime?.config.auth_strategy === "named_value_api_key"
             || runtime?.config.auth_strategy === "oauth_client_credentials"
               && registry.databricks_oauth_supported === true
-          return <ModelRow key={model.id} model={model} target={modelTargetDetails(model, runtime, registry.gateways, topology)} oauthCredential={runtime?.config.auth_strategy === "oauth_client_credentials"} busy={busy} removing={removingModelKey === model.model_key} publication={rowPublication} canRotateCredential={Boolean(model.publication_id && managedCredential)} deleteDisabledReason={deleteDisabledReason} onOpenPublication={onOpenPublication} onEdit={() => onEdit("model", model)} onToggle={() => onToggleModel(model)} onRotateCredential={() => onRotateCredential(model)} onDelete={() => onDeleteModel(model)} />
+          return <ModelRow key={model.id} model={model} target={modelTargetDetails(model, runtime, registry.gateways, topology)} oauthCredential={runtime?.config.auth_strategy === "oauth_client_credentials"} availability={availabilityByModel.get(model.id)} onOpenAvailability={() => onOpenAvailability(model.id)} busy={busy} removing={removingModelKey === model.model_key} publication={rowPublication} canRotateCredential={Boolean(model.publication_id && managedCredential)} deleteDisabledReason={deleteDisabledReason} onOpenPublication={onOpenPublication} onEdit={() => onEdit("model", model)} onRotateCredential={() => onRotateCredential(model)} onDelete={() => onDeleteModel(model)} />
         })}
         {activeTab === "models" && visiblePublications.map((publication) => <PublicationModelRow key={publication.id} publication={publication} registry={registry} topology={topology} onOpen={() => onOpenPublication(publication.id)} />)}
         {activeTab === "connections" && connectionGroups.map(({ provider, connections: providerConnections, connectionCount, modelCount }) => {
@@ -1293,7 +1272,8 @@ function PublicationModelRow({ publication, registry, topology, onOpen }: { publ
   </article>
 }
 
-function ModelRow({ model, target, oauthCredential, busy, removing, publication, canRotateCredential, deleteDisabledReason, onOpenPublication, onEdit, onToggle, onRotateCredential, onDelete }: { model: ManagedModel; target: ReturnType<typeof modelTargetDetails>; oauthCredential: boolean; busy: boolean; removing: boolean; publication: GatewayPublication | null; canRotateCredential: boolean; deleteDisabledReason: string | null; onOpenPublication: (publicationId: string) => void; onEdit: () => void; onToggle: () => void; onRotateCredential: () => void; onDelete: () => void }) {
+function ModelRow({ model, target, oauthCredential, availability, onOpenAvailability, busy, removing, publication, canRotateCredential, deleteDisabledReason, onOpenPublication, onEdit, onRotateCredential, onDelete }: { model: ManagedModel; target: ReturnType<typeof modelTargetDetails>; oauthCredential: boolean; availability?: ModelAvailabilityReadback; onOpenAvailability: () => void; busy: boolean; removing: boolean; publication: GatewayPublication | null; canRotateCredential: boolean; deleteDisabledReason: string | null; onOpenPublication: (publicationId: string) => void; onEdit: () => void; onRotateCredential: () => void; onDelete: () => void }) {
+  const availabilityAction = useModelAvailabilityCommand(model.id, availability)
   const family = modelFamily(model)
   return <article className="model-list-row" role="row" data-model-id={model.id}>
     <div className="model-primary-cell"><span className="model-list-icon" data-model-family={family} title={modelFamilyLabel(family)}><ModelFamilyLogo family={family} /></span><div><b>{model.display_name}</b><code>{model.model_key}</code></div>{model.is_default && <em>默认</em>}</div>
@@ -1302,8 +1282,8 @@ function ModelRow({ model, target, oauthCredential, busy, removing, publication,
     <div className="model-pricing-cell"><b>{model.context_window?.toLocaleString() ?? "—"}</b>{model.context_price_tiers?.length
       ? <span>分档价格 <span data-no-localize>({model.context_price_tiers.length})</span></span>
       : <span>输入 ${model.input_cost_per_million ?? "—"} · 缓存读 ${model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 缓存写 ${model.cache_write_cost_per_million ?? model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 输出 ${model.output_cost_per_million ?? "—"}</span>}</div>
-    <div className="model-status-cell">{publication ? <ModelPublicationStatus publication={publication} onOpen={onOpenPublication} /> : removing ? <span className="model-removing-status"><RefreshCw className="spin" size={12} />正在删除</span> : <Health status={model.enabled ? "available" : "unavailable"} enabled={model.enabled} />}</div>
-  <div className="model-row-actions"><button className="model-edit-action" title="编辑" disabled={busy || removing || Boolean(publication && publication.status !== "failed" && publication.status !== "rolled_back")} onClick={onEdit}><Edit3 size={14} /></button><button className="model-delete-action" title={deleteDisabledReason ?? "删除模型"} disabled={busy || removing || Boolean(publication) || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button>{canRotateCredential && <button className="model-credential-action" title={oauthCredential ? "更新 OAuth Secret" : "更新 API Key"} disabled={busy || removing || Boolean(publication)} onClick={onRotateCredential}><KeyRound size={14} /></button>}<Toggle checked={model.enabled} disabled={busy || removing || Boolean(publication)} onChange={onToggle} /></div>
+    <div className="model-status-cell">{publication ? <ModelPublicationStatus publication={publication} onOpen={onOpenPublication} /> : removing ? <span className="model-removing-status"><RefreshCw className="spin" size={12} />正在删除</span> : <ModelAvailabilityStatus readback={availability} pending={availabilityAction.inFlight} error={availabilityAction.error} onOpen={onOpenAvailability} />}</div>
+  <div className="model-row-actions"><button className="model-edit-action" title="编辑" disabled={busy || removing || Boolean(publication && publication.status !== "failed" && publication.status !== "rolled_back")} onClick={onEdit}><Edit3 size={14} /></button><button className="model-delete-action" title={deleteDisabledReason ?? "删除模型"} disabled={busy || removing || availabilityAction.inFlight || Boolean(publication) || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button>{canRotateCredential && <button className="model-credential-action" title={oauthCredential ? "更新 OAuth Secret" : "更新 API Key"} disabled={busy || removing || Boolean(publication)} onClick={onRotateCredential}><KeyRound size={14} /></button>}<ModelAvailabilitySwitch readback={availability} registryEnabled={model.enabled} pending={availabilityAction.inFlight} disabled={busy || removing || Boolean(publication)} onChange={availabilityAction.change} /></div>
   </article>
 }
 

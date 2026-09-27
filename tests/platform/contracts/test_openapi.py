@@ -113,9 +113,11 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     components = cast(dict[str, object], root["components"])
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
-    assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 104
-    assert len(schemas) == 242
+    assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 120 + 2 * (
+        len(paths) + len(schemas)
+    )
+    assert len(paths) == 108
+    assert len(schemas) == 249
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -127,6 +129,40 @@ def test_openapi_root_is_a_small_domain_index() -> None:
         "model-platform.yaml",
         "observability.yaml",
     }
+
+
+def test_model_availability_contract_matches_runtime_constraints_and_owner_routes() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+
+    def normalize(value: object) -> object:
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        return {
+            key: {name: normalize(schema) for name, schema in item.items()}
+            if key == "properties" and isinstance(item, dict) else normalize(item)
+            for key, item in value.items() if key not in {"title", "description"}
+        }
+
+    names = {name for name in actual if name.startswith("ModelAvailability")}
+    assert len(names) == 7
+    for name in names:
+        assert normalize(documented[name]) == normalize(actual[name]), name
+    for path, methods in (
+        ("/api/v1/model-management/model-availability", ("get",)),
+        ("/api/v1/model-management/models/{item_id}/availability", ("get", "put")),
+        ("/api/v1/model-management/model-availability/operations/{operation_id}", ("get",)),
+        ("/api/v1/model-management/model-availability/operations/{operation_id}/retry", ("post",)),
+    ):
+        for method in methods:
+            operation = cast(dict[str, object], _documented_paths()[path][method])
+            assert operation["security"] == [{"sessionCookie": []}]
+            responses = cast(dict[str, dict[str, object]], operation["responses"])
+            accepted = responses["200" if method == "get" else "202"]
+            headers = cast(dict[str, dict[str, object]], accepted["headers"])
+            assert headers["Cache-Control"]["schema"] == {"type": "string", "const": "no-store"}
 
 
 def test_budget_diagnostics_contract_matches_public_fields_and_owner_routes() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date
 from functools import lru_cache
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from uuid import UUID
 
 from fastapi import Depends, Header
@@ -33,6 +33,10 @@ from turnstile_core.services.application_provisioning_ledger import (
 )
 from turnstile_core.services.budget_settlement import BudgetStatusRepository, execution_budget_view
 from turnstile_core.services.control_plane import GatewayControlPlaneService
+from turnstile_core.services.model_availability import (
+    ModelAvailabilityRepository,
+    ModelAvailabilityService,
+)
 
 from ..services.anomaly_service import AnomalyRuleService
 from ..services.assistant import AssistantService
@@ -52,6 +56,15 @@ def runtime_service(repository: Repository) -> ModelRuntimeService:
 
 RuntimeService = Annotated[ModelRuntimeService, Depends(runtime_service)]
 Authorization = Annotated[str | None, Header()]
+
+
+def model_availability_service(repository: Repository) -> ModelAvailabilityService:
+    return ModelAvailabilityService(cast(ModelAvailabilityRepository, repository))
+
+
+ModelAvailabilityServiceDependency = Annotated[
+    ModelAvailabilityService, Depends(model_availability_service),
+]
 
 
 def _application_provisioning_available(settings: Settings) -> bool:

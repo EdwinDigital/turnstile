@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from ..domain.model_availability import ModelAvailabilityConflict
 from ..domain.runtime_models import apply_databricks_adoption
 
 
@@ -258,6 +259,10 @@ class InMemoryRegistryRepositoryMixin:
         row = self._find(target, item_id)
         if row is None:
             return None
+        if kind == "model" and "enabled" in values and values["enabled"] != row["enabled"]:
+            raise ModelAvailabilityConflict(
+                "Change model availability through the versioned availability command"
+            )
         if kind == "model" and any(
             publication["publication_kind"] == "model_remove"
             and publication["status"] in {
@@ -304,7 +309,8 @@ class InMemoryRegistryRepositoryMixin:
             row["price_sync_status"] = "ok" if values["context_price_tiers"] else None
             row["price_sync_message"] = None
             row["price_synced_at"] = datetime.now(UTC)
-        row.update(values)
+        row.update({key: value for key, value in values.items()
+                if kind != "model" or key != "enabled"})
         row["updated_at"] = datetime.now(UTC)
         if kind == "runtime":
             provider = self._require(self.providers, row["provider_id"], "provider")

@@ -152,6 +152,23 @@ test("budget diagnostic clients send only explicit selections with encoded targe
   assert.deepEqual(JSON.parse(JSON.stringify(calls[1][1])), { application_id: "application", model_id: "model" })
 })
 
+test("availability clients use no-store reads and exact versioned model and operation commands", async () => {
+  const reads = []
+  const writes = []
+  const api = apiHarness(async (...args) => { reads.push(args); return { items: [] } },
+    async (path, payload, method = "POST") => { writes.push({ path, payload, method }); return {} })
+  await api.modelAvailability()
+  const intent = { enabled: false, expected_revision: 3, idempotency_key: "unit-intent" }
+  await api.changeModelAvailability("unit/model", intent)
+  await api.retryModelAvailability("unit/operation", 4)
+  assert.equal(reads[0][0], "/api/v1/model-management/model-availability")
+  assert.equal(reads[0][1].cache, "no-store")
+  assert.deepEqual(JSON.parse(JSON.stringify(writes)), [
+    { path: "/api/v1/model-management/models/unit%2Fmodel/availability", payload: intent, method: "PUT" },
+    { path: "/api/v1/model-management/model-availability/operations/unit%2Foperation/retry", payload: { expected_revision: 4 }, method: "POST" },
+  ])
+})
+
 test("Trace errors wrap long identities within their grid column", () => {
   const stylesheet = frontendRequire("postcss").parse(readFileSync(new URL("../../../frontend/src/styles/finops.css", import.meta.url), "utf8"))
   const rules = new Map()
@@ -842,6 +859,7 @@ test("model workspace applies filters and search to models, pending rows, empty 
   }
   const harness = componentHarness("ModelWorkspace", {
     registry, topology: { items: [], total: 0 }, topologyAvailable: true, tab: "models",
+    availabilityByModel: new Map(), onOpenAvailability() {},
     publications: [{ id: "pending", model_key: "deepseek-pending", display_name: "DeepSeek pending", publication_kind: "model_add", status: "queued", updated_at: "2026-01-01T00:00:00Z" }],
     loadingRuntimeHealthIds: new Set(),
   }, { code: pageCode })
@@ -879,8 +897,14 @@ test("model rows separate same-alias publications by APIM and render a dedicated
   ]
   const target = topology({ apim_target_id: "first" })
   target.deployments[0].published_models = [{ id: "alpha" }]
-  const harness = componentHarness("ModelWorkspace", { registry, publications, topology: { items: [target] }, topologyAvailable: true, tab: "models", loadingRuntimeHealthIds: new Set() }, { code: pageCode })
+  const availability = { model_id: "alpha", status: "pending", desired_enabled: false }
+  const opened = []
+  const harness = componentHarness("ModelWorkspace", { registry, publications, topology: { items: [target] }, topologyAvailable: true, tab: "models", loadingRuntimeHealthIds: new Set(), availabilityByModel: new Map([["alpha", availability]]), onOpenAvailability: id => opened.push(id) }, { code: pageCode })
   const row = harness.find(node => node.type?.name === "ModelRow")
+  assert.equal(row.props.availability, availability)
+  assert.equal("onToggle" in row.props, false)
+  row.props.onOpenAvailability()
+  assert.deepEqual(opened, ["alpha"])
   assert.equal(row.props.publication, null)
   assert.equal(row.props.target.gateways[0].id, "managed")
   assert.equal(harness.find(node => node.type?.name === "PublicationModelRow").props.publication.id, "other")

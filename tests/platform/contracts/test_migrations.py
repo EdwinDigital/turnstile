@@ -40,8 +40,32 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "013_multi_target_rollout.up.sql",
         "014_self_hosted_gateway_provisioning.up.sql",
         "015_platform_invocation_trace.up.sql",
+        "016_model_availability.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
+
+
+def test_availability_migration_guards_versioned_writes_and_retains_identities() -> None:
+    sql = (MIGRATIONS / "016_model_availability.up.sql").read_text()
+    assert table_names(sql) == {
+        "model_availability_identity", "model_availability_capability",
+        "model_availability_node_enrollment", "model_availability_operation",
+        "model_availability_task", "model_availability_audit",
+    }
+    assert "operation.accepted_xid = txid_current()" in sql
+    assert "UNIQUE (model_id, desired_revision)" in sql
+    assert "idempotency_key UUID NOT NULL UNIQUE" in sql
+    assert "Use the versioned model availability command" in sql
+    assert "Model availability history is immutable" in sql
+    assert "A retained model availability identity cannot be reused" in sql
+    assert "FOREIGN KEY (deployment_id, target_id)" in sql
+    assert "WHERE model_id = OLD.id FOR UPDATE" in sql
+    assert "SELECT id, 'active' FROM managed_model" in sql
+    assert "CREATE FUNCTION model_availability_inventory()" in sql
+    assert "token_usage" not in sql and "managed_model_price" not in sql
+    assert not re.search(
+        r"^\s*(UPDATE|DELETE FROM|TRUNCATE|DROP) managed_model\b", sql, re.MULTILINE,
+    )
 
 
 def test_platform_trace_migration_is_nonbilling_and_requires_unique_real_correlation() -> None:

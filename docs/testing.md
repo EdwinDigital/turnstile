@@ -22,6 +22,33 @@ git diff --check
 
 ## Database validation
 
+Migration `016_model_availability` adds retained model identities, immutable commands/audit,
+capability and node-enrollment evidence, and a leased projection outbox. It preserves existing
+model states, prices, defaults and financial history. Local checks are:
+
+```bash
+uv run --frozen --no-sync pytest -q tests/backend/model_platform/test_model_availability.py \
+	tests/platform/contracts/test_migrations.py tests/platform/api/test_model_management_api.py \
+	tests/platform/deployment/test_control_plane_function.py
+node --test tests/platform/frontend/model-availability.test.mjs \
+	tests/platform/frontend/model-edit-form.test.mjs tests/platform/frontend/gateway-topology.test.mjs
+```
+
+The existing C# policy suite also compiles and runs native availability expressions. On an
+explicitly authorized PostgreSQL database, separately verify migration parsing, same-transaction
+command enforcement, stale/duplicate commands, concurrent removal, immutable intent/audit,
+retained tombstones, lost/expired worker leases, and bounded same-operation retry. Test exact
+Table ETag conflicts, projection readback and complete Gateway evidence independently. Do not
+run an initializing local database fixture against a shared database. Static SQL and recording
+adapters do not prove PostgreSQL transaction isolation.
+
+For UI acceptance, compare actual source and public components with the same data at desktop and
+390 px. Cover enabled, disabled, pending, projected, partial, failed and unknown; open details,
+long target names, keyboard activation, disabled controls, duplicate clicks and an uncertain
+response that reuses its idempotency key. Editing metadata must never submit `enabled`.
+Verify all locales and light/dark themes. Local component transport adapters are not authenticated
+Gateway E2E; that requires the separate installation and live validation workflow.
+
 Migration `015_platform_invocation_trace` adds nonbilling platform call snapshots and a
 Request Trace view. Apply it before deploying the updated API. On an authorized PostgreSQL
 database, verify duplicate-start rejection, conditional immutable completion, visibility before
@@ -53,7 +80,7 @@ Validate cross-target foreign keys, the unique enabled default route, preserved 
 and transactional inventory replacement against a separately authorized PostgreSQL environment.
 Local domain and SQL-source tests are not evidence that a migration has been applied.
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, `011_gateway_targets`, `012_apim_onboarding`, `013_multi_target_rollout`, `014_self_hosted_gateway_provisioning`, and `015_platform_invocation_trace`), then run the command again and verify that no migration is reapplied.
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_context_tier_pricing`, `010_budget_execution_protocol`, `011_gateway_targets`, `012_apim_onboarding`, `013_multi_target_rollout`, `014_self_hosted_gateway_provisioning`, `015_platform_invocation_trace`, and `016_model_availability`), then run the command again and verify that no migration is reapplied.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 

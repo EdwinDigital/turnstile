@@ -204,14 +204,6 @@ class AssistantService:
         return candidates
 
     def _select_model(self) -> tuple[UUID, UUID, str]:
-        """Resolve the model to call: the configured one, or the registry's own order.
-
-        A configured model is re-checked against the eligibility rule on every call
-        rather than trusted because it was valid when it was saved. Disabling it in Model
-        Management, or moving it to a CLI runtime, would otherwise turn every question
-        into a 409. Falling back keeps the assistant answering; the settings page reads
-        `model_available` so the fallback is visible rather than silent.
-        """
         candidates = self._eligible_models()
         if not candidates:
             raise HTTPException(
@@ -219,10 +211,19 @@ class AssistantService:
                 detail="No enabled model declares the tools capability",
             )
         configured = self._repository.assistant_settings().get("model_id")
-        chosen = next(
-            (model for model in candidates if model.id == configured), candidates[0]
-        )
+        chosen = self._selected_candidate(candidates, configured)
+        if chosen is None:
+            raise HTTPException(
+                status_code=409, detail="Configured or default model is unavailable",
+            )
         return chosen.runtime_id, chosen.id, chosen.model_key
+
+    def _selected_candidate(self, candidates: list[Any], configured: UUID | None) -> Any:
+        if configured is not None:
+            return next((model for model in candidates if model.id == configured), None)
+        if any(model.is_default and not model.enabled for model in self._runtime.registry().models):
+            return None
+        return candidates[0] if candidates else None
 
     # -- settings --------------------------------------------------------------
 
@@ -230,16 +231,13 @@ class AssistantService:
         stored = self._repository.assistant_settings()
         configured = stored.get("model_id")
         candidates = self._eligible_models()
-        pinned = next((model for model in candidates if model.id == configured), None)
-        effective = pinned or (candidates[0] if candidates else None)
+        effective = self._selected_candidate(candidates, configured)
         return AssistantSettings(
             model_id=configured,
             auto_title=bool(stored.get("auto_title", True)),
             effective_model_id=effective.id if effective else None,
             effective_model_name=effective.display_name if effective else None,
-            # True when nothing is pinned, because automatic selection cannot be
-            # unavailable -- the empty-registry case is reported by a null effective model.
-            model_available=configured is None or pinned is not None,
+            model_available=effective is not None,
             available_models=[
                 AssistantModelChoice(
                     id=model.id,
@@ -256,10 +254,9 @@ class AssistantService:
         )
 
     def save_settings(self, write: AssistantSettingsWrite, updated_by: str) -> AssistantSettings:
-        # Validated on write as well as on read. Read-time fallback exists for a model
-        # that stopped qualifying later; it is not a licence to store one that never did.
-        if write.model_id is not None and not any(
-            model.id == write.model_id for model in self._eligible_models()
+        if (write.model_id is not None
+            and write.model_id != self._repository.assistant_settings().get("model_id")
+            and not any(model.id == write.model_id for model in self._eligible_models())
         ):
             raise HTTPException(
                 status_code=409,

@@ -98,3 +98,18 @@ def test_image_upgrade_documents_independent_defaults_and_validation_limits() ->
     assert architecture.count("## Ledger finalization") == 1
     assert "SQL source checks cannot prove" in testing
     assert "separately authorized real targets" in testing
+
+
+def test_model_availability_documents_installation_and_evidence_boundaries() -> None:
+    configuration = (REPOSITORY_ROOT / "docs/configuration.md").read_text()
+    deployment = " ".join((REPOSITORY_ROOT / "docs/deployment.md").read_text().split())
+    testing = (REPOSITORY_ROOT / "docs/testing.md").read_text()
+    assert "202` response" in configuration and "not effective" in configuration
+    assert "Ordinary model updates cannot change `enabled`" in configuration
+    assert "every retained Revision" in deployment
+    assert "Publisher remains unable" in deployment
+    assert "do not" in deployment and "grant those rights to the ordinary Publisher" in deployment
+    assert "does not provide a generic controller" in deployment
+    assert "enrolled_nodes_only_guarded_bootstrap" in deployment
+    assert "016_model_availability" in testing
+    assert "do not prove PostgreSQL transaction isolation" in testing

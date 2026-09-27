@@ -19,6 +19,7 @@ from turnstile_core.domain.application_access import application_id_for
 from turnstile_core.domain.billable_requests import BillableBudgetExceeded, BillableRequestPlan
 from turnstile_core.domain.gateway_targets import ApimTarget, GatewayDeployment
 from turnstile_core.domain.images import ImageInvocationRequest, ImageInvocationResponse
+from turnstile_core.domain.model_availability import ModelAvailabilityConflict
 from turnstile_core.domain.models import TokenUsageRecord
 from turnstile_core.domain.runtime_models import (
     FOUNDRY_INFERENCE_RESOURCE,
@@ -919,6 +920,12 @@ class ModelRuntimeService:
             raise HTTPException(
                 status_code=409, detail="Changing model operation requires a publication"
             )
+        if (current is not None and "enabled" in write.model_fields_set
+                and write.enabled != current["enabled"]):
+            raise HTTPException(
+                status_code=409,
+                detail="Change model availability through the versioned availability command",
+            )
         price_fields = (
             "runtime_id", "price_source", "price_discount_percent", "context_price_references",
             "context_price_rule",
@@ -934,6 +941,8 @@ class ModelRuntimeService:
                 and current_model.price_reference != write.price_reference)
         )
         values = write.model_dump(mode="python")
+        if item_id is not None and "enabled" not in write.model_fields_set:
+            values.pop("enabled", None)
         values.pop("context_price_references", None)
         values.pop("context_price_refresh", None)
         values.pop("context_price_rule", None)
@@ -1299,6 +1308,13 @@ class ModelRuntimeService:
     def _invocation_route(
         self, request: ModelInvocationRequest | ImageInvocationRequest,
     ) -> dict[str, Any] | None:
+        if request.model_id is not None:
+            current = next((model for model in self._repository.registry()["models"]
+                            if model["id"] == request.model_id), None)
+            if current is not None and current["enabled"] is False:
+                raise HTTPException(status_code=403, detail={
+                    "code": "model_disabled", "message": "The requested model is disabled",
+                })
         if request.gateway_profile_id is not None:
             if not self._settings.apim_target_registry_enabled:
                 raise HTTPException(
@@ -1639,6 +1655,10 @@ class ModelRuntimeService:
             if saved is None:
                 raise HTTPException(status_code=404, detail=f"Unknown {kind}: {item_id}")
             return saved
+        except ModelAvailabilityConflict as error:
+            raise HTTPException(status_code=409, detail={
+                "code": "model_availability_conflict", "message": str(error),
+            }) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 

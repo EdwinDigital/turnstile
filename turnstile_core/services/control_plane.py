@@ -2292,8 +2292,7 @@ class GatewayControlPlaneService:
             alias = str(model["model_key"]).casefold()
             runtime_id = model.get("runtime_id")
             if (
-                not model["enabled"]
-                or alias in bound_aliases
+                alias in bound_aliases
                 or alias not in discovery_aliases
                 or runtime_id not in templates_by_runtime
             ):

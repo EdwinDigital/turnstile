@@ -48,6 +48,14 @@ tags:
 - name: Model Router
   description: User-scoped model routing drafts, validation, version publication, and lifecycle.
 paths:
+  /api/v1/model-management/model-availability:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1model-availability
+  /api/v1/model-management/models/{item_id}/availability:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1models~1{item_id}~1availability
+  /api/v1/model-management/model-availability/operations/{operation_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1model-availability~1operations~1{operation_id}
+  /api/v1/model-management/model-availability/operations/{operation_id}/retry:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1model-availability~1operations~1{operation_id}~1retry
   /api/v1/model-management/gateways/{gateway_profile_id}/budget-readiness:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1budget-readiness
   /api/v1/model-management/gateways/{gateway_profile_id}/budget-execution-verification:
@@ -305,6 +313,20 @@ components:
     ErrorResponse:
       $ref: ./openapi/components/common.yaml#/responses/ErrorResponse
   schemas:
+    ModelAvailabilityAccepted:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityAccepted
+    ModelAvailabilityCommand:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityCommand
+    ModelAvailabilityList:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityList
+    ModelAvailabilityOperation:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityOperation
+    ModelAvailabilityReadback:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityReadback
+    ModelAvailabilityRetry:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityRetry
+    ModelAvailabilityTargetResult:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityTargetResult
     BudgetDelegationCheck:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetDelegationCheck
     BudgetExecutionVerificationOptions:

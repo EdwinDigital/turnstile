@@ -1864,6 +1864,8 @@ def test_context_prices_save_and_reopen_without_trusting_client_rates(
             region_required=False,
         ),))
     catalog.options.side_effect = responses.get
+    assert isinstance(service._repository, InMemoryRepository)
+    next(model for model in service._repository.models if model["id"] == model_id)["enabled"] = True
     values = write.model_dump() | {
         "context_price_references": references, "price_reference": None,
         "price_discount_percent": 80, "input_cost_per_million": 0.000001,
@@ -2018,6 +2020,7 @@ def test_registry_redacts_secret_and_invocation_records_attribution(
     provider_id = UUID("20000000-0000-4000-8000-000000000003")
     runtime_id = UUID("30000000-0000-4000-8000-000000000003")
     model_id = UUID("40000000-0000-4000-8000-000000000003")
+    next(model for model in repository.models if model["id"] == model_id)["enabled"] = True
     service.save_runtime(
         RuntimeWrite(
             provider_id=provider_id,

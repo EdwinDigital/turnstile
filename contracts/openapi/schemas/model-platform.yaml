@@ -1,4 +1,100 @@
 schemas:
+  ModelAvailabilityCommand:
+    type: object
+    additionalProperties: false
+    required: [enabled, expected_revision, idempotency_key]
+    properties:
+      enabled: {type: boolean}
+      expected_revision: {type: integer, minimum: 1, maximum: 2147483647}
+      idempotency_key: {type: string, format: uuid}
+  ModelAvailabilityRetry:
+    type: object
+    additionalProperties: false
+    required: [expected_revision]
+    properties:
+      expected_revision: {type: integer, minimum: 1, maximum: 2147483647}
+  ModelAvailabilityTargetResult:
+    type: object
+    additionalProperties: false
+    required: [target_id, inventory_digest]
+    properties:
+      target_id: {type: string, format: uuid}
+      inventory_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+      policy_digest:
+        anyOf: [{type: string, pattern: '^[0-9a-f]{64}$'}, {type: 'null'}]
+      status: {type: string, enum: [pending, verified, failed, unknown], default: pending}
+      observed_revision:
+        anyOf: [{type: integer, minimum: 1, maximum: 2147483647}, {type: 'null'}]
+      observed_enabled:
+        anyOf: [{type: boolean}, {type: 'null'}]
+      verified_at:
+        anyOf: [{type: string, format: date-time}, {type: 'null'}]
+      reason:
+        anyOf: [{type: string, maxLength: 500}, {type: 'null'}]
+  ModelAvailabilityOperation:
+    type: object
+    additionalProperties: false
+    required: [id, model_id, idempotency_key, expected_revision, desired_revision, desired_enabled, created_by, created_at, updated_at]
+    properties:
+      id: {type: string, format: uuid}
+      model_id: {type: string, format: uuid}
+      idempotency_key: {type: string, format: uuid}
+      expected_revision: {type: integer, minimum: 1, maximum: 2147483647}
+      desired_revision: {type: integer, minimum: 1, maximum: 2147483647}
+      desired_enabled: {type: boolean}
+      created_by: {type: string, minLength: 1, maxLength: 255}
+      created_at: {type: string, format: date-time}
+      updated_at: {type: string, format: date-time}
+      status: {type: string, enum: [pending, projected, partial, succeeded, failed, unknown], default: pending}
+      targets:
+        type: array
+        items: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityTargetResult}
+        default: []
+      projected_revision:
+        anyOf: [{type: integer, minimum: 1, maximum: 2147483647}, {type: 'null'}]
+      projected_at:
+        anyOf: [{type: string, format: date-time}, {type: 'null'}]
+      completed_at:
+        anyOf: [{type: string, format: date-time}, {type: 'null'}]
+      error_code:
+        anyOf: [{type: string}, {type: 'null'}]
+  ModelAvailabilityReadback:
+    type: object
+    additionalProperties: false
+    required: [model_id, desired_enabled, desired_revision]
+    properties:
+      model_id: {type: string, format: uuid}
+      desired_enabled: {type: boolean}
+      desired_revision: {type: integer, minimum: 1, maximum: 2147483647}
+      effective_enabled:
+        anyOf: [{type: boolean}, {type: 'null'}]
+      effective_revision:
+        anyOf: [{type: integer, minimum: 1, maximum: 2147483647}, {type: 'null'}]
+      verified_at:
+        anyOf: [{type: string, format: date-time}, {type: 'null'}]
+      status: {type: string, enum: [pending, projected, partial, succeeded, failed, unknown], default: unknown}
+      command_ready: {type: boolean, default: false}
+      reason:
+        anyOf: [{type: string}, {type: 'null'}]
+      operation:
+        anyOf:
+        - {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityOperation}
+        - {type: 'null'}
+  ModelAvailabilityList:
+    type: object
+    additionalProperties: false
+    required: [items]
+    properties:
+      items:
+        type: array
+        items: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityReadback}
+  ModelAvailabilityAccepted:
+    type: object
+    additionalProperties: false
+    required: [operation, status_url]
+    properties:
+      operation: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityOperation}
+      status_url: {type: string}
   BudgetDelegationCheck:
     type: object
     additionalProperties: false

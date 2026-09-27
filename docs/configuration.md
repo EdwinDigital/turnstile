@@ -30,6 +30,40 @@ Delegated invocation does not change the authenticated session. A Member remains
 
 ## APIM and control plane
 
+### Versioned model availability
+
+Model enablement is a dedicated Owner command, not a general model edit or a connection-health
+flag. The model row and editor use `PUT /api/v1/model-management/models/{item_id}/availability`
+with strict `enabled`, `expected_revision` and UUID `idempotency_key` values. A `202` response
+means accepted, not effective. The status view shows desired state separately from the last
+verified state, revision, operation and per-target results. Concurrent changes return `409`;
+an uncertain response must reuse the same intent rather than create a second command.
+
+Apply `016_model_availability` and install compatible policies on every retained Revision before
+using the switch. The Control Plane requires `CONTROL_PLANE_ENABLED`, `LEDGER_TABLE_ENDPOINT`,
+`LEDGER_TABLE_NAME`, registered APIM identities and target-scoped probe credentials. The storage
+endpoint must be the primary Table origin. The worker synchronizes state every two seconds and
+refreshes full coverage at seconds 10 and 40 of each minute. Missing migration, incomplete
+inventory, expired coverage or missing node enrollment keeps commands unavailable; the in-memory
+repository cannot claim real Gateway enforcement.
+
+Gateway admission reads the exact model UUID and revision from the Table without a cache.
+Disabled models return `403 model_disabled`; invalid or unreadable state returns
+`503 model_availability_unavailable`. Model catalogs are filtered from the same state and use
+`Cache-Control: no-store`. A successful operation requires exact evidence from every retained
+Revision and every enrolled self-hosted instance, not just the current managed Gateway.
+Self-hosted node leases are bound to target, API, Revision, native Gateway, instance and policy
+capability, and expire within 120 seconds. Dedicated HEAD diagnostics do not dispatch inference.
+
+Ordinary model updates cannot change `enabled`, even when other fields are saved concurrently.
+Availability commands leave prices, default selection, assignments and budgets unchanged.
+An explicitly selected or default disabled model is not silently replaced by another model in
+the invocation page or assistant. The assistant retains an unavailable configured model while
+allowing unrelated settings to be edited. Previously admitted in-flight requests are not cancelled.
+
+See [availability installation](deployment.md#model-availability-installation) for the separate
+operator workflow and the self-hosted admission prerequisites.
+
 Set `AZURE_SUBSCRIPTION_ID`, `APIM_RESOURCE_GROUP`, `APIM_SERVICE_NAME`, `APIM_PRINCIPAL_ID`, `APIM_GATEWAY_URL`, and `APIM_DASHBOARD_SUBSCRIPTION_KEY` to the deployed resources. The dashboard key is server-side only and must never be compiled into the frontend. Keep all control-plane feature flags false until the corresponding managed identities and roles exist.
 
 `APIM_REGRESSION_MODEL_KEY` has no default. Set it only after onboarding a model that can be used for publication probes.

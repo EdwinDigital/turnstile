@@ -15,7 +15,6 @@ import {
   modelEditRoleOptions,
   resolveDiscount,
   setModelEditDefault,
-  setModelEditEnabled,
   toggleModelRole,
   validateModelEdit,
 } from "../../../frontend/src/components/model-management/model-edit-form.ts"
@@ -47,6 +46,7 @@ function editorHarness(model, providerKind = "microsoft_foundry") {
     } },
     "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
     "./model-edit-form": modelEditForm,
+    "./model-availability": { ModelAvailabilityStatus: "ModelAvailabilityStatus", ModelAvailabilitySwitch: "ModelAvailabilitySwitch", useModelAvailabilityCommand: () => ({ inFlight: false, error: null, change() {} }) },
     "./openai-compatible": modelVendor,
     "../brand-logos": { GatewayBrandLogo: "GatewayBrandLogo", ProviderBrandLogo: "ProviderBrandLogo", gatewayBrandFromIdentity: value => value, providerBrandFromMetadata: value => value },
   }
@@ -198,20 +198,35 @@ test("context windows require positive safe integers and prices finite non-negat
   assert.equal(validateModelEdit({ ...draft, contextWindow: "1", inputPrice: "0" }), null)
 })
 
-test("default and enabled controls cannot produce a disabled default", () => {
+test("default metadata changes never include or change model availability", () => {
   const model = savedModel()
   const initial = createModelEditDraft(model)
-  const disabled = setModelEditEnabled(initial, false)
-  const promoted = setModelEditDefault(disabled, true)
-  assert.equal(promoted.enabled, true)
+  const promoted = setModelEditDefault(initial, true)
+  assert.equal("enabled" in promoted, false)
   assert.equal(promoted.isDefault, true)
-  assert.equal(setModelEditEnabled(promoted, false).isDefault, false)
-  assert.equal(setModelEditDefault(promoted, false).enabled, true)
-  const invalid = { ...initial, enabled: false, isDefault: true }
-  assert.equal(validateModelEdit(invalid), "default_disabled")
-  assert.throws(() => modelEditPayload(model, invalid), /default_disabled/)
-  assert.equal(initial.enabled, true)
+  const disabled = createModelEditDraft(savedModel({ enabled: false, is_default: true }))
+  assert.equal(validateModelEdit(disabled), null)
+  assert.equal("enabled" in modelEditPayload(model, disabled), false)
+  assert.equal(setModelEditDefault(promoted, false).isDefault, false)
+  assert.equal("enabled" in initial, false)
   assert.equal(initial.isDefault, false)
+})
+
+test("the editor uses the dedicated availability switch and metadata save never re-enables a model", () => {
+  const harness = editorHarness(savedModel({ enabled: false, is_default: true }))
+  const availability = { model_id: "model-id", status: "succeeded", desired_enabled: false }
+  harness.props.availability = availability
+  const control = harness.find(node => node.type === "ModelAvailabilitySwitch")
+  assert.equal(control.props.readback, availability)
+  assert.equal(control.props.registryEnabled, false)
+  const labels = harness.all().filter(node => node.type === "label" && node.props.className === "model-editor-checkbox")
+  const defaultLabel = labels.find(node => node.props.children.some(child => child.props?.children === "设为默认"))
+  assert.equal(labels.some(node => node.props.children.some(child => child.props?.children === "启用")), false)
+  defaultLabel.props.children[0].props.onCheckedChange(false)
+  harness.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
+  assert.equal(harness.saved.length, 1)
+  assert.equal(harness.saved[0].is_default, false)
+  assert.equal("enabled" in harness.saved[0], false)
 })
 
 test("model editor restores identity, help and units without changing saved routing", () => {

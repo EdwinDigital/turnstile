@@ -315,6 +315,51 @@ class TableStorageLedger:
         response.raise_for_status()
         return True
 
+    def list_partition_entities(
+        self, partition: str, *, max_entities: int = 2000, max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        if max_entities < 1 or max_pages < 1:
+            raise ValueError("Table inventory limits must be positive")
+        escaped = partition.replace("'", "''")
+        params = {"$filter": f"PartitionKey eq '{escaped}'", "$top": str(min(max_entities, 1000))}
+        rows: list[dict[str, Any]] = []
+        identities: set[str] = set()
+        continuations: set[tuple[str, str]] = set()
+        for _page in range(max_pages):
+            response = self._request(
+                "GET", f"{self._endpoint}/{self._table}()",
+                {"Cache-Control": "no-cache"}, params=params,
+            )
+            response.raise_for_status()
+            if len(response.content) > 2_097_152:
+                raise ValueError("Table inventory response exceeds its limit")
+            payload = response.json()
+            values = payload.get("value") if isinstance(payload, dict) else None
+            if not isinstance(values, list) or len(rows) + len(values) > max_entities:
+                raise ValueError("Table inventory is incomplete or exceeds its limit")
+            for value in values:
+                if (not isinstance(value, dict) or value.get("PartitionKey") != partition
+                        or not isinstance(value.get("RowKey"), str) or not value["RowKey"]
+                        or value["RowKey"] in identities):
+                    raise ValueError("Table inventory identity is invalid or repeated")
+                identities.add(value["RowKey"])
+                rows.append(value)
+            next_partition = response.headers.get("x-ms-continuation-NextPartitionKey", "")
+            next_row = response.headers.get("x-ms-continuation-NextRowKey", "")
+            if not next_partition and not next_row:
+                return rows
+            continuation = (next_partition, next_row)
+            if (not next_partition or len(next_partition) > 1024 or len(next_row) > 1024
+                    or continuation in continuations):
+                raise ValueError("Table inventory continuation is invalid or repeated")
+            continuations.add(continuation)
+            params["NextPartitionKey"] = next_partition
+            if next_row:
+                params["NextRowKey"] = next_row
+            else:
+                params.pop("NextRowKey", None)
+        raise ValueError("Table inventory pagination did not complete")
+
     def list_reservations(self, partition: str) -> list[LedgerReservation]:
         """List every reservation in one partition, following Table continuation tokens."""
         escaped_partition = partition.replace("'", "''")

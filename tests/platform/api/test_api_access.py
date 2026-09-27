@@ -106,7 +106,12 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         route for route in copilot_protected.routes if isinstance(route, APIRoute)
     ]
 
-    assert len(apim_routes) == 110
+    assert len(apim_routes) == 115
+    availability_routes = [route for route in apim_routes if "availability" in route.path]
+    assert len(availability_routes) == 5
+    for route in availability_routes:
+        assert any(dependency.call is require_owner_session
+                   for dependency in route.dependant.dependencies)
     budget_diagnostic_routes = [
         route for route in apim_routes
         if route.path.endswith(("/budget-readiness", "/budget-execution-verification"))

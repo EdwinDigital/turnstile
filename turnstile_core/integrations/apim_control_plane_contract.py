@@ -196,7 +196,7 @@ class OAuthCredentialResource:
 class OperationResource:
     id: str
     display_name: str
-    method: Literal["GET", "POST"]
+    method: Literal["GET", "POST", "HEAD"]
     path: str
 
 
@@ -214,6 +214,7 @@ class CompiledGatewayRelease:
     images_generations_policy: str | None = None
     operations: tuple[OperationResource, ...] = ()
     oauth_credentials: tuple[OAuthCredentialResource, ...] = ()
+    availability_probe_policies: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

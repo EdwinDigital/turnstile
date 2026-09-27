@@ -11,6 +11,7 @@ from tests.support.paths import FRONTEND_SOURCE, REPOSITORY_ROOT, read_frontend_
     "suite_name",
     (
         "model-edit-form.test.mjs",
+        "model-availability.test.mjs",
         "model-publication-connections.test.mjs",
         "openai-compatible.test.mjs",
         "vite-proxy.test.mjs",

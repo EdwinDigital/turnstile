@@ -6,7 +6,7 @@ import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import azure.functions as func
@@ -14,6 +14,7 @@ import azure.functions as func
 from turnstile_core.config import Settings, get_settings
 from turnstile_core.domain.control_plane import GatewayReleaseRetentionPolicy
 from turnstile_core.domain.gateway_targets import ApimTargetArmInventory
+from turnstile_core.domain.model_availability import ModelAvailabilityState
 from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
 from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
@@ -46,9 +47,67 @@ from turnstile_core.services.gateway_publication_worker import GatewayPublicatio
 from turnstile_core.services.gateway_release_operation_worker import (
     GatewayReleaseOperationWorker,
 )
+from turnstile_core.services.model_availability import (
+    ModelAvailabilityCoordinator,
+    ModelAvailabilityRepository,
+    ModelAvailabilityWorker,
+    project_model_availability,
+)
 
 app = func.FunctionApp()
 logger = logging.getLogger(__name__)
+
+
+def _project_model_availability(
+    repository: QueryRepository, settings: Settings, model_id: UUID,
+) -> ModelAvailabilityState:
+    if not settings.ledger_table_endpoint:
+        raise ValueError("Model availability projection requires the configured store")
+    with TableStorageLedger(
+        settings.ledger_table_endpoint, settings.ledger_table_name, timeout=2,
+    ) as store:
+        return project_model_availability(repository, store, model_id)
+
+
+@app.timer_trigger(
+    arg_name="timer", schedule="*/2 * * * * *", run_on_startup=False, use_monitor=True,
+)
+def synchronize_model_availability(timer: func.TimerRequest) -> None:
+    del timer
+    _run_model_availability(audit=False)
+
+
+@app.timer_trigger(
+    arg_name="timer", schedule="10,40 * * * * *", run_on_startup=False, use_monitor=True,
+)
+def refresh_model_availability_coverage(timer: func.TimerRequest) -> None:
+    del timer
+    _run_model_availability(audit=True)
+
+
+def _run_model_availability(*, audit: bool) -> None:
+    settings = get_settings()
+    if not settings.control_plane_enabled or not settings.ledger_table_endpoint:
+        return
+    with repository_session(settings) as repository:
+        if not repository.model_availability_supported():
+            return
+        clients = AzureApimPublisherClientResolver(
+            apim_target_client_config_resolver(repository, settings),
+        )
+        coordinator = ModelAvailabilityCoordinator(
+            repository, clients, settings.ledger_table_endpoint, settings.ledger_table_name,
+        )
+        if audit:
+            coordinator.refresh()
+            return
+        endpoint = settings.ledger_table_endpoint
+        worker = ModelAvailabilityWorker(
+            cast(ModelAvailabilityRepository, repository),
+            lambda: TableStorageLedger(endpoint, settings.ledger_table_name, timeout=2),
+            coordinator.verify,
+        )
+        worker.run_once(os.environ.get("WEBSITE_INSTANCE_ID", "control-plane-local")[:128])
 
 
 def _publisher_clients(
@@ -215,6 +274,9 @@ def publish_gateway_changes(timer: func.TimerRequest) -> None:
                 messages_operation_id=settings.apim_messages_operation_id,
                 count_tokens_operation_id=settings.apim_count_tokens_operation_id,
                 models_operation_id=settings.apim_models_operation_id,
+                availability_projector=lambda model_id: _project_model_availability(
+                    repository, settings, model_id,
+                ),
                 **budget_options,
             )
             result = worker.run_once(
@@ -310,6 +372,9 @@ def process_gateway_release_operations(timer: func.TimerRequest) -> None:
                 settings.gateway_application_default_tokens_per_minute
             ),
             cipher=CredentialCipher.from_settings(settings),
+            availability_projector=lambda model_id: _project_model_availability(
+                repository, settings, model_id,
+            ),
             parent_policy=parent_policy,
             self_hosted_gateway_provisioning_enabled=getattr(
                 settings, "self_hosted_gateway_provisioning_enabled", False,

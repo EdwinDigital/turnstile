@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import UUID
 
 import pytest
@@ -20,6 +20,7 @@ from backend.api import (
 )
 from backend.http.dependencies import get_repository
 from backend.http.publication_auth import require_publication_owner
+from backend.http.service_dependencies import model_availability_service
 from backend.http.session import SessionIdentity, require_authenticated_session
 from backend.services.runtime_service import ModelRuntimeService
 from tests.backend.model_platform.control_plane_support import (
@@ -31,10 +32,17 @@ from tests.backend.model_platform.test_image_publication import image_publicatio
 from turnstile_core.config import Settings
 from turnstile_core.domain.control_plane import GatewayPublication, GatewayPublicationCreate
 from turnstile_core.domain.gateway_targets import SelfHostedGatewayBootstrap
+from turnstile_core.domain.model_availability import (
+    ModelAvailabilityConflict,
+    ModelAvailabilityOperation,
+    ModelAvailabilityReadback,
+    ModelAvailabilityUnavailable,
+)
 from turnstile_core.integrations.apim_control_plane import ApimPolicyCompiler
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.control_plane import GatewayControlPlaneService
+from turnstile_core.services.model_availability import ModelAvailabilityService
 
 client = TestClient(app)
 
@@ -65,6 +73,137 @@ def publication_api() -> Iterator[InMemoryRepository]:
     app.dependency_overrides.pop(control_plane_service, None)
     app.dependency_overrides.pop(require_authenticated_session, None)
     app.dependency_overrides.pop(require_publication_owner, None)
+
+
+def test_availability_api_reports_uninstalled_storage_without_mutating_models(
+    publication_api: InMemoryRepository,
+) -> None:
+    before = deepcopy(publication_api.models)
+    response = client.get("/api/v1/model-management/model-availability")
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "model_availability_unavailable"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert publication_api.models == before
+
+
+def test_availability_api_returns_versioned_operation_without_claiming_effective_success(
+    publication_api: InMemoryRepository,
+) -> None:
+    model_id, operation_id, intent_id = UUID(int=20), UUID(int=21), UUID(int=22)
+    now = datetime.now(UTC)
+    operation = ModelAvailabilityOperation(
+        id=operation_id, model_id=model_id, idempotency_key=intent_id, expected_revision=1,
+        desired_revision=2, desired_enabled=False, created_by="owner@contoso.com",
+        created_at=now, updated_at=now, status="pending",
+    )
+    state = ModelAvailabilityReadback(
+        model_id=model_id, desired_enabled=False, desired_revision=2, status="pending",
+        effective_enabled=True, effective_revision=1, verified_at=now, operation=operation,
+    )
+    service = Mock(spec=ModelAvailabilityService)
+    service.inventory.return_value = [state]
+    service.read.return_value = state
+    service.change.return_value = operation
+    service.operation.return_value = operation
+    service.retry.return_value = operation
+    path = f"/api/v1/model-management/models/{model_id}/availability"
+    operations = f"/api/v1/model-management/model-availability/operations/{operation_id}"
+    payload = {"enabled": False, "expected_revision": 1, "idempotency_key": str(intent_id)}
+    with patch.dict(app.dependency_overrides, {model_availability_service: lambda: service}):
+        listed = client.get("/api/v1/model-management/model-availability")
+        readback = client.get(path)
+        accepted = client.put(path, json=payload)
+        progress = client.get(operations)
+        retry = client.post(operations + "/retry", json={"expected_revision": 2})
+    assert listed.json()["items"][0]["status"] == "pending"
+    assert readback.json()["effective_enabled"] is True
+    assert readback.json()["desired_enabled"] is False
+    for response in (accepted, retry):
+        assert response.status_code == 202
+        assert response.headers["Location"] == operations
+        assert response.json()["status_url"] == operations
+        assert response.json()["operation"]["status"] == "pending"
+    for response in (listed, readback, accepted, progress, retry):
+        assert response.headers["Cache-Control"] == "no-store"
+    service.change.assert_called_once()
+    assert service.change.call_args.args[0] == model_id
+    assert service.change.call_args.args[1].idempotency_key == intent_id
+    assert service.change.call_args.args[2] == "owner@contoso.com"
+    service.retry.assert_called_once_with(operation_id, 2, "owner@contoso.com")
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "model-availability"),
+    ("GET", f"models/{UUID(int=20)}/availability"),
+    ("PUT", f"models/{UUID(int=20)}/availability"),
+    ("GET", f"model-availability/operations/{UUID(int=21)}"),
+    ("POST", f"model-availability/operations/{UUID(int=21)}/retry"),
+])
+@pytest.mark.parametrize("access", ["anonymous", "member"])
+def test_availability_endpoints_require_owner_before_any_command(
+    publication_api: InMemoryRepository, method: str, path: str, access: str,
+) -> None:
+    owner = app.dependency_overrides[require_authenticated_session]()
+
+    def identity() -> SessionIdentity:
+        if access == "anonymous":
+            raise HTTPException(status_code=401, detail="Sign in required")
+        return SessionIdentity(id=owner.id, email=owner.email, name=owner.name, role="member",
+                               method=owner.method, session_expires_at=owner.session_expires_at)
+
+    service = Mock(spec=ModelAvailabilityService)
+    with patch.dict(app.dependency_overrides, {
+        require_authenticated_session: identity, model_availability_service: lambda: service,
+    }):
+        response = client.request(method, "/api/v1/model-management/" + path, json={})
+    assert response.status_code == (401 if access == "anonymous" else 403)
+    assert service.method_calls == []
+
+
+@pytest.mark.parametrize("method,path", [
+    ("PUT", f"models/{UUID(int=20)}/availability"),
+    ("POST", f"model-availability/operations/{UUID(int=21)}/retry"),
+])
+def test_availability_commands_reject_cross_origin(
+    publication_api: InMemoryRepository, method: str, path: str,
+) -> None:
+    response = client.request(method, "/api/v1/model-management/" + path,
+                              json={}, headers={"Origin": "https://foreign.example.test"})
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("change", [
+    {"enabled": "unit-secret"}, {"enabled": 1}, {"expected_revision": 1.5},
+    {"expected_revision": True}, {"expected_revision": 2147483648},
+    {"idempotency_key": "not-an-id"}, {"unexpected": "unit-secret"},
+])
+def test_availability_commands_reject_coercion_and_redact_validation_input(
+    publication_api: InMemoryRepository, change: dict[str, object],
+) -> None:
+    response = client.put(f"/api/v1/model-management/models/{UUID(int=20)}/availability", json={
+        "enabled": False, "expected_revision": 1, "idempotency_key": str(UUID(int=22)), **change,
+    })
+    assert response.status_code == 422
+    assert "unit-secret" not in response.text
+    assert all("input" not in issue for issue in response.json()["detail"])
+
+
+@pytest.mark.parametrize("error,status,code", [
+    (ModelAvailabilityConflict("Version changed"), 409, "model_availability_conflict"),
+    (ModelAvailabilityUnavailable("unit-secret"), 503, "model_availability_unavailable"),
+])
+def test_availability_command_failures_never_report_accepted_success(
+    publication_api: InMemoryRepository, error: Exception, status: int, code: str,
+) -> None:
+    service = Mock(spec=ModelAvailabilityService)
+    service.change.side_effect = error
+    with patch.dict(app.dependency_overrides, {model_availability_service: lambda: service}):
+        response = client.put(f"/api/v1/model-management/models/{UUID(int=20)}/availability", json={
+            "enabled": False, "expected_revision": 1, "idempotency_key": str(UUID(int=22)),
+        })
+    assert response.status_code == status and response.json()["detail"]["code"] == code
+    assert "unit-secret" not in response.text
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 def test_gateway_creation_api_generates_identity_and_retries_the_same_request(

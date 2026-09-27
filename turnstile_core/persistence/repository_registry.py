@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
 
+from ..domain.model_availability import ModelAvailabilityConflict
 from ..domain.models import ModelIdentity
 from ..domain.runtime_models import apply_databricks_adoption
 
@@ -674,7 +675,6 @@ class PostgreSqlRegistryRepositoryMixin:
                 "runtime_id",
                 "model_key",
                 "display_name",
-                "enabled",
                 "is_default",
                 "capabilities",
                 "context_window",
@@ -715,6 +715,15 @@ class PostgreSqlRegistryRepositoryMixin:
                     "SELECT pg_advisory_xact_lock(hashtextextended('model-pricing', 0))"
                 )
             if kind == "model":
+                current = connection.execute(
+                    "SELECT enabled FROM managed_model WHERE id = %s FOR UPDATE", (item_id,),
+                ).fetchone()
+                if current is None:
+                    return None
+                if "enabled" in values and values["enabled"] != current["enabled"]:
+                    raise ModelAvailabilityConflict(
+                        "Change model availability through the versioned availability command"
+                    )
                 removing = connection.execute(
                     """SELECT id FROM gateway_publication
                        WHERE publication_kind = 'model_remove'

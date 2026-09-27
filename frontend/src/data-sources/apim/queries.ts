@@ -1,6 +1,7 @@
 import { queryOptions, type QueryClient } from "@tanstack/react-query"
 
 import { cachePolicies } from "../../api/cache-policies"
+import { availabilityRefetchInterval } from "../../lib/model-availability"
 import { resolveTimezone } from "../../lib/timezone"
 import { dataSource, usageWindow } from "./api"
 import type {
@@ -81,6 +82,7 @@ export const finopsKeys = {
   all: ["finops"] as const,
   entities: ["reference", "enterprise-entities"] as const,
   registry: ["reference", "model-registry"] as const,
+  modelAvailability: ["model-platform", "model-availability"] as const,
   apimTargets: ["control-plane", "apim-targets"] as const,
   apimOnboarding: ["control-plane", "apim-onboarding"] as const,
   selfHostedGatewayProvisions: ["control-plane", "self-hosted-gateway-provisions"] as const,
@@ -235,6 +237,14 @@ export const finopsQueries = {
     queryKey: finopsKeys.registry,
     queryFn: dataSource.registry,
     ...cachePolicies.aggregate,
+  }),
+  modelAvailability: () => queryOptions({
+    queryKey: finopsKeys.modelAvailability,
+    queryFn: dataSource.modelAvailability,
+    retry: false,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+    refetchInterval: (query) => availabilityRefetchInterval(query.state.data?.items, query.state.error),
   }),
   modelBackendPool: (id: string | null) => queryOptions({
     queryKey: finopsKeys.modelBackendPool(id ?? ""),

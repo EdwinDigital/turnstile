@@ -947,6 +947,59 @@ export type ModelConnectionUpdate = {
 
 export type GatewayPublicationStatus = "queued" | "validating" | "provisioning" | "building_revision" | "verifying" | "awaiting_authorization" | "promoting" | "active" | "failed" | "superseded" | "rolling_back" | "rolled_back"
 
+export type ModelAvailabilityStatus = "pending" | "projected" | "partial" | "succeeded" | "failed" | "unknown"
+
+export type ModelAvailabilityTarget = {
+  target_id: string
+  inventory_digest: string
+  policy_digest: string | null
+  status: "pending" | "verified" | "failed" | "unknown"
+  observed_revision: number | null
+  observed_enabled: boolean | null
+  verified_at: string | null
+  reason: string | null
+}
+
+export type ModelAvailabilityOperation = {
+  id: string
+  model_id: string
+  idempotency_key: string
+  expected_revision: number
+  desired_revision: number
+  desired_enabled: boolean
+  created_by: string
+  created_at: string
+  updated_at: string
+  status: ModelAvailabilityStatus
+  targets: ModelAvailabilityTarget[]
+  projected_revision: number | null
+  projected_at: string | null
+  completed_at: string | null
+  error_code: string | null
+}
+
+export type ModelAvailabilityReadback = {
+  model_id: string
+  desired_enabled: boolean
+  desired_revision: number
+  effective_enabled: boolean | null
+  effective_revision: number | null
+  verified_at: string | null
+  status: ModelAvailabilityStatus
+  command_ready: boolean
+  reason: string | null
+  operation: ModelAvailabilityOperation | null
+}
+
+export type ModelAvailabilityCommand = {
+  enabled: boolean
+  expected_revision: number
+  idempotency_key: string
+}
+
+export type ModelAvailabilityList = { items: ModelAvailabilityReadback[] }
+export type ModelAvailabilityAccepted = { operation: ModelAvailabilityOperation; status_url: string }
+
 export type GatewayPublicationCreate = {
   gateway_profile_id: string
   deployment_scope?: { mode: "all" | "selected"; deployment_ids: string[] }

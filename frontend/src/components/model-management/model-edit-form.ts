@@ -207,7 +207,6 @@ export type ModelEditDraft = ModelPriceDraft & {
   displayName: string
   contextWindow: string
   allowedRoles: string[]
-  enabled: boolean
   isDefault: boolean
 }
 
@@ -215,7 +214,6 @@ export type ModelEditError =
   | "display_name"
   | "context_window"
   | "prices"
-  | "default_disabled"
   | "price_reference"
   | "discount"
   | "context_pricing_preview"
@@ -243,7 +241,6 @@ export function createModelEditDraft(model: ManagedModel, contextPricingSupporte
     cacheReadPrice: model.cached_cost_per_million?.toString() ?? "",
     cacheWritePrice: model.cache_write_cost_per_million?.toString() ?? "",
     allowedRoles: [...model.allowed_roles],
-    enabled: model.enabled,
     isDefault: model.is_default,
     priceSource: model.price_source ?? "manual",
     priceReference: model.price_reference ?? "",
@@ -311,12 +308,8 @@ export function toggleModelRole(roles: string[], role: string, checked: boolean)
   return checked ? [...new Set([...roles, role])] : roles.filter((value) => value !== role)
 }
 
-export function setModelEditEnabled(draft: ModelEditDraft, enabled: boolean): ModelEditDraft {
-  return { ...draft, enabled, isDefault: enabled && draft.isDefault }
-}
-
 export function setModelEditDefault(draft: ModelEditDraft, isDefault: boolean): ModelEditDraft {
-  return { ...draft, isDefault, enabled: isDefault || draft.enabled }
+  return { ...draft, isDefault }
 }
 
 /** Switching back to manual keeps the rates that were showing, so nothing silently blanks. */
@@ -413,11 +406,10 @@ export function validateModelEdit(draft: ModelEditDraft): ModelEditError | null 
   }
   const priceError = validateModelPricing(draft)
   if (priceError) return priceError
-  if (draft.isDefault && !draft.enabled) return "default_disabled"
   return null
 }
 
-export function validateModelPricing(draft: ModelPriceDraft): Exclude<ModelEditError, "display_name" | "context_window" | "default_disabled"> | null {
+export function validateModelPricing(draft: ModelPriceDraft): Exclude<ModelEditError, "display_name" | "context_window"> | null {
   const prices = [draft.inputPrice, draft.outputPrice, draft.cacheReadPrice, draft.cacheWritePrice]
   if (prices.some((value) => value.trim() && (!Number.isFinite(Number(value)) || Number(value) < 0))) {
     return "prices"
@@ -474,7 +466,6 @@ export function modelEditPayload(model: ManagedModel, draft: ModelEditDraft) {
     cached_cost_per_million: draft.contextPricingPreview ? null : optionalNumber(draft.cacheReadPrice),
     cache_write_cost_per_million: draft.contextPricingPreview ? null : optionalNumber(draft.cacheWritePrice),
     allowed_roles: [...draft.allowedRoles],
-    enabled: draft.enabled,
     is_default: draft.isDefault,
     price_source: draft.priceSource,
     price_reference: draft.priceSource === "manual" || draft.contextPricingPreview ? null : draft.priceReference.trim(),

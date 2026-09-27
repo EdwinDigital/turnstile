@@ -67,6 +67,16 @@ from turnstile_core.domain.gateway_targets import (
     SelfHostedGatewayWrite,
 )
 from turnstile_core.domain.images import ImageInvocationRequest, ImageInvocationResponse
+from turnstile_core.domain.model_availability import (
+    ModelAvailabilityAccepted,
+    ModelAvailabilityCommand,
+    ModelAvailabilityConflict,
+    ModelAvailabilityList,
+    ModelAvailabilityOperation,
+    ModelAvailabilityReadback,
+    ModelAvailabilityRetry,
+    ModelAvailabilityUnavailable,
+)
 from turnstile_core.domain.runtime_models import (
     DatabricksConnectionAdopt,
     GatewayProfileNameWrite,
@@ -111,6 +121,7 @@ from .service_dependencies import (
     ApplicationAccessServiceDependency,
     Authorization,
     ControlPlaneService,
+    ModelAvailabilityServiceDependency,
     RuntimeService,
 )
 from .session import (
@@ -131,6 +142,15 @@ class ModelPlatformRoute(APIRoute):
         async def credential_safe_handler(request: Request) -> Response:
             try:
                 return await handler(request)
+            except ModelAvailabilityConflict as error:
+                raise HTTPException(status_code=409, detail={
+                    "code": "model_availability_conflict", "message": str(error),
+                }, headers={"Cache-Control": "no-store"}) from None
+            except ModelAvailabilityUnavailable:
+                raise HTTPException(status_code=503, detail={
+                    "code": "model_availability_unavailable",
+                    "message": "Model availability could not be verified",
+                }, headers={"Cache-Control": "no-store"}) from None
             except RequestValidationError as error:
                 detail = [
                     {key: issue[key] for key in ("type", "loc", "msg") if key in issue}
@@ -159,6 +179,85 @@ def get_model_registry(
 ) -> RegistryResponse:
     service.authorize(identity.role, authorization, manage=False)
     return service.registry()
+
+
+@protected_router.get(
+    "/api/v1/model-management/model-availability", response_model=ModelAvailabilityList,
+)
+def list_model_availability(
+    service: ModelAvailabilityServiceDependency, identity: OwnerSession, response: Response,
+) -> ModelAvailabilityList:
+    del identity
+    response.headers["Cache-Control"] = "no-store"
+    return ModelAvailabilityList(items=service.inventory())
+
+
+@protected_router.get(
+    "/api/v1/model-management/models/{item_id}/availability",
+    response_model=ModelAvailabilityReadback,
+)
+def get_model_availability(
+    item_id: UUID, service: ModelAvailabilityServiceDependency,
+    identity: OwnerSession, response: Response,
+) -> ModelAvailabilityReadback:
+    del identity
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return service.read(item_id)
+    except LookupError:
+        raise HTTPException(
+            status_code=404, detail="Unknown model availability identity",
+            headers={"Cache-Control": "no-store"},
+        ) from None
+
+
+@protected_router.put(
+    "/api/v1/model-management/models/{item_id}/availability",
+    response_model=ModelAvailabilityAccepted, status_code=202,
+)
+def change_model_availability(
+    item_id: UUID, write: ModelAvailabilityCommand, service: ModelAvailabilityServiceDependency,
+    identity: OwnerSession, response: Response,
+) -> ModelAvailabilityAccepted:
+    operation = service.change(item_id, write, identity.email)
+    status_url = f"/api/v1/model-management/model-availability/operations/{operation.id}"
+    response.headers["Location"] = status_url
+    response.headers["Cache-Control"] = "no-store"
+    return ModelAvailabilityAccepted(operation=operation, status_url=status_url)
+
+
+@protected_router.get(
+    "/api/v1/model-management/model-availability/operations/{operation_id}",
+    response_model=ModelAvailabilityOperation,
+)
+def get_model_availability_operation(
+    operation_id: UUID, service: ModelAvailabilityServiceDependency,
+    identity: OwnerSession, response: Response,
+) -> ModelAvailabilityOperation:
+    del identity
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return service.operation(operation_id)
+    except LookupError:
+        raise HTTPException(
+            status_code=404, detail="Unknown model availability operation",
+            headers={"Cache-Control": "no-store"},
+        ) from None
+
+
+@protected_router.post(
+    "/api/v1/model-management/model-availability/operations/{operation_id}/retry",
+    response_model=ModelAvailabilityAccepted, status_code=202,
+)
+def retry_model_availability_operation(
+    operation_id: UUID, write: ModelAvailabilityRetry, service: ModelAvailabilityServiceDependency,
+    identity: OwnerSession, response: Response,
+) -> ModelAvailabilityAccepted:
+    operation = service.retry(operation_id, write.expected_revision, identity.email)
+    status_url = f"/api/v1/model-management/model-availability/operations/{operation.id}"
+    response.headers["Location"] = status_url
+    response.headers["Cache-Control"] = "no-store"
+    return ModelAvailabilityAccepted(operation=operation, status_url=status_url)
 
 
 @protected_router.get(

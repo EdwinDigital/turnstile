@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from functools import partial
@@ -53,6 +53,15 @@ from ..domain.gateway_targets import (
     GatewayHostnameConfigurationInventory,
 )
 from ..domain.image_profiles import ImageGenerationProfile, validate_image_profile
+from ..domain.model_availability import (
+    AVAILABILITY_CONFIRMATION_PARTITION,
+    ModelAvailabilityConfirmationPlan,
+    ModelAvailabilityCoverage,
+    ModelAvailabilityNodeEnrollment,
+    ModelAvailabilityState,
+    ModelAvailabilityTargetResult,
+    ModelAvailabilityUnavailable,
+)
 from ..integrations.reconciliation import ManagedIdentityTokenProvider
 from .apim_control_plane_contract import (
     AuthorizationRequiredError,
@@ -75,6 +84,8 @@ from .apim_control_plane_contract import (
 from .apim_policy_compiler import ApimPolicyCompiler
 from .apim_policy_components import parent_readback_matches
 from .apim_self_hosted_gateway import AzureSelfHostedGatewayManagementMixin
+from .ledger import TableStorageLedger
+from .model_availability_verifier import ModelAvailabilityGatewayVerifier
 
 
 class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
@@ -838,6 +849,30 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
         if journal is not None:
             journal.heartbeat()
 
+    def _probe_disabled_model(
+        self, base: str, headers: dict[str, str], binding: GatewayModelBinding,
+    ) -> None:
+        endpoint = {
+            ApiFormat.OPENAI_CHAT: "/chat/completions",
+            ApiFormat.ANTHROPIC_MESSAGES: "/v1/messages",
+            ApiFormat.OPENAI_IMAGES: "/images/generations",
+        }[binding.api_format]
+        self._probe_heartbeat()
+        response = self._client.post(
+            base + endpoint, headers=headers, json={"model": binding.model.model_key},
+            timeout=10, follow_redirects=False,
+        )
+        try:
+            try:
+                error = response.json()["error"]
+                valid = response.status_code == 403 and error["code"] == "model_disabled"
+            except (KeyError, TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise PolicyCompilationError("Disabled model was not rejected before dispatch")
+        finally:
+            response.close()
+
     def _probe_revision(
         self, revision: str, publication: GatewayPublication,
     ) -> tuple[GatewayEndpointProbeResult, ...]:
@@ -937,6 +972,16 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
         expected_models = [item for item in publication.desired_spec.discovery_models
                    if (binding := binding_by_alias.get(item.id.casefold())) is None
                    or self._binding_serves_gateway(binding, native_gateway_id)]
+        disabled_aliases: set[str] = set()
+        if publication.resource_manifest.get("model_availability") is not None:
+            states = publication.resource_manifest.get("availability_probe_states")
+            if not isinstance(states, dict) or any(
+                type(states.get(item.id)) is not bool
+                for item in publication.desired_spec.discovery_models
+            ):
+                raise PolicyCompilationError("Publication availability state is unverified")
+            disabled_aliases = {item.id for item in expected_models if states[item.id] is False}
+            expected_models = [item for item in expected_models if item.id not in disabled_aliases]
         expected = {item.id for item in expected_models}
         if not expected.issubset(discovered):
             raise RetryablePublicationError(
@@ -957,6 +1002,13 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
             raise RetryablePublicationError(
                 "Candidate revision still advertises the removed model"
             )
+        for disabled_binding in publication.desired_spec.bindings:
+            if disabled_binding.model.model_key in disabled_aliases:
+                self._probe_disabled_model(
+                    revision_path,
+                    self._model_probe_headers(publication, headers, disabled_binding.model.model_key),
+                    disabled_binding,
+                )
 
         regression = next(
             (
@@ -1024,6 +1076,7 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
             binding = publication.desired_spec.bindings[-1]
             if (
             self._binding_serves_gateway(binding, native_gateway_id)
+            and binding.model.model_key not in disabled_aliases
             and
                 binding.runtime_config.get("apim_backend_pool") is None
                 and binding.api_format is not ApiFormat.OPENAI_IMAGES
@@ -1052,6 +1105,7 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
                 for item in publication.desired_spec.bindings
                 if ApimPolicyCompiler._responses_backend_path(item) is not None
                 and self._binding_serves_gateway(item, native_gateway_id)
+                and item.model.model_key not in disabled_aliases
             ]
             for responses_binding in responses_bindings:
                 if (
@@ -1102,6 +1156,8 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
             )
             baseline_pool_ids: dict[ApiFormat, set[str]] = {}
             for pooled_binding in publication.desired_spec.bindings:
+                if pooled_binding.model.model_key in disabled_aliases:
+                    continue
                 pool = pooled_binding.backend_pool
                 if pool is None or not self._binding_serves_gateway(pooled_binding, native_gateway_id):
                     continue
@@ -1202,6 +1258,7 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
 
         for image_binding in publication.desired_spec.bindings:
             if (image_binding.api_format is not ApiFormat.OPENAI_IMAGES
+                    or image_binding.model.model_key in disabled_aliases
                     or not self._binding_serves_gateway(image_binding, native_gateway_id)):
                 continue
             profile = validate_image_profile(image_binding.model.image_profile)
@@ -2577,20 +2634,101 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
             raise PolicyCompilationError(f"APIM policy {path} returned no value")
         return value
 
-    def _list_all(self, path: str) -> list[dict[str, Any]]:
+    def verify_model_availability(
+        self, target_id: UUID, inventory_digest: str,
+        deployments: Sequence[Mapping[str, Any]], table_endpoint: str, table_name: str,
+        state_reader: Callable[[UUID], ModelAvailabilityState | None],
+        *, node_enrollment_reader: Callable[[], Sequence[ModelAvailabilityNodeEnrollment]] | None = None,
+    ) -> ModelAvailabilityCoverage:
+        with TableStorageLedger(table_endpoint, table_name, timeout=2) as store:
+            verifier = ModelAvailabilityGatewayVerifier(
+                target_id=target_id, api_id=self._settings.apim_api_id,
+                gateway_url=str(self._settings.apim_gateway_url),
+                table_endpoint=table_endpoint, table_name=table_name,
+                key=self._settings.apim_probe_subscription_key,
+                list_resources=lambda path: self._list_all(path, max_items=2000, max_pages=20),
+                read_policy=lambda path: self._policy_value(path + "?format=rawxml"),
+                client=self._client, state_reader=state_reader,
+                node_enrollment_reader=node_enrollment_reader, node_store=store,
+                resource_id=self._resource_id_base,
+            )
+            coverage = verifier.verify(inventory_digest, deployments)
+            plan = verifier.confirmation_plan
+            if plan is None:
+                raise ModelAvailabilityUnavailable("Verified confirmation plan is missing")
+            current = store.read_versioned_entity(plan.partition_key, plan.row_key)
+            if current is not None:
+                previous = ModelAvailabilityConfirmationPlan.from_entity(current[0])
+                if previous.coverage.verified_at > coverage.verified_at:
+                    raise ModelAvailabilityUnavailable("Confirmation plan advanced during audit")
+            if not store.replace_if_match(
+                plan.partition_key, plan.row_key, plan.entity(), current[1] if current else None,
+            ):
+                raise ModelAvailabilityUnavailable("Confirmation plan write lost its version")
+            observed = store.read_versioned_entity(plan.partition_key, plan.row_key)
+            if observed is None or ModelAvailabilityConfirmationPlan.from_entity(observed[0]) != plan:
+                raise ModelAvailabilityUnavailable("Confirmation plan changed after audit")
+            return coverage
+
+    def confirm_model_availability(
+        self, target_id: UUID, projected: ModelAvailabilityState, coverage: ModelAvailabilityCoverage,
+        deployments: Sequence[Mapping[str, Any]], table_endpoint: str, table_name: str,
+        read_states: Callable[[Sequence[UUID]], dict[UUID, ModelAvailabilityState]],
+        *, node_enrollment_reader: Callable[[], Sequence[ModelAvailabilityNodeEnrollment]],
+    ) -> ModelAvailabilityTargetResult:
+        if coverage.target_id != target_id or not coverage.current(datetime.now(UTC), coverage.inventory_digest):
+            raise ModelAvailabilityUnavailable("Availability coverage is stale or belongs to another target")
+        key = ModelAvailabilityConfirmationPlan.context_key(
+            self._resource_id_base, self._settings.apim_api_id,
+            str(self._settings.apim_gateway_url), table_endpoint, table_name,
+        )
+        with TableStorageLedger(table_endpoint, table_name, timeout=2) as store:
+            stored = store.read_versioned_entity(f"{AVAILABILITY_CONFIRMATION_PARTITION}|{target_id}", key)
+            if stored is None:
+                raise ModelAvailabilityUnavailable("Verified confirmation plan is unavailable")
+            plan = ModelAvailabilityConfirmationPlan.from_entity(stored[0])
+            if (
+                plan.coverage.policy_digest != coverage.policy_digest
+                or plan.coverage.inventory_digest != coverage.inventory_digest
+                or set(plan.coverage.serving_surfaces) != set(coverage.serving_surfaces)
+            ):
+                raise ModelAvailabilityUnavailable("Confirmation plan does not match current coverage")
+            return ModelAvailabilityGatewayVerifier(
+                resource_id=self._resource_id_base, target_id=target_id,
+                api_id=self._settings.apim_api_id, gateway_url=str(self._settings.apim_gateway_url),
+                table_endpoint=table_endpoint, table_name=table_name,
+                key=self._settings.apim_probe_subscription_key,
+                list_resources=lambda _path: [], read_policy=lambda _path: None,
+                client=self._client, state_reader=lambda model_id: read_states([model_id]).get(model_id),
+                node_enrollment_reader=node_enrollment_reader, node_store=store,
+            ).confirm(plan, projected, coverage.inventory_digest, deployments, read_states)
+
+    def _list_all(
+        self, path: str, *, max_items: int | None = None, max_pages: int | None = None,
+    ) -> list[dict[str, Any]]:
         response = self._request("GET", path)
         rows: list[dict[str, Any]] = []
+        pages = 0
+        seen_links: set[str] = set()
         while True:
+            pages += 1
             payload = response.json()
             values = payload.get("value")
             if not isinstance(values, list):
                 raise PolicyCompilationError(f"APIM list {path} returned no value array")
             rows.extend(value for value in values if isinstance(value, dict))
+            if max_items is not None and (
+                len(rows) > max_items or any(not isinstance(value, dict) for value in values)
+            ):
+                raise PolicyCompilationError("APIM bounded inventory is incomplete or too large")
             next_link = payload.get("nextLink")
             if not next_link:
                 return rows
             if not isinstance(next_link, str):
                 raise PolicyCompilationError("APIM returned an untrusted pagination URL")
+            if (max_pages is not None and pages >= max_pages) or next_link in seen_links:
+                raise PolicyCompilationError("APIM bounded pagination did not complete")
+            seen_links.add(next_link)
             parsed = urlparse(next_link)
             try:
                 port = parsed.port

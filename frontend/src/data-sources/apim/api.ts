@@ -52,6 +52,9 @@ import type {
   GatewayApplicationSubscriptionProvisionAccepted,
   MetricTotals,
   ModelConnectionCreate,
+  ModelAvailabilityAccepted,
+  ModelAvailabilityCommand,
+  ModelAvailabilityList,
   ModelConnectionUpdate,
   ModelInvocationResponse,
   ImageInvocationRequest,
@@ -455,6 +458,16 @@ export const dataSource = {
     { method: "DELETE" },
   ).then(normalizeRegistry),
   saveModel: (value: Record<string, unknown>, id?: string) => saveRegistry("/api/v1/model-management/models", value, id),
+  modelAvailability: () => request<ModelAvailabilityList>(
+    "/api/v1/model-management/model-availability", { cache: "no-store" },
+  ),
+  changeModelAvailability: (id: string, value: ModelAvailabilityCommand) => writeJson<ModelAvailabilityAccepted>(
+    `/api/v1/model-management/models/${encodeURIComponent(id)}/availability`, value, "PUT",
+  ),
+  retryModelAvailability: (operationId: string, revision: number) => writeJson<ModelAvailabilityAccepted>(
+    `/api/v1/model-management/model-availability/operations/${encodeURIComponent(operationId)}/retry`,
+    { expected_revision: revision },
+  ),
   priceCatalogModels: (query: string) => request<PriceCatalogModelsResponse>(
     `/api/v1/model-management/price-catalog/models?q=${encodeURIComponent(query)}`,
   ),

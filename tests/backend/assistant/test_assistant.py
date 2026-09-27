@@ -1158,9 +1158,7 @@ def test_automatic_selection_is_a_value_not_an_absence() -> None:
     assert back.model_available is True
 
 
-def test_a_model_that_stopped_qualifying_falls_back_instead_of_failing() -> None:
-    # Disabling the pinned model in Model Management must not turn every question into a
-    # 409. The fallback is only acceptable because the settings page can see it.
+def test_a_disabled_configured_model_never_falls_back() -> None:
     service, repository, sent = _service([_answer("答案。")])
     choices = service.settings().available_models
     picked = choices[-1]
@@ -1170,17 +1168,37 @@ def test_a_model_that_stopped_qualifying_falls_back_instead_of_failing() -> None
             model["enabled"] = False
 
     settings = service.settings()
-    service.ask(AssistantAskRequest(question="用量如何？"), user_id=USER, user_name=USER)
+    with pytest.raises(HTTPException) as error:
+        service.ask(AssistantAskRequest(question="用量如何？"), user_id=USER, user_name=USER)
 
     assert settings.model_id == picked.id
     assert settings.model_available is False
-    assert settings.effective_model_id != picked.id
-    assert sent[0]["model"] != picked.model_key
+    assert settings.effective_model_id is None
+    assert error.value.status_code == 409
+    assert sent == []
+    saved = service.save_settings(
+        AssistantSettingsWrite(model_id=picked.id, auto_title=False), USER,
+    )
+    assert saved.model_id == picked.id and saved.model_available is False
+    assert saved.auto_title is False
+
+
+def test_a_disabled_default_model_blocks_automatic_assistant_selection() -> None:
+    service, repository, sent = _service([])
+    selected = service.settings().available_models[0].id
+    for model in repository.models:
+        model["is_default"] = model["id"] == selected
+        if model["id"] == selected:
+            model["enabled"] = False
+    settings = service.settings()
+    assert settings.available_models
+    assert settings.effective_model_id is None and settings.model_available is False
+    with pytest.raises(HTTPException) as error:
+        service.ask(AssistantAskRequest(question="Usage?"), user_id=USER, user_name=USER)
+    assert error.value.status_code == 409 and sent == []
 
 
 def test_a_model_that_never_qualified_is_refused_rather_than_stored() -> None:
-    # Read-time fallback exists for a model that stopped qualifying later. Saving one that
-    # never did would leave a setting that silently does nothing from the moment it is set.
     service, repository, _ = _service([])
     disabled = next(model for model in repository.models if not model["enabled"])
 

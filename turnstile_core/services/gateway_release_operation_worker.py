@@ -19,6 +19,7 @@ from ..domain.gateway_targets import (
     ApimTargetArmInventory,
     SelfHostedGatewayProvisionSpec,
 )
+from ..domain.model_availability import ModelAvailabilityPublication, ModelAvailabilityState
 from ..integrations.apim_control_plane import (
     ApimPublisherClient,
     PolicyCompilationError,
@@ -29,6 +30,7 @@ from ..integrations.apim_control_plane_contract import (
     ResolvedApimPublisherClient,
     coerce_apim_publisher_client_resolver,
 )
+from ..integrations.apim_model_availability import compose_availability_parent
 from ..integrations.apim_policy_components import parse_policy, validate_parent_readback
 from ..persistence.repository import QueryRepository
 from ..security import CredentialCipher
@@ -57,6 +59,7 @@ class GatewayReleaseOperationWorker:
             [ApimTargetArmInventory, ApimPublisherClient, Callable[[], None]], tuple[str, ...]
         ] | None = None,
         self_hosted_gateway_provisioning_enabled: bool = False,
+        availability_projector: Callable[[UUID], ModelAvailabilityState] | None = None,
     ) -> None:
         self._repository = repository
         self._client_resolver = coerce_apim_publisher_client_resolver(client)
@@ -67,6 +70,7 @@ class GatewayReleaseOperationWorker:
         )
         self._cipher = cipher
         self._application_projector = application_projector
+        self._availability_projector = availability_projector
         self._onboarding_handler = onboarding_handler
         self._gateway_protocol_enrollment = gateway_protocol_enrollment
         self._self_hosted_gateway_provisioning_enabled = self_hosted_gateway_provisioning_enabled
@@ -561,9 +565,13 @@ class GatewayReleaseOperationWorker:
         if status == "restoring":
             self._restore(row, prior, worker_id)
 
-    def _validate_rollback_parent(self, publication: GatewayPublication) -> None:
+    def _validate_rollback_parent(self, publication: GatewayPublication) -> GatewayPublication:
         canonical_parent = self._parent_policy_overrides.get(
             publication.gateway_profile_id, self._parent_policy,
+        )
+        availability = publication.resource_manifest.get("model_availability")
+        availability_required = (
+            self._repository.model_availability_supported() or availability is not None
         )
         execution_enabled = canonical_parent is not None and parse_policy(canonical_parent).find(
             "./inbound/set-variable[@name='budgetExecutionVersion']"
@@ -575,19 +583,43 @@ class GatewayReleaseOperationWorker:
         ]
         if (not profiles and not publication.resource_manifest.get("images_generations_operation")
             and not execution_enabled
-            and not publication.resource_manifest.get("budget_contracts")):
-            return
+            and not publication.resource_manifest.get("budget_contracts")
+            and not availability_required):
+            return publication
         if canonical_parent is None:
             raise PolicyCompilationError(
             "Governed rollback requires the canonical parent policy contract"
             )
+        observed = self._client.revision_api_policy(self._revision(publication))
+        if availability_required:
+            if availability is None or parse_policy(observed).find(
+                "inbound/set-variable[@name='availabilityProtocolVersion']",
+            ) is None:
+                raise PolicyCompilationError(
+                    "Rollback cannot remove model availability enforcement"
+                )
+            snapshot = ModelAvailabilityPublication.model_validate(availability)
+            snapshot.validate_publication(publication)
+            if self._availability_projector is None:
+                raise PolicyCompilationError("Rollback availability projection is unavailable")
+            probe_states = {}
+            for alias, model_id in snapshot.models.items():
+                projected = self._availability_projector(model_id)
+                if projected.model_id != model_id:
+                    raise PolicyCompilationError("Rollback model availability identity changed")
+                probe_states[alias] = projected.enabled
+            publication = publication.model_copy(update={"resource_manifest": {
+                **publication.resource_manifest, "availability_probe_states": probe_states,
+            }})
+            canonical_parent = compose_availability_parent(canonical_parent)
         validate_parent_readback(
-            self._client.revision_api_policy(self._revision(publication)),
+            observed,
             canonical_parent,
             profiles,
             expected_contract=publication.resource_manifest.get("parent_policy_contract_sha256"),
             expected_raw=publication.resource_manifest.get("parent_policy_sha256"),
         )
+        return publication
 
     def _probe_release(
         self,
@@ -595,7 +627,7 @@ class GatewayReleaseOperationWorker:
         publication: GatewayPublication,
         worker_id: str,
     ) -> None:
-        self._validate_rollback_parent(publication)
+        publication = self._validate_rollback_parent(publication)
         if not any(binding.model.image_profile for binding in publication.desired_spec.bindings):
             self._client.probe_revision(self._revision(publication), publication)
             return

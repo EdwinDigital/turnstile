@@ -600,6 +600,32 @@
 .model-publication-status span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .model-publication-status.warning { color: var(--warning); }
 .model-publication-status.failed { color: var(--destructive); }
+.model-availability-status { appearance: none; display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; border: 0; padding: 0; background: transparent; color: var(--muted-foreground); font: inherit; font-size: 11px; line-height: 16px; text-align: left; }
+button.model-availability-status { cursor: pointer; }
+.model-availability-status > svg { flex: 0 0 12px; }
+.model-availability-status > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-availability-status.pending, .model-availability-status.projected { color: var(--brand); }
+.model-availability-status.partial { color: var(--warning); }
+.model-availability-status.failed { color: var(--destructive); }
+.model-availability-status:focus-visible { border-radius: 4px; outline: 2px solid var(--ring); outline-offset: 2px; }
+[data-slot="switch"].model-availability-toggle { width: 32px; height: 18px; flex: 0 0 32px; border: 0; padding: 1px; background: var(--input); }
+[data-slot="switch"].model-availability-toggle[data-checked] { background: var(--primary); }
+.model-availability-dialog { width: min(560px, calc(100vw - 32px)); padding: 0; gap: 0; }
+.model-availability-body { display: grid; gap: 16px; }
+.model-availability-summary { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.model-editor-state .model-availability-summary { gap: 8px; }
+.model-availability-facts { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.model-availability-facts > div { min-width: 0; display: grid; gap: 4px; }
+.model-availability-facts dt, .model-availability-operation > span { color: var(--muted-foreground); font-size: 11px; line-height: 16px; }
+.model-availability-facts dd { margin: 0; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.model-availability-operation { min-width: 0; display: grid; gap: 4px; }
+.model-availability-operation code { overflow-wrap: anywhere; font-size: 11px; line-height: 16px; }
+.model-availability-targets { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
+.model-availability-targets li { padding: 10px 0; border-top: 1px solid var(--border); }
+.model-availability-targets li > div { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px; font-size: 12px; }
+.model-availability-targets b { min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+.model-availability-targets small, .model-availability-targets p { color: var(--muted-foreground); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; }
+.model-availability-targets p { margin: 4px 0 0; }
 .model-publication-status:focus-visible { border-radius: 4px; outline: 2px solid var(--ring); outline-offset: 2px; }
 .publication-model-row { padding-block: 8px; background: color-mix(in oklch, var(--muted) 25%, transparent); }
 .machine-health.blocked, .machine-health.configuration, .machine-health.changed { color: var(--warning); }

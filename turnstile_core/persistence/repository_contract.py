@@ -22,6 +22,7 @@ from ..domain.ledger import (
     LedgerAdmissionReceipt,
     LedgerScopeType,
 )
+from ..domain.model_availability import ModelAvailabilityState
 from ..domain.models import (
     ApimCacheReadBucket,
     AuditFindingUpdate,
@@ -60,6 +61,12 @@ class OpsDbProxy(Protocol):
 
 
 class QueryRepository(ABC):
+    def model_availability_supported(self) -> bool:
+        return False
+
+    def get_model_availability_state(self, model_id: UUID) -> ModelAvailabilityState | None:
+        return None
+
     @abstractmethod
     def begin_platform_invocation(self, attempt: PlatformInvocationAttempt) -> None: ...
 

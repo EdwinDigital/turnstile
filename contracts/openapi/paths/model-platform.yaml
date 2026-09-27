@@ -1,4 +1,132 @@
 paths:
+  /api/v1/model-management/model-availability:
+    get:
+      tags: [Model Control Plane]
+      operationId: listModelAvailability
+      summary: Read desired and verified model availability
+      description: Owner-only consistent state and latest operation snapshot. Unknown or stale target coverage never becomes verified success.
+      security: [{sessionCookie: []}]
+      responses:
+        '200':
+          description: Model availability snapshots
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityList}
+        '401': {description: Authentication required}
+        '403': {description: Owner session required}
+        '503': {description: Model availability storage is unavailable}
+  /api/v1/model-management/models/{item_id}/availability:
+    parameters:
+    - name: item_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    get:
+      tags: [Model Control Plane]
+      operationId: getModelAvailability
+      summary: Read one model's desired and verified state
+      security: [{sessionCookie: []}]
+      responses:
+        '200':
+          description: Latest desired state and independent effective evidence
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityReadback}
+        '401': {description: Authentication required}
+        '403': {description: Owner session required}
+        '404': {description: Unknown model availability identity}
+        '503': {description: Model availability storage is unavailable}
+    put:
+      tags: [Model Control Plane]
+      operationId: changeModelAvailability
+      summary: Submit an idempotent versioned model availability command
+      description: Requires fresh coverage of every target, the current expected revision and a unique intent key. Returns an accepted operation, not effective success. Does not modify prices, default selection, assignments or budgets. Ordinary model PUT cannot change enabled.
+      security: [{sessionCookie: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityCommand}
+      responses:
+        '202':
+          description: Versioned operation accepted or exact intent replayed
+          headers:
+            Location:
+              schema: {type: string}
+              description: Relative status URL for the same operation
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityAccepted}
+        '401': {description: Authentication required}
+        '403': {description: Owner session and allowed write origin required}
+        '409': {description: 'Stale revision, conflicting intent, pending operation or removal'}
+        '422': {description: 'Invalid strict Boolean, revision or idempotency key'}
+        '503': {description: Availability storage or complete target coverage unavailable}
+  /api/v1/model-management/model-availability/operations/{operation_id}:
+    get:
+      tags: [Model Control Plane]
+      operationId: getModelAvailabilityOperation
+      summary: Read an immutable availability intent and its observed progress
+      security: [{sessionCookie: []}]
+      parameters:
+      - name: operation_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Operation and per-target evidence
+          headers:
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityOperation}
+        '401': {description: Authentication required}
+        '403': {description: Owner session required}
+        '404': {description: Unknown operation}
+        '503': {description: Model availability storage is unavailable}
+  /api/v1/model-management/model-availability/operations/{operation_id}/retry:
+    post:
+      tags: [Model Control Plane]
+      operationId: retryModelAvailabilityOperation
+      summary: Retry the same failed availability operation
+      description: Retains the original operation, intent and desired revision. Requires matching current revision and coverage; at most three manual retries are permitted.
+      security: [{sessionCookie: []}]
+      parameters:
+      - name: operation_id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityRetry}
+      responses:
+        '202':
+          description: Existing operation accepted for retry
+          headers:
+            Location:
+              schema: {type: string}
+            Cache-Control:
+              schema: {type: string, const: no-store}
+          content:
+            application/json:
+              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityAccepted}
+        '401': {description: Authentication required}
+        '403': {description: Owner session and allowed write origin required}
+        '409': {description: 'Revision changed, operation ineligible or retry limit reached'}
+        '422': {description: Invalid expected revision}
+        '503': {description: Availability storage or complete target coverage unavailable}
   /api/v1/model-management/gateways/{gateway_profile_id}/budget-readiness:
     post:
       operationId: checkGatewayBudgetReadiness

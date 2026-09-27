@@ -4,7 +4,7 @@ import hashlib
 import json
 import shutil
 import subprocess
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -15,6 +15,7 @@ from scripts.prepare_budget_execution import CutoverReadback, render_candidate
 from tests.backend.telemetry.test_atomic_ledger import EPOCH, NOW, completion, identity, summary
 from turnstile_core.domain.ledger import LedgerAdmissionReceipt, complete_ledger, reserve_ledger
 from turnstile_core.integrations import apim_budget_execution as compiler
+from turnstile_core.integrations import apim_model_availability as availability
 from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
 from turnstile_core.integrations.apim_policy_components import parse_policy
 
@@ -88,11 +89,16 @@ sealed class Response : IResponse {
     Body = new Body((string)source["body"]);
   }
 }
-sealed class Request { public Body Body; public Headers Headers = new Headers(); }
+sealed class Request {
+    public Body Body; public Headers Headers = new Headers(); public string Method = "POST";
+}
 sealed class Operation { public string Id; }
 sealed class Subscription { public string Id; }
 sealed class Api { public string Id = "unit-turnstile"; public string Revision = "candidate"; }
-sealed class Gateway { public string Id = "managed"; public bool IsManaged = true; }
+sealed class Gateway {
+    public string Id = "managed"; public bool IsManaged = true;
+    public string InstanceId = "managed";
+}
 sealed class Deployment {
   public Gateway Gateway = new Gateway();
   public string ServiceId = "unit-service"; public string Region = "unit-region";
@@ -103,7 +109,13 @@ sealed class Context {
   public Deployment Deployment = new Deployment(); public Subscription Subscription;
   public Guid RequestId = Guid.Parse("11111111-2222-3333-4444-555555555555");
   public Context(JObject source) {
-    Request = new Request { Body = new Body((string)source["body"] ?? "{}") };
+        Request = new Request {
+            Body = new Body((string)source["body"] ?? "{}"),
+            Method = (string)source["method"] ?? "POST"
+        };
+        Deployment.Gateway.Id = (string)source["gateway"] ?? "managed";
+        Deployment.Gateway.InstanceId = (string)source["instance"] ?? "managed";
+        Deployment.Gateway.IsManaged = Deployment.Gateway.Id == "managed";
         Response = new Response(new JObject(new JProperty("status", 200),
             new JProperty("headers", new JObject()),
             new JProperty("body", (string)source["response"] ?? "{}")));
@@ -119,7 +131,9 @@ sealed class Context {
       var value = item.Value;
       Variables[item.Name] = item.Name == "requestStarted"
         ? (object)DateTime.Parse((string)value).ToUniversalTime()
-                : item.Name == "budgetExecutionVersion" ? (object)(int)value
+                : item.Name == "budgetExecutionVersion"
+                    || item.Name == "availabilityProtocolVersion"
+                    ? (object)(int)value
         : value is JObject && value["__response"] != null ? new Response((JObject)value)
         : value is JValue ? ((JValue)value).Value : value;
     }
@@ -213,6 +227,8 @@ def compiled_expressions(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path
         if name.isupper() and isinstance(value, str) and value.startswith("@")
     }
     expressions.update(application_tpm_expressions().values())
+    expressions.update(value for name, value in vars(availability).items()
+                       if name.isupper() and isinstance(value, str) and value.startswith("@"))
     assembled = ET.Element("inbound")
     compiler._native_count(assembled)
     compiler._deny(assembled, "@(true)", "budget_request_invalid", cancel_preparing=True)
@@ -283,6 +299,172 @@ def run_cases(
     for case, evaluated in zip(cases, results, strict=True):
         assert evaluated["body_after"] == case["body"]
     return [result["value"] for result in results]
+
+
+@pytest.mark.parametrize("change,status,outcome", [
+    ({}, 200, "disabled"), ({"Enabled": True}, 200, "enabled"),
+    ({"Enabled": "true"}, 200, "unavailable"), ({"Revision": True}, 200, "unavailable"),
+    ({"Revision": 0}, 200, "unavailable"), ({"SchemaVersion": True}, 200, "unavailable"),
+    ({"ModelId": "other"}, 200, "unavailable"), ({"RowKey": "other"}, 200, "unavailable"),
+    ({"Lifecycle": "deleted", "Enabled": True}, 200, "unavailable"),
+    ({}, 404, "unavailable"), ({}, 503, "unavailable"),
+])
+def test_availability_state_expression_rejects_unknown_or_wrong_identity(
+    compiled_expressions: tuple[Path, str], tmp_path: Path,
+    change: dict[str, Any], status: int, outcome: str,
+) -> None:
+    model_id = "00000000-0000-0000-0000-000000000002"
+    entity = {"PartitionKey": "model-availability|v1", "RowKey": model_id,
+              "ModelId": model_id, "SchemaVersion": 1, "Revision": 2,
+              "Lifecycle": "active", "Enabled": False, **change}
+    result = run_cases(compiled_expressions, tmp_path, [{
+        "expression": expression_id(availability.READ_STATE), "body": "{}",
+        "variables": {"availabilityModelId": model_id, "availabilityRead": {
+            "__response": True, "status": status, "headers": {"ETag": '"unit"'},
+            "body": json.dumps(entity),
+        }},
+    }])[0]
+    assert json.loads(result)["outcome"] == outcome
+
+
+@pytest.mark.parametrize("method,operation,kind,accepted", [
+    ("POST", "chat-completions", "inference", False),
+    ("HEAD", "chat-completions", "inference", False),
+    ("HEAD", "availability-probe-chat-completions", "inference", True),
+    ("GET", "models", "catalog", True),
+])
+def test_availability_probe_cannot_bypass_normal_inference(
+    compiled_expressions: tuple[Path, str], tmp_path: Path,
+    method: str, operation: str, kind: str, accepted: bool,
+) -> None:
+    nonce = "0123456789abcdef0123456789abcdef"
+    result = run_cases(compiled_expressions, tmp_path, [{
+        "expression": expression_id(availability.PROBE_NONCE), "body": "{}", "method": method,
+        "operation": operation, "headers": {"x-turnstile-availability-probe": nonce},
+        "variables": {"availabilitySurfaceKind": kind},
+    }])[0]
+    assert result == (nonce if accepted else "")
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_availability_catalog_filters_actual_state_and_preserves_model_shape(
+    compiled_expressions: tuple[Path, str], tmp_path: Path, enabled: bool,
+) -> None:
+    model_id = "00000000-0000-0000-0000-000000000002"
+    result = json.loads(run_cases(compiled_expressions, tmp_path, [{
+        "expression": expression_id(availability.FILTER_CATALOG), "body": "{}",
+        "variables": {
+            "availabilityCatalogPage": json.dumps({"ok": True, "pages": 1,
+                "states": {model_id: {"enabled": enabled, "revision": 2}},
+                "next_partition": None, "next_row": None}),
+            "availabilityCatalogScope": json.dumps([
+                {"id": "unit-model", "owned_by": "unit-provider", "logical_model_id": model_id},
+            ]),
+        },
+    }])[0])
+    assert result["ok"] is True
+    assert result["body"]["data"] == (
+        [{"id": "unit-model", "owned_by": "unit-provider"}] if enabled else []
+    )
+    expected = f"{model_id}:2:{1 if enabled else 0}"
+    assert result["digest"] == hashlib.sha256(expected.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("change", [
+    {}, {"InstanceId": "other"}, {"CapabilityDigest": "other"}, {"ApiRevision": "other"},
+    {"SchemaVersion": True}, {"IssuedEpoch": "01"}, {"ExpiresEpoch": "1"},
+    {"IssuedEpoch": "999999999999"}, {"Lifetime": 180}, {"ETag": "*"},
+])
+def test_availability_native_node_lease_requires_exact_identity_and_short_lifetime(
+    compiled_expressions: tuple[Path, str], tmp_path: Path, change: dict[str, Any],
+) -> None:
+    now = int(datetime.now(UTC).timestamp())
+    target = "90000000-0000-4000-8000-000000000002"
+    key = hashlib.sha256(b'["candidate","edge","node-one"]').hexdigest()
+    entity = {
+        "PartitionKey": f"model-availability-nodes|v1|{target}|unit-turnstile",
+        "RowKey": key, "TargetId": target, "ApiId": "unit-turnstile", "ApiRevision": "candidate",
+        "NativeGatewayId": "edge", "InstanceId": "node-one", "CapabilityDigest": "a" * 64,
+        "SchemaVersion": 1, "IssuedEpoch": str(now - 1),
+        "ExpiresEpoch": str(now + change.get("Lifetime", 60)), **change,
+    }
+    actual = run_cases(compiled_expressions, tmp_path, [{
+        "expression": expression_id(availability.READ_NODE), "body": "{}",
+        "gateway": "edge", "instance": "node-one",
+        "variables": {"availabilityTargetId": target, "availabilityNodeKey": key,
+            "availabilityCapabilityDigest": "a" * 64, "availabilityNodeRead": {
+                "__response": True, "status": 200,
+                "headers": {"ETag": change.get("ETag", '"unit"')}, "body": json.dumps(entity),
+            }},
+    }])[0]
+    assert actual is (not change)
+
+
+@pytest.mark.parametrize("gateway,routes,body,expected", [
+    ("managed", None, {"model": " UNIT "}, True),
+    ("edge", ["edge"], {"model": "unit"}, True),
+    ("managed", ["edge"], {"model": "unit"}, False),
+    ("managed", None, {"model": 1}, False),
+    ("managed", None, {"model": "other"}, False),
+])
+def test_availability_native_alias_resolution_honors_serving_scope(
+    compiled_expressions: tuple[Path, str], tmp_path: Path,
+    gateway: str, routes: list[str] | None, body: dict[str, Any], expected: bool,
+) -> None:
+    model_id = "00000000-0000-0000-0000-000000000002"
+    result = run_cases(compiled_expressions, tmp_path, [{
+        "expression": expression_id(availability.RESOLVE_MODEL), "body": json.dumps(body),
+        "gateway": gateway, "variables": {"availabilityRoutes": json.dumps([
+            {"alias": "unit", "model_id": model_id, "gateways": routes},
+        ])},
+    }])[0]
+    assert result == (model_id if expected else "")
+
+
+@pytest.mark.parametrize("failure", ["duplicate", "foreign", "boolean", "revision", "continuation"])
+def test_availability_native_catalog_pages_reject_invalid_rows(
+    compiled_expressions: tuple[Path, str], tmp_path: Path, failure: str,
+) -> None:
+    model_id = "00000000-0000-0000-0000-000000000002"
+    entity = {"PartitionKey": "model-availability|v1", "RowKey": model_id, "ModelId": model_id,
+              "SchemaVersion": 1, "Revision": 2, "Enabled": False, "Lifecycle": "active"}
+    if failure == "foreign":
+        entity["PartitionKey"] = "other"
+    if failure == "boolean":
+        entity["Enabled"] = "false"
+    if failure == "revision":
+        entity["Revision"] = 2147483648
+    result = run_cases(compiled_expressions, tmp_path, [{
+        "expression": expression_id(availability.CATALOG_PAGE), "body": "{}",
+        "variables": {
+            "availabilityCatalogPage": json.dumps({"ok": True, "pages": 0, "states": {}}),
+            "availabilityCatalogRead": {"__response": True, "status": 200,
+                "headers": {"x-ms-continuation-NextRowKey": "next"}
+                if failure == "continuation" else {},
+                "body": json.dumps({
+                    "value": [entity, entity] if failure == "duplicate" else [entity],
+                })},
+        },
+    }])[0]
+    assert json.loads(result) == {"ok": False}
+
+
+@pytest.mark.parametrize("failure", ["incomplete", "missing", "failed"])
+def test_availability_native_catalog_never_returns_partial_success(
+    compiled_expressions: tuple[Path, str], tmp_path: Path, failure: str,
+) -> None:
+    model_id = "00000000-0000-0000-0000-000000000002"
+    page = {"ok": failure != "failed", "pages": 4,
+            "next_partition": "next" if failure == "incomplete" else None, "next_row": None,
+            "states": {} if failure == "missing" else {model_id: {"revision": 2, "enabled": False}}}
+    result = run_cases(compiled_expressions, tmp_path, [{
+        "expression": expression_id(availability.FILTER_CATALOG), "body": "{}",
+        "variables": {"availabilityCatalogPage": json.dumps(page),
+                      "availabilityCatalogScope": json.dumps([
+                          {"id": "unit", "logical_model_id": model_id},
+                      ])},
+    }])[0]
+    assert json.loads(result) == {"ok": False}
 
 
 def test_execution_retains_configured_public_application_tpm(

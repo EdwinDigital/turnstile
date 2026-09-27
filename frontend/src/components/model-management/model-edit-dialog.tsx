@@ -1,7 +1,7 @@
 import { LoaderCircle, Save, X } from "lucide-react"
 import { useId, useState, type FormEvent } from "react"
 
-import type { ManagedModel, ModelRegistry } from "../../data-sources/apim/types"
+import type { ManagedModel, ModelAvailabilityReadback, ModelRegistry } from "../../data-sources/apim/types"
 import {
   GatewayBrandLogo,
   ProviderBrandLogo,
@@ -15,6 +15,7 @@ import {
 } from "../ui/dialog"
 import { Input } from "../ui/input"
 import { FieldHelp } from "./field-help"
+import { ModelAvailabilityStatus, ModelAvailabilitySwitch, useModelAvailabilityCommand } from "./model-availability"
 import { ModelPriceSourceFields } from "./model-price-source"
 import { ModelVendorLogo } from "./model-vendor-select"
 import { modelVendorFromMetadata, modelVendorLabel } from "./openai-compatible"
@@ -24,7 +25,6 @@ import {
   modelEditPayload,
   modelEditRoleOptions,
   setModelEditDefault,
-  setModelEditEnabled,
   toggleModelRole,
   validateModelEdit,
   type ModelEditDraft,
@@ -35,7 +35,6 @@ const VALIDATION_MESSAGES: Record<ModelEditError, string> = {
   display_name: "显示名称须为 1–255 个字符。",
   context_window: "上下文窗口须为正整数，或留空。",
   prices: "单价须为非负有限数字，或留空。",
-  default_disabled: "默认模型必须启用。",
   price_reference: "跟随官方价时，必须先选定一个官方价基准。",
   context_pricing_preview: "当前后端尚不支持分档计费，暂不可保存或发布。",
   context_pricing_incomplete: "分档价格或阈值不完整，不能保存。",
@@ -66,15 +65,17 @@ function ModelEditNumberField({ id, label, unit, value, onChange, busy, integer 
   </div>
 }
 
-export function ModelEditDialog({ registry, model, busy, error, onClose, onSave }: {
+export function ModelEditDialog({ registry, model, availability, busy, error, onClose, onSave }: {
   registry: ModelRegistry
   model: ManagedModel
+  availability?: ModelAvailabilityReadback
   busy: boolean
   error: string | null
   onClose: () => void
   onSave: (value: ReturnType<typeof modelEditPayload>) => void
 }) {
   const id = useId()
+  const availabilityAction = useModelAvailabilityCommand(model.id, availability)
   const [initial] = useState(() => createModelEditDraft(model, registry.context_pricing_supported === true, registry.context_price_rules_supported === true))
   const [draft, setDraft] = useState<ModelEditDraft>(initial)
   const [submitted, setSubmitted] = useState(false)
@@ -168,11 +169,11 @@ export function ModelEditDialog({ registry, model, busy, error, onClose, onSave 
           <section className="simple-model-section simple-connection-section" aria-labelledby={`${id}-access`}>
             <div className="simple-section-title"><b id={`${id}-access`}>状态与访问</b></div>
             <div className="model-editor-state">
-              <label className="model-editor-checkbox"><Checkbox checked={draft.enabled} disabled={busy}
-                onCheckedChange={(checked) => setDraft((current) => setModelEditEnabled(current, checked))} /><span>启用</span></label>
+              <div className="model-availability-summary"><ModelAvailabilityStatus readback={availability} pending={availabilityAction.inFlight} error={availabilityAction.error} /><ModelAvailabilitySwitch readback={availability} registryEnabled={model.enabled} pending={availabilityAction.inFlight} disabled={busy} onChange={availabilityAction.change} /></div>
               <div className="registry-field-label-row"><label className="model-editor-checkbox"><Checkbox checked={draft.isDefault} disabled={busy || imageGeneration}
                 onCheckedChange={(checked) => setDraft((current) => setModelEditDefault(current, checked))} /><span>设为默认</span></label><FieldHelp>{imageGeneration ? "图片模型不能设为聊天默认" : "设为整个模型目录的默认模型，并将其连接设为默认；不改变网关路由优先级。"}</FieldHelp></div>
             </div>
+            {availabilityAction.error && <div className="registry-error" role="alert">{availabilityAction.error}</div>}
             <details className="model-editor-advanced">
               <summary>高级访问限制</summary>
               <div className="model-editor-advanced-body">

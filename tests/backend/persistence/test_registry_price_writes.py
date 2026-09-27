@@ -153,7 +153,7 @@ def test_creating_a_connection_keeps_the_discount_off_model_runtime() -> None:
 
 def test_updating_a_price_does_not_update_managed_model() -> None:
     model_id = uuid4()
-    proxy, recorder = proxy_with([None, model_row(model_id), None])
+    proxy, recorder = proxy_with([{"enabled": False}, None, model_row(model_id), None])
 
     proxy.update_registry_item("model", model_id, {
         "price_source": "azure_retail",
@@ -167,7 +167,7 @@ def test_updating_a_price_does_not_update_managed_model() -> None:
 def test_a_price_edit_arriving_alone_is_still_applied() -> None:
     """Pricing a model is the one edit that always arrives on its own: no other field moves."""
     model_id = uuid4()
-    proxy, recorder = proxy_with([None, model_row(model_id), None])
+    proxy, recorder = proxy_with([{"enabled": False}, None, model_row(model_id), None])
 
     result = proxy.update_registry_item("model", model_id,
                                         {"price_discount_percent": 66})
@@ -180,6 +180,7 @@ def test_going_back_to_manual_drops_the_catalog_reference() -> None:
     """Otherwise the model reads as "following gpt 4.1 mini" while charging a typed number."""
     model_id = uuid4()
     proxy, recorder = proxy_with([
+        {"enabled": False},
         None,
         model_row(model_id),
         {"price_source": "azure_retail", "price_reference": "azure_retail:x:y:Global:*",
@@ -194,10 +195,12 @@ def test_going_back_to_manual_drops_the_catalog_reference() -> None:
 
 def test_an_edit_that_names_no_price_field_writes_no_price_row() -> None:
     model_id = uuid4()
-    proxy, recorder = proxy_with([None, model_row(model_id)])
+    proxy, recorder = proxy_with([{"enabled": False}, None, model_row(model_id)])
 
-    proxy.update_registry_item("model", model_id, {"display_name": "renamed"})
+    result = proxy.update_registry_item("model", model_id, {"display_name": "renamed"})
 
+    assert result is not None
+    assert recorder.writes_to("managed_model")
     assert recorder.writes_to("managed_model_price") == []
 
 
@@ -211,14 +214,14 @@ def test_catalog_save_persists_the_accepted_baseline_and_preserves_metadata_edit
         "pending_list_price": None, "pending_context_price_tiers": None,
         "price_sync_status": "ok", "price_sync_message": None,
     }
-    proxy, recorder = proxy_with([None, model_row(model_id), None])
+    proxy, recorder = proxy_with([{"enabled": False}, None, model_row(model_id), None])
     result = proxy.update_registry_item("model", model_id, baseline)
     assert result is not None
     for field, value in baseline.items():
         assert result[field] == value
     statement = recorder.writes_to("managed_model_price")[0]
     assert "list_input_cost_per_million = EXCLUDED.list_input_cost_per_million" in statement
-    proxy, _recorder = proxy_with([None, model_row(model_id), baseline])
+    proxy, _recorder = proxy_with([{"enabled": False}, None, model_row(model_id), baseline])
     result = proxy.update_registry_item("model", model_id, {"price_discount_percent": 90})
     assert result is not None and result["list_input_cost_per_million"] == 3
 

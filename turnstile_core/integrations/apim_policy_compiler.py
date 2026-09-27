@@ -23,6 +23,7 @@ from ..domain.control_plane import (
         StreamingMode,
 )
 from ..domain.image_profiles import validate_image_profile
+from ..domain.model_availability import ModelAvailabilityPublication
 from ..domain.runtime_models import BrandKey
 from .apim_control_plane_contract import (
         BackendCircuitBreakerResource,
@@ -36,6 +37,7 @@ from .apim_control_plane_contract import (
         PolicyCompilationError,
 )
 from .apim_image_policy import IMAGE_OPERATION_ID, IMAGE_POLICY_VERSION, image_request_validation
+from .apim_model_availability import AVAILABILITY_PROBE_PREFIX, compile_availability_operation
 from .apim_policy_components import parse_policy, serialize_policy, upgrade_application_tpm_policy
 
 
@@ -313,6 +315,34 @@ class ApimPolicyCompiler:
             for item in publication.desired_spec.removed_models
         )
         image_policy = self._images_policy(publication, backend_ids) if includes_images else None
+        operations = [
+            OperationResource(IMAGE_OPERATION_ID, "Image generations", "POST", "/images/generations")
+        ] if image_policy is not None else []
+        probe_policies: list[tuple[str, str]] = []
+        availability = publication.resource_manifest.get("model_availability")
+        if availability is not None:
+            snapshot = ModelAvailabilityPublication.model_validate(availability)
+            snapshot.validate_publication(publication)
+            chat_completions, responses, responses_compact, messages, count_tokens = (
+                compile_availability_operation(policy, publication, snapshot)
+                for policy in (chat_completions, responses, responses_compact, messages, count_tokens)
+            )
+            models = compile_availability_operation(models, publication, snapshot, catalog=True)
+            if image_policy is not None:
+                image_policy = compile_availability_operation(image_policy, publication, snapshot)
+            diagnostic_surfaces = [
+                ("chat-completions", "/chat/completions", chat_completions),
+                ("responses", "/responses", responses),
+                ("responses-compact", "/responses/compact", responses_compact),
+                ("anthropic-messages", "/v1/messages", messages),
+                ("anthropic-count-tokens", "/v1/messages/count_tokens", count_tokens),
+            ]
+            if image_policy is not None:
+                diagnostic_surfaces.append((IMAGE_OPERATION_ID, "/images/generations", image_policy))
+            for operation_id, path, policy in diagnostic_surfaces:
+                probe_id = AVAILABILITY_PROBE_PREFIX + operation_id
+                operations.append(OperationResource(probe_id, "Availability " + operation_id, "HEAD", path))
+                probe_policies.append((probe_id, policy))
         for value in (
             chat_completions,
             responses,
@@ -333,6 +363,7 @@ class ApimPolicyCompiler:
                     count_tokens,
                     models,
                     *([image_policy] if image_policy is not None else []),
+                    *(policy for _operation_id, policy in probe_policies),
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -348,13 +379,8 @@ class ApimPolicyCompiler:
             named_values=tuple(named_values.values()),
             oauth_credentials=tuple(oauth_credentials.values()),
             images_generations_policy=image_policy,
-            operations=(
-                OperationResource(
-                    IMAGE_OPERATION_ID, "Image generations", "POST", "/images/generations"
-                ),
-            )
-            if image_policy is not None
-            else (),
+            operations=tuple(operations),
+            availability_probe_policies=tuple(probe_policies),
         )
 
     @staticmethod

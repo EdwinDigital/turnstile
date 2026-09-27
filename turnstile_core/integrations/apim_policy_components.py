@@ -453,6 +453,20 @@ def validate_parent_policy(
         parse_policy(without_slots(upgrade_application_tpm_policy(source))),
         parse_policy(without_slots(upgrade_application_tpm_policy(canonical_parent))),
     )
+    availability = root.find(".//set-variable[@name='availabilityProtocolVersion']")
+    expected_availability = template.find(".//set-variable[@name='availabilityProtocolVersion']")
+    if availability is not None or expected_availability is not None:
+        from .apim_model_availability import without_availability_parent
+
+        if availability is None or expected_availability is None:
+            raise PolicyCompilationError(
+                "Model availability requires a compatible canonical parent"
+            )
+        validate_parent_policy(
+            serialize_policy(without_availability_parent(root)),
+            serialize_policy(without_availability_parent(template)), profiles,
+        )
+        return upgrade_application_tpm_policy(source)
     for policy in (root, template):
         if policy.tag != "policies" or [
             node.tag for node in policy if isinstance(node.tag, str)

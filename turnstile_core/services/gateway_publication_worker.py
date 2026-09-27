@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -20,6 +20,7 @@ from ..domain.control_plane import (
     publication_model_id,
 )
 from ..domain.image_profiles import validate_image_profile
+from ..domain.model_availability import ModelAvailabilityPublication, ModelAvailabilityState
 from ..integrations.apim_control_plane import (
     ApimPolicyCompiler,
     ApimPublisherClient,
@@ -34,6 +35,7 @@ from ..integrations.apim_control_plane_contract import (
     ResolvedApimPublisherClient,
     coerce_apim_publisher_client_resolver,
 )
+from ..integrations.apim_model_availability import compose_availability_parent
 from ..integrations.apim_policy_components import (
     component_digest,
     parse_policy,
@@ -44,6 +46,7 @@ from ..integrations.apim_policy_components import (
 from ..persistence.repository import QueryRepository
 from ..security import CredentialCipher
 from .control_plane import GatewayControlPlaneService
+from .model_availability import ModelAvailabilityRepository
 from .probe_journal import PersistentProbeJournal
 from .worker_lease import WorkerLease
 
@@ -72,12 +75,14 @@ class GatewayPublicationWorker:
         models_operation_id: str = "anthropic-models",
         parent_policy_overrides: Mapping[UUID, str] | None = None,
         budget_configuration: Callable[[UUID], Mapping[str, object]] | None = None,
+        availability_projector: Callable[[UUID], ModelAvailabilityState] | None = None,
     ) -> None:
         self._repository = repository
         self._client_resolver = coerce_apim_publisher_client_resolver(client)
         self._parent_policy = parent_policy
         self._parent_policy_overrides = dict(parent_policy_overrides or {})
         self._budget_configuration = budget_configuration
+        self._availability_projector = availability_projector
         self._compiler = compiler or ApimPolicyCompiler()
         self._cipher = cipher
         self._chat_completions_operation_id = chat_completions_operation_id
@@ -252,6 +257,41 @@ class GatewayPublicationWorker:
                 )
             }
         )
+        observed_current: tuple[str, str] | None = None
+        availability_snapshot = publication.resource_manifest.get("model_availability")
+        if self._repository.model_availability_supported() and availability_snapshot is None:
+            if status != "queued":
+                raise PolicyCompilationError("In-flight publication requires availability identity")
+            observed_current = client.current_api_policy()
+            if parse_policy(observed_current[1]).find(
+                "inbound/set-variable[@name='availabilityProtocolVersion']",
+            ) is None:
+                raise PolicyCompilationError("Publication requires installed model availability")
+            target = self._repository.get_apim_target(publication.gateway_profile_id)
+            if target is None:
+                raise PolicyCompilationError("Availability requires a registered APIM identity")
+            availability_snapshot = ModelAvailabilityPublication.capture(
+                routed_publication, registry, str(target["api_id"]),
+            ).model_dump(mode="json")
+        snapshot_availability = None
+        if availability_snapshot is not None:
+            snapshot_availability = ModelAvailabilityPublication.model_validate(
+                availability_snapshot,
+            )
+            snapshot_availability.validate_publication(routed_publication)
+            availability_manifest = {
+                **publication.resource_manifest,
+                "model_availability": snapshot_availability.model_dump(mode="json"),
+            }
+            publication = publication.model_copy(
+                update={"resource_manifest": availability_manifest},
+            )
+            routed_publication = routed_publication.model_copy(
+                update={"resource_manifest": availability_manifest},
+            )
+            canonical_parent = compose_availability_parent(canonical_parent)
+            if self._availability_projector is None and not already_promoted:
+                raise PolicyCompilationError("Availability publication projection is unavailable")
         execution_enabled = parse_policy(canonical_parent).find(
             "./inbound/set-variable[@name='budgetExecutionVersion']"
         ) is not None
@@ -291,10 +331,26 @@ class GatewayPublicationWorker:
             )
         elif publication.resource_manifest.get("budget_contracts") is not None:
             raise PolicyCompilationError("Budget contract publication requires an execution parent")
+        if (snapshot_availability is not None and status in {"verifying", "promoting"}
+                and not already_promoted):
+            if self._availability_projector is None:
+                raise PolicyCompilationError("Availability publication projection is unavailable")
+            availability_repository = cast(ModelAvailabilityRepository, self._repository)
+            probe_states = {}
+            for alias, model_id in snapshot_availability.models.items():
+                availability_repository.stage_model_availability(model_id, publication.id)
+                projected = self._availability_projector(model_id)
+                if projected.model_id != model_id or projected.lifecycle == "deleted":
+                    raise PolicyCompilationError("Publication availability identity is not current")
+                probe_states[alias] = projected.enabled
+            routed_publication = routed_publication.model_copy(update={"resource_manifest": {
+                **routed_publication.resource_manifest, "availability_probe_states": probe_states,
+            }})
         compiler = self._compiler_for(publication, resolved)
         compiled = compiler.compile(routed_publication)
         client.verify_publication_permissions(compiled, recovery_only=already_promoted)
-        if (execution_enabled and status in {"verifying", "promoting"}
+        if ((execution_enabled or snapshot_availability is not None)
+            and status in {"verifying", "promoting"}
                 and publication.policy_sha256 != compiled.policy_sha256):
             raise PolicyCompilationError("Candidate policy no longer matches the active compiler")
         profiles = [
@@ -305,8 +361,9 @@ class GatewayPublicationWorker:
         image_release = compiled.images_generations_policy is not None
         updates: dict[str, Any] = {}
         if status == "queued":
-            base_revision, live_policy = client.current_api_policy()
-            if execution_enabled or image_release or "imageGenerationPolicyVersion" in live_policy:
+            base_revision, live_policy = observed_current or client.current_api_policy()
+            if (execution_enabled or image_release or snapshot_availability is not None
+                    or "imageGenerationPolicyVersion" in live_policy):
                 validate_parent_policy(live_policy, canonical_parent, profiles)
             else:
                 compiler.patch_parent_policy(canonical_parent)
@@ -392,7 +449,7 @@ class GatewayPublicationWorker:
                 )
             parent = (
                 validate_parent_policy(live_policy, canonical_parent, profiles)
-                if (execution_enabled or image_release
+                if (execution_enabled or image_release or snapshot_availability is not None
                     or "imageGenerationPolicyVersion" in live_policy)
                 else compiler.patch_parent_policy(live_policy)
             )
@@ -402,6 +459,8 @@ class GatewayPublicationWorker:
             client.put_api_policy(publication.apim_revision, parent)
             for operation in compiled.operations:
                 client.ensure_operation(publication.apim_revision, operation)
+            for operation_id, policy in compiled.availability_probe_policies:
+                client.put_operation_policy(publication.apim_revision, operation_id, policy)
             client.put_operation_policy(
                 publication.apim_revision,
                 self._chat_completions_operation_id,
@@ -448,7 +507,7 @@ class GatewayPublicationWorker:
                             parse_policy(parent), normalize_text_defaults=False
                         ),
                     }
-                    if image_release or execution_enabled
+                    if image_release or execution_enabled or snapshot_availability is not None
                     else {}
                 ),
                 **({"images_generations_operation": True} if image_release else {}),
@@ -456,7 +515,7 @@ class GatewayPublicationWorker:
         elif status == "verifying":
             if not publication.apim_revision:
                 raise RuntimeError("Publication is missing its APIM revision")
-            if image_release or execution_enabled:
+            if image_release or execution_enabled or snapshot_availability is not None:
                 validate_parent_readback(
                     client.revision_api_policy(publication.apim_revision),
                     canonical_parent,
@@ -509,7 +568,7 @@ class GatewayPublicationWorker:
                 raise RuntimeError("Publication is missing its APIM revision")
             if heartbeat:
                 heartbeat()
-            if image_release or execution_enabled:
+            if image_release or execution_enabled or snapshot_availability is not None:
                 validate_parent_readback(
                     client.revision_api_policy(publication.apim_revision),
                     canonical_parent,

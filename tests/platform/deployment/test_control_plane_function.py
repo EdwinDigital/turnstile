@@ -19,6 +19,7 @@ from tests.backend.model_platform.test_apim_target_inventory import arm_inventor
 from tests.backend.model_platform.test_gateway_targets import TARGET
 from tests.support.paths import REPOSITORY_ROOT
 from turnstile_core.config import Settings
+from turnstile_core.domain.model_availability import ModelAvailabilityState
 from turnstile_core.integrations.apim_onboarding_policy import render_onboarding_parent
 from turnstile_core.integrations.apim_policy_components import validate_parent_policy
 from turnstile_core.persistence import factory
@@ -103,6 +104,97 @@ def test_protocol_enrollment_only_uses_enabled_target_configuration(
             before_write=before_write,
         )
         ledger.__exit__.assert_called_once()
+
+
+@pytest.mark.parametrize("mode", ["off", "no_store", "no_migration"])
+def test_availability_timer_skips_unsupported_configuration(
+    monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    settings = Settings.model_construct(
+        control_plane_enabled=mode != "off",
+        ledger_table_endpoint=None if mode == "no_store" else "https://unit.table.core.windows.net",
+    )
+    repository = MagicMock()
+    repository.model_availability_supported.return_value = False
+    repository_factory, coordinator = MagicMock(return_value=repository), MagicMock()
+    monkeypatch.setattr(function_app, "get_settings", lambda: settings)
+    monkeypatch.setattr(factory, "create_repository", repository_factory)
+    monkeypatch.setattr(function_app, "ModelAvailabilityCoordinator", coordinator)
+    function_app.synchronize_model_availability(None)
+    function_app.refresh_model_availability_coverage(None)
+    coordinator.assert_not_called()
+    if mode == "no_migration":
+        assert repository.close.call_count == 2
+    else:
+        repository_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("audit", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+def test_availability_timers_bind_scoped_clients_and_always_close_repository(
+    monkeypatch: pytest.MonkeyPatch, audit: bool, fails: bool,
+) -> None:
+    settings = Settings.model_construct(
+        control_plane_enabled=True, ledger_table_endpoint="https://unit.table.core.windows.net",
+        ledger_table_name="Unit",
+    )
+    repository, coordinator, worker, clients, configs, store = (MagicMock() for _index in range(6))
+    repository.model_availability_supported.return_value = True
+    coordinator_factory = MagicMock(return_value=coordinator)
+    worker_factory = MagicMock(return_value=worker)
+    config_factory = MagicMock(return_value=configs)
+    store_factory = MagicMock(return_value=store)
+    monkeypatch.setattr(function_app, "get_settings", lambda: settings)
+    monkeypatch.setattr(factory, "create_repository", lambda _settings: repository)
+    monkeypatch.setattr(function_app, "apim_target_client_config_resolver", config_factory)
+    monkeypatch.setattr(function_app, "AzureApimPublisherClientResolver", lambda _configs: clients)
+    monkeypatch.setattr(function_app, "ModelAvailabilityCoordinator", coordinator_factory)
+    monkeypatch.setattr(function_app, "ModelAvailabilityWorker", worker_factory)
+    monkeypatch.setattr(function_app, "TableStorageLedger", store_factory)
+    action = coordinator.refresh if audit else worker.run_once
+    if fails:
+        action.side_effect = RuntimeError("unit failure")
+        with pytest.raises(RuntimeError, match="unit failure"):
+            function_app._run_model_availability(audit=audit)
+    else:
+        function_app._run_model_availability(audit=audit)
+    repository.close.assert_called_once()
+    config_factory.assert_called_once_with(repository, settings)
+    coordinator_factory.assert_called_once_with(
+        repository, clients, settings.ledger_table_endpoint, "Unit",
+    )
+    action.assert_called_once()
+    if audit:
+        worker_factory.assert_not_called()
+    else:
+        assert worker_factory.call_args.args[0] is repository
+        assert worker_factory.call_args.args[2] == coordinator.verify
+        assert worker_factory.call_args.args[1]() is store
+        store_factory.assert_called_once_with(settings.ledger_table_endpoint, "Unit", timeout=2)
+
+
+def test_availability_projection_callback_uses_configured_store_and_closes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings.model_construct(
+        ledger_table_endpoint="https://unit.table.core.windows.net", ledger_table_name="Unit",
+    )
+    repository, store = MagicMock(), MagicMock()
+    store.__enter__.return_value = store
+    state = ModelAvailabilityState(model_id=UUID(int=2), revision=1, enabled=False)
+    projection = MagicMock(return_value=state)
+    store_factory = MagicMock(return_value=store)
+    monkeypatch.setattr(function_app, "TableStorageLedger", store_factory)
+    monkeypatch.setattr(function_app, "project_model_availability", projection)
+    assert function_app._project_model_availability(repository, settings, state.model_id) == state
+    projection.assert_called_once_with(repository, store, state.model_id)
+    store_factory.assert_called_once_with(settings.ledger_table_endpoint, "Unit", timeout=2)
+    store.__exit__.assert_called_once()
+    with pytest.raises(ValueError, match="configured store"):
+        function_app._project_model_availability(
+            repository, settings.model_copy(update={"ledger_table_endpoint": None}), state.model_id,
+        )
+    assert store_factory.call_count == 1
 
 
 def test_disabled_publication_timer_does_not_build_dependencies(monkeypatch: Any) -> None:
@@ -285,6 +377,7 @@ def test_release_timer_never_constructs_publication_worker(
         ):
             assert actual_repository is repository
             assert actual_publisher is publisher
+            assert callable(kwargs.pop("availability_projector"))
             projector = kwargs.pop("application_projector")
             if provisioning_enabled:
                 assert callable(projector)

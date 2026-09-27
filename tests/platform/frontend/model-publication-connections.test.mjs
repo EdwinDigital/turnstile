@@ -4,6 +4,7 @@ import { createRequire } from "node:module"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
 import { runInNewContext } from "node:vm"
+import * as modelAvailability from "../../../frontend/src/lib/model-availability.ts"
 
 import {
   isDatabricksWorkspaceUrl,
@@ -128,6 +129,7 @@ function registryCacheHarness(readRegistry) {
     "@tanstack/react-query": queryLibrary,
     "../../api/cache-policies": { cachePolicies: { aggregate: {}, reference: {} } },
     "../../lib/timezone": { resolveTimezone: () => "UTC" },
+    "../../lib/model-availability": modelAvailability,
     "./api": { dataSource: { registry: readRegistry } },
   }
   runInNewContext(queriesCode, { exports, require: name => {

@@ -184,6 +184,7 @@ export function resolveGatewaySelection(
 export function resolveInvocationModel<Model extends Pick<ManagedModel, "id" | "enabled" | "capabilities" | "is_default">>(models: readonly Model[], modelId: string | null, imageMode: boolean) {
   const candidates = models.filter(model => model.enabled && model.capabilities.includes("image_generation") === imageMode)
   if (modelId !== null) return candidates.find(model => model.id === modelId)
+  if (!imageMode && models.some(model => model.is_default && !model.enabled)) return undefined
   return imageMode ? undefined : candidates.find(model => model.is_default) ?? candidates[0]
 }
 

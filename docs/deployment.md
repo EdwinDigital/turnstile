@@ -6,6 +6,63 @@ Turnstile infrastructure includes PostgreSQL, Event Hubs, Storage, Key Vault, Ap
 
 The API, telemetry and control-plane Functions, observer, and budget ledger require public service endpoints for package deployment or runtime traffic. They explicitly enable public network access and carry the resource-level `SecurityControl=Ignore` tag so an organization-level network Modify policy does not silently disable them. The exemption is not applied at resource-group scope; platform Storage and Key Vault resources designed for private-link access remain private.
 
+## Model availability installation
+
+Availability is an application and Gateway protocol upgrade. Deploying the UI alone does not
+install admission protection. The public base infrastructure does not automatically reconcile
+existing Revision policies or self-hosted rejoin controls. The runtime Publisher remains unable
+to create APIM operations; its existing `ensure_operation` path only verifies installed operations.
+The independent [installation tool](../scripts/install_model_availability.py) is an operator tool,
+not a background Publisher permission expansion.
+
+Before installation, authorize the exact database, APIM service/API, every retained Revision and
+the shared primary Table. Preserve migration checksums, model/price/default/access/budget data,
+policy ETags and hashes. Quiesce publication and administrative writers and arrange a reviewed
+maintenance window: the installer updates policies in place and stops at the first uncertain or
+mismatched result; it is not a zero-downtime or automatic rollback workflow. Ensure compatible
+API and Control Plane packages, migration `016_model_availability`, exact scoped identities,
+network reachability and Table access are available before admitting normal traffic.
+
+An installation manifest validates against `AvailabilityInstallation`. It contains explicit
+`subscription_id`, `resource_group`, `service_name`, `target_id`, `api_id`, `table_endpoint`,
+`table_name` and `revisions`. Each revision entry is a `ModelAvailabilityPolicyAdoption` with a
+unique adoption ID, target/API/Revision, exact alias-to-model-UUID mapping, alias-to-native-Gateway
+scope, and SHA-256 values for `parent` and every original operation policy. Do not infer model
+identity from a name alone or omit historical revisions. Keep manifests and journals outside Git;
+they contain environment identity but must contain no credentials.
+
+```bash
+uv run python -m scripts.install_model_availability <installation-manifest.json>
+uv run python -m scripts.install_model_availability <installation-manifest.json> \
+  --expected-plan-sha256 <reviewed-plan-sha256> --journal <new-installation-journal.jsonl>
+```
+
+The first command is read-only and reports exact paths and baseline/candidate digests. Review
+that plan before the second command. Every existing policy write uses its concrete `If-Match`
+ETag; new diagnostic operations use `If-None-Match`. The journal is created exclusively with
+mode `0600` and records intent before each write. A lost response or bad readback leaves the
+attempt unresolved and prevents replay using that journal. Do not delete the journal or rerun
+under a new name to bypass that stop. Inspect exact ARM state and derive a separately reviewed
+recovery plan. The operator needs installation rights for the selected API operations; do not
+grant those rights to the ordinary Publisher.
+
+For self-hosted Gateways, separately verify the controller's complete instance inventory and
+fenced installation/rejoin behavior. Record a `ModelAvailabilityNodeEnrollment` for every
+deployment, including retained retired deployments: exact direct HTTPS node endpoints, instance
+IDs, revisioned controller evidence, fenced-installation evidence and the
+`enrolled_nodes_only_guarded_bootstrap` contract. `save_model_availability_node_enrollment`
+requires the matching target inventory digest, next enrollment revision and actor. This port does
+not provide a generic controller, VM reconciler or an enrollment HTTP endpoint. Do not invent
+evidence hashes or mark enrollment complete from a load-balanced endpoint probe. Old unguarded
+nodes must not be able to rejoin and receive consumer traffic.
+
+After policy installation, the normal Control Plane projects retained model identities and
+verifies full coverage. Keep traffic gated until the database and Table revisions, all catalogs,
+all managed/self-hosted HEAD surfaces and node leases agree. The UI must remain unverified when
+any requirement is absent. Validate disabled admission, enabled recovery, stale/conflicting
+commands, worker lease loss and unchanged financial history on the explicitly approved targets.
+Local tests do not establish Azure policy acceptance, PostgreSQL concurrency or actual node fencing.
+
 ## Self-hosted Gateway management
 
 The optional [access template](../infra/self-hosted-gateway-access.bicep) enables Turnstile to
