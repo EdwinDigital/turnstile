@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID
 
@@ -265,6 +265,8 @@ class ModelAvailabilityCatalogCheck(_AvailabilityContract):
     models: dict[str, UUID] = Field(max_length=MAX_CATALOG_MODELS)
     capability_digest: AvailabilityDigest
     admission_surfaces: dict[str, AvailabilityDigest] = Field(min_length=1, max_length=20)
+    retired_surfaces: tuple[str, ...] = Field(default=(), max_length=20)
+    protocol_fenced: StrictBool = False
 
     @model_validator(mode="after")
     def validate_check(self) -> ModelAvailabilityCatalogCheck:
@@ -273,9 +275,12 @@ class ModelAvailabilityCatalogCheck(_AvailabilityContract):
             or (self.gateway_id == "managed") != (self.instance_id == "managed")
             or len({alias.casefold() for alias in self.models}) != len(self.models)
             or any(not alias.strip() for alias in self.models)
+            or len(set(self.retired_surfaces)) != len(self.retired_surfaces)
+            or set(self.retired_surfaces).intersection(self.admission_surfaces)
+            or (self.protocol_fenced and bool(self.models))
             or any(
                 not route.startswith("/") or any(part in route for part in ("..", "?", "#", "{"))
-                for route in self.admission_surfaces
+                for route in (*self.admission_surfaces, *self.retired_surfaces)
             )
         ):
             raise ValueError("Confirmation requires an exact HTTPS catalog and model scope")
@@ -297,11 +302,23 @@ class ModelAvailabilityConfirmationPlan(_AvailabilityContract):
     coverage: ModelAvailabilityCoverage
     enrollments: tuple[ModelAvailabilityNodeEnrollment, ...] = Field(max_length=128)
     catalogs: tuple[ModelAvailabilityCatalogCheck, ...] = Field(min_length=1, max_length=2000)
+    retired_deployments: tuple[UUID, ...] = Field(default=(), max_length=2000)
+    management_verified_at: AwareDatetime | None = None
 
     @model_validator(mode="after")
     def validate_plan(self) -> ModelAvailabilityConfirmationPlan:
+        if self.management_verified_at is not None and not (
+            self.management_verified_at <= self.coverage.verified_at
+            < self.management_verified_at + timedelta(seconds=300)
+            and self.coverage.expires_at <= self.management_verified_at + timedelta(seconds=300)
+        ):
+            raise ValueError("Confirmation management evidence is outside its validity window")
+        if len(set(self.retired_deployments)) != len(self.retired_deployments):
+            raise ValueError("Retired deployment evidence repeats an identity")
         endpoints = {("managed", "managed"): str(self.gateway_url).rstrip("/")}
         for enrollment in self.enrollments:
+            if enrollment.deployment_id in self.retired_deployments:
+                raise ValueError("A serving enrollment cannot also be retired")
             if enrollment.target_id != self.coverage.target_id or enrollment.api_id != self.api_id:
                 raise ValueError("Confirmation enrollment does not match its target")
             for node in enrollment.nodes:
@@ -310,7 +327,7 @@ class ModelAvailabilityConfirmationPlan(_AvailabilityContract):
                     raise ValueError("Confirmation repeats a node identity")
                 endpoints[identity] = str(node.endpoint_url).rstrip("/")
         identities = set()
-        admission_by_prefix: dict[str, tuple[str, dict[str, str]]] = {}
+        admission_by_prefix: dict[str, tuple[str, dict[str, str], tuple[str, ...], bool]] = {}
         for check in self.catalogs:
             if endpoints.get((check.gateway_id, check.instance_id)) != str(
                 check.endpoint_url
@@ -320,7 +337,10 @@ class ModelAvailabilityConfirmationPlan(_AvailabilityContract):
             if identity in identities:
                 raise ValueError("Confirmation repeats a catalog")
             identities.add(identity)
-            admission = (check.capability_digest, check.admission_surfaces)
+            admission = (
+                check.capability_digest, check.admission_surfaces,
+                check.retired_surfaces, check.protocol_fenced,
+            )
             if admission_by_prefix.setdefault(check.surface_prefix, admission) != admission:
                 raise ValueError("Confirmation catalogs disagree about admission coverage")
         prefixes = {surface.rsplit("/", 1)[0] for surface in self.coverage.serving_surfaces}
@@ -486,9 +506,24 @@ class ModelAvailabilityPolicyAdoption(_AvailabilityContract):
     models: dict[str, UUID] = Field(max_length=MAX_CATALOG_MODELS)
     serving_gateways: dict[str, tuple[str, ...] | None] = Field(max_length=MAX_CATALOG_MODELS)
     original_policy_digests: dict[str, AvailabilityDigest] = Field(min_length=1, max_length=32)
+    fixed_operations: dict[str, str] = Field(default_factory=dict, max_length=32)
+    inherited_operations: tuple[str, ...] = Field(default=(), max_length=32)
+    retired_operations: tuple[str, ...] = Field(default=(), max_length=32)
 
     @model_validator(mode="after")
     def validate_mapping(self) -> ModelAvailabilityPolicyAdoption:
+        if len(set(self.retired_operations)) != len(self.retired_operations) or not set(
+            self.retired_operations
+        ).issubset(self.fixed_operations):
+            raise ValueError("Retired operations require explicit fixed model identities")
+        if any(
+            operation not in self.original_policy_digests or alias not in self.models
+            or operation == "parent" for operation, alias in self.fixed_operations.items()
+        ) or len(set(self.inherited_operations)) != len(self.inherited_operations) or any(
+            operation not in self.original_policy_digests or operation == "parent"
+            for operation in self.inherited_operations
+        ):
+            raise ValueError("Operation adoption must match pinned model and policy identities")
         if (
             set(self.models) != set(self.serving_gateways)
             or len({alias.casefold() for alias in self.models}) != len(self.models)

@@ -32,6 +32,7 @@ from turnstile_core.config import Settings
 from turnstile_core.domain.model_availability import (
     MAX_AVAILABILITY_REVISION,
     ModelAvailabilityCommand,
+    ModelAvailabilityConfirmationPlan,
     ModelAvailabilityConflict,
     ModelAvailabilityCoverage,
     ModelAvailabilityNodeLease,
@@ -412,6 +413,83 @@ def gateway_availability_fixture(
         resource_id=f"/subscriptions/{UUID(int=20)}/resourceGroups/unit/providers/Microsoft.ApiManagement/service/unit",
     )
     return verifier, state, requests
+
+
+@pytest.mark.parametrize(
+    "age,valid", [(-1, False), (0, True), (239, True), (240, True), (241, False), (300, False)],
+)
+def test_confirmation_management_evidence_has_an_absolute_five_minute_bound(
+    age: int, valid: bool,
+) -> None:
+    verifier, _state, _requests = gateway_availability_fixture()
+    with verifier.client:
+        verifier.verify("a" * 64, [])
+    assert verifier.confirmation_plan is not None
+    payload = verifier.confirmation_plan.model_dump(mode="json")
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    payload["coverage"]["verified_at"] = now.isoformat()
+    payload["coverage"]["expires_at"] = (now + timedelta(seconds=60)).isoformat()
+    payload["management_verified_at"] = (now - timedelta(seconds=age)).isoformat()
+    if valid:
+        plan = ModelAvailabilityConfirmationPlan.model_validate(payload)
+        assert ModelAvailabilityConfirmationPlan.from_entity(plan.entity()) == plan
+    else:
+        with pytest.raises(ValidationError, match="validity window"):
+            ModelAvailabilityConfirmationPlan.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "damage", ["duplicate", "overlap", "traversal", "fenced_models", "retired_deployments"],
+)
+def test_confirmation_rejects_ambiguous_retired_surface_evidence(damage: str) -> None:
+    verifier, _state, _requests = gateway_availability_fixture()
+    with verifier.client:
+        verifier.verify("a" * 64, [])
+    assert verifier.confirmation_plan is not None
+    payload = verifier.confirmation_plan.model_dump(mode="json")
+    check = payload["catalogs"][0]
+    if damage == "duplicate":
+        check["retired_surfaces"] = ["/old-model", "/old-model"]
+    elif damage == "overlap":
+        check["retired_surfaces"] = list(check["admission_surfaces"])
+    elif damage == "traversal":
+        check["retired_surfaces"] = ["/../other"]
+    elif damage == "fenced_models":
+        check["protocol_fenced"] = True
+    else:
+        payload["retired_deployments"] = [str(UUID(int=50)), str(UUID(int=50))]
+    with pytest.raises(ValidationError):
+        ModelAvailabilityConfirmationPlan.model_validate(payload)
+
+
+@pytest.mark.parametrize("damage", [
+    "missing_operation", "unknown_model", "parent", "unbound_retirement",
+    "duplicate_retirement", "duplicate_inheritance",
+])
+def test_policy_adoption_requires_explicit_fixed_and_retired_operation_identities(
+    damage: str,
+) -> None:
+    payload: dict[str, Any] = {
+        "adoption_id": str(UUID(int=11)), "target_id": str(UUID(int=12)),
+        "api_id": "unit-api", "revision": "1", "models": {"unit-model": str(UUID(int=2))},
+        "serving_gateways": {"unit-model": None}, "original_policy_digests": {"fixed": "a" * 64},
+        "fixed_operations": {"fixed": "unit-model"}, "retired_operations": ["fixed"],
+    }
+    assert ModelAvailabilityPolicyAdoption.model_validate(payload).retired_operations == ("fixed",)
+    if damage == "missing_operation":
+        payload["original_policy_digests"] = {"other": "b" * 64}
+    elif damage == "unknown_model":
+        payload["fixed_operations"] = {"fixed": "unbound"}
+    elif damage == "parent":
+        payload["inherited_operations"] = ["parent"]
+    elif damage == "unbound_retirement":
+        payload["retired_operations"] = ["other"]
+    elif damage == "duplicate_retirement":
+        payload["retired_operations"] = ["fixed", "fixed"]
+    else:
+        payload["inherited_operations"] = ["fixed", "fixed"]
+    with pytest.raises(ValidationError):
+        ModelAvailabilityPolicyAdoption.model_validate(payload)
 
 
 def test_gateway_confirmation_covers_retained_revisions_without_dispatching_inference() -> None:
