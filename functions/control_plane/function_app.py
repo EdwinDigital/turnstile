@@ -85,7 +85,15 @@ def refresh_model_availability_coverage(timer: func.TimerRequest) -> None:
     _run_model_availability(audit=True)
 
 
-def _run_model_availability(*, audit: bool) -> None:
+@app.timer_trigger(
+    arg_name="timer", schedule="5,20,35,50 * * * * *", run_on_startup=False, use_monitor=True,
+)
+def renew_model_availability_proofs(timer: func.TimerRequest) -> None:
+    del timer
+    _run_model_availability(audit=False, renew=True)
+
+
+def _run_model_availability(*, audit: bool, renew: bool = False) -> None:
     settings = get_settings()
     if not settings.control_plane_enabled or not settings.ledger_table_endpoint:
         return
@@ -98,6 +106,9 @@ def _run_model_availability(*, audit: bool) -> None:
         coordinator = ModelAvailabilityCoordinator(
             repository, clients, settings.ledger_table_endpoint, settings.ledger_table_name,
         )
+        if renew:
+            coordinator.refresh(renew=True)
+            return
         if audit:
             coordinator.refresh()
             return

@@ -42,6 +42,7 @@ from turnstile_core.domain.model_availability import (
     ModelAvailabilityPolicyAdoption,
     ModelAvailabilityPublication,
     ModelAvailabilityState,
+    ModelAvailabilityTargetResult,
     ModelAvailabilityUnavailable,
 )
 from turnstile_core.domain.runtime_models import ManagedModelWrite, ProviderTarget
@@ -76,7 +77,10 @@ from turnstile_core.integrations.apim_policy_components import (
     serialize_policy,
     validate_parent_policy,
 )
-from turnstile_core.integrations.apim_publisher_client import AzureApimPublisherClient
+from turnstile_core.integrations.apim_publisher_client import (
+    AzureApimPublisherClient,
+    _AvailabilityManagementReadPacer,
+)
 from turnstile_core.integrations.ledger import TableStorageLedger
 from turnstile_core.integrations.model_availability_verifier import (
     ModelAvailabilityGatewayVerifier,
@@ -1050,6 +1054,7 @@ def test_publisher_persists_exact_confirmation_plan_with_conditional_readback(
                     "https://unit.table.core.windows.net",
                     "Unit",
                     lambda _model: state,
+                    before_proof=lambda: None,
                 )
             assert not entities
         else:
@@ -1060,6 +1065,7 @@ def test_publisher_persists_exact_confirmation_plan_with_conditional_readback(
                 "https://unit.table.core.windows.net",
                 "Unit",
                 lambda _model: state,
+                before_proof=lambda: None,
             )
             result = publisher.confirm_model_availability(
                 UUID(int=12),
@@ -1086,6 +1092,164 @@ def test_publisher_persists_exact_confirmation_plan_with_conditional_readback(
     store.__exit__.assert_called()
 
 
+@pytest.mark.parametrize("renew", [False, True])
+def test_coordinator_refresh_bounds_parallel_targets_and_holds_exact_proof_guards(
+    renew: bool,
+) -> None:
+    verifier, _state, _requests = gateway_availability_fixture()
+    with verifier.client:
+        baseline = verifier.verify("a" * 64, [])
+    targets = {UUID(int=index): "a" * 64 for index in range(12, 18)}
+    repository, clients = MagicMock(), Mock()
+    repository.get_model_availability_inventory.return_value = targets
+    repository.list_gateway_deployments.return_value = []
+    client = Mock(spec=AzureApimPublisherClient)
+    clients.resolve.return_value = Mock(client=client)
+    coordinator = ModelAvailabilityCoordinator(
+        repository, clients, "https://unit.table.core.windows.net", "Unit",
+    )
+    barrier, lock = Barrier(3), Lock()
+    held: set[UUID] = set()
+    maximum = 0
+    guard_modes = []
+
+    @contextmanager
+    def guard(target: UUID, *, wait: bool) -> Iterator[None]:
+        nonlocal maximum
+        with lock:
+            assert target not in held
+            held.add(target)
+            guard_modes.append(wait)
+            maximum = max(maximum, len(held))
+        try:
+            yield
+        finally:
+            with lock:
+                held.remove(target)
+
+    def check(target: UUID, *_args: Any, **kwargs: Any) -> ModelAvailabilityCoverage:
+        if not renew:
+            assert target not in held
+            kwargs["before_proof"]()
+            assert kwargs["state_batch_reader"] == repository.get_model_availability_states
+        assert target in held
+        barrier.wait(timeout=5)
+        if target == UUID(int=13):
+            raise ModelAvailabilityUnavailable("Test target unavailable")
+        return baseline.model_copy(update={"target_id": target})
+
+    def save(value: ModelAvailabilityCoverage) -> bool:
+        assert value.target_id in held
+        return True
+
+    repository.model_availability_proof_guard.side_effect = guard
+    repository.save_model_availability_coverage.side_effect = save
+    client.verify_model_availability.side_effect = check
+    client.renew_model_availability.side_effect = check
+    assert coordinator.refresh(renew=renew) == 5
+    assert maximum == 3 and not held
+    assert guard_modes == [not renew] * 6
+    assert repository.save_model_availability_coverage.call_count == 5
+    if renew:
+        client.verify_model_availability.assert_not_called()
+    else:
+        client.renew_model_availability.assert_not_called()
+
+
+def test_coordinator_confirm_is_parallel_and_preserves_target_order() -> None:
+    verifier, state, _requests = gateway_availability_fixture()
+    with verifier.client:
+        baseline = verifier.verify("a" * 64, [])
+    targets = {UUID(int=index): "a" * 64 for index in range(12, 18)}
+    repository, clients = MagicMock(), Mock()
+    repository.list_gateway_deployments.return_value = []
+    repository.get_model_availability_coverage.side_effect = (
+        lambda target: baseline.model_copy(update={"target_id": target})
+    )
+    client = Mock(spec=AzureApimPublisherClient)
+    clients.resolve.return_value = Mock(client=client)
+    barrier = Barrier(3)
+
+    def confirm(target: UUID, *_args: Any, **_kwargs: Any) -> ModelAvailabilityTargetResult:
+        barrier.wait(timeout=5)
+        return ModelAvailabilityTargetResult(
+            target_id=target, inventory_digest="a" * 64, policy_digest=baseline.policy_digest,
+            status="verified", observed_revision=state.revision, observed_enabled=state.enabled,
+            verified_at=datetime.now(UTC),
+        )
+
+    client.confirm_model_availability.side_effect = confirm
+    coordinator = ModelAvailabilityCoordinator(
+        repository, clients, "https://unit.table.core.windows.net", "Unit",
+    )
+    results = coordinator.verify(state, targets)
+    assert [result.target_id for result in results] == list(targets)
+    assert all(result.status == "verified" for result in results)
+    repository.model_availability_proof_guard.assert_not_called()
+
+
+def test_availability_management_pacer_reserves_bounded_shared_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+    monkeypatch.setattr(
+        "turnstile_core.integrations.apim_publisher_client.monotonic", lambda: 1000.0,
+    )
+    monkeypatch.setattr(
+        "turnstile_core.integrations.apim_publisher_client.Event",
+        lambda: Mock(wait=lambda delay: waits.append(delay)),
+    )
+    pacer = _AvailabilityManagementReadPacer()
+    for _index in range(10):
+        pacer.wait()
+    assert waits == [index / 16 for index in range(1, 10)]
+
+
+@pytest.mark.parametrize("full_audit", [False, True])
+def test_invalid_confirmation_plan_can_only_be_replaced_after_a_full_audit(
+    full_audit: bool,
+) -> None:
+    verifier, _state, _requests = gateway_availability_fixture()
+    with verifier.client:
+        verifier.verify("a" * 64, [])
+    assert verifier.confirmation_plan is not None
+    plan = verifier.confirmation_plan
+    store = Mock(spec=TableStorageLedger)
+    store.read_versioned_entity.side_effect = [
+        ({"SchemaVersion": 0}, '"prior"'), (plan.entity(), '"next"'),
+    ]
+    store.replace_if_match.return_value = True
+    if full_audit:
+        AzureApimPublisherClient._save_availability_plan(store, plan, full_audit=True)
+        assert store.replace_if_match.call_args.args[-1] == '"prior"'
+    else:
+        with pytest.raises(ModelAvailabilityUnavailable, match="full audit"):
+            AzureApimPublisherClient._save_availability_plan(store, plan)
+        store.replace_if_match.assert_not_called()
+
+
+@pytest.mark.parametrize("newer_management", [False, True])
+def test_confirmation_write_cannot_replace_more_recent_management_or_native_proof(
+    newer_management: bool,
+) -> None:
+    verifier, _state, _requests = gateway_availability_fixture()
+    with verifier.client:
+        verifier.verify("a" * 64, [])
+    assert verifier.confirmation_plan is not None
+    plan = verifier.confirmation_plan
+    payload = plan.model_dump()
+    payload["coverage"]["verified_at"] += timedelta(seconds=2)
+    payload["coverage"]["expires_at"] += timedelta(seconds=2)
+    if newer_management:
+        payload["management_verified_at"] += timedelta(seconds=1)
+    previous = ModelAvailabilityConfirmationPlan.model_validate(payload)
+    store = Mock(spec=TableStorageLedger)
+    store.read_versioned_entity.return_value = (previous.entity(), '"prior"')
+    with pytest.raises(ModelAvailabilityUnavailable, match="advanced"):
+        AzureApimPublisherClient._save_availability_plan(store, plan, full_audit=True)
+    store.replace_if_match.assert_not_called()
+
+
 def test_coordinator_preserves_unknown_target_and_includes_retired_deployments() -> None:
     verifier, state, _requests = gateway_availability_fixture()
     with verifier.client:
@@ -1093,7 +1257,9 @@ def test_coordinator_preserves_unknown_target_and_includes_retired_deployments()
     repository, clients = Mock(), Mock()
     client = Mock(spec=AzureApimPublisherClient)
     clients.resolve.return_value = Mock(client=client)
-    repository.get_model_availability_coverage.side_effect = [coverage, None]
+    repository.get_model_availability_coverage.side_effect = (
+        lambda target: coverage if target == UUID(int=12) else None
+    )
     repository.list_gateway_deployments.return_value = [{"retired_at": "earlier"}]
     client.confirm_model_availability.return_value = Mock(target_id=UUID(int=12), status="verified")
     coordinator = ModelAvailabilityCoordinator(
@@ -1681,6 +1847,36 @@ class RecordedAvailabilityRepository(
 
     def fetchall(self) -> Any:
         return self.current or []
+
+
+@pytest.mark.parametrize("wait", [False, True])
+@pytest.mark.parametrize("acquired", [True, False, None])
+def test_postgres_proof_guard_serializes_only_the_exact_target(
+    wait: bool, acquired: bool | None,
+) -> None:
+    repository = RecordedAvailabilityRepository([
+        None, None, {"acquired": acquired} if acquired is not None else None, None,
+    ])
+    target = UUID(int=12)
+    reached = False
+    if not wait and acquired is not True:
+        with (
+            pytest.raises(ModelAvailabilityUnavailable, match="writer is busy"),
+            repository.model_availability_proof_guard(target, wait=wait),
+        ):
+            reached = True
+        assert not reached and len(repository.calls) == 3
+    else:
+        with repository.model_availability_proof_guard(target, wait=wait):
+            reached = True
+        assert reached and repository.calls[-1] == ("SELECT 1", ())
+    assert repository.calls[:2] == [
+        ("SET LOCAL statement_timeout = '95s'", ()),
+        ("SET LOCAL lock_timeout = '90s'", ()),
+    ]
+    statement, parameters = repository.calls[2]
+    assert ("pg_advisory_xact_lock" if wait else "pg_try_advisory_xact_lock") in statement
+    assert parameters == ("model-availability-proof-writer:" + str(target),)
 
 
 def test_postgres_command_rejects_stale_revision_before_any_update() -> None:

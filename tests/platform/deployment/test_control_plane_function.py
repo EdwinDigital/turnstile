@@ -122,17 +122,18 @@ def test_availability_timer_skips_unsupported_configuration(
     monkeypatch.setattr(function_app, "ModelAvailabilityCoordinator", coordinator)
     function_app.synchronize_model_availability(None)
     function_app.refresh_model_availability_coverage(None)
+    function_app.renew_model_availability_proofs(None)
     coordinator.assert_not_called()
     if mode == "no_migration":
-        assert repository.close.call_count == 2
+        assert repository.close.call_count == 3
     else:
         repository_factory.assert_not_called()
 
 
-@pytest.mark.parametrize("audit", [False, True])
+@pytest.mark.parametrize("mode", ["synchronize", "audit", "renew"])
 @pytest.mark.parametrize("fails", [False, True])
 def test_availability_timers_bind_scoped_clients_and_always_close_repository(
-    monkeypatch: pytest.MonkeyPatch, audit: bool, fails: bool,
+    monkeypatch: pytest.MonkeyPatch, mode: str, fails: bool,
 ) -> None:
     settings = Settings.model_construct(
         control_plane_enabled=True, ledger_table_endpoint="https://unit.table.core.windows.net",
@@ -151,21 +152,25 @@ def test_availability_timers_bind_scoped_clients_and_always_close_repository(
     monkeypatch.setattr(function_app, "ModelAvailabilityCoordinator", coordinator_factory)
     monkeypatch.setattr(function_app, "ModelAvailabilityWorker", worker_factory)
     monkeypatch.setattr(function_app, "TableStorageLedger", store_factory)
-    action = coordinator.refresh if audit else worker.run_once
+    action = coordinator.refresh if mode != "synchronize" else worker.run_once
     if fails:
         action.side_effect = RuntimeError("unit failure")
         with pytest.raises(RuntimeError, match="unit failure"):
-            function_app._run_model_availability(audit=audit)
+            function_app._run_model_availability(audit=mode == "audit", renew=mode == "renew")
     else:
-        function_app._run_model_availability(audit=audit)
+        function_app._run_model_availability(audit=mode == "audit", renew=mode == "renew")
     repository.close.assert_called_once()
     config_factory.assert_called_once_with(repository, settings)
     coordinator_factory.assert_called_once_with(
         repository, clients, settings.ledger_table_endpoint, "Unit",
     )
     action.assert_called_once()
-    if audit:
+    if mode != "synchronize":
         worker_factory.assert_not_called()
+        if mode == "renew":
+            coordinator.refresh.assert_called_once_with(renew=True)
+        else:
+            coordinator.refresh.assert_called_once_with()
     else:
         assert worker_factory.call_args.args[0] is repository
         assert worker_factory.call_args.args[2] == coordinator.verify

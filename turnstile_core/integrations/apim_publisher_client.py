@@ -11,14 +11,16 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from functools import partial
 from html import unescape
+from threading import Event, Lock
+from time import monotonic
 from typing import Any, Literal, cast
-from urllib.parse import parse_qsl, quote, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse
 from urllib.parse import unquote as url_unquote
 from uuid import UUID
 from xml.etree import ElementTree
 
 import httpx
-from pydantic import HttpUrl
+from pydantic import HttpUrl, ValidationError
 
 from ..config import Settings
 from ..domain.application_access import (
@@ -82,10 +84,27 @@ from .apim_control_plane_contract import (
     missing_management_actions,
 )
 from .apim_policy_compiler import ApimPolicyCompiler
-from .apim_policy_components import parent_readback_matches
+from .apim_policy_components import parent_readback_matches, parse_policy
 from .apim_self_hosted_gateway import AzureSelfHostedGatewayManagementMixin
 from .ledger import TableStorageLedger
 from .model_availability_verifier import ModelAvailabilityGatewayVerifier
+
+
+class _AvailabilityManagementReadPacer:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._next_slot = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = monotonic()
+            slot = max(now, self._next_slot)
+            self._next_slot = slot + 1 / 16
+        if slot > now:
+            Event().wait(slot - now)
+
+
+_availability_management_reads = _AvailabilityManagementReadPacer()
 
 
 class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
@@ -2619,26 +2638,47 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
             if (backend_id := node.get("backend-id")) is not None
         }
 
-    def _policy_value(self, path: str) -> str | None:
-        response = self._request("GET", path, allow_not_found=True)
-        if response.status_code == 404:
-            return None
-        content_type = response.headers.get("content-type", "").casefold()
-        if "json" in content_type:
-            value = (response.json().get("properties") or {}).get("value")
-        elif "format=rawxml" in path:
-            value = response.text
-        else:
-            value = unescape(response.text)
-        if not isinstance(value, str) or not value:
-            raise PolicyCompilationError(f"APIM policy {path} returned no value")
-        return value
+    def _policy_value(
+        self, path: str, *, before_request: Callable[[], None] | None = None,
+    ) -> str | None:
+        location = urlparse(path)
+        for representation in ("rawxml", "xml"):
+            query = {**dict(parse_qsl(location.query)), "format": representation}
+            address = location._replace(query=urlencode(query)).geturl()
+            if before_request is not None:
+                before_request()
+            try:
+                response = self._request("GET", address, allow_not_found=True)
+            except httpx.ReadTimeout:
+                if representation == "rawxml" and before_request is not None:
+                    continue
+                raise
+            if response.status_code == 404:
+                return None
+            content_type = response.headers.get("content-type", "").casefold()
+            if "json" in content_type:
+                value = (response.json().get("properties") or {}).get("value")
+            else:
+                value = response.text
+                if value.lstrip().startswith("&lt;"):
+                    value = unescape(value)
+            if not isinstance(value, str) or not value:
+                raise PolicyCompilationError(f"APIM policy {path} returned no value")
+            if representation == "rawxml":
+                try:
+                    parse_policy(value)
+                except ElementTree.ParseError:
+                    continue
+            return value
+        raise PolicyCompilationError(f"APIM policy {path} returned no XML representation")
 
     def verify_model_availability(
         self, target_id: UUID, inventory_digest: str,
         deployments: Sequence[Mapping[str, Any]], table_endpoint: str, table_name: str,
         state_reader: Callable[[UUID], ModelAvailabilityState | None],
         *, node_enrollment_reader: Callable[[], Sequence[ModelAvailabilityNodeEnrollment]] | None = None,
+        state_batch_reader: Callable[[Sequence[UUID]], dict[UUID, ModelAvailabilityState]] | None = None,
+        before_proof: Callable[[], None],
     ) -> ModelAvailabilityCoverage:
         with TableStorageLedger(table_endpoint, table_name, timeout=2) as store:
             verifier = ModelAvailabilityGatewayVerifier(
@@ -2646,28 +2686,87 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
                 gateway_url=str(self._settings.apim_gateway_url),
                 table_endpoint=table_endpoint, table_name=table_name,
                 key=self._settings.apim_probe_subscription_key,
-                list_resources=lambda path: self._list_all(path, max_items=2000, max_pages=20),
-                read_policy=lambda path: self._policy_value(path + "?format=rawxml"),
+                list_resources=lambda path: self._list_all(
+                    path, max_items=2000, max_pages=20,
+                    before_request=_availability_management_reads.wait,
+                ),
+                read_policy=lambda path: self._policy_value(
+                    path, before_request=_availability_management_reads.wait,
+                ),
                 client=self._client, state_reader=state_reader,
                 node_enrollment_reader=node_enrollment_reader, node_store=store,
                 resource_id=self._resource_id_base,
+                state_batch_reader=state_batch_reader, before_proof=before_proof,
             )
             coverage = verifier.verify(inventory_digest, deployments)
             plan = verifier.confirmation_plan
             if plan is None:
                 raise ModelAvailabilityUnavailable("Verified confirmation plan is missing")
-            current = store.read_versioned_entity(plan.partition_key, plan.row_key)
-            if current is not None:
+            self._save_availability_plan(store, plan, full_audit=True)
+            return coverage
+
+    @staticmethod
+    def _save_availability_plan(
+        store: TableStorageLedger, plan: ModelAvailabilityConfirmationPlan,
+        *, full_audit: bool = False,
+    ) -> None:
+        plan = ModelAvailabilityConfirmationPlan.model_validate(plan.model_dump())
+        current = store.read_versioned_entity(plan.partition_key, plan.row_key)
+        if current is not None:
+            try:
                 previous = ModelAvailabilityConfirmationPlan.from_entity(current[0])
-                if previous.coverage.verified_at > coverage.verified_at:
-                    raise ModelAvailabilityUnavailable("Confirmation plan advanced during audit")
-            if not store.replace_if_match(
-                plan.partition_key, plan.row_key, plan.entity(), current[1] if current else None,
+            except (ValidationError, ModelAvailabilityUnavailable):
+                if not full_audit:
+                    raise ModelAvailabilityUnavailable(
+                        "Invalid previous confirmation requires a full audit"
+                    ) from None
+                previous = None
+            if (
+                previous is not None and previous.management_verified_at is not None
+                and (plan.management_verified_at is None
+                     or previous.management_verified_at > plan.management_verified_at)
+            ) or (
+                previous is not None and previous.management_verified_at == plan.management_verified_at
+                and previous.coverage.verified_at > plan.coverage.verified_at
             ):
-                raise ModelAvailabilityUnavailable("Confirmation plan write lost its version")
-            observed = store.read_versioned_entity(plan.partition_key, plan.row_key)
-            if observed is None or ModelAvailabilityConfirmationPlan.from_entity(observed[0]) != plan:
-                raise ModelAvailabilityUnavailable("Confirmation plan changed after audit")
+                raise ModelAvailabilityUnavailable("Confirmation plan advanced during audit")
+        if not store.replace_if_match(
+            plan.partition_key, plan.row_key, plan.entity(), current[1] if current else None,
+        ):
+            raise ModelAvailabilityUnavailable("Confirmation plan write lost its version")
+        observed = store.read_versioned_entity(plan.partition_key, plan.row_key)
+        if observed is None or ModelAvailabilityConfirmationPlan.from_entity(observed[0]) != plan:
+            raise ModelAvailabilityUnavailable("Confirmation plan changed after audit")
+
+    def renew_model_availability(
+        self, target_id: UUID, inventory_digest: str, deployments: Sequence[Mapping[str, Any]],
+        table_endpoint: str, table_name: str,
+        read_states: Callable[[Sequence[UUID]], dict[UUID, ModelAvailabilityState]],
+        *, node_enrollment_reader: Callable[[], Sequence[ModelAvailabilityNodeEnrollment]],
+    ) -> ModelAvailabilityCoverage:
+        key = ModelAvailabilityConfirmationPlan.context_key(
+            self._resource_id_base, self._settings.apim_api_id,
+            str(self._settings.apim_gateway_url), table_endpoint, table_name,
+        )
+        with TableStorageLedger(table_endpoint, table_name, timeout=2) as store:
+            stored = store.read_versioned_entity(f"{AVAILABILITY_CONFIRMATION_PARTITION}|{target_id}", key)
+            if stored is None:
+                raise ModelAvailabilityUnavailable("Verified confirmation plan is unavailable")
+            plan = ModelAvailabilityConfirmationPlan.from_entity(stored[0])
+            verifier = ModelAvailabilityGatewayVerifier(
+                resource_id=self._resource_id_base, target_id=target_id,
+                api_id=self._settings.apim_api_id, gateway_url=str(self._settings.apim_gateway_url),
+                table_endpoint=table_endpoint, table_name=table_name,
+                key=self._settings.apim_probe_subscription_key,
+                list_resources=lambda _path: [], read_policy=lambda _path: None,
+                client=self._client, state_reader=lambda model_id: read_states([model_id]).get(model_id),
+                node_enrollment_reader=node_enrollment_reader, node_store=store,
+            )
+            coverage = verifier.renew(plan, inventory_digest, deployments, read_states)
+            renewed = verifier.confirmation_plan
+            if renewed is None:
+                raise ModelAvailabilityUnavailable("Renewed confirmation plan is missing")
+            self._save_availability_plan(store, renewed)
             return coverage
 
     def confirm_model_availability(
@@ -2705,7 +2804,10 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
 
     def _list_all(
         self, path: str, *, max_items: int | None = None, max_pages: int | None = None,
+        before_request: Callable[[], None] | None = None,
     ) -> list[dict[str, Any]]:
+        if before_request is not None:
+            before_request()
         response = self._request("GET", path)
         rows: list[dict[str, Any]] = []
         pages = 0
@@ -2751,6 +2853,8 @@ class AzureApimPublisherClient(AzureSelfHostedGatewayManagementMixin):
                 )
             ):
                 raise PolicyCompilationError("APIM returned an untrusted pagination URL")
+            if before_request is not None:
+                before_request()
             response = self._client.get(
                 next_link,
                 headers=self._headers(),

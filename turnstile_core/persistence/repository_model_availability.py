@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -19,6 +19,7 @@ from ..domain.model_availability import (
     ModelAvailabilityReadback,
     ModelAvailabilityState,
     ModelAvailabilityTargetResult,
+    ModelAvailabilityUnavailable,
 )
 
 _STATE_SQL = (
@@ -73,6 +74,28 @@ def _ready(
 class PostgreSqlModelAvailabilityRepositoryMixin:
     def _connection(self) -> AbstractContextManager[Any]:
         raise NotImplementedError
+
+    @contextmanager
+    def model_availability_proof_guard(
+        self, target_id: UUID, *, wait: bool,
+    ) -> Iterator[None]:
+        with self._connection() as connection, connection.transaction():
+            connection.execute("SET LOCAL statement_timeout = '95s'")
+            connection.execute("SET LOCAL lock_timeout = '90s'")
+            identity = ("model-availability-proof-writer:" + str(target_id),)
+            if wait:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", identity,
+                )
+            else:
+                row = connection.execute(
+                    "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS acquired",
+                    identity,
+                ).fetchone()
+                if not row or row["acquired"] is not True:
+                    raise ModelAvailabilityUnavailable("Availability proof writer is busy")
+            yield
+            connection.execute("SELECT 1")
 
     def model_availability_supported(self) -> bool:
         with self._connection() as connection:

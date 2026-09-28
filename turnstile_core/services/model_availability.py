@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import AbstractContextManager, ExitStack
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Protocol, cast
@@ -27,6 +29,7 @@ from ..persistence.repository_contract import QueryRepository
 from .worker_lease import WorkerLease
 
 logger = logging.getLogger(__name__)
+_MAX_CONCURRENT_TARGETS = 3
 
 
 class AvailabilityStateReader(Protocol):
@@ -35,6 +38,10 @@ class AvailabilityStateReader(Protocol):
 
 class ModelAvailabilityRepository(AvailabilityStateReader, Protocol):
     def model_availability_supported(self) -> bool: ...
+
+    def model_availability_proof_guard(
+        self, target_id: UUID, *, wait: bool,
+    ) -> AbstractContextManager[None]: ...
 
     def list_model_availability(self) -> list[ModelAvailabilityReadback]: ...
 
@@ -282,44 +289,85 @@ class ModelAvailabilityCoordinator:
         resolved = self._clients.resolve(target_id)
         if not isinstance(resolved.client, AzureApimPublisherClient):
             raise ModelAvailabilityUnavailable("Availability target verifier is unavailable")
-        coverage = resolved.client.verify_model_availability(
-            target_id,
-            digest,
-            self._repository.list_gateway_deployments(target_id, include_retired=True),
-            self._table_endpoint,
-            self._table_name,
-            self._availability.get_model_availability_state,
-            node_enrollment_reader=partial(
-                self._availability.list_model_availability_node_enrollments,
+        with ExitStack() as proofs:
+            coverage = resolved.client.verify_model_availability(
                 target_id,
-            ),
-        )
-        if not self._availability.save_model_availability_coverage(coverage):
-            raise ModelAvailabilityUnavailable("Availability target inventory changed")
-        return coverage
+                digest,
+                self._repository.list_gateway_deployments(target_id, include_retired=True),
+                self._table_endpoint,
+                self._table_name,
+                self._availability.get_model_availability_state,
+                node_enrollment_reader=partial(
+                    self._availability.list_model_availability_node_enrollments, target_id,
+                ),
+                state_batch_reader=self._availability.get_model_availability_states,
+                before_proof=lambda: proofs.enter_context(
+                    self._availability.model_availability_proof_guard(target_id, wait=True),
+                ),
+            )
+            if not self._availability.save_model_availability_coverage(coverage):
+                raise ModelAvailabilityUnavailable("Availability target inventory changed")
+            return coverage
 
-    def refresh(self) -> int:
-        verified = 0
-        for target_id, digest in self._availability.get_model_availability_inventory().items():
+    def _renew_target(self, target_id: UUID, digest: str) -> ModelAvailabilityCoverage:
+        resolved = self._clients.resolve(target_id)
+        if not isinstance(resolved.client, AzureApimPublisherClient):
+            raise ModelAvailabilityUnavailable("Availability target verifier is unavailable")
+        with self._availability.model_availability_proof_guard(target_id, wait=False):
+            coverage = resolved.client.renew_model_availability(
+                target_id, digest,
+                self._repository.list_gateway_deployments(target_id, include_retired=True),
+                self._table_endpoint, self._table_name,
+                self._availability.get_model_availability_states,
+                node_enrollment_reader=partial(
+                    self._availability.list_model_availability_node_enrollments, target_id,
+                ),
+            )
+            if not self._availability.save_model_availability_coverage(coverage):
+                raise ModelAvailabilityUnavailable("Availability target inventory changed")
+            return coverage
+
+    def refresh(self, *, renew: bool = False) -> int:
+        inventory = self._availability.get_model_availability_inventory()
+        if not inventory:
+            return 0
+
+        def refresh_target(entry: tuple[UUID, str]) -> Exception | None:
+            target_id, digest = entry
             try:
-                self._verify_target(target_id, digest)
+                if renew:
+                    self._renew_target(target_id, digest)
+                else:
+                    self._verify_target(target_id, digest)
             except Exception as error:
-                logger.warning(
-                    "Model availability coverage failed target=%s error=%s",
-                    target_id,
-                    type(error).__name__,
-                )
-                continue
-            verified += 1
-        return verified
+                return error
+            return None
+
+        workers = min(_MAX_CONCURRENT_TARGETS, len(inventory))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            verified = 0
+            for target_id, error in zip(
+                inventory, executor.map(refresh_target, inventory.items()), strict=True,
+            ):
+                if error is None:
+                    verified += 1
+                else:
+                    logger.warning(
+                        "Model availability coverage failed target=%s error=%s",
+                        target_id, type(error).__name__,
+                    )
+            return verified
 
     def verify(
         self,
         projected: ModelAvailabilityState,
         inventory: dict[UUID, str],
     ) -> Sequence[ModelAvailabilityTargetResult]:
-        results = []
-        for target_id, digest in inventory.items():
+        if not inventory:
+            return []
+
+        def confirm_target(entry: tuple[UUID, str]) -> ModelAvailabilityTargetResult:
+            target_id, digest = entry
             try:
                 coverage = self._availability.get_model_availability_coverage(target_id)
                 if coverage is None or not coverage.current(datetime.now(UTC), digest):
@@ -327,20 +375,18 @@ class ModelAvailabilityCoordinator:
                 resolved = self._clients.resolve(target_id)
                 if not isinstance(resolved.client, AzureApimPublisherClient):
                     raise ModelAvailabilityUnavailable("Availability verifier is unavailable")
-                results.append(
-                    resolved.client.confirm_model_availability(
+                return resolved.client.confirm_model_availability(
+                    target_id,
+                    projected,
+                    coverage,
+                    self._repository.list_gateway_deployments(target_id, include_retired=True),
+                    self._table_endpoint,
+                    self._table_name,
+                    self._availability.get_model_availability_states,
+                    node_enrollment_reader=partial(
+                        self._availability.list_model_availability_node_enrollments,
                         target_id,
-                        projected,
-                        coverage,
-                        self._repository.list_gateway_deployments(target_id, include_retired=True),
-                        self._table_endpoint,
-                        self._table_name,
-                        self._availability.get_model_availability_states,
-                        node_enrollment_reader=partial(
-                            self._availability.list_model_availability_node_enrollments,
-                            target_id,
-                        ),
-                    )
+                    ),
                 )
             except Exception as error:
                 logger.warning(
@@ -356,12 +402,13 @@ class ModelAvailabilityCoordinator:
                     )
                     else "model_availability_capability_unverified"
                 )
-                results.append(
-                    ModelAvailabilityTargetResult(
-                        target_id=target_id,
-                        inventory_digest=digest,
-                        status="unknown",
-                        reason=reason,
-                    )
+                return ModelAvailabilityTargetResult(
+                    target_id=target_id,
+                    inventory_digest=digest,
+                    status="unknown",
+                    reason=reason,
                 )
-        return results
+
+        workers = min(_MAX_CONCURRENT_TARGETS, len(inventory))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            return list(executor.map(confirm_target, inventory.items()))
