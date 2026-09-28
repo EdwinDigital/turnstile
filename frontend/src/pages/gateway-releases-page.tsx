@@ -695,12 +695,12 @@ export function GatewayReleasesPage({
         {rollbackPreview.isLoading ? <div className="gateway-release-rollback-state"><RefreshCw className="spin" size={15} />生成语义预览</div>
           : rollbackPreview.error ? <div className="gateway-release-rollback-state error"><AlertTriangle size={15} />{String(rollbackPreview.error)}</div>
           : rollbackPreview.data && <div className="gateway-release-rollback-preview">
-            <dl><div><dt>目标版本</dt><dd><code>{rollbackPreview.data.target_release_id.slice(0, 8)}</code></dd></div><div><dt>当前版本</dt><dd><code>{rollbackPreview.data.current_release_id.slice(0, 8)}</code></dd></div><div><dt>语义变更</dt><dd>{changeCount(rollbackPreview.data.changes)} 项</dd></div></dl>
+            <dl><div><dt>目标版本</dt><dd><code>{rollbackPreview.data.target_release_id.slice(0, 8)}</code></dd></div><div><dt>当前版本</dt><dd><code>{rollbackPreview.data.current_release_id.slice(0, 8)}</code></dd></div><div><dt>语义变更</dt><dd data-no-localize>{changeCount(rollbackPreview.data.changes).toLocaleString(getIntlLocale())}</dd></div></dl>
             {rollbackPreview.data.rollback_blockers.length > 0 && <div className="gateway-release-rollback-blockers">{rollbackPreview.data.rollback_blockers.map((blocker) => <code key={blocker}>{blocker}</code>)}</div>}
           </div>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={rollbackMutation.isPending}>取消</AlertDialogCancel>
-          <AlertDialogAction className="gateway-release-rollback-confirm" disabled={!rollbackPreview.data?.rollback_eligible || rollbackPreview.isFetching || rollbackMutation.isPending} onClick={(event) => { event.preventDefault(); if (rollbackId && rollbackPreview.data?.rollback_eligible && !rollbackPreview.isFetching) rollbackMutation.mutate({ id: rollbackId, confirmation: rollbackPreview.data.confirmation_sha256 }) }}>{rollbackMutation.isPending ? <><RefreshCw className="spin" size={13} />正在排队</> : <><RotateCcw size={13} />确认回滚</>}</AlertDialogAction>
+          <AlertDialogAction variant="destructive" className="gateway-release-rollback-confirm" disabled={!rollbackPreview.data?.rollback_eligible || rollbackPreview.isFetching || rollbackMutation.isPending} onClick={(event) => { event.preventDefault(); if (rollbackId && rollbackPreview.data?.rollback_eligible && !rollbackPreview.isFetching) rollbackMutation.mutate({ id: rollbackId, confirmation: rollbackPreview.data.confirmation_sha256 }) }}>{rollbackMutation.isPending ? <><RefreshCw className="spin" size={13} />正在排队</> : <><RotateCcw size={13} />确认回滚</>}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

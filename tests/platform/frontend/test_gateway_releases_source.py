@@ -1,6 +1,25 @@
 from tests.support.paths import FRONTEND_SOURCE, read_frontend_styles
 
 
+def test_rollback_confirmation_uses_destructive_semantics_and_localized_count() -> None:
+    page = (FRONTEND_SOURCE / "pages/gateway-releases-page.tsx").read_text(encoding="utf-8")
+    styles = read_frontend_styles()
+    assert (
+        '<AlertDialogAction variant="destructive" '
+        'className="gateway-release-rollback-confirm"' in page
+    )
+    assert (
+        '<dd data-no-localize>{changeCount(rollbackPreview.data.changes)'
+        '.toLocaleString(getIntlLocale())}</dd>' in page
+    )
+    assert (
+        '.gateway-release-rollback-dialog [data-slot="alert-dialog-action"]:focus-visible' in styles
+    )
+    assert '.dark .gateway-release-rollback-dialog .gateway-release-rollback-confirm' in styles
+    assert 'height: 32px; border: 1px solid transparent; border-radius: 7px;' in styles
+    assert 'pointer-events: none; opacity: .5; cursor: not-allowed;' in styles
+
+
 def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> None:
     app = (FRONTEND_SOURCE / "app.tsx").read_text(encoding="utf-8")
     page = (FRONTEND_SOURCE / "pages/gateway-releases-page.tsx").read_text(

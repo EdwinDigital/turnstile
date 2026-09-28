@@ -236,10 +236,18 @@
 .gateway-release-rollback-blockers { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 9px; }
 .gateway-release-rollback-blockers code { border-radius: 4px; padding: 2px 5px; background: color-mix(in oklch, var(--destructive) 7%, transparent); color: var(--destructive); font-size: 9px; }
 .gateway-release-rollback-dialog [data-slot="alert-dialog-footer"] { margin: 0; display: flex; flex-direction: row; justify-content: flex-end; gap: 6px; border-radius: 0; padding: 10px 14px; background: color-mix(in oklch, var(--muted) 30%, var(--background)); }
-.gateway-release-rollback-dialog [data-slot="alert-dialog-cancel"], .gateway-release-rollback-dialog [data-slot="alert-dialog-action"] { height: 28px; border-radius: 6px; padding: 0 10px; font-size: 10px; font-weight: 600; }
-.gateway-release-rollback-dialog .gateway-release-rollback-confirm { display: inline-flex; align-items: center; gap: 5px; border-color: var(--destructive); background: var(--destructive); color: var(--destructive-foreground); }
-.gateway-release-rollback-dialog .gateway-release-rollback-confirm:hover:not(:disabled) { filter: brightness(.95); }
-.gateway-release-rollback-dialog [data-slot="alert-dialog-action"]:disabled { opacity: .45; cursor: not-allowed; }
+.gateway-release-rollback-dialog [data-slot="alert-dialog-cancel"], .gateway-release-rollback-dialog [data-slot="alert-dialog-action"] { appearance: none; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 6px; width: auto; max-width: 100%; height: 32px; border: 1px solid transparent; border-radius: 7px; padding: 0 10px; outline: none; font: inherit; font-size: 12px; line-height: 18px; font-weight: 500; white-space: nowrap; cursor: pointer; transition: color 100ms ease, background-color 100ms ease, border-color 100ms ease, box-shadow 100ms ease; }
+.gateway-release-rollback-dialog [data-slot="alert-dialog-cancel"] { border-color: var(--border); background: var(--background); color: var(--foreground); }
+.gateway-release-rollback-dialog [data-slot="alert-dialog-cancel"]:hover:not(:disabled) { background: var(--muted); }
+.gateway-release-rollback-dialog .gateway-release-rollback-confirm { background: color-mix(in oklch, var(--destructive) 10%, transparent); color: var(--destructive); }
+.gateway-release-rollback-dialog .gateway-release-rollback-confirm:hover:not(:disabled) { background: color-mix(in oklch, var(--destructive) 20%, transparent); }
+.dark .gateway-release-rollback-dialog .gateway-release-rollback-confirm { background: color-mix(in oklch, var(--destructive) 20%, transparent); }
+.dark .gateway-release-rollback-dialog .gateway-release-rollback-confirm:hover:not(:disabled) { background: color-mix(in oklch, var(--destructive) 30%, transparent); }
+.gateway-release-rollback-dialog [data-slot="alert-dialog-cancel"]:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 50%, transparent); }
+.gateway-release-rollback-dialog [data-slot="alert-dialog-action"]:focus-visible { box-shadow: 0 0 0 3px color-mix(in oklch, var(--destructive) 20%, transparent); }
+.dark .gateway-release-rollback-dialog [data-slot="alert-dialog-action"]:focus-visible { box-shadow: 0 0 0 3px color-mix(in oklch, var(--destructive) 40%, transparent); }
+.gateway-release-rollback-dialog [data-slot="alert-dialog-cancel"]:disabled, .gateway-release-rollback-dialog [data-slot="alert-dialog-action"]:disabled { pointer-events: none; opacity: .5; cursor: not-allowed; }
+.gateway-release-rollback-dialog [data-slot="alert-dialog-action"] > svg { flex: 0 0 auto; }
 
 @media (max-width: 767px) {
   .gateway-budget-preview dl { grid-template-columns: 1fr; }
