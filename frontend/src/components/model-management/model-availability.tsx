@@ -143,8 +143,8 @@ export function ModelAvailabilityDialog({ model, registry, readback, readError, 
       </DialogHeader>
       <DialogClose render={<Button type="button" variant="ghost" size="icon-sm" className="registry-editor-close" />}><X size={16} /><span className="sr-only">关闭</span></DialogClose>
       <div className="registry-editor-body model-availability-body">
-        <div className="model-availability-summary"><ModelAvailabilityStatus readback={readback} pending={action.inFlight} error={action.error} />
-          <ModelAvailabilitySwitch readback={readback} registryEnabled={model.enabled} pending={action.inFlight} onChange={action.change} />
+        <div className="model-availability-summary"><ModelAvailabilityStatus readback={readback} pending={action.submitting} error={action.error} />
+          <ModelAvailabilitySwitch readback={readback} registryEnabled={model.enabled} pending={action.submitting} onChange={action.change} />
         </div>
         <dl className="model-availability-facts">
           <div><dt>期望状态</dt><dd>{(readback?.desired_enabled ?? model.enabled) ? "已启用" : "已停用"}</dd></div>

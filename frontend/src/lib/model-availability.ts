@@ -15,6 +15,7 @@ export function availabilityPresentation(readback: ModelAvailabilityReadback | u
   const state = submitting ? "pending" : verified ? "succeeded" : readback?.status === "succeeded" ? "unknown" : readback?.status ?? "unknown"
   return {
     state,
+    submitting,
     inFlight,
     verified,
     checked: readback?.desired_enabled ?? registryEnabled,

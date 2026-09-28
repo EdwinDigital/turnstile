@@ -565,11 +565,12 @@ export function GatewayReleasesPage({
       && (!normalized || `${release.apim_revision ?? ""} ${release.display_name} ${release.model_key} ${release.created_by}`.toLocaleLowerCase().includes(normalized)))
   }, [filter, items, search])
   useEffect(() => {
+    if (!releases.isSuccess) return
     if (selectedId && items.some((release) => release.id === selectedId)) return
     const next = items.find((release) => release.role === "current")?.id ?? items[0]?.id ?? null
     setSelectedId(next)
     setReleaseInUrl(next)
-  }, [items, selectedId])
+  }, [items, selectedId, releases.isSuccess])
   useEffect(() => {
     const sync = () => setSelectedId(releaseFromUrl())
     window.addEventListener("popstate", sync)

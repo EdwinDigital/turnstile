@@ -1,6 +1,12 @@
 from tests.support.paths import FRONTEND_SOURCE, read_frontend_styles
 
 
+def test_release_selection_waits_for_successful_inventory_before_replacing_deep_link() -> None:
+    page = (FRONTEND_SOURCE / "pages/gateway-releases-page.tsx").read_text(encoding="utf-8")
+    assert "if (!releases.isSuccess) return\n    if (selectedId && items.some" in page
+    assert "[items, selectedId, releases.isSuccess]" in page
+
+
 def test_rollback_confirmation_uses_destructive_semantics_and_localized_count() -> None:
     page = (FRONTEND_SOURCE / "pages/gateway-releases-page.tsx").read_text(encoding="utf-8")
     styles = read_frontend_styles()

@@ -169,7 +169,7 @@ export function ModelEditDialog({ registry, model, availability, busy, error, on
           <section className="simple-model-section simple-connection-section" aria-labelledby={`${id}-access`}>
             <div className="simple-section-title"><b id={`${id}-access`}>状态与访问</b></div>
             <div className="model-editor-state">
-              <div className="model-availability-summary"><ModelAvailabilityStatus readback={availability} pending={availabilityAction.inFlight} error={availabilityAction.error} /><ModelAvailabilitySwitch readback={availability} registryEnabled={model.enabled} pending={availabilityAction.inFlight} disabled={busy} onChange={availabilityAction.change} /></div>
+              <div className="model-availability-summary"><ModelAvailabilityStatus readback={availability} pending={availabilityAction.submitting} error={availabilityAction.error} /><ModelAvailabilitySwitch readback={availability} registryEnabled={model.enabled} pending={availabilityAction.submitting} disabled={busy} onChange={availabilityAction.change} /></div>
               <div className="registry-field-label-row"><label className="model-editor-checkbox"><Checkbox checked={draft.isDefault} disabled={busy || imageGeneration}
                 onCheckedChange={(checked) => setDraft((current) => setModelEditDefault(current, checked))} /><span>设为默认</span></label><FieldHelp>{imageGeneration ? "图片模型不能设为聊天默认" : "设为整个模型目录的默认模型，并将其连接设为默认；不改变网关路由优先级。"}</FieldHelp></div>
             </div>

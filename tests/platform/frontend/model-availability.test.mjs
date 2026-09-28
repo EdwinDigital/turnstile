@@ -253,6 +253,8 @@ test("the detail keeps target evidence and old verified state separate from the 
   }))
   assert.deepEqual(content.filter(node => node.type === "dd").slice(0, 4).map(node => node.props.children), ["已停用", 2, "已启用", 1])
   assert.equal(content.filter(node => node.type === "li").length, 2)
+  assert.ok(content.some(node => node.type === "span" && node.props.children === "部分生效"))
+  assert.ok(!content.some(node => node.type === "span" && node.props.children === "正在停用"))
   assert.ok(content.some(node => node.type === "p" && node.props.children === "自托管节点覆盖尚未验证"))
   assert.equal(content.find(node => node.type === "Switch").props.disabled, true)
 })
