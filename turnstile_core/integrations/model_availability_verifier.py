@@ -989,6 +989,25 @@ class ModelAvailabilityGatewayVerifier:
             if inherited is not None:
                 _no_bypass(parse_policy(inherited), self.api_id)
         revisions = inventory(api_path + "/revisions")
+        if not revisions:
+            for entry in inventory("/apis?includeRevisions=true"):
+                entry_name = entry.get("name")
+                if not isinstance(entry_name, str):
+                    raise ModelAvailabilityUnavailable("Availability API inventory is invalid")
+                parent_api_id, separator, named_revision = entry_name.partition(";rev=")
+                if parent_api_id.casefold() != self.api_id.casefold():
+                    continue
+                revision = _revision_name(entry)
+                api_properties = entry.get("properties")
+                expected_id = self.resource_id.rstrip("/") + "/apis/" + entry_name
+                if (
+                    not self.resource_id or not isinstance(api_properties, Mapping)
+                    or str(entry.get("id", "")).casefold() != expected_id.casefold()
+                    or (separator and named_revision != revision)
+                    or (not separator and api_properties.get("isCurrent") is not True)
+                ):
+                    raise ModelAvailabilityUnavailable("Retained API revision identity differs")
+                revisions.append(entry)
         if not revisions or len(revisions) > 100:
             raise ModelAvailabilityUnavailable(
                 "Availability revision inventory is empty or too large"

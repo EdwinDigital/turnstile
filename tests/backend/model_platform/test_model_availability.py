@@ -1014,6 +1014,53 @@ def test_retired_and_fenced_native_proofs_require_exact_denial_identity(
     assert len(sent) == 1 and sent[0].method == "HEAD"
 
 
+@pytest.mark.parametrize("defect", [None, "scope", "revision", "current", "duplicate", "empty"])
+def test_empty_revision_endpoint_uses_complete_identity_checked_api_inventory(
+    defect: str | None,
+) -> None:
+    verifier, _state, _requests = gateway_availability_fixture()
+    original = verifier.list_resources
+    verifier.resource_id = (
+        "/subscriptions/unit/resourceGroups/unit/providers/Microsoft.ApiManagement/service/unit"
+    )
+    revisions = original("/apis/unit-api/revisions")
+    revision = revisions[0].get(
+        "apiRevision", revisions[0].get("properties", {}).get("apiRevision"),
+    )
+    assert revision
+    entry: dict[str, Any] = {
+        "name": "unit-api",
+        "id": verifier.resource_id + "/apis/unit-api",
+        "properties": {"apiRevision": revision, "isCurrent": True},
+    }
+    if defect == "scope":
+        entry["id"] = "/foreign/apis/unit-api"
+    elif defect == "revision":
+        entry["name"] = "unit-api;rev=other"
+        entry["id"] = verifier.resource_id + "/apis/unit-api;rev=other"
+    elif defect == "current":
+        entry["properties"]["isCurrent"] = False
+    entries = [] if defect == "empty" else [entry, entry] if defect == "duplicate" else [entry]
+
+    def inventory(path: str) -> list[dict[str, Any]]:
+        if path == "/apis/unit-api/revisions":
+            return []
+        if path == "/apis?includeRevisions=true":
+            return [{"name": "other-api", "properties": {}}, *entries]
+        return original(path)
+
+    verifier.list_resources = inventory
+    with verifier.client:
+        if defect:
+            with pytest.raises(ModelAvailabilityUnavailable):
+                verifier.verify("a" * 64, [])
+        else:
+            coverage = verifier.verify("a" * 64, [])
+            assert coverage.serving_surfaces
+            assert verifier.confirmation_plan is not None
+            assert {item.revision for item in verifier.confirmation_plan.catalogs} == {revision}
+
+
 def test_node_attestation_does_not_follow_redirects_or_publish_a_lease() -> None:
     store = Mock(spec=TableStorageLedger)
     with httpx.Client(
