@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -20,6 +21,7 @@ from turnstile_core.integrations.reconciliation import (
     RECONCILIATION_SOURCE,
     CacheReadSyncService,
     LogAnalyticsReservationTerminalLog,
+    ManagedIdentityTokenProvider,
     ReconciliationService,
     _parse_cache_read_rows,
     _parse_rows,
@@ -28,6 +30,65 @@ from turnstile_core.integrations.reconciliation import (
 from turnstile_core.persistence.in_memory import InMemoryRepository
 
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
+
+
+def test_managed_identity_token_cache_is_concurrent_expiring_and_identity_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr("turnstile_core.integrations.reconciliation.time", lambda: clock[0])
+    monkeypatch.setattr("turnstile_core.integrations.reconciliation.monotonic", lambda: clock[0])
+    monkeypatch.setenv("IDENTITY_ENDPOINT", "http://127.0.0.1/identity")
+    monkeypatch.setenv("IDENTITY_HEADER", "unit-header")
+    requests: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={
+            "access_token": "unit-token-" + str(len(requests)),
+            "expires_on": str(int(clock[0] + 240)),
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(transport)) as client:
+        provider = ManagedIdentityTokenProvider(client)
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            tokens = list(executor.map(provider.token, ["https://management.azure.com/"] * 40))
+        assert len(requests) == 1 and len(set(tokens)) == 1
+        assert provider.token("https://storage.azure.com/") != tokens[0]
+        assert len(requests) == 2
+        clock[0] += 121
+        assert provider.token("https://management.azure.com/") != tokens[0]
+        assert len(requests) == 3
+        monkeypatch.setenv("IDENTITY_HEADER", "rotated-unit-header")
+        provider.token("https://management.azure.com/")
+        assert len(requests) == 4
+        monkeypatch.setenv("IDENTITY_ENDPOINT", "http://127.0.0.1/new-identity")
+        provider.token("https://management.azure.com/")
+        assert len(requests) == 5
+        monkeypatch.delenv("IDENTITY_HEADER")
+        with pytest.raises(RuntimeError, match="not available"):
+            provider.token("https://management.azure.com/")
+        assert len(requests) == 5
+
+
+@pytest.mark.parametrize("expiry", [None, "invalid", True, "999999999999999999999", 1001])
+def test_managed_identity_token_does_not_cache_missing_invalid_or_expiring_lifetime(
+    expiry: object, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IDENTITY_ENDPOINT", "http://127.0.0.1/identity")
+    monkeypatch.setenv("IDENTITY_HEADER", "unit-header")
+    monkeypatch.setattr("turnstile_core.integrations.reconciliation.time", lambda: 1000.0)
+    requests: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"access_token": "unit-token", "expires_on": expiry})
+
+    with httpx.Client(transport=httpx.MockTransport(transport)) as client:
+        provider = ManagedIdentityTokenProvider(client)
+        assert provider.token("https://management.azure.com/") == "unit-token"
+        assert provider.token("https://management.azure.com/") == "unit-token"
+    assert len(requests) == 2
 
 
 def _terminal_payload(rows: list[list[Any]]) -> dict[str, Any]:

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -112,7 +113,11 @@ web_dist = get_settings().web_dist_dir
 if web_dist.is_dir():
     assets_dir = web_dist / "assets"
     if assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="web-assets")
+        app.mount(
+            "/assets",
+            GZipMiddleware(StaticFiles(directory=assets_dir), minimum_size=1024, compresslevel=6),
+            name="web-assets",
+        )
 
     @app.get("/{client_path:path}", include_in_schema=False)
     def web_application(client_path: str) -> FileResponse:

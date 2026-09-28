@@ -16,6 +16,8 @@ import logging
 import os
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from threading import Lock
+from time import monotonic, time
 from typing import Any, Protocol
 
 import httpx
@@ -117,28 +119,49 @@ class ManagedIdentityTokenProvider:
 
     def __init__(self, client: httpx.Client | None = None) -> None:
         self._client = client
+        self._token_lock = Lock()
+        self._identity: tuple[str, str] | None = None
+        self._tokens: dict[str, tuple[str, float]] = {}
 
     def token(self, resource: str) -> str:
-        endpoint = os.environ.get("IDENTITY_ENDPOINT")
-        header = os.environ.get("IDENTITY_HEADER")
-        if not endpoint or not header:
-            raise RuntimeError("Managed identity endpoint is not available in this environment")
-        client = self._client or httpx.Client(timeout=10.0)
-        try:
-            response = client.get(
-                endpoint,
-                params={"resource": resource, "api-version": "2019-08-01"},
-                headers={"X-IDENTITY-HEADER": header},
-            )
-            response.raise_for_status()
-            payload: dict[str, Any] = response.json()
-        finally:
-            if self._client is None:
-                client.close()
-        access_token = payload.get("access_token")
-        if not isinstance(access_token, str) or not access_token:
-            raise RuntimeError("Managed identity response did not contain an access token")
-        return access_token
+        with self._token_lock:
+            endpoint = os.environ.get("IDENTITY_ENDPOINT")
+            header = os.environ.get("IDENTITY_HEADER")
+            if not endpoint or not header:
+                self._tokens.clear()
+                raise RuntimeError("Managed identity endpoint is not available in this environment")
+            identity = (endpoint, header)
+            if identity != self._identity:
+                self._tokens.clear()
+                self._identity = identity
+            cached = self._tokens.get(resource)
+            if cached is not None and monotonic() < cached[1]:
+                return cached[0]
+            client = self._client or httpx.Client(timeout=10.0)
+            try:
+                response = client.get(
+                    endpoint,
+                    params={"resource": resource, "api-version": "2019-08-01"},
+                    headers={"X-IDENTITY-HEADER": header},
+                )
+                response.raise_for_status()
+                payload: dict[str, Any] = response.json()
+            finally:
+                if self._client is None:
+                    client.close()
+            access_token = payload.get("access_token")
+            if not isinstance(access_token, str) or not access_token:
+                raise RuntimeError("Managed identity response did not contain an access token")
+            expiry = payload.get("expires_on")
+            if isinstance(expiry, str) and expiry.isascii() and expiry.isdecimal():
+                expiry = int(expiry) if len(expiry) <= 12 else None
+            if type(expiry) is int:
+                lifetime = min(300.0, expiry - time() - 120.0)
+                if lifetime > 0:
+                    if len(self._tokens) >= 8:
+                        self._tokens.clear()
+                    self._tokens[resource] = (access_token, monotonic() + lifetime)
+            return access_token
 
 
 class LogAnalyticsGatewayUsageLog:
