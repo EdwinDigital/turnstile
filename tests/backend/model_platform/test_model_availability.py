@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, Mock
 from uuid import UUID
+from xml.etree import ElementTree as ET
 
 import httpx
 import pytest
@@ -43,14 +44,27 @@ from turnstile_core.domain.model_availability import (
     ModelAvailabilityUnavailable,
 )
 from turnstile_core.domain.runtime_models import ManagedModelWrite, ProviderTarget
-from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
+from turnstile_core.integrations.apim_budget_execution import (
+    _deny,
+    budget_execution_fence,
+    compose_budget_execution_parent,
+)
 from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
 from turnstile_core.integrations.apim_model_availability import (
+    INHERITED_OPERATION_POLICY,
+    RESOLVE_FIXED_MODEL,
+    _admission_locations,
     availability_denial,
     availability_kernel_digest,
     availability_operation_digest,
     compile_availability_adoption,
+    compile_protocol_fenced_availability_operation,
+    compile_protocol_fenced_probe,
     compose_availability_parent,
+    is_pre_admission_denial,
+    is_protocol_fenced_availability_operation,
+    is_read_only_budget_fence,
+    is_retired_availability_operation,
     validate_availability_parent,
     without_availability_parent,
 )
@@ -203,6 +217,149 @@ def test_native_admission_rejects_policy_tampering(change: str) -> None:
         node.append(parse_policy("<cache-lookup />"))
     with pytest.raises(PolicyCompilationError):
         validate_availability_parent(root)
+
+
+@pytest.mark.parametrize("retired", [False, True])
+def test_fixed_availability_route_preserves_binding_or_rejects_before_inheritance(
+    retired: bool,
+) -> None:
+    source = INHERITED_OPERATION_POLICY.replace(
+        "<inbound><base />", '<inbound><base /><set-backend-service backend-id="unit-backend" />',
+    )
+    adoption = ModelAvailabilityPolicyAdoption(
+        adoption_id=UUID(int=11), target_id=UUID(int=12), api_id="unit-api", revision="1",
+        models={"unit-model": UUID(int=2), "other-model": UUID(int=3)},
+        serving_gateways={"unit-model": ("edge",), "other-model": None},
+        original_policy_digests={"fixed": hashlib.sha256(source.encode()).hexdigest()},
+        fixed_operations={"fixed": "unit-model"}, retired_operations=("fixed",) if retired else (),
+    )
+    root = parse_policy(compile_availability_adoption(source, adoption, "fixed"))
+    assert root.find("inbound/set-backend-service[@backend-id='unit-backend']") is not None
+    assert is_retired_availability_operation(root) is retired
+    if retired:
+        first = root.find("inbound")
+        assert first is not None
+        assert first[0].tag == "return-response"
+        assert first[0].findtext("set-header[@name='x-turnstile-model-retired']/value") == "1"
+        status = first[0].find("set-status")
+        assert status is not None and status.get("code") == "403"
+    else:
+        resolver = root.find("inbound/set-variable[@name='availabilityModelId']")
+        routes = root.find("inbound/set-variable[@name='availabilityRoutes']")
+        assert resolver is not None and resolver.get("value") == RESOLVE_FIXED_MODEL
+        assert routes is not None
+        assert json.loads(routes.attrib["value"]) == [{
+            "alias": "unit-model", "model_id": str(UUID(int=2)), "gateways": ["edge"],
+        }]
+    with pytest.raises(PolicyCompilationError):
+        compile_availability_adoption(source, adoption, "fixed", catalog=True)
+
+
+def test_historical_protocol_fence_is_idempotent_and_probe_cannot_process_an_image_body() -> None:
+    source = INHERITED_OPERATION_POLICY
+    compiled = compile_protocol_fenced_availability_operation(source)
+    assert compile_protocol_fenced_availability_operation(compiled) == compiled
+    root = parse_policy(compiled)
+    assert is_protocol_fenced_availability_operation(root)
+    inbound = root.find("inbound")
+    assert inbound is not None
+    assert inbound[0].findtext("set-body") is not None
+    assert "budget_protocol_fenced" in inbound[0].findtext("set-body", "")
+    inbound.remove(inbound[0])
+    assert component_digest(root) == component_digest(parse_policy(source))
+    image_source = source.replace(
+        "<inbound><base />",
+        '<inbound><set-variable name="imageRequestValid" value="@(false)" /><base />',
+    )
+    probe = parse_policy(compile_protocol_fenced_probe(image_source))
+    probe_inbound = probe.find("inbound")
+    assert probe_inbound is not None and probe_inbound[0].tag == "base"
+    assert compile_protocol_fenced_probe(source) == source
+    tampered = parse_policy(compiled)
+    tampered_status = tampered.find("inbound/return-response/set-status")
+    assert tampered_status is not None
+    tampered_status.set("code", "200")
+    assert not is_protocol_fenced_availability_operation(tampered)
+
+
+@pytest.mark.parametrize("defect", [None, "post", "success", "scope", "write"])
+def test_parent_only_accepts_the_exact_read_only_budget_fence(defect: str | None) -> None:
+    fence = budget_execution_fence(["unit-api"])
+    if defect == "post":
+        method = fence.find("when/send-request/set-method")
+        assert method is not None
+        method.text = "POST"
+    elif defect == "success":
+        response = fence.find(".//return-response/set-status")
+        assert response is not None
+        response.set("code", "200")
+    elif defect == "scope":
+        branch = fence.find("when")
+        assert branch is not None
+        branch.set("condition", "@(true)")
+    elif defect == "write":
+        branch = fence.find("when")
+        assert branch is not None
+        ET.SubElement(branch, "send-request")
+    assert is_read_only_budget_fence(fence) is (defect is None)
+
+
+@pytest.mark.parametrize("defect", [None, "status", "reassign", "late"])
+def test_legacy_budget_denial_uses_bounded_status_without_log_text(defect: str | None) -> None:
+    root = ET.Element("inbound")
+    _deny(root, "@(true)", "budget_protocol_fenced")
+    branch = root.find("choose/when")
+    assert branch is not None
+    event = branch.find("log-to-eventhub")
+    assert event is not None
+    branch.remove(event)
+    status = branch.find("set-variable[@name='executionStatus']")
+    response = branch.find("return-response")
+    assert status is not None and response is not None
+    if defect == "status":
+        status.set("value", "@(200)")
+    elif defect == "reassign":
+        branch.insert(list(branch).index(response), ET.Element("set-variable", {
+            "name": "executionStatus", "value": "@(200)",
+        }))
+    elif defect == "late":
+        branch.remove(status)
+        branch.append(status)
+    assert is_pre_admission_denial(root, response) is (defect is None)
+
+
+@pytest.mark.parametrize("defect", [None, "employee_auth", "subscription_auth", "early_work"])
+def test_legacy_parent_requires_authentication_before_availability(defect: str | None) -> None:
+    employee = '<validate-azure-ad-token tenant-id="unit-tenant" />'
+    subscription = (
+        '<choose><when condition="@(context.Subscription == null)">'
+        '<return-response><set-status code="401" reason="Unauthorized" />'
+        '</return-response></when></choose>'
+    )
+    if defect == "employee_auth":
+        employee = '<set-variable name="unchecked" value="true" />'
+    elif defect == "subscription_auth":
+        subscription = subscription.replace('code="401"', 'code="200"')
+    elif defect == "early_work":
+        employee = '<rate-limit calls="1" renewal-period="60" />' + employee
+    source = (
+        '<policies><inbound><base /><choose>'
+        '<when condition="@((bool)context.Variables[&quot;hasEmployeeToken&quot;])">'
+        + employee + '<llm-token-limit counter-key="unit" tokens-per-minute="100" />'
+        '</when><otherwise>' + subscription
+        + '<llm-token-limit counter-key="unit" tokens-per-minute="100" />'
+        '</otherwise></choose></inbound><backend><base /></backend>'
+        '<outbound><base /></outbound><on-error><base /></on-error></policies>'
+    )
+    if defect:
+        with pytest.raises(PolicyCompilationError):
+            compose_availability_parent(source)
+    else:
+        upgraded = parse_policy(compose_availability_parent(source))
+        assert len(_admission_locations(upgraded)) == 2
+        assert component_digest(without_availability_parent(upgraded)) == component_digest(
+            parse_policy(source)
+        )
 
 
 def test_native_catalog_adoption_binds_model_and_preserves_the_upstream_route() -> None:

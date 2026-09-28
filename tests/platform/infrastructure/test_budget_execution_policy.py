@@ -331,6 +331,8 @@ def test_availability_state_expression_rejects_unknown_or_wrong_identity(
     ("POST", "chat-completions", "inference", False),
     ("HEAD", "chat-completions", "inference", False),
     ("HEAD", "availability-probe-chat-completions", "inference", True),
+    ("HEAD", "availability-probe-models", "catalog", True),
+    ("HEAD", "models", "catalog", False),
     ("GET", "models", "catalog", True),
 ])
 def test_availability_probe_cannot_bypass_normal_inference(
@@ -417,6 +419,31 @@ def test_availability_native_alias_resolution_honors_serving_scope(
         "gateway": gateway, "variables": {"availabilityRoutes": json.dumps([
             {"alias": "unit", "model_id": model_id, "gateways": routes},
         ])},
+    }])[0]
+    assert result == (model_id if expected else "")
+
+
+@pytest.mark.parametrize("gateway,routes,alias,expected", [
+    ("managed", None, "unit", True),
+    ("edge", ["edge"], "unit", True),
+    ("managed", ["edge"], "unit", False),
+    ("edge", ["edge"], "UNIT", False),
+    ("edge", ["edge"], "other", False),
+])
+def test_availability_fixed_alias_does_not_read_the_request_body(
+    compiled_expressions: tuple[Path, str], tmp_path: Path,
+    gateway: str, routes: list[str] | None, alias: str, expected: bool,
+) -> None:
+    model_id = "00000000-0000-0000-0000-000000000002"
+    result = run_cases(compiled_expressions, tmp_path, [{
+        "expression": expression_id(availability.RESOLVE_FIXED_MODEL),
+        "body": '{"model":"different-body-model"}', "gateway": gateway,
+        "variables": {
+            "availabilityFixedModelAlias": alias,
+            "availabilityRoutes": json.dumps([
+                {"alias": "unit", "model_id": model_id, "gateways": routes},
+            ]),
+        },
     }])[0]
     assert result == (model_id if expected else "")
 

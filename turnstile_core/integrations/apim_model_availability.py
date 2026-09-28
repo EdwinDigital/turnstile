@@ -18,6 +18,7 @@ from .apim_policy_components import (
 )
 from .apim_policy_components import (
     component_digest,
+    expression_tokens,
     parse_policy,
     serialize_policy,
 )
@@ -97,7 +98,7 @@ PROBE_NONCE = r"""@{
       || parsed.ToString("N") != nonce) { return ""; }
     var kind = context.Variables.GetValueOrDefault<string>("availabilitySurfaceKind", "");
     if (context.Request.Method == "GET" && kind == "catalog") { return nonce; }
-    if (context.Request.Method != "HEAD" || kind != "inference"
+        if (context.Request.Method != "HEAD" || (kind != "inference" && kind != "catalog")
       || !context.Operation.Id.StartsWith("availability-probe-", StringComparison.Ordinal)) {
       return "";
     }
@@ -278,6 +279,29 @@ FILTER_CATALOG = r"""@{
 }"""
 
 
+RESOLVE_FIXED_MODEL = r'''@{
+    try {
+        var alias = (string)context.Variables["availabilityFixedModelAlias"];
+        var routes = JArray.Parse((string)context.Variables["availabilityRoutes"]);
+        var matches = routes.OfType<JObject>().Where(route =>
+            string.Equals((string)route["alias"], alias, StringComparison.Ordinal)
+            && (route["gateways"].Type == JTokenType.Null || ((JArray)route["gateways"]).Any(
+                gateway => string.Equals((string)gateway, context.Deployment.Gateway.Id,
+                    StringComparison.OrdinalIgnoreCase)))).ToArray();
+        if (matches.Length != 1) { return ""; }
+        Guid modelId;
+        var value = (string)matches[0]["model_id"];
+        return Guid.TryParseExact(value, "D", out modelId) && modelId.ToString() == value
+            ? value : "";
+    } catch { return ""; }
+}'''
+
+INHERITED_OPERATION_POLICY = (
+        "<policies><inbound><base /></inbound><backend><base /></backend>"
+        "<outbound><base /></outbound><on-error><base /></on-error></policies>"
+)
+
+
 def _variable(parent: ET.Element, name: str, value: str) -> ET.Element:
     return ET.SubElement(parent, "set-variable", {"name": name, "value": value})
 
@@ -392,8 +416,9 @@ def availability_probe_guard() -> ET.Element:
         "when",
         {
             "condition": (
-                '@(context.Variables.GetValueOrDefault<string>("availabilitySurfaceKind", "")'
-                ' == "inference" && !string.IsNullOrEmpty('
+                '@((context.Variables.GetValueOrDefault<string>("availabilitySurfaceKind", "")'
+                ' == "inference" || context.Variables.GetValueOrDefault<string>('
+                '"availabilitySurfaceKind", "") == "catalog") && !string.IsNullOrEmpty('
                 'context.Variables.GetValueOrDefault<string>("availabilityProbeNonce", "")))'
             )
         },
@@ -448,7 +473,7 @@ def admission_guard() -> ET.Element:
         root,
         "when",
         {
-            "condition": "@("
+            "condition": '@(context.Request.Method == "POST" || '
             + " || ".join(f'context.Operation.Id == "{name}"' for name in operations)
             + ")"
         },
@@ -504,6 +529,7 @@ def admission_guard() -> ET.Element:
 def availability_kernel_digest() -> str:
     parts = (
         RESOLVE_MODEL,
+        RESOLVE_FIXED_MODEL,
         BINDING_VALID,
         READ_STATE,
         PROBE_NONCE,
@@ -537,6 +563,39 @@ def availability_operation_digest(root: ET.Element) -> str:
     return component_digest(source)
 
 
+def _legacy_authenticated_branches(root: ET.Element) -> list[tuple[ET.Element, ET.Element]]:
+    inbound = root.find("inbound")
+    if inbound is None:
+        return []
+    condition = expression_tokens('@((bool)context.Variables["hasEmployeeToken"])')
+    for choice in inbound.findall("choose"):
+        branches = [node for node in choice if isinstance(node.tag, str)]
+        if [branch.tag for branch in branches] != ["when", "otherwise"] or (
+            expression_tokens(branches[0].get("condition", "")) != condition
+        ):
+            continue
+        employee = [node for node in branches[0] if isinstance(node.tag, str)]
+        subscription = [node for node in branches[1] if isinstance(node.tag, str)]
+        if not employee or employee[0].tag not in {"validate-azure-ad-token", "validate-jwt"}:
+            return []
+        if not subscription or subscription[0].tag != "choose":
+            return []
+        checks = list(subscription[0])
+        if len(checks) != 1 or checks[0].tag != "when" or (
+            expression_tokens(checks[0].get("condition", ""))
+            != expression_tokens("@(context.Subscription == null)")
+        ):
+            return []
+        children = [node for node in checks[0] if isinstance(node.tag, str)]
+        if len(children) != 1 or children[0].tag != "return-response":
+            return []
+        status = children[0].find("set-status")
+        if status is None or status.get("code") != "401":
+            return []
+        return [(branches[0], employee[0]), (branches[1], subscription[0])]
+    return []
+
+
 def _admission_locations(root: ET.Element) -> list[tuple[ET.Element, ET.Element]]:
     inbound = root.find("inbound")
     if inbound is None:
@@ -551,6 +610,28 @@ def _admission_locations(root: ET.Element) -> list[tuple[ET.Element, ET.Element]
         and (condition := node.find("when")) is not None
         and "selectedModelKnown" in condition.get("condition", "")
     ]
+    legacy_markers = root.findall(".//set-variable[@name='availabilityLegacyAuthenticated']")
+    if legacy_markers:
+        if locations or len(legacy_markers) != 2:
+            raise PolicyCompilationError("Legacy availability authentication is ambiguous")
+        branches = _legacy_authenticated_branches(root)
+        if len(branches) != 2:
+            raise PolicyCompilationError("Legacy authentication cannot be verified")
+        for branch, authenticated in branches:
+            marker = branch.find("set-variable[@name='availabilityLegacyAuthenticated']")
+            if marker is None or marker not in legacy_markers or marker.get("value") != "@(true)":
+                raise PolicyCompilationError("Legacy authentication marker is invalid")
+            preceding = [
+                node for node in list(branch)[:list(branch).index(marker)]
+                if isinstance(node.tag, str)
+            ]
+            if preceding != [authenticated] and (
+                len(preceding) != 2 or preceding[0] is not authenticated or (
+                    component_digest(preceding[1]) != component_digest(availability_probe_guard())
+                )
+            ):
+                raise PolicyCompilationError("Legacy availability must follow authentication")
+            locations.append((branch, marker))
     if len(locations) != 2:
         raise PolicyCompilationError("Availability requires both authenticated admission paths")
     for parent, anchor in locations:
@@ -579,7 +660,65 @@ def is_pre_admission_denial(root: ET.Element, response: ET.Element) -> bool:
     reference = ET.Element("inbound")
     _deny(reference, parent.get("condition", ""), error.get("value", ""))
     expected = reference.find("choose/when")
-    return expected is not None and _matches_policy_component(parent, expected, {})
+    if expected is not None and _matches_policy_component(parent, expected, {}):
+        return True
+    if expression_tokens(code) != expression_tokens('@((int)context.Variables["executionStatus"])'):
+        return False
+    statuses = [node for node in parent.iter("set-variable")
+                if node.get("name") == "executionStatus"]
+    if len(statuses) != 1 or statuses[0] not in list(parent) or (
+        list(parent).index(statuses[0]) >= list(parent).index(response)
+    ):
+        return False
+    status_node = reference.find("choose/when/set-variable[@name='executionStatus']")
+    assert status_node is not None
+    legacy_status = '''@(
+        (string)context.Variables["executionError"] == "budget_temporarily_reserved" ? 429
+        : (string)context.Variables["executionError"] == "budget_exhausted"
+          || (string)context.Variables["executionError"] == "budget_consumer_disabled"
+          || (string)context.Variables["executionError"] == "budget_delegation_invalid" ? 403
+        : (string)context.Variables["executionError"] == "budget_request_bound_exceeds_balance"
+          || (string)context.Variables["executionError"] == "budget_output_limit_invalid"
+          ? 400 : 503)'''
+    initial_status = (
+        '@((string)context.Variables["executionError"] == "budget_temporarily_reserved" ? 429'
+        ' : (string)context.Variables["executionError"] == "budget_exhausted"'
+        ' || (string)context.Variables["executionError"] == "budget_consumer_disabled" ? 403'
+        ' : (string)context.Variables["executionError"] == "budget_request_bound_exceeds_balance"'
+        ' || (string)context.Variables["executionError"] == "budget_output_limit_invalid"'
+        ' ? 400 : 503)'
+    )
+    return expression_tokens(statuses[0].get("value", "")) in {
+        expression_tokens(status_node.get("value", "")), expression_tokens(legacy_status),
+        expression_tokens(initial_status),
+    }
+
+
+def is_read_only_budget_fence(node: ET.Element) -> bool:
+    from .apim_budget_execution import budget_execution_fence
+
+    branches = list(node)
+    if node.tag != "choose" or len(branches) != 1 or branches[0].tag != "when":
+        return False
+    prefix = expression_tokens("@(JArray.Parse(")
+    suffix = expression_tokens(
+        ").Values<string>().Contains(context.Api.Id.Split(';')[0]))"
+    )
+    tokens = expression_tokens(branches[0].get("condition", ""))
+    if len(tokens) != len(prefix) + 1 + len(suffix) or (
+        tokens[:len(prefix)] != prefix or tokens[-len(suffix):] != suffix
+    ):
+        return False
+    try:
+        api_ids = json.loads(json.loads(tokens[len(prefix)]))
+        if not isinstance(api_ids, list) or not api_ids or any(
+            not isinstance(value, str) for value in api_ids
+        ):
+            return False
+        expected = budget_execution_fence(api_ids)
+    except (ValueError, TypeError):
+        return False
+    return _matches_policy_component(node, expected, {})
 
 
 def validate_availability_parent(root: ET.Element) -> None:
@@ -621,6 +760,7 @@ def validate_availability_parent(root: ET.Element) -> None:
     for node in (
         child
         for item in list(inbound)[: list(inbound).index(authentication)]
+        if not is_read_only_budget_fence(item)
         for child in item.iter()
     ):
         if node.tag in {
@@ -646,6 +786,7 @@ def validate_availability_parent(root: ET.Element) -> None:
         "availabilityProbeNonce",
         "availabilityNodeKey",
         "availabilityNodeAllowed",
+        "availabilityLegacyAuthenticated",
     }
     if any(
         node.get("name", "").startswith("availability") and node.get("name") not in names
@@ -680,6 +821,16 @@ def compose_availability_parent(source: str) -> str:
     inbound = root.find("inbound")
     if inbound is None:
         raise PolicyCompilationError("Availability requires a parent inbound policy")
+    if not any(
+        "selectedModelKnown" in node.get("condition", "") for node in inbound.iter("when")
+    ):
+        legacy = _legacy_authenticated_branches(root)
+        if len(legacy) != 2:
+            raise PolicyCompilationError("Availability requires both authenticated admission paths")
+        for branch, authenticated in legacy:
+            branch.insert(list(branch).index(authenticated) + 1, ET.Element("set-variable", {
+                "name": "availabilityLegacyAuthenticated", "value": "@(true)",
+            }))
     for parent, anchor in _admission_locations(root):
         parent.insert(list(parent).index(anchor), availability_probe_guard())
         parent.insert(list(parent).index(anchor) + 1, admission_guard())
@@ -703,6 +854,8 @@ def without_availability_parent(root: ET.Element) -> ET.Element:
     for parent, anchor in _admission_locations(result):
         parent.remove(parent[list(parent).index(anchor) + 1])
         parent.remove(parent[list(parent).index(anchor) - 1])
+        if anchor.get("name") == "availabilityLegacyAuthenticated":
+            parent.remove(anchor)
     inbound = result.find("inbound")
     assert inbound is not None
     for name in (
@@ -738,6 +891,96 @@ def catalog_read() -> list[ET.Element]:
     _storage_read(retry, "availabilityCatalogRead", CATALOG_URL)
     _variable(retry, "availabilityCatalogPage", CATALOG_PAGE)
     return list(root)
+
+
+def retired_availability_denial() -> ET.Element:
+    response = availability_denial(disabled=True)
+    _header(response, "x-turnstile-model-retired", "1")
+    for name, value in (
+        ("probe", '@(context.Request.Headers.GetValueOrDefault('
+                  '"x-turnstile-availability-probe", ""))'),
+        ("api", "@(context.Api.Id.Split(';')[0])"),
+        ("revision", "@(context.Api.Revision)"),
+        ("gateway", "@(context.Deployment.Gateway.Id)"),
+        ("instance", "@(context.Deployment.Gateway.InstanceId)"),
+    ):
+        _header(response, "x-turnstile-retired-" + name, value)
+    return response
+
+
+def is_retired_availability_operation(root: ET.Element) -> bool:
+    inbound = root.find("inbound")
+    if inbound is None:
+        return False
+    children = [node for node in inbound if isinstance(node.tag, str)]
+    return bool(children) and component_digest(children[0]) == component_digest(
+        retired_availability_denial()
+    )
+
+
+def protocol_fenced_availability_denial() -> ET.Element:
+    response = availability_denial()
+    body = response.find("set-body")
+    assert body is not None
+    body.text = (
+        '{"type":"error","error":{"type":"api_error",'
+        '"code":"budget_protocol_fenced","message":"This historical revision remains fenced"}}'
+    )
+    _header(response, "x-turnstile-protocol-fenced", "1")
+    for name, value in (
+        ("probe", '@(context.Request.Headers.GetValueOrDefault('
+                  '"x-turnstile-availability-probe", ""))'),
+        ("api", "@(context.Api.Id.Split(';')[0])"),
+        ("revision", "@(context.Api.Revision)"),
+        ("gateway", "@(context.Deployment.Gateway.Id)"),
+        ("instance", "@(context.Deployment.Gateway.InstanceId)"),
+    ):
+        _header(response, "x-turnstile-protocol-fence-" + name, value)
+    return response
+
+
+def is_protocol_fenced_availability_operation(root: ET.Element) -> bool:
+    inbound = root.find("inbound")
+    if inbound is None:
+        return False
+    children = [node for node in inbound if isinstance(node.tag, str)]
+    return bool(children) and component_digest(children[0]) == component_digest(
+        protocol_fenced_availability_denial()
+    )
+
+
+def compile_protocol_fenced_availability_operation(source: str) -> str:
+    root = parse_policy(source)
+    if not is_protocol_fenced_availability_operation(root):
+        inbound = root.find("inbound")
+        if inbound is None:
+            raise PolicyCompilationError("Protocol-fenced operation inbound is missing")
+        inbound.insert(0, protocol_fenced_availability_denial())
+    return serialize_policy(root)
+
+
+def compile_protocol_fenced_probe(source: str) -> str:
+    root = parse_policy(source)
+    inbound = root.find("inbound")
+    if inbound is None or len(inbound.findall("base")) != 1:
+        raise PolicyCompilationError("Historical probe requires exactly one operation base")
+    base = inbound.find("base")
+    assert base is not None
+    prefix = list(inbound)[:list(inbound).index(base)]
+    if not any(
+        node.tag == "set-variable"
+        and node.get("name") in {"imageRequestValid", "dynamicImageModel"}
+        for node in prefix
+    ):
+        return source
+    processing = [node for node in prefix if not (
+        node.tag == "set-variable" and node.get("name", "").startswith("availability")
+    )]
+    if not processing:
+        return source
+    inbound.remove(base)
+    inbound.insert(list(inbound).index(processing[0]), base)
+    return serialize_policy(root)
 
 
 def compile_availability_operation(
@@ -776,11 +1019,27 @@ def compile_availability_adoption(
     catalog: bool = False,
 ) -> str:
     adoption.validate_source(operation_id, source)
+    if operation_id in adoption.retired_operations:
+        if catalog:
+            raise PolicyCompilationError("A catalog cannot be a retired fixed route")
+        root = parse_policy(source)
+        inbound = root.find("inbound")
+        if inbound is None:
+            raise PolicyCompilationError("Retired route inbound policy is missing")
+        inbound.insert(0, retired_availability_denial())
+        return serialize_policy(root)
     routes = [
         {"alias": alias, "model_id": str(model_id), "gateways": adoption.serving_gateways[alias]}
         for alias, model_id in adoption.models.items()
     ]
-    return _compile_availability_operation(source, adoption, routes, catalog=catalog)
+    fixed_model = adoption.fixed_operations.get(operation_id)
+    if fixed_model is not None:
+        if catalog:
+            raise PolicyCompilationError("A catalog cannot use a fixed inference identity")
+        routes = [route for route in routes if route["alias"] == fixed_model]
+    return _compile_availability_operation(
+        source, adoption, routes, catalog=catalog, fixed_model_alias=fixed_model,
+    )
 
 
 def _compile_availability_operation(
@@ -789,6 +1048,7 @@ def _compile_availability_operation(
     routes: Sequence[dict[str, Any]],
     *,
     catalog: bool,
+    fixed_model_alias: str | None = None,
 ) -> str:
     root = parse_policy(source)
     inbound = root.find("inbound")
@@ -807,7 +1067,12 @@ def _compile_availability_operation(
         _variable(nodes, name, value)
     if not catalog:
         _variable(nodes, "availabilityRoutes", json.dumps(routes, separators=(",", ":")))
-        _variable(nodes, "availabilityModelId", RESOLVE_MODEL)
+        if fixed_model_alias is not None:
+            _variable(nodes, "availabilityFixedModelAlias", fixed_model_alias)
+        _variable(
+            nodes, "availabilityModelId",
+            RESOLVE_FIXED_MODEL if fixed_model_alias is not None else RESOLVE_MODEL,
+        )
     for index, node in enumerate(nodes):
         inbound.insert(index, node)
     ready = ET.Element("choose")
