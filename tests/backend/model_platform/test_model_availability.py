@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier, Lock
 from typing import Any
 from unittest.mock import MagicMock, Mock
 from uuid import UUID
@@ -233,9 +234,16 @@ def test_fixed_availability_route_preserves_binding_or_rejects_before_inheritanc
         original_policy_digests={"fixed": hashlib.sha256(source.encode()).hexdigest()},
         fixed_operations={"fixed": "unit-model"}, retired_operations=("fixed",) if retired else (),
     )
-    root = parse_policy(compile_availability_adoption(source, adoption, "fixed"))
+    compiled = compile_availability_adoption(source, adoption, "fixed")
+    root = parse_policy(compiled)
     assert root.find("inbound/set-backend-service[@backend-id='unit-backend']") is not None
     assert is_retired_availability_operation(root) is retired
+    inspected = inspect_availability_operation(
+        compiled, UUID(int=12), "unit-api", "1", catalog=False,
+    )
+    assert inspected == ([] if retired else [{
+        "alias": "unit-model", "model_id": str(UUID(int=2)), "gateways": ["edge"],
+    }])
     if retired:
         first = root.find("inbound")
         assert first is not None
@@ -431,7 +439,7 @@ def test_diagnostics_require_exact_inference_policy_and_path_pairs() -> None:
 
 
 def gateway_availability_fixture(
-    corruption: str | None = None,
+    corruption: str | None = None, *, revision_count: int = 2,
 ) -> tuple[ModelAvailabilityGatewayVerifier, ModelAvailabilityState, list[httpx.Request]]:
     target_id, model_id = UUID(int=12), UUID(int=2)
     state = ModelAvailabilityState(model_id=model_id, revision=2, enabled=False)
@@ -447,13 +455,18 @@ def gateway_availability_fixture(
         "<on-error><base /></on-error></policies>"
     )
     policies: dict[str, str] = {}
+    revisions = [str(index) for index in range(1, revision_count + 1)]
     resources: dict[str, list[dict[str, Any]]] = {
         "/apis/unit-api/products": [],
-        "/apis/unit-api/revisions": [{"apiRevision": "1"}, {"properties": {"apiRevision": "2"}}],
+        "/apis/unit-api/revisions": [
+            {"apiRevision": revision} if int(revision) % 2
+            else {"properties": {"apiRevision": revision}}
+            for revision in revisions
+        ],
     }
     capabilities: dict[str, str] = {}
-    surface_digests: dict[str, str] = {}
-    for revision in ("1", "2"):
+    surface_digests: dict[tuple[str, str], str] = {}
+    for revision in revisions:
         adoption = ModelAvailabilityPolicyAdoption(
             adoption_id=UUID(int=11),
             target_id=target_id,
@@ -486,7 +499,8 @@ def gateway_availability_fixture(
         capability = root.find("inbound/set-variable[@name='availabilityCapabilityDigest']")
         assert capability is not None
         capabilities[revision] = capability.attrib["value"]
-        surface_digests[revision] = availability_operation_digest(root)
+        surface_digests[revision, "/responses"] = availability_operation_digest(root)
+        surface_digests[revision, "/models"] = availability_operation_digest(parse_policy(catalog))
         prefix = f"/apis/unit-api;rev={revision}"
         policies[prefix + "/policies/policy"] = (
             compose_availability_parent(
@@ -509,11 +523,15 @@ def gateway_availability_fixture(
                     "urlTemplate": "/responses",
                 },
             },
+            {"name": "availability-probe-models", "properties": {
+                "method": "HEAD", "urlTemplate": "/models",
+            }},
         ]
         for name, source in (
             ("responses", inference),
             ("models", catalog),
             ("availability-probe-responses", inference),
+            ("availability-probe-models", catalog),
         ):
             policies[prefix + f"/operations/{name}/policies/policy"] = source
     if corruption == "missing_revision_policy":
@@ -536,7 +554,7 @@ def gateway_availability_fixture(
             "kernel": availability_kernel_digest(),
             "store": hashlib.sha256(b"https://unit.table.core.windows.net|Unit").hexdigest(),
             "capability": capabilities[revision],
-            "surface": surface_digests[revision],
+            "surface": surface_digests[revision, "/" + request.url.path.rsplit("/", 1)[-1]],
         }
         if request.method == "HEAD":
             fields["probe"] = request.headers["x-turnstile-availability-probe"]
@@ -649,11 +667,154 @@ def test_policy_adoption_requires_explicit_fixed_and_retired_operation_identitie
         ModelAvailabilityPolicyAdoption.model_validate(payload)
 
 
+def test_gateway_verification_covers_inventory_exceeding_the_old_300_read_limit() -> None:
+    verifier, _state, requests = gateway_availability_fixture(revision_count=50)
+    original_policy, original_inventory = verifier.read_policy, verifier.list_resources
+    management_reads: list[str] = []
+    lock = Lock()
+
+    def policy(path: str) -> str | None:
+        with lock:
+            management_reads.append(path)
+        return original_policy(path)
+
+    def inventory(path: str) -> list[dict[str, Any]]:
+        with lock:
+            management_reads.append(path)
+        return original_inventory(path)
+
+    verifier.read_policy, verifier.list_resources = policy, inventory
+    with verifier.client:
+        coverage = verifier.verify("a" * 64, [])
+    assert len(coverage.serving_surfaces) == 200
+    assert len(management_reads) == 303
+    assert len(requests) == 150
+    assert len(management_reads) + len(requests) == 453
+    assert {request.method for request in requests} == {"GET", "HEAD"}
+    assert verifier.confirmation_plan is not None
+    assert verifier.confirmation_plan.management_verified_at is not None
+
+
+def test_availability_management_reads_are_parallel_bounded_and_precede_native_proof() -> None:
+    verifier, _state, requests = gateway_availability_fixture(revision_count=16)
+    original_policy = verifier.read_policy
+    barrier = Barrier(8)
+    lock = Lock()
+    active = 0
+    maximum = 0
+    calls: list[str] = []
+    proof_started = False
+
+    def policy(path: str) -> str | None:
+        nonlocal active, maximum
+        if ";rev=" not in path:
+            return original_policy(path)
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            calls.append(path)
+        try:
+            assert not proof_started
+            barrier.wait(timeout=5)
+            return original_policy(path)
+        finally:
+            with lock:
+                active -= 1
+
+    def before_proof() -> None:
+        nonlocal proof_started
+        assert len(calls) == 80 and active == 0 and not requests
+        proof_started = True
+
+    verifier.read_policy, verifier.before_proof = policy, before_proof
+    with verifier.client:
+        verifier.verify("a" * 64, [])
+    assert maximum == 8 and proof_started
+
+
+def test_fast_confirmation_uses_live_proofs_without_management_reads_or_lease_writes() -> None:
+    verifier, state, requests = gateway_availability_fixture()
+    with verifier.client:
+        verifier.verify("a" * 64, [])
+        assert verifier.confirmation_plan is not None
+        requests.clear()
+        verifier.read_policy = Mock(side_effect=AssertionError("Unexpected policy read"))
+        verifier.list_resources = Mock(side_effect=AssertionError("Unexpected inventory read"))
+        store = Mock(spec=TableStorageLedger)
+        verifier.node_store = store
+        result = verifier.confirm(
+            verifier.confirmation_plan, state, "a" * 64, [], lambda _ids: {state.model_id: state},
+        )
+    assert result.status == "verified"
+    assert [request.method for request in requests].count("GET") == 2
+    assert [request.method for request in requests].count("HEAD") == 4
+    store.replace_if_match.assert_not_called()
+    store.read_versioned_entity.assert_not_called()
+
+
+@pytest.mark.parametrize("defect", ["missing", "expired", "future", "inventory", "state"])
+def test_coverage_renewal_refuses_invalid_management_evidence(defect: str) -> None:
+    verifier, state, requests = gateway_availability_fixture()
+    with verifier.client:
+        verifier.verify("a" * 64, [])
+        assert verifier.confirmation_plan is not None
+        plan = verifier.confirmation_plan
+        now = datetime.now(UTC)
+        if defect == "missing":
+            plan = plan.model_copy(update={"management_verified_at": None})
+        elif defect == "expired":
+            plan = plan.model_copy(update={"management_verified_at": now - timedelta(seconds=301)})
+        elif defect == "future":
+            plan = plan.model_copy(update={"management_verified_at": now + timedelta(seconds=30)})
+        requests.clear()
+        with pytest.raises(ModelAvailabilityUnavailable):
+            verifier.renew(
+                plan, "b" * 64 if defect == "inventory" else "a" * 64, [],
+                lambda _ids: {} if defect == "state" else {state.model_id: state},
+            )
+    assert not requests
+
+
+def test_coverage_renewal_cannot_extend_the_original_management_validity() -> None:
+    verifier, state, requests = gateway_availability_fixture()
+    with verifier.client:
+        verifier.verify("a" * 64, [])
+        assert verifier.confirmation_plan is not None
+        payload = verifier.confirmation_plan.model_dump()
+        now = datetime.now(UTC)
+        payload["management_verified_at"] = now - timedelta(seconds=220)
+        payload["coverage"]["verified_at"] = now - timedelta(seconds=2)
+        payload["coverage"]["expires_at"] = now + timedelta(seconds=60)
+        plan = ModelAvailabilityConfirmationPlan.model_validate(payload)
+        verifier.read_policy = Mock(side_effect=AssertionError("Unexpected policy read"))
+        verifier.list_resources = Mock(side_effect=AssertionError("Unexpected inventory read"))
+        coverage = verifier.renew(plan, "a" * 64, [], lambda _ids: {state.model_id: state})
+        assert coverage.expires_at <= now + timedelta(seconds=80)
+        assert verifier.confirmation_plan is not None
+        assert verifier.confirmation_plan.management_verified_at == plan.management_verified_at
+        again = verifier.renew(
+            verifier.confirmation_plan, "a" * 64, [], lambda _ids: {state.model_id: state},
+        )
+        assert again.expires_at == coverage.expires_at
+    assert {request.method for request in requests} == {"GET", "HEAD"}
+
+
+def test_verification_rejects_state_drift_after_the_batch_snapshot() -> None:
+    verifier, state, _requests = gateway_availability_fixture()
+    verifier.state_batch_reader = Mock(side_effect=[
+        {state.model_id: state},
+        {state.model_id: state.model_copy(update={"revision": state.revision + 1})},
+    ])
+    with verifier.client, pytest.raises(ModelAvailabilityUnavailable, match="source changed"):
+        verifier.verify("a" * 64, [])
+    assert verifier.confirmation_plan is None
+
+
 def test_gateway_confirmation_covers_retained_revisions_without_dispatching_inference() -> None:
     verifier, state, requests = gateway_availability_fixture()
     with verifier.client:
         coverage = verifier.verify("a" * 64, [])
-        assert len(coverage.serving_surfaces) == 6
+        assert len(coverage.serving_surfaces) == 8
         assert verifier.confirmation_plan is not None
         result = verifier.confirm(
             verifier.confirmation_plan, state, "a" * 64, [], lambda _ids: {state.model_id: state}
@@ -663,6 +824,8 @@ def test_gateway_confirmation_covers_retained_revisions_without_dispatching_infe
     assert {request.url.path for request in requests if request.method == "HEAD"} == {
         "/llm;rev=1/responses",
         "/llm;rev=2/responses",
+        "/llm;rev=1/models",
+        "/llm;rev=2/models",
     }
 
 
@@ -690,21 +853,125 @@ def test_gateway_confirmation_refuses_incomplete_or_wrong_evidence(corruption: s
         )
 
 
-def test_gateway_verification_requires_retired_self_hosted_node_enrollment() -> None:
+@pytest.mark.parametrize("native_state", ["removed", "detached", "attached", "ambiguous"])
+def test_retired_gateway_requires_fresh_native_association_revocation(native_state: str) -> None:
     verifier, _state, requests = gateway_availability_fixture()
-    with verifier.client, pytest.raises(ModelAvailabilityUnavailable, match="node_coverage"):
-        verifier.verify(
-            "a" * 64,
-            [
-                {
-                    "id": str(UUID(int=5)),
-                    "kind": "self_hosted",
-                    "native_gateway_id": "unit-node",
-                    "retired_at": "earlier",
-                }
-            ],
+    original = verifier.list_resources
+    native_reads = []
+
+    def inventory(path: str) -> list[dict[str, Any]]:
+        if path == "/gateways":
+            native_reads.append(path)
+            return [] if native_state == "removed" else [{"name": "unit-node"}]
+        if path == "/gateways/unit-node/apis":
+            native_reads.append(path)
+            return [] if native_state == "detached" else [
+                {"name": "unit-api;rev=1"} if native_state == "attached" else {},
+            ]
+        return original(path)
+
+    verifier.list_resources = inventory
+    deployments = [{
+        "id": str(UUID(int=5)), "kind": "self_hosted",
+        "native_gateway_id": "unit-node", "retired_at": "2026-01-01T00:00:00Z",
+    }]
+    with verifier.client:
+        if native_state in {"removed", "detached"}:
+            verifier.verify("a" * 64, deployments)
+            assert verifier.confirmation_plan is not None
+            assert verifier.confirmation_plan.retired_deployments == (UUID(int=5),)
+            assert native_reads.count("/gateways") == 2
+        else:
+            with pytest.raises(ModelAvailabilityUnavailable):
+                verifier.verify("a" * 64, deployments)
+            assert not requests
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_node_lease_never_outlives_its_management_evidence(
+    expired: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = Mock(spec=TableStorageLedger)
+    saved: dict[str, Any] = {}
+
+    def read(_partition: str, _row: str) -> tuple[dict[str, Any], str] | None:
+        return (saved, '"unit"') if saved else None
+
+    def replace(_partition: str, _row: str, entity: dict[str, Any], _etag: str | None) -> bool:
+        saved.update(entity)
+        return True
+
+    store.read_versioned_entity.side_effect = read
+    store.replace_if_match.side_effect = replace
+    with httpx.Client() as client:
+        verifier = ModelAvailabilityNodeVerifier(
+            client, SecretStr("unit"), store, "https://unit.table.core.windows.net", "Unit",
         )
-    assert not requests
+        monkeypatch.setattr(verifier, "attest", Mock())
+        now = datetime.now(UTC).replace(microsecond=0)
+        lease = ModelAvailabilityNodeLease(
+            target_id=UUID(int=12), api_id="unit-api", revision="1",
+            native_gateway_id="edge", instance_id="unit-node", capability_digest="a" * 64,
+            issued_at=now, expires_at=now + timedelta(seconds=120),
+        )
+        valid_until = now + timedelta(seconds=-1 if expired else 30)
+        if expired:
+            with pytest.raises(ModelAvailabilityUnavailable, match="expired"):
+                verifier.verify("https://unit.example/llm", lease, {"/responses": "b" * 64},
+                                valid_until=valid_until)
+            store.replace_if_match.assert_not_called()
+        else:
+            result = verifier.verify(
+                "https://unit.example/llm", lease, {"/responses": "b" * 64},
+                valid_until=valid_until,
+            )
+            assert result.expires_at == valid_until
+            assert ModelAvailabilityNodeLease.from_entity(saved) == result
+
+
+@pytest.mark.parametrize("protocol_fenced", [False, True])
+@pytest.mark.parametrize("defect", [None, "status", "marker", "probe", "api", "revision",
+                                  "gateway", "instance", "cache"])
+def test_retired_and_fenced_native_proofs_require_exact_denial_identity(
+    protocol_fenced: bool, defect: str | None,
+) -> None:
+    verifier, _state, _requests = gateway_availability_fixture()
+    with verifier.client:
+        verifier.verify("a" * 64, [])
+    assert verifier.confirmation_plan is not None
+    check = verifier.confirmation_plan.catalogs[0]
+    prefix = "x-turnstile-protocol-fence-" if protocol_fenced else "x-turnstile-retired-"
+    marker = "x-turnstile-protocol-fenced" if protocol_fenced else "x-turnstile-model-retired"
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        headers = {
+            "Cache-Control": "no-store", marker: "1",
+            prefix + "probe": request.headers["x-turnstile-availability-probe"],
+            prefix + "api": "unit-api", prefix + "revision": check.revision,
+            prefix + "gateway": "managed", prefix + "instance": "managed",
+        }
+        if defect == "marker":
+            headers[marker] = "wrong"
+        elif defect == "cache":
+            headers["Cache-Control"] = "public"
+        elif defect and defect != "status":
+            headers[prefix + defect] = "wrong"
+        return httpx.Response(
+            200 if defect == "status" else 503 if protocol_fenced else 403, headers=headers,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        verifier.client = client
+        verify = (verifier._check_protocol_fenced_surface if protocol_fenced
+                  else verifier._check_retired_surface)
+        if defect:
+            with pytest.raises(ModelAvailabilityUnavailable):
+                verify(check, "/responses", lambda: None)
+        else:
+            verify(check, "/responses", lambda: None)
+    assert len(sent) == 1 and sent[0].method == "HEAD"
 
 
 def test_node_attestation_does_not_follow_redirects_or_publish_a_lease() -> None:
