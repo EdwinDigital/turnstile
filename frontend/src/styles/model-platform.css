@@ -603,12 +603,16 @@
 button.model-availability-status { cursor: pointer; }
 .model-availability-status > svg { flex: 0 0 12px; }
 .model-availability-status > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-availability-status.registry-health { gap: 4px; font-size: 12px; font-weight: 500; }
+.model-availability-status.registry-health > i { flex: 0 0 5px; }
 .model-availability-status.pending, .model-availability-status.projected { color: var(--brand); }
 .model-availability-status.partial { color: var(--warning); }
 .model-availability-status.failed { color: var(--destructive); }
 .model-availability-status:focus-visible { border-radius: 4px; outline: 2px solid var(--ring); outline-offset: 2px; }
-[data-slot="switch"].model-availability-toggle { width: 32px; height: 18px; flex: 0 0 32px; border: 0; padding: 1px; background: var(--input); }
-[data-slot="switch"].model-availability-toggle[data-checked] { background: var(--primary); }
+[data-slot="switch"].model-availability-toggle { width: 32px; height: 18px; flex: 0 0 32px; border: 1px solid var(--border); padding: 2px; background: var(--muted); }
+[data-slot="switch"].model-availability-toggle [data-slot="switch-thumb"] { width: 12px; height: 12px; background: var(--muted-foreground); box-shadow: none; }
+[data-slot="switch"].model-availability-toggle[data-checked] { border-color: var(--success); background: oklch(0.65 0.15 145 / 18%); }
+[data-slot="switch"].model-availability-toggle[data-checked] [data-slot="switch-thumb"] { background: var(--success); }
 .model-availability-dialog { width: min(560px, calc(100vw - 32px)); padding: 0; gap: 0; }
 .model-availability-body { display: grid; gap: 16px; }
 .model-availability-summary { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; }

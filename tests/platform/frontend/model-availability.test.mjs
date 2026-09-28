@@ -6,6 +6,7 @@ import { runInNewContext } from "node:vm"
 
 import { availabilityPresentation, availabilityRefetchInterval } from "../../../frontend/src/lib/model-availability.ts"
 import { resolveInvocationModel } from "../../../frontend/src/lib/gateway-topology.ts"
+import * as runtimeHealth from "../../../frontend/src/lib/runtime-health.ts"
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
@@ -77,7 +78,9 @@ function componentHarness(initial = readback(), send = async (_modelId, value) =
     } },
     "../../data-sources/apim/queries": { finopsKeys: keys },
     "../../lib/model-availability": { availabilityPresentation },
+    "../../lib/runtime-health": runtimeHealth,
     "../../locales": { getIntlLocale: () => "en-US" },
+    "../../providers/timezone-provider": { useTimezone: () => ({ timezone: "Asia/Shanghai" }) },
     "../assistant/queries": { assistantSettingsKey: ["assistant", "settings"] },
   }
   const exports = {}
@@ -252,6 +255,37 @@ test("the detail keeps target evidence and old verified state separate from the 
   assert.equal(content.filter(node => node.type === "li").length, 2)
   assert.ok(content.some(node => node.type === "p" && node.props.children === "自托管节点覆盖尚未验证"))
   assert.equal(content.find(node => node.type === "Switch").props.disabled, true)
+})
+
+test("verified status uses the existing health indicator without promoting unknown state", () => {
+  const harness = componentHarness()
+  for (const enabled of [true, false]) {
+    const result = harness.render("ModelAvailabilityStatus", { readback: ready(enabled) })
+    assert.equal(result.props.className, `model-availability-status succeeded registry-health ${enabled ? "available" : "unavailable"}`)
+    assert.ok(harness.nodes(result).some(node => node.type === "i" && node.props["aria-hidden"] === "true"))
+  }
+  for (const status of ["pending", "partial", "failed", "unknown"]) {
+    const result = harness.render("ModelAvailabilityStatus", { readback: readback({ status }) })
+    assert.equal(result.props.className.includes("registry-health"), false)
+  }
+})
+
+test("availability details use the selected timezone and historical diagnostic health", () => {
+  const current = ready()
+  const harness = componentHarness(current)
+  const runtime = { id: "connection", enabled: true, health_status: "available", diagnostic: {
+    runtime_id: "connection", status: "available", outcome: "passed", checked_at: "2026-01-01T00:00:00Z",
+    configuration_status: "changed", configuration_fingerprint: "unit", selection: null,
+  } }
+  const content = harness.nodes(harness.render("ModelAvailabilityDialog", {
+    model: { id: "unit-model", display_name: "Unit model", enabled: true, runtime_id: "connection" },
+    registry: { gateways: [], runtimes: [runtime] }, readback: current,
+    readError: false, onRefresh() {}, onClose() {},
+  }))
+  const facts = content.filter(node => node.type === "dd")
+  assert.equal(facts[4].props.children, new Date(current.verified_at).toLocaleString("en-US", { timeZone: "Asia/Shanghai" }))
+  assert.equal(facts[5].props.children, "当前配置待验证")
+  assert.ok(facts[5].props.title.includes("历史结果不代表当前配置"))
 })
 
 test("a disabled default blocks automatic invocation selection but not an explicit enabled model", () => {

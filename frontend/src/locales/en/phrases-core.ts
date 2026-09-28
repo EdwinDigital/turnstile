@@ -1732,7 +1732,7 @@ export const ENGLISH_CORE_PHRASES: Record<string, string> = {
   "百分位必须在 1 到 100 之间": "The percentile must be between 1 and 100",
   "最小样本必须是大于 0 的整数": "Minimum sample must be a positive integer",
   "请选择规则作用范围": "Select a rule scope",
-  "已启用": "enabled",
+  "已启用": "Enabled",
   "规则": "Rule",
   "条件": "Condition",
   "级别": "Severity",

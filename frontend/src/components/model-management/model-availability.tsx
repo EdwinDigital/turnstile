@@ -1,6 +1,6 @@
 import { useRef } from "react"
 import { useIsMutating, useMutation, useQueryClient } from "@tanstack/react-query"
-import { Check, CircleHelp, RefreshCw, TriangleAlert, X } from "lucide-react"
+import { CircleHelp, RefreshCw, TriangleAlert, X } from "lucide-react"
 
 import { ApiError, dataSource } from "../../data-sources/apim/api"
 import { finopsKeys } from "../../data-sources/apim/queries"
@@ -8,7 +8,9 @@ import type {
   ManagedModel, ModelAvailabilityCommand, ModelAvailabilityList, ModelAvailabilityReadback, ModelRegistry,
 } from "../../data-sources/apim/types"
 import { availabilityPresentation } from "../../lib/model-availability"
+import { runtimeHealthDescription, runtimeHealthLabels, runtimeHealthState } from "../../lib/runtime-health"
 import { getIntlLocale } from "../../locales"
+import { useTimezone } from "../../providers/timezone-provider"
 import { assistantSettingsKey } from "../assistant/queries"
 import { Button } from "../ui/button"
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog"
@@ -105,8 +107,9 @@ export function ModelAvailabilityStatus({ readback, pending, error, onOpen }: {
     : "未验证"
   const content = <>{error || state.state === "failed" || state.state === "partial" ? <TriangleAlert size={12} />
     : state.inFlight ? <RefreshCw className="spin" size={12} />
-    : state.verified ? <Check size={12} /> : <CircleHelp size={12} />}<span>{label}</span></>
-  const className = `model-availability-status ${error ? "failed" : state.state}`
+    : state.verified ? <i aria-hidden="true" /> : <CircleHelp size={12} />}<span>{label}</span></>
+  const className = `model-availability-status ${error ? "failed" : state.state}${!error && state.verified
+    ? ` registry-health ${readback?.effective_enabled ? "available" : "unavailable"}` : ""}`
   return onOpen
     ? <button type="button" className={className} title={error ?? label} onClick={onOpen}>{content}</button>
     : <span className={className}>{content}</span>
@@ -128,9 +131,10 @@ export function ModelAvailabilityDialog({ model, registry, readback, readError, 
   onClose: () => void
 }) {
   const action = useModelAvailabilityCommand(model.id, readback)
+  const { timezone } = useTimezone()
   const runtime = registry.runtimes.find((item) => item.id === model.runtime_id)
   const timestamp = (value: string | null | undefined) => value
-    ? new Date(value).toLocaleString(getIntlLocale()) : "未验证"
+    ? new Date(value).toLocaleString(getIntlLocale(), { timeZone: timezone }) : "未验证"
   return <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
     <DialogContent className="registry-editor-dialog model-availability-dialog" finalFocus={false}>
       <DialogHeader className="registry-editor-header">
@@ -148,7 +152,7 @@ export function ModelAvailabilityDialog({ model, registry, readback, readError, 
           <div><dt>最后验证状态</dt><dd>{readback?.effective_enabled == null ? "未验证" : readback.effective_enabled ? "已启用" : "已停用"}</dd></div>
           <div><dt>最后验证版本</dt><dd data-no-localize>{readback?.effective_revision ?? "--"}</dd></div>
           <div><dt>验证时间</dt><dd>{timestamp(readback?.verified_at)}</dd></div>
-          <div><dt>连接健康</dt><dd>{runtime?.health_status === "available" ? "在线" : runtime?.health_status === "unavailable" ? "离线" : "未检查"}</dd></div>
+          <div><dt>连接健康</dt><dd title={runtime ? runtimeHealthDescription(runtime) : undefined}>{runtime ? runtimeHealthLabels[runtimeHealthState(runtime)] : "未验证"}</dd></div>
         </dl>
         {(readError || !readback || readback.reason) && <div className="registry-progress" role="status">{reasonLabels[readback?.reason ?? ""] ?? "网关覆盖尚未验证"}</div>}
         {readback?.operation && <>
