@@ -63,6 +63,33 @@ Turnstile is a self-hosted control plane for governed AI model access. It combin
 
 Model Intelligent Router is intentionally not part of this release. It may return as an optional extension in a future version.
 
+## v1.2 Preview
+
+**v1.2 is in preparation, not a published release.** These documents describe the current
+implementation and its installation requirements; v1.1 remains the latest public release.
+
+- **Model pricing:** provider catalog or manual prices, connection and model discounts, regional
+   references, explicit short/long-context tiers, reviewed price synchronization, and historical
+   request costs that retain the applicable price snapshot.
+- **Gateway management:** separate Models, Connections, Self-hosted Gateways, and APIM workspaces;
+   gateway registration, initialization, creation/bootstrap, diagnostics, and per-model serving scope.
+- **Publication and request diagnostics:** explicit target Gateways, verified API Revisions,
+   credential recovery, and invocation-attempt records that distinguish failures and unknown usage
+   from confirmed provider telemetry.
+- **Model operations:** inventory filters, dedicated editors, connection diagnostics, and an
+   independently versioned model-availability command. The availability rollout is **not yet
+   accepted end to end** and is not enabled by an application-package update alone.
+
+An unavailable model switch means the deployment has not established the required Gateway
+coverage; it does not mean the model has been stopped. Do not bypass this check. The availability
+protocol requires compatible workers, migration 016, retained-Revision policies, primary Table
+access, self-hosted node enrollment, and verified admission/recovery before use.
+
+Start with the [documentation index](docs/README.md), [configuration reference](docs/configuration.md),
+and [availability installation requirements](docs/deployment.md#model-availability-installation).
+Existing installations must review the matching migrations and infrastructure steps; an application
+ZIP upload is not a complete protocol upgrade.
+
 ## Architecture
 
 Turnstile separates the inference data plane from its management plane. Clients call Azure API Management, which applies authentication, budget, and model-access policy before selecting a provider route. A response-aware observer emits metadata-only usage events to Event Hubs; Azure Functions persist and reconcile them in PostgreSQL. The FastAPI application and React console manage registry, governance, and release state without sitting on the provider request path. See [Architecture](docs/architecture.md).

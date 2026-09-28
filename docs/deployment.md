@@ -6,6 +6,38 @@ Turnstile infrastructure includes PostgreSQL, Event Hubs, Storage, Key Vault, Ap
 
 The API, telemetry and control-plane Functions, observer, and budget ledger require public service endpoints for package deployment or runtime traffic. They explicitly enable public network access and carry the resource-level `SecurityControl=Ignore` tag so an organization-level network Modify policy does not silently disable them. The exemption is not applied at resource-group scope; platform Storage and Key Vault resources designed for private-link access remain private.
 
+## Prepare for v1.2
+
+v1.2 is an upcoming release. Do not interpret the presence of a UI control or a successful package
+upload as completed feature acceptance. The v1.1 installation and upgrade instructions below remain
+the published-release instructions; this section identifies the additional v1.2 preparation work.
+
+| Change | Required preparation | Verify before use |
+| --- | --- | --- |
+| Catalog pricing, discounts and context tiers | Compatible API, Control Plane and Telemetry readers; migrations through 009 | Regional references, all price buckets, explicit tier boundaries and preserved historical snapshots. |
+| Registered targets, initialization and multi-target API publication | Migrations 011-013 and target-specific worker configuration | Exact APIM identity, endpoint trust, declared capabilities and per-target results; multi-target publication is an API workflow, not a multi-select Add Model form. |
+| Create a Self-hosted Gateway | Migration 014 and the separately reviewed Gateway-management permissions | API association, a running operator-managed container, HTTPS, restart-persistent ingress and configuration-token renewal. |
+| Platform invocation attempts and explicit Gateway selection | Migration 015 and compatible API readers | Failures remain visible; selected Gateway scope is respected; incomplete usage is not billed as zero. |
+| Versioned model availability | Migration 016, compatible workers, Table access, all retained Revision policies and self-hosted enrollment | Full fresh coverage, disabled rejection and enabled recovery. End-to-end acceptance remains pending; leave controls unavailable until it passes. |
+| Atomic budget execution | Separate opt-in flags, identities and reviewed cutover | Existing balances, admission, completion and recovery; an application update does not activate the protocol. |
+
+1. Back up the existing private deployment state in an approved secret store. Keep the database,
+  APIM/API identities, model references, budgets and historical releases; do not start with a new
+  deployment state to upgrade an existing installation.
+2. Select and validate one compatible application candidate. Inspect which numbered migrations are
+  missing and retain the checksums of all applied migrations. Never edit an applied migration.
+3. Review separate infrastructure and policy changes, permissions, network reachability and the
+  expected maintenance impact. Do not grant APIM operation-creation rights to the runtime Publisher.
+4. Deploy the matching application packages and approved migrations, then verify the actual mounted
+  packages, served frontend assets, Function host/index and API contracts.
+5. Complete each enabled feature's own installation and real acceptance checks. Record missing
+  prerequisites as unavailable, and preserve prior failures and in-flight request evidence.
+
+Follow the [availability installation](#model-availability-installation),
+[Self-hosted Gateway management](#self-hosted-gateway-management) and
+[budget cutover](#budget-execution-cutover) sections only for the capabilities being installed.
+There is no single package-only command that proves all of these protocols ready.
+
 ## Model availability installation
 
 Availability is an application and Gateway protocol upgrade. Deploying the UI alone does not

@@ -19,6 +19,74 @@
 - Confirm the probe subscription and `APIM_REGRESSION_MODEL_KEY` refer to an onboarded model.
 - Inspect release state before retrying; do not create parallel publications for one gateway.
 
+## Model switch is disabled or unverified
+
+The v1.2 switch controls a versioned Gateway operation. A model can remain enabled in the registry
+while its switch is unavailable: `desired_enabled` describes intent, `effective_enabled` describes
+the last verified result, and `command_ready` controls whether a new command can be accepted.
+Color alone is not an authoritative status indicator.
+
+1. Confirm the signed-in user is an Owner and inspect
+	 `GET /api/v1/model-management/model-availability` using the normal authenticated session.
+2. A `404` means the backend does not expose the new route. Verify the actual API package and URL;
+	 changing frontend CSS or refreshing indefinitely does not install the backend.
+3. A `200` with `command_ready=false` means the route is available but prerequisites or fresh
+	 coverage are missing. Inspect the operation/target reason, migration 016, Control Plane timers,
+	 primary Table access, every retained API Revision and every required self-hosted node enrollment.
+4. `202` means an operation was accepted, not that the Gateway has applied it. A `409` requires a
+	 fresh state read; an unknown response must not create a duplicate intent. Do not replace this
+	 workflow with a general model edit or direct database update.
+
+The v1.2 availability rollout remains pending end-to-end acceptance. Do not remove historical
+Revisions, skip nodes, fabricate proof or force `command_ready` to make the control clickable.
+See [availability installation](deployment.md#model-availability-installation).
+
+## Self-hosted Gateway catalog returns 404
+
+Compare the selected endpoint's current catalog and candidate `;rev=<revision>` path with the
+matching container route. A successful Managed Gateway check does not prove the self-hosted route.
+
+- Verify the exact native Gateway ID, target API association, container and configured HTTPS endpoint.
+- A proxy path prefix must be stripped consistently for both current and candidate routes. Persist
+	the proxy configuration used at startup; a runtime-only change can disappear after a reload.
+- When TLS terminates at a trusted reverse proxy, preserve the intended HTTPS scheme at the isolated
+	container. Do not trust forwarded headers from arbitrary public clients or disable certificate checks.
+- Check the configuration-token expiry and renewal process. A running container or an old connection
+	timestamp does not prove it is receiving current API configuration.
+- Inspect the original publication audit before retrying. A repeated catalog failure is not proof of
+	an upstream model or provider-authorization failure.
+
+## Price selection cannot be saved or synchronization needs review
+
+Select the actual catalog model, deployment type and region; verify every required price bucket.
+Missing data or an unavailable catalog is not a free rate. A discount is the percentage charged:
+`80` charges 80% of list price, and a blank model discount inherits the Connection discount.
+
+Short/long-context labels do not establish a billing threshold. Use supplied metadata or an explicit
+administrator-defined rule; an estimated rule must not be described as a verified provider threshold.
+If synchronization reports review required, inspect all changed rates, buckets and boundaries before
+explicitly accepting them. Preserve manual pricing and previously accepted schedules during failures.
+Historical request costs use saved price evidence, not today's model price.
+See [context-tier pricing](configuration.md#context-tier-pricing).
+
+## Connection check is blocked or no longer applicable
+
+Open the diagnostic plan first and inspect the selected text model, Gateway and missing permissions.
+The plan does not invoke a model; confirming the check sends at most one bounded request and may
+incur provider charges. Do not grant broad permissions or substitute a user's key to make it pass.
+
+A historical successful check is not live health. After a configuration change, run a new check only
+when the old attempt's result is known and the cooldown allows it. A timeout with unknown outcome is
+not permission to repeat a paid request automatically. See [diagnostics](configuration.md#connection-diagnostics).
+
+## Invocation failed but usage is unavailable
+
+With migration 015 and compatible readers, Request Trace can display a platform attempt before formal
+Gateway telemetry arrives. Preserve the caller request ID, actual Gateway correlation ID and upstream
+request ID separately. `usage_available=false` is missing measurement, not zero consumption.
+An attempt joins formal telemetry only on an unambiguous identity match; a platform timeout and a
+later Gateway result can both be valid evidence. Do not retry an unknown paid outcome to create a trace.
+
 ## Telemetry is missing
 
 - Verify APIM can send to Event Hubs and the Telemetry Function can receive from it.
