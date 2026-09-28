@@ -71,7 +71,14 @@ def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> Non
     assert 'className="gateway-release-detail-grid"' in page
     assert 'className="gateway-release-detail-main"' in page
     assert 'className="gateway-release-summary-card"' in page
-    assert ".gateway-release-detail-head { min-height: 52px;" in styles
+    assert (
+        ".gateway-release-detail-head, .gateway-release-card-head { min-height: 42px;"
+        in styles
+    )
+    assert (
+        ".gateway-release-identity-line h2, .gateway-release-card h2 { "
+        "margin: 0; font-size: 13px; line-height: 18px; font-weight: 600; }" in styles
+    )
     assert "padding: 10px 16px; border-bottom: 1px solid var(--border);" in styles
     assert 'className="gateway-release-identity-line"' in page
     assert "<span><History size={18} /></span>" not in page

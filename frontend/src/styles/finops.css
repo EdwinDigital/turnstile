@@ -320,11 +320,9 @@ section.simple-pricing { padding-top: 16px; }
 	.connection-form .registry-editor-footer > .connection-adopt-action { flex-basis: 100%; margin-right: 0; }
 	.simple-model-form .registry-editor-footer { padding-inline: 12px; }
 }
-.finops-filter-menu-trigger { appearance: none; width: auto; height: 30px; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--border); border-radius: 7px; padding: 0 12px; outline: none; background: var(--background); background-clip: padding-box; color: var(--muted-foreground); font-size: 13px; line-height: 20px; font-weight: 500; white-space: nowrap; cursor: pointer; user-select: none; transition: color 100ms ease, background-color 100ms ease, border-color 100ms ease, box-shadow 100ms ease; }
-.finops-filter-menu-trigger:hover, .finops-filter-menu-trigger[aria-expanded="true"] { background: var(--muted); color: var(--foreground); }
+.finops-filter-menu-trigger { flex: 0 0 auto; justify-content: center; }
 .finops-filter-menu-trigger[data-active="true"], .finops-filter-menu-trigger[data-active="true"]:hover, .finops-filter-menu-trigger[data-active="true"][aria-expanded="true"] { border-color: var(--brand) !important; background-color: var(--brand) !important; color: var(--brand-foreground) !important; transition: box-shadow 100ms ease !important; }
-.finops-filter-menu-trigger:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 50%, transparent); }
-.finops-filter-menu-trigger > svg { width: 16px; height: 16px; color: currentColor; }
+.finops-filter-menu-trigger > svg { width: 14px; height: 14px; color: currentColor; }
 .isolate.z-50 { z-index: 50; isolation: isolate; outline: none; }
 [data-slot="dropdown-menu-content"] { z-index: 50; max-height: var(--available-height); min-width: 128px; overflow-x: hidden; overflow-y: auto; border-radius: var(--radius); padding: 4px; outline: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent); background: var(--popover); color: var(--popover-foreground); box-shadow: 0 4px 10px oklch(0 0 0 / 12%); transform-origin: var(--transform-origin); }
 [data-slot="dropdown-menu-content"][data-open] { animation: smh-menu-in 100ms ease-out; }
@@ -350,14 +348,14 @@ section.simple-pricing { padding-top: 16px; }
 .gateway-api-select-value b, .gateway-api-select-option b { font-size: 11px; line-height: 15px; font-weight: 600; }
 .gateway-api-select-value small, .gateway-api-select-option small { color: var(--muted-foreground); font-size: 9px; line-height: 13px; }
 .select-positioner { z-index: 70; isolation: isolate; outline: none; }
-[data-slot="select-trigger"] { height: 32px; width: fit-content; display: flex; align-items: center; justify-content: space-between; gap: 6px; border: 1px solid var(--input); border-radius: 8px; padding: 0 8px 0 10px; outline: none; background: transparent; color: var(--foreground); font-size: 14px; line-height: 20px; white-space: nowrap; cursor: default; user-select: none; transition: border-color 100ms ease, background-color 100ms ease, box-shadow 100ms ease; }
-[data-slot="select-trigger"]:hover { background: color-mix(in oklch, var(--input) 30%, transparent); }
-[data-slot="select-trigger"]:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 50%, transparent); }
-[data-slot="select-trigger"][data-disabled] { cursor: not-allowed; opacity: .5; }
-[data-slot="select-trigger"][data-size="sm"] { height: 28px; border-radius: 7px; }
-[data-slot="select-trigger"] > svg { width: 16px; height: 16px; flex: 0 0 auto; pointer-events: none; color: var(--muted-foreground); }
+[data-slot="select-trigger"], .model-filter-trigger, .finops-filter-menu-trigger, .people-model-select-trigger { appearance: none; height: 28px; min-width: 0; max-width: 100%; width: fit-content; display: inline-flex; align-items: center; justify-content: space-between; gap: 6px; border: 1px solid var(--border); border-radius: 7px; padding: 0 10px; outline: none; background: var(--background); background-clip: padding-box; color: var(--muted-foreground); font: inherit; font-size: 12px; line-height: 20px; font-weight: 500; white-space: nowrap; cursor: pointer; user-select: none; transition: color 100ms ease, background-color 100ms ease, border-color 100ms ease, box-shadow 100ms ease; }
+:is([data-slot="select-trigger"], .model-filter-trigger, .finops-filter-menu-trigger, .people-model-select-trigger):is(:hover, [aria-expanded="true"]):where(:not(:disabled):not([data-disabled])) { background: var(--muted); color: var(--foreground); }
+:is([data-slot="select-trigger"], .model-filter-trigger, .finops-filter-menu-trigger, .people-model-select-trigger):focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+:is([data-slot="select-trigger"], .model-filter-trigger, .finops-filter-menu-trigger, .people-model-select-trigger):is(:disabled, [data-disabled]) { cursor: not-allowed; opacity: .5; }
+[data-slot="select-trigger"][aria-invalid="true"] { border-color: var(--destructive); outline: 2px solid color-mix(in oklch, var(--destructive) 20%, transparent); outline-offset: -2px; }
+[data-slot="select-trigger"] > svg, [data-slot="select-trigger"] [data-slot="select-value"] svg { width: 14px; height: 14px; flex: 0 0 auto; pointer-events: none; color: currentColor; }
 [data-slot="select-value"] { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-[data-slot="select-content"] { position: relative; z-index: 50; max-height: var(--available-height); width: max-content; min-width: max(144px, var(--anchor-width)); max-width: min(var(--available-width), calc(100vw - 16px)); overflow-x: hidden; overflow-y: auto; border-radius: 8px; background: var(--popover); color: var(--popover-foreground); box-shadow: 0 4px 10px oklch(0 0 0 / 12%); outline: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent); transform-origin: var(--transform-origin); }
+[data-slot="select-content"] { position: relative; z-index: 50; max-height: min(var(--available-height, 400px), 400px); width: max-content; min-width: max(160px, var(--anchor-width)); max-width: min(var(--available-width), calc(100vw - 16px)); overflow-x: hidden; overflow-y: auto; border-radius: var(--radius); background: var(--popover); color: var(--popover-foreground); box-shadow: 0 4px 10px oklch(0 0 0 / 12%); outline: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent); transform-origin: var(--transform-origin); }
 [data-slot="select-content"][data-open] { animation: smh-select-in 100ms ease-out; }
 [data-slot="select-content"][data-closed] { animation: smh-select-out 100ms ease-in; }
 [data-slot="select-group"] { padding: 4px; scroll-margin-block: 4px; }
@@ -798,12 +796,12 @@ section.simple-pricing { padding-top: 16px; }
 .people-update-toggle > span { min-width: 0; display: grid; gap: 1px; }
 .people-update-toggle b { font-size: 12px; line-height: 17px; font-weight: 500; }
 .people-update-toggle small { color: var(--muted-foreground); font-size: 10px; line-height: 14px; }
-.people-model-select-trigger { width: 100%; height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--input); border-radius: 8px; padding: 0 10px; background: var(--background); color: var(--foreground); text-align: left; cursor: pointer; }
+.people-model-select-trigger { width: 100%; height: 42px; text-align: left; }
 .people-model-select-trigger > span { min-width: 0; display: grid; }
 .people-model-select-trigger b, .people-model-select-trigger small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .people-model-select-trigger b { font-size: 12px; line-height: 17px; font-weight: 500; }
 .people-model-select-trigger small { color: var(--muted-foreground); font-size: 10px; line-height: 14px; }
-.people-model-select-trigger > svg { flex: 0 0 auto; color: var(--muted-foreground); transition: transform 120ms ease; }
+.people-model-select-trigger > svg { width: 14px; height: 14px; flex: 0 0 auto; color: currentColor; transition: transform 120ms ease; }
 .people-model-select-trigger[data-popup-open] > svg, .people-model-select-trigger[data-open] > svg { transform: rotate(180deg); }
 .popover-positioner { z-index: 70; }
 /* Base UI defers unmounting a popup until its exit animation settles, so a popup with no

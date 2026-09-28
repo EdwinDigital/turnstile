@@ -111,10 +111,9 @@
 .gateway-release-detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; padding: 12px; }
 .gateway-release-detail-main, .gateway-release-detail-rail { min-width: 0; display: grid; align-content: start; gap: 12px; }
 .gateway-release-summary-card, .gateway-release-card { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
-.gateway-release-detail-head { min-height: 52px; display: flex; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); }
 .gateway-release-identity { min-width: 0; flex: 1 1 360px; display: flex; align-items: center; }
 .gateway-release-identity-line { width: 0; min-width: 0; flex: 1 1 0; display: flex; align-items: center; gap: 8px; }
-.gateway-release-identity-line h2 { min-width: 0; margin: 0; overflow: hidden; font-size: 16px; line-height: 24px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.gateway-release-identity-line h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gateway-release-identity-line .gateway-release-role { flex: 0 0 auto; }
 .gateway-release-actions { min-width: 0; }
 .gateway-release-actions-mobile { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; border-top: 1px solid var(--border); padding: 10px 16px; }
@@ -134,9 +133,9 @@
 .gateway-release-facts dt, .gateway-release-hashes dt { color: var(--muted-foreground); font-size: 10px; line-height: 14px; font-weight: 500; letter-spacing: .05em; text-transform: uppercase; }
 .gateway-release-facts dd, .gateway-release-hashes dd { min-width: 0; min-height: 18px; margin: 3px 0 0; overflow: hidden; font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
 .gateway-release-facts code { font-size: 11px; }
-.gateway-release-card-head { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.gateway-release-detail-head, .gateway-release-card-head { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
 .gateway-release-card-head > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
-.gateway-release-card h2 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 600; }
+.gateway-release-identity-line h2, .gateway-release-card h2 { margin: 0; font-size: 13px; line-height: 18px; font-weight: 600; }
 .gateway-release-card h3 { margin: 0; font-size: 12px; line-height: 18px; font-weight: 600; }
 .gateway-release-card-head > span { color: var(--muted-foreground); font-size: 11px; line-height: 16px; }
 .gateway-release-change-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }

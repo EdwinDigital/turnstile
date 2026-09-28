@@ -18,6 +18,7 @@ import {
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const queryLibrary = frontendRequire("@tanstack/react-query")
+const postcss = frontendRequire("postcss")
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
 const queriesEntry = fileURLToPath(new URL("../../../frontend/src/data-sources/apim/queries.ts", import.meta.url))
 const queriesBundle = await rolldown({ input: queriesEntry, external: id => id !== queriesEntry, treeshake: false })
@@ -67,6 +68,56 @@ function gatewayNameHarness(overrides = {}) {
     submit() { find(node => node.type === "form").props.onSubmit({ preventDefault() {} }) },
   }
 }
+
+test("infrastructure action menus inherit the shared surface without a second border", () => {
+  const sheet = postcss.parse(readFileSync(new URL("../../../frontend/src/styles/model-platform.css", import.meta.url), "utf8"))
+  const rule = sheet.nodes.find(node => node.type === "rule" && node.selector === ".infrastructure-row-menu")
+  assert.ok(rule)
+  assert.deepEqual(Object.fromEntries(rule.nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value])), {
+    "min-width": "188px",
+  })
+  const shared = postcss.parse(readFileSync(new URL("../../../frontend/src/styles/finops.css", import.meta.url), "utf8"))
+    .nodes.find(node => node.type === "rule" && node.selector === '[data-slot="dropdown-menu-content"]')
+  const reference = sheet.nodes.find(node => node.type === "rule" && node.selectors.includes(".model-filter-menu"))
+  assert.ok(shared)
+  assert.ok(reference)
+  const declarations = rule => Object.fromEntries(rule.nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value]))
+  for (const property of ["outline", "box-shadow", "border-radius", "background", "color", "padding"]) {
+    assert.equal(declarations(shared)[property], declarations(reference)[property])
+  }
+})
+
+test("selects and filter dropdowns share one compact theme contract", () => {
+  const sheet = postcss.parse(readFileSync(new URL("../../../frontend/src/styles/finops.css", import.meta.url), "utf8"))
+  const rule = sheet.nodes.find(node => node.type === "rule" && node.selectors.includes('[data-slot="select-trigger"]'))
+  assert.ok(rule)
+  for (const selector of [".model-filter-trigger", ".finops-filter-menu-trigger", ".people-model-select-trigger"]) {
+    assert.ok(rule.selectors.includes(selector))
+  }
+  const declarations = Object.fromEntries(rule.nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value]))
+  const expected = {
+    height: "28px", "font-size": "12px", "font-weight": "500", border: "1px solid var(--border)",
+    "border-radius": "7px", padding: "0 10px", background: "var(--background)", color: "var(--muted-foreground)",
+  }
+  assert.deepEqual(Object.fromEntries(Object.keys(expected).map(name => [name, declarations[name]])), expected)
+  const focus = sheet.nodes.find(node => node.type === "rule" && node.selector.startsWith(':is([data-slot="select-trigger"]') && node.selector.endsWith(":focus-visible"))
+  assert.ok(focus.selector.includes(".model-filter-trigger"))
+  const popup = sheet.nodes.find(node => node.type === "rule" && node.selector === '[data-slot="select-content"]')
+  assert.equal(popup.nodes.find(node => node.prop === "border-radius").value, "var(--radius)")
+  assert.ok(sheet.nodes.some(node => node.type === "rule" && node.selector === '[data-slot="select-trigger"][aria-invalid="true"]'))
+})
+
+test("select page layouts do not override shared filter colors or density", () => {
+  const sheet = postcss.parse(readFileSync(new URL("../../../frontend/src/styles/base.css", import.meta.url), "utf8"))
+  const layoutSelectors = [".settings-section .settings-select-trigger", ".dimension-picker .dimension-select-trigger", ".settings-select-trigger"]
+  const forbidden = new Set(["background", "color", "border-color", "height", "min-height", "font-size", "padding"])
+  sheet.walkRules(rule => {
+    if (!rule.selectors.some(selector => layoutSelectors.includes(selector))) return
+    for (const declaration of rule.nodes.filter(node => node.type === "decl")) {
+      assert.equal(forbidden.has(declaration.prop), false, `${rule.selector}: ${declaration.prop}`)
+    }
+  })
+})
 
 test("name dialog submits only a trimmed changed name and keeps failed drafts", () => {
   const harness = gatewayNameHarness()
