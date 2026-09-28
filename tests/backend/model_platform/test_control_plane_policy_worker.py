@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock, patch
 from uuid import UUID
 from xml.etree import ElementTree
@@ -33,6 +34,7 @@ from turnstile_core.domain.control_plane import (
     RuntimeTarget,
 )
 from turnstile_core.domain.gateway_targets import GatewayDeploymentScope, GatewayServingDeployment
+from turnstile_core.domain.model_availability import ModelAvailabilityCoverage
 from turnstile_core.domain.runtime_models import ProviderTarget, databricks_connection_config
 from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
 from turnstile_core.integrations.apim_control_plane import (
@@ -55,6 +57,54 @@ from turnstile_core.integrations.apim_policy_components import (
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.gateway_release_operation_worker import GatewayReleaseOperationWorker
+
+
+@pytest.mark.parametrize("defect", [None, "missing", "target", "expired", "inventory",
+                                  "managed", "required_node", "revision"])
+def test_candidate_probe_requires_fresh_managed_and_required_node_coverage(
+    defect: str | None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, client = InMemoryRepository(), FakeApimClient()
+    publication = GatewayControlPlaneService(repository).publish(
+        bedrock_publication(), "unit-owner",
+    )
+    serving = GatewayServingDeployment.model_validate({
+        "deployment_id": str(UUID(int=24)), "native_gateway_id": "unit-edge",
+        "kind": "self_hosted", "endpoint_url": "https://edge.example.test/unit/llm",
+        "release_gate": "required",
+    })
+    publication = publication.model_copy(update={
+        "apim_revision": None if defect == "revision" else "candidate",
+        "resource_manifest": {"model_availability": {}},
+        "desired_spec": publication.desired_spec.model_copy(update={
+            "gateway_deployments": (serving,),
+        }),
+    })
+    now = datetime.now(UTC)
+    surfaces = (
+        "managed/candidate/responses" if defect != "managed" else "managed/old/responses",
+        "unit-edge/node-one/candidate/responses"
+        if defect != "required_node" else "unit-edge/node-one/old/responses",
+    )
+    verified = ModelAvailabilityCoverage(
+        target_id=UUID(int=25) if defect == "target" else publication.gateway_profile_id,
+        inventory_digest="a" * 64, policy_digest="b" * 64,
+        serving_surfaces=surfaces, verified_surfaces=surfaces,
+        verified_at=now - timedelta(seconds=120),
+        expires_at=now + timedelta(seconds=-1 if defect == "expired" else 60),
+    )
+    monkeypatch.setattr(repository, "get_model_availability_inventory", lambda: {
+        publication.gateway_profile_id: "c" * 64 if defect == "inventory" else "a" * 64,
+    }, raising=False)
+    monkeypatch.setattr(repository, "get_model_availability_coverage",
+                        lambda _target: None if defect == "missing" else verified, raising=False)
+    worker = GatewayPublicationWorker(repository, client, client.policy)
+    if defect:
+        with pytest.raises(RetryablePublicationError, match="not ready"):
+            worker._require_availability_coverage(publication)
+    else:
+        worker._require_availability_coverage(publication)
+    assert client.calls == []
 
 
 @pytest.mark.parametrize("operation", ["chat", "messages", "image"])

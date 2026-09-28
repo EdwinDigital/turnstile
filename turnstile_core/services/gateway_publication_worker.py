@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
@@ -193,6 +194,33 @@ class GatewayPublicationWorker:
              "error_message": "Gateway publication exceeded its retry limit"}, worker_id,
         )
         return GatewayPublication.model_validate(failed) if failed else publication
+
+    def _require_availability_coverage(self, publication: GatewayPublication) -> None:
+        if publication.resource_manifest.get("model_availability") is None:
+            return
+        repository = cast(ModelAvailabilityRepository, self._repository)
+        inventory = repository.get_model_availability_inventory()
+        digest = inventory.get(publication.gateway_profile_id)
+        coverage = repository.get_model_availability_coverage(publication.gateway_profile_id)
+        revision = publication.apim_revision
+        if (
+            digest is None or coverage is None or revision is None
+            or coverage.target_id != publication.gateway_profile_id
+            or not coverage.current(datetime.now(UTC), digest)
+        ):
+            raise RetryablePublicationError("Candidate availability coverage is not ready")
+        surfaces = [surface.split("/") for surface in coverage.verified_surfaces]
+        if not any(parts[:2] == ["managed", revision] for parts in surfaces):
+            raise RetryablePublicationError("Candidate Managed proof is not ready")
+        for deployment in publication.desired_spec.gateway_deployments:
+            if (
+                deployment.native_gateway_id == "managed"
+                or deployment.release_gate.value != "required"
+            ):
+                continue
+            if not any(len(parts) == 4 and parts[0] == deployment.native_gateway_id
+                       and parts[2] == revision for parts in surfaces):
+                raise RetryablePublicationError("Candidate node proof is not ready")
 
     @staticmethod
     def _validate_target_identity(
@@ -515,6 +543,7 @@ class GatewayPublicationWorker:
         elif status == "verifying":
             if not publication.apim_revision:
                 raise RuntimeError("Publication is missing its APIM revision")
+            self._require_availability_coverage(routed_publication)
             if image_release or execution_enabled or snapshot_availability is not None:
                 validate_parent_readback(
                     client.revision_api_policy(publication.apim_revision),

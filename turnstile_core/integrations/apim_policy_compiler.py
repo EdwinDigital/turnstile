@@ -37,7 +37,11 @@ from .apim_control_plane_contract import (
         PolicyCompilationError,
 )
 from .apim_image_policy import IMAGE_OPERATION_ID, IMAGE_POLICY_VERSION, image_request_validation
-from .apim_model_availability import AVAILABILITY_PROBE_PREFIX, compile_availability_operation
+from .apim_model_availability import (
+    AVAILABILITY_PROBE_PREFIX,
+    compile_availability_operation,
+    compile_protocol_fenced_probe,
+)
 from .apim_policy_components import parse_policy, serialize_policy, upgrade_application_tpm_policy
 
 
@@ -336,13 +340,14 @@ class ApimPolicyCompiler:
                 ("responses-compact", "/responses/compact", responses_compact),
                 ("anthropic-messages", "/v1/messages", messages),
                 ("anthropic-count-tokens", "/v1/messages/count_tokens", count_tokens),
+                ("anthropic-models", "/v1/models", models),
             ]
             if image_policy is not None:
                 diagnostic_surfaces.append((IMAGE_OPERATION_ID, "/images/generations", image_policy))
             for operation_id, path, policy in diagnostic_surfaces:
                 probe_id = AVAILABILITY_PROBE_PREFIX + operation_id
                 operations.append(OperationResource(probe_id, "Availability " + operation_id, "HEAD", path))
-                probe_policies.append((probe_id, policy))
+                probe_policies.append((probe_id, compile_protocol_fenced_probe(policy)))
         for value in (
             chat_completions,
             responses,

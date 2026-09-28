@@ -1326,13 +1326,15 @@ def test_publication_compiler_binds_all_diagnostics_to_the_same_immutable_snapsh
         "responses-compact": compiled.responses_compact_policy,
         "anthropic-messages": compiled.messages_policy,
         "anthropic-count-tokens": compiled.count_tokens_policy,
+        "anthropic-models": compiled.models_policy,
     }
-    assert len(compiled.availability_probe_policies) == 5
+    assert len(compiled.availability_probe_policies) == 6
     assert all(operation.method == "HEAD" for operation in compiled.operations)
     for name, source in compiled.availability_probe_policies:
         assert source == policies[name.removeprefix("availability-probe-")]
         assert inspect_availability_operation(
-            source, publication.gateway_profile_id, "unit-api", snapshot.revision, catalog=False
+            source, publication.gateway_profile_id, "unit-api", snapshot.revision,
+            catalog=name == "availability-probe-anthropic-models",
         )
     assert inspect_availability_operation(
         compiled.models_policy,
@@ -1385,6 +1387,17 @@ def test_publication_worker_projects_before_probes_and_recovers_promotion_read_o
     client.policy = compose_availability_parent(canonical)
     monkeypatch.setattr(repository, "model_availability_supported", lambda: True)
     monkeypatch.setattr(repository, "get_apim_target", lambda _target: {"api_id": "unit-api"})
+    candidate_revision = f"turnstile-{publication.generation}-{publication.id.hex[:8]}"
+    monkeypatch.setattr(repository, "get_model_availability_inventory", lambda: {
+        publication.gateway_profile_id: "a" * 64,
+    }, raising=False)
+    monkeypatch.setattr(repository, "get_model_availability_coverage", lambda _target: coverage(
+        target_id=publication.gateway_profile_id,
+        serving_surfaces=(f"managed/{candidate_revision}/responses",),
+        verified_surfaces=(f"managed/{candidate_revision}/responses",),
+        verified_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(seconds=120),
+    ), raising=False)
     staging = Mock()
     monkeypatch.setattr(repository, "stage_model_availability", staging, raising=False)
     projector = Mock(
@@ -1423,7 +1436,7 @@ def test_publication_worker_projects_before_probes_and_recovers_promotion_read_o
     assert ("budget_contracts" in probe.call_args.args[1].resource_manifest) is budget_enabled
     assert (
         len([name for name in client.operation_policies if name.startswith("availability-probe-")])
-        == 5
+        == 6
     )
     assert projector.call_count == len(snapshot.models)
     staging.assert_called()
