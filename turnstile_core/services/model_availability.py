@@ -6,6 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, ExitStack
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
+from traceback import extract_tb
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
@@ -352,9 +354,14 @@ class ModelAvailabilityCoordinator:
                 if error is None:
                     verified += 1
                 else:
+                    frames = extract_tb(error.__traceback__, limit=-1)
+                    location = (
+                        f"{Path(frames[0].filename).name}:{frames[0].lineno}:{frames[0].name}"
+                        if frames else "unknown"
+                    )
                     logger.warning(
-                        "Model availability coverage failed target=%s error=%s",
-                        target_id, type(error).__name__,
+                        "Model availability coverage failed target=%s error=%s location=%s",
+                        target_id, type(error).__name__, location,
                     )
             return verified
 

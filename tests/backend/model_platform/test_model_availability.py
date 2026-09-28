@@ -1131,6 +1131,7 @@ def test_publisher_persists_exact_confirmation_plan_with_conditional_readback(
 @pytest.mark.parametrize("renew", [False, True])
 def test_coordinator_refresh_bounds_parallel_targets_and_holds_exact_proof_guards(
     renew: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     verifier, _state, _requests = gateway_availability_fixture()
     with verifier.client:
@@ -1186,6 +1187,9 @@ def test_coordinator_refresh_bounds_parallel_targets_and_holds_exact_proof_guard
     assert maximum == 3 and not held
     assert guard_modes == [not renew] * 6
     assert repository.save_model_availability_coverage.call_count == 5
+    assert "error=ModelAvailabilityUnavailable location=test_model_availability.py:" in caplog.text
+    assert ":check" in caplog.text
+    assert "Test target unavailable" not in caplog.text
     if renew:
         client.verify_model_availability.assert_not_called()
     else:
