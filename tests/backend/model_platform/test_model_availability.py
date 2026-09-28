@@ -18,7 +18,11 @@ from fastapi import HTTPException
 from pydantic import SecretStr, ValidationError
 
 from backend.services.runtime_service import ModelRuntimeService
-from scripts.install_model_availability import AvailabilityInstallation, AvailabilityInstaller
+from scripts.install_model_availability import (
+    AvailabilityInstallation,
+    AvailabilityInstaller,
+    normalize_legacy_parent,
+)
 from tests.backend.model_platform.control_plane_support import (
     FakeApimClient,
     GatewayControlPlaneService,
@@ -1636,7 +1640,7 @@ def test_postgres_general_update_locks_model_and_never_assigns_enabled(
 
 
 def availability_installer_fixture(
-    failure: str | None = None,
+    failure: str | None = None, *, route_mode: str = "ordinary",
 ) -> tuple[AvailabilityInstaller, list[httpx.Request], dict[str, Any]]:
     parent = (REPOSITORY_ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
     inference = (
@@ -1656,7 +1660,11 @@ def availability_installer_fixture(
     }
     adoptions = []
     for revision in ("1", "2"):
-        original = {"parent": parent, "responses": inference, "models": catalog}
+        original = {
+            "parent": parent,
+            "responses": INHERITED_OPERATION_POLICY if route_mode == "inherited" else inference,
+            "models": catalog,
+        }
         adoptions.append(
             ModelAvailabilityPolicyAdoption(
                 adoption_id=UUID(int=int(revision)),
@@ -1669,6 +1677,10 @@ def availability_installer_fixture(
                     name: hashlib.sha256(source.encode()).hexdigest()
                     for name, source in original.items()
                 },
+                fixed_operations={"responses": "unit-model"}
+                if route_mode in {"fixed", "retired"} else {},
+                inherited_operations=("responses",) if route_mode == "inherited" else (),
+                retired_operations=("responses",) if route_mode == "retired" else (),
             )
         )
         prefix = f"/apis/unit-api;rev={revision}"
@@ -1677,12 +1689,18 @@ def availability_installer_fixture(
             "value": [
                 {
                     "name": "responses",
-                    "properties": {"method": "POST", "urlTemplate": "/responses"},
+                    "properties": {
+                        "method": "POST",
+                        "urlTemplate": "/unit-model/invoke"
+                        if route_mode in {"fixed", "retired"} else "/responses",
+                    },
                 },
                 {"name": "models", "properties": {"method": "GET", "urlTemplate": "/models"}},
             ]
         }
         for name, source in (("responses", inference), ("models", catalog)):
+            if name == "responses" and route_mode == "inherited":
+                continue
             resources[prefix + f"/operations/{name}/policies/policy"] = {
                 "properties": {"value": source}
             }
@@ -1714,6 +1732,8 @@ def availability_installer_fixture(
         assert request.url.path.startswith(scope.service_path + "/")
         path = request.url.path.removeprefix(scope.service_path)
         if request.method == "PUT":
+            if failure == "lost_before_commit":
+                raise httpx.ReadTimeout("Unit request was not applied", request=request)
             if path in resources:
                 assert request.headers["If-Match"] == '"base"'
             else:
@@ -1742,6 +1762,39 @@ def availability_installer_fixture(
     )
 
 
+@pytest.mark.parametrize("route_mode", ["fixed", "inherited", "retired"])
+def test_installer_binds_explicit_fixed_inherited_and_retired_routes(
+    route_mode: str, tmp_path: Path,
+) -> None:
+    installer, requests, _resources = availability_installer_fixture(route_mode=route_mode)
+    with installer.client:
+        changes = installer.plan()
+        assert len(changes) == 14
+        policies = [change for change in changes
+                    if change.path.endswith("/operations/responses/policies/policy")]
+        assert len(policies) == 2
+        for change in policies:
+            assert (change.etag is None) is (route_mode == "inherited")
+            assert (change.original_sha256 is None) is (route_mode == "inherited")
+            root = parse_policy(change.body["properties"]["value"])
+            assert is_retired_availability_operation(root) is (route_mode == "retired")
+            if route_mode == "fixed":
+                fixed = root.find("inbound/set-variable[@name='availabilityFixedModelAlias']")
+                assert fixed is not None and fixed.get("value") == "unit-model"
+        installer.apply(changes, installer.plan_digest(changes), tmp_path / "installation.jsonl")
+    assert len([request for request in requests if request.method == "PUT"]) == 14
+
+
+def test_installer_refuses_inherited_policy_presence_drift() -> None:
+    installer, requests, resources = availability_installer_fixture(route_mode="inherited")
+    resources["/apis/unit-api;rev=1/operations/responses/policies/policy"] = {
+        "properties": {"value": INHERITED_OPERATION_POLICY},
+    }
+    with installer.client, pytest.raises(ValueError, match="presence changed"):
+        installer.plan()
+    assert all(request.method == "GET" for request in requests)
+
+
 def test_installer_plans_all_revisions_and_conditionally_verifies_every_change(
     tmp_path: Path,
 ) -> None:
@@ -1749,7 +1802,7 @@ def test_installer_plans_all_revisions_and_conditionally_verifies_every_change(
     journal = tmp_path / "installation.jsonl"
     with installer.client:
         changes = installer.plan()
-        assert len(changes) == 10
+        assert len(changes) == 14
         assert {request.method for request in requests} == {"GET"}
         installer.apply(changes, installer.plan_digest(changes), journal)
         writes = [request for request in requests if request.method == "PUT"]
@@ -1760,9 +1813,9 @@ def test_installer_plans_all_revisions_and_conditionally_verifies_every_change(
         }
         with pytest.raises(FileExistsError):
             installer.apply(changes, installer.plan_digest(changes), journal)
-        assert len([request for request in requests if request.method == "PUT"]) == 10
+        assert len([request for request in requests if request.method == "PUT"]) == 14
     events = [json.loads(line) for line in journal.read_text().splitlines()]
-    assert [event["event"] for event in events] == ["attempt", "verified"] * 10
+    assert [event["event"] for event in events] == ["attempt", "verified"] * 14
     assert journal.stat().st_mode & 0o777 == 0o600
     assert not any("body" in event for event in events)
 
@@ -1775,7 +1828,7 @@ def test_installer_rejects_incomplete_or_changed_baseline_before_any_write(failu
     assert all(request.method == "GET" for request in requests)
 
 
-@pytest.mark.parametrize("failure", ["readback", "lost_response"])
+@pytest.mark.parametrize("failure", ["readback", "lost_before_commit"])
 def test_installer_records_unknown_write_and_never_replays_it(tmp_path: Path, failure: str) -> None:
     installer, requests, _resources = availability_installer_fixture(failure)
     journal = tmp_path / "installation.jsonl"
@@ -1786,7 +1839,57 @@ def test_installer_records_unknown_write_and_never_replays_it(tmp_path: Path, fa
         with pytest.raises(FileExistsError):
             installer.apply(changes, installer.plan_digest(changes), journal)
     assert len([request for request in requests if request.method == "PUT"]) == 1
-    assert [json.loads(line)["event"] for line in journal.read_text().splitlines()] == ["attempt"]
+    assert [json.loads(line)["event"] for line in journal.read_text().splitlines()] == (
+        ["attempt", "response_unavailable"] if failure == "lost_before_commit" else ["attempt"]
+    )
+
+
+def test_installer_reads_back_lost_put_response_without_replaying_the_write(tmp_path: Path) -> None:
+    installer, requests, _resources = availability_installer_fixture("lost_response")
+    journal = tmp_path / "installation.jsonl"
+    with installer.client:
+        changes = installer.plan()
+        installer.apply(changes, installer.plan_digest(changes), journal)
+        with pytest.raises(FileExistsError):
+            installer.apply(changes, installer.plan_digest(changes), journal)
+    writes = [request for request in requests if request.method == "PUT"]
+    assert len(writes) == len(changes) == len({request.url.path for request in writes})
+    assert [json.loads(line)["event"] for line in journal.read_text().splitlines()] == (
+        ["attempt", "response_unavailable", "verified"] * len(changes)
+    )
+
+
+@pytest.mark.parametrize("defect", [None, "unknown_variable", "early_request", "wrong_parent"])
+def test_legacy_parent_normalization_moves_only_known_ordered_variables(
+    defect: str | None,
+) -> None:
+    source = (
+        '<policies><inbound><choose><when condition="@(true)"><choose>'
+        '<set-variable name="budgetRequestCannotFit" value="@(false)" />'
+        '<set-variable name="budgetDenialReason" value="unit" />'
+        '<when condition="@(false)"><return-response><set-status code="403" />'
+        '</return-response></when></choose></when></choose></inbound></policies>'
+    )
+    if defect == "unknown_variable":
+        source = source.replace("budgetDenialReason", "otherVariable")
+    elif defect == "early_request":
+        source = source.replace('<set-variable name="budgetRequestCannotFit" value="@(false)" />',
+                                '<send-request><set-method>GET</set-method></send-request>')
+    elif defect == "wrong_parent":
+        source = source.replace('<when condition="@(true)">', '<otherwise>', 1)
+        source = source.replace('</choose></when></choose>', '</choose></otherwise></choose>')
+    if defect:
+        with pytest.raises(ValueError, match="unknown legacy"):
+            normalize_legacy_parent(source)
+    else:
+        normalized = normalize_legacy_parent(source)
+        assert normalize_legacy_parent(normalized) == normalized
+        branch = parse_policy(normalized).find("inbound/choose/when")
+        assert branch is not None
+        assert [node.tag for node in branch] == ["set-variable", "set-variable", "choose"]
+        assert [node.get("name") for node in list(branch)[:2]] == [
+            "budgetRequestCannotFit", "budgetDenialReason",
+        ]
 
 
 def test_installer_rejects_unapproved_digest_and_late_source_drift(tmp_path: Path) -> None:

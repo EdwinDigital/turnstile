@@ -19,7 +19,9 @@ from turnstile_core.domain.model_availability import ModelAvailabilityPolicyAdop
 from turnstile_core.domain.models import StrictModel
 from turnstile_core.integrations.apim_model_availability import (
     AVAILABILITY_PROBE_PREFIX,
+    INHERITED_OPERATION_POLICY,
     compile_availability_adoption,
+    compile_protocol_fenced_probe,
     compose_availability_parent,
 )
 from turnstile_core.integrations.apim_policy_components import component_digest, parse_policy
@@ -92,6 +94,33 @@ class InstallationChange:
             "original_sha256": self.original_sha256,
             "candidate_sha256": self.digest,
         }
+
+
+def normalize_legacy_parent(source: str) -> str:
+    root = parse_policy(source)
+    changed = False
+    for parent in root.iter():
+        for choice in list(parent):
+            if choice.tag != "choose":
+                continue
+            children = [node for node in choice if isinstance(node.tag, str)]
+            if all(node.tag in {"when", "otherwise"} for node in children):
+                continue
+            if (
+                parent.tag != "when"
+                or len(children) < 3
+                or [node.get("name") for node in children[:2]]
+                != ["budgetRequestCannotFit", "budgetDenialReason"]
+                or any(node.tag != "set-variable" or len(node) for node in children[:2])
+                or any(node.tag not in {"when", "otherwise"} for node in children[2:])
+            ):
+                raise ValueError("Installation refuses an unknown legacy choice structure")
+            position = list(parent).index(choice)
+            for offset, variable in enumerate(children[:2]):
+                choice.remove(variable)
+                parent.insert(position + offset, variable)
+            changed = True
+    return ElementTree.tostring(root, encoding="unicode") if changed else source
 
 
 class AvailabilityInstaller:
@@ -185,7 +214,7 @@ class AvailabilityInstaller:
                 raise ValueError("Installation parent policy is missing")
             original, etag = observed
             adoption.validate_source("parent", original)
-            parent = compose_availability_parent(original)
+            parent = compose_availability_parent(normalize_legacy_parent(original))
             for placeholder, value in (
                 ("__GATEWAY_PROFILE_ID__", str(self.scope.target_id)),
                 ("__LEDGER_TABLE_ENDPOINT__", str(self.scope.table_endpoint).rstrip("/")),
@@ -220,14 +249,22 @@ class AvailabilityInstaller:
                     "images-generations": "/images/generations",
                 }
                 if properties.get("templateParameters") or (
-                    not catalog and (method != "POST" or expected.get(operation_id) != route)
+                    not catalog and (
+                        method != "POST" or (
+                            expected.get(operation_id) != route
+                            and operation_id not in adoption.fixed_operations
+                        )
+                    )
                 ):
                     raise ValueError("Installation refuses an unknown operation contract")
                 path = revision_path + "/operations/" + quote(operation_id, safe="")
                 observed = self._policy(path + "/policies/policy")
-                if observed is None:
-                    raise ValueError("Installation operation policy is missing")
-                source, etag = observed
+                inherits_policy = operation_id in adoption.inherited_operations
+                if (observed is None) != inherits_policy:
+                    raise ValueError("Installation operation policy presence changed")
+                source, operation_etag = (
+                    observed if observed is not None else (INHERITED_OPERATION_POLICY, None)
+                )
                 candidate = compile_availability_adoption(
                     source, adoption, operation_id, catalog=catalog
                 )
@@ -241,12 +278,12 @@ class AvailabilityInstaller:
                 changes.append(
                     InstallationChange(
                         path + "/policies/policy",
-                        etag,
-                        hashlib.sha256(source.encode()).hexdigest(),
+                        operation_etag,
+                        None if inherits_policy else hashlib.sha256(source.encode()).hexdigest(),
                         self._policy_body(candidate),
                     )
                 )
-                if not catalog:
+                if catalog or method == "POST":
                     diagnostic_path = (
                         revision_path + "/operations/" + AVAILABILITY_PROBE_PREFIX + operation_id
                     )
@@ -271,7 +308,7 @@ class AvailabilityInstaller:
                                 diagnostic_path + "/policies/policy",
                                 None,
                                 None,
-                                self._policy_body(candidate),
+                                self._policy_body(compile_protocol_fenced_probe(candidate)),
                             ),
                         ]
                     )
@@ -308,7 +345,15 @@ class AvailabilityInstaller:
                 output.flush()
                 os.fsync(output.fileno())
                 headers = {"If-Match": change.etag} if change.etag else {"If-None-Match": "*"}
-                self._request("PUT", change.path, json=change.body, headers=headers)
+                try:
+                    self._request("PUT", change.path, json=change.body, headers=headers)
+                except httpx.TransportError as error:
+                    output.write(json.dumps({
+                        "event": "response_unavailable", "path": change.path,
+                        "error_type": type(error).__name__,
+                    }) + "\n")
+                    output.flush()
+                    os.fsync(output.fileno())
                 if change.path.endswith("/policies/policy"):
                     readback = self._policy(change.path)
                     if readback is None or component_digest(
