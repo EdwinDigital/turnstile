@@ -519,6 +519,7 @@ class ModelAvailabilityGatewayVerifier:
         excluded = []
         for deployment in retired:
             native = str(deployment["native_gateway_id"])
+            still_associated = False
             if native in names:
                 associations = self.list_resources("/gateways/" + quote(native, safe="") + "/apis")
                 for association in associations:
@@ -526,8 +527,9 @@ class ModelAvailabilityGatewayVerifier:
                     if not isinstance(api_name, str) or not api_name:
                         raise ModelAvailabilityUnavailable("Native API association is invalid")
                     if api_name.split(";rev=", 1)[0].casefold() == self.api_id.casefold():
-                        raise ModelAvailabilityUnavailable("Retired Gateway still serves this API")
-            excluded.append(UUID(str(deployment["id"])))
+                        still_associated = True
+            if not still_associated:
+                excluded.append(UUID(str(deployment["id"])))
         return tuple(sorted(excluded, key=str))
 
     def _catalog(

@@ -41,6 +41,7 @@ from turnstile_core.domain.model_availability import (
     ModelAvailabilityConfirmationPlan,
     ModelAvailabilityConflict,
     ModelAvailabilityCoverage,
+    ModelAvailabilityNodeEnrollment,
     ModelAvailabilityNodeLease,
     ModelAvailabilityOperation,
     ModelAvailabilityPolicyAdoption,
@@ -893,6 +894,37 @@ def test_retired_gateway_requires_fresh_native_association_revocation(native_sta
             with pytest.raises(ModelAvailabilityUnavailable):
                 verifier.verify("a" * 64, deployments)
             assert not requests
+
+
+def test_retired_but_associated_gateway_remains_subject_to_complete_node_enrollment() -> None:
+    verifier, _state, _requests = gateway_availability_fixture()
+    verifier.list_resources = lambda path: (
+        [{"name": "unit-node"}] if path == "/gateways" else [{"name": "unit-api;rev=1"}]
+    )
+    deployment = {
+        "id": str(UUID(int=5)), "kind": "self_hosted", "native_gateway_id": "unit-node",
+        "retired_at": "2026-01-01T00:00:00Z",
+    }
+    with verifier.client:
+        excluded = verifier._retired_deployments([deployment])
+        assert excluded == ()
+        with pytest.raises(ModelAvailabilityUnavailable, match="coverage_unverified"):
+            verifier._enrollments([deployment], excluded)
+        enrollment = ModelAvailabilityNodeEnrollment.model_validate({
+            "enrollment_id": str(UUID(int=6)), "target_id": str(verifier.target_id),
+            "deployment_id": deployment["id"], "api_id": verifier.api_id,
+            "native_gateway_id": "unit-node", "revision": 1,
+            "controller_evidence_sha256": "a" * 64, "fenced_installation_sha256": "b" * 64,
+            "rejoin_contract": "enrolled_nodes_only_guarded_bootstrap",
+            "enrolled_at": datetime.now(UTC),
+            "nodes": [{"instance_id": "unit-instance", "endpoint_url": "https://unit.test/llm"}],
+        })
+        verifier.node_enrollment_reader = lambda: [enrollment]
+        verifier.node_store = Mock(spec=TableStorageLedger)
+        assert verifier._enrollments([deployment], excluded) == (enrollment,)
+        verifier.node_enrollment_reader = lambda: []
+        with pytest.raises(ModelAvailabilityUnavailable, match="coverage_unverified"):
+            verifier._enrollments([deployment], excluded)
 
 
 @pytest.mark.parametrize("expired", [False, True])
