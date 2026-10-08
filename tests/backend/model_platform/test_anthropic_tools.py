@@ -193,15 +193,13 @@ def test_anthropic_errors_keep_status_and_correlation_without_retry(
     assert "policy_denied" in str(caught.value)
 
 
-@pytest.mark.parametrize("stream,api", [
-    (True, None), (False, InvocationApiFormat.OPENAI_RESPONSES),
-])
-def test_incompatible_anthropic_requests_are_rejected_before_dispatch(
+@pytest.mark.parametrize("stream", [True, False])
+def test_incompatible_anthropic_protocol_is_rejected_before_dispatch(
     invocation: ModelInvocationRequest, route: dict[str, Any],
-    stream: bool, api: InvocationApiFormat | None,
+    stream: bool,
 ) -> None:
     invocation.stream = stream
-    invocation.api_format = api
+    invocation.api_format = InvocationApiFormat.OPENAI_RESPONSES
 
     def handler(_: httpx.Request) -> httpx.Response:
         pytest.fail("An unsupported request must not be dispatched")

@@ -5,7 +5,7 @@ import os
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -284,8 +284,7 @@ def _anthropic_message(payload: Any) -> tuple[str, tuple[ToolCall, ...], list[di
         raise GatewayInvocationError("Gateway returned an unsupported response schema") from error
 
 
-def _sse_json_events(response: httpx.Response) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
+def _iter_sse_json_events(response: httpx.Response) -> Iterator[dict[str, Any]]:
     data_lines: list[str] = []
     for line in response.iter_lines():
         if line == "":
@@ -295,7 +294,7 @@ def _sse_json_events(response: httpx.Response) -> list[dict[str, Any]]:
                 if data != "[DONE]":
                     payload = json.loads(data)
                     if isinstance(payload, dict):
-                        events.append(payload)
+                        yield payload
             continue
         if line.startswith("data:"):
             data_lines.append(line[5:].lstrip(" "))
@@ -304,8 +303,181 @@ def _sse_json_events(response: httpx.Response) -> list[dict[str, Any]]:
         if data != "[DONE]":
             payload = json.loads(data)
             if isinstance(payload, dict):
-                events.append(payload)
-    return events
+                yield payload
+
+
+def _sse_json_events(response: httpx.Response) -> list[dict[str, Any]]:
+    return list(_iter_sse_json_events(response))
+
+
+def _anthropic_error_headers(response: httpx.Response) -> dict[str, str]:
+    return {
+        name: response.headers[name]
+        for name in (
+            "x-request-id", "x-correlation-id", "request-id", "retry-after",
+            "x-ratelimit-remaining-tokens", "x-quota-remaining-tokens",
+        )
+        if name in response.headers
+    }
+
+
+def _anthropic_usage(raw: Any) -> InvocationUsage | None:
+    if not isinstance(raw, Mapping) or not {"input_tokens", "output_tokens"} <= raw.keys():
+        return None
+    if raw["input_tokens"] is None or raw["output_tokens"] is None:
+        return None
+    values = {}
+    for name in (
+        "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+    ):
+        value = raw.get(name, 0)
+        if value is None:
+            value = 0
+        if type(value) is not int or value < 0:
+            raise ValueError("Anthropic token usage must be a nonnegative integer")
+        values[name] = value
+    return InvocationUsage(
+        input_tokens=values["input_tokens"],
+        cached_tokens=values["cache_creation_input_tokens"] + values["cache_read_input_tokens"],
+        cache_write_tokens=values["cache_creation_input_tokens"],
+        output_tokens=values["output_tokens"],
+        estimated=False,
+    )
+
+
+def _anthropic_stream_message(response: httpx.Response) -> dict[str, Any]:
+    message: dict[str, Any] | None = None
+    blocks: list[dict[str, Any]] = []
+    active: set[int] = set()
+    arguments: dict[int, list[str]] = {}
+    usage: dict[str, Any] = {}
+    stopped = False
+
+    def failure(detail: str, status_code: int = 502) -> GatewayInvocationError:
+        try:
+            partial_usage = _anthropic_usage(usage)
+        except ValueError:
+            partial_usage = None
+        return GatewayInvocationError(
+            detail, status_code=status_code,
+            headers=_anthropic_error_headers(response), usage=partial_usage,
+        )
+
+    try:
+        for event in _iter_sse_json_events(response):
+            kind = event.get("type")
+            if kind == "error":
+                error = event["error"]
+                if not isinstance(error, dict):
+                    raise ValueError("Expected a stream error object")
+                status = {
+                    "invalid_request_error": 400, "authentication_error": 401,
+                    "permission_error": 403, "not_found_error": 404,
+                    "rate_limit_error": 429, "api_error": 500, "overloaded_error": 529,
+                }.get(str(error.get("type") or ""), 502)
+                detail = _http_error_detail(httpx.Response(status, json=event))
+                raise failure(f"Gateway stream failed: {detail}", status)
+            if kind == "message_start":
+                start = event["message"]
+                if (
+                    message is not None or not isinstance(start, dict)
+                    or start.get("type") != "message" or start.get("role") != "assistant"
+                    or start.get("content") != []
+                ):
+                    raise ValueError("Invalid message start")
+                message = dict(start)
+                if isinstance(start.get("usage"), dict):
+                    usage.update(start["usage"])
+                continue
+            if kind not in {
+                "content_block_start", "content_block_delta", "content_block_stop",
+                "message_delta", "message_stop",
+            }:
+                # Ping and future event types do not affect the completed message.
+                continue
+            if message is None:
+                raise ValueError("Stream event preceded message start")
+            if kind.startswith("content_block_"):
+                index = event["index"]
+                if type(index) is not int or index < 0:
+                    raise ValueError("Invalid content block index")
+                if kind == "content_block_start":
+                    block = event["content_block"]
+                    if (
+                        index != len(blocks) or not isinstance(block, dict)
+                        or not isinstance(block.get("type"), str)
+                    ):
+                        raise ValueError("Invalid content block start")
+                    blocks.append(dict(block))
+                    active.add(index)
+                    continue
+                if index not in active:
+                    raise ValueError("Content block is not active")
+                block = blocks[index]
+                if kind == "content_block_stop":
+                    encoded = "".join(arguments.pop(index, []))
+                    if encoded:
+                        decoded = json.loads(encoded)
+                        if not isinstance(decoded, dict):
+                            raise ValueError("Tool arguments must be an object")
+                        block["input"] = decoded
+                    active.remove(index)
+                    continue
+                delta = event["delta"]
+                if not isinstance(delta, dict):
+                    raise ValueError("Invalid content delta")
+                delta_kind = delta.get("type")
+                fields = {
+                    "text_delta": ("text", "text"),
+                    "thinking_delta": ("thinking", "thinking"),
+                    "signature_delta": ("thinking", "signature"),
+                }
+                if delta_kind in fields:
+                    block_kind, field_name = fields[delta_kind]
+                    fragment = delta[field_name]
+                    if block["type"] != block_kind or not isinstance(fragment, str):
+                        raise ValueError("Content delta does not match its block")
+                    block[field_name] = block.get(field_name, "") + fragment
+                elif delta_kind == "input_json_delta":
+                    fragment = delta["partial_json"]
+                    if block["type"] not in {"tool_use", "server_tool_use"} or not isinstance(
+                        fragment, str,
+                    ):
+                        raise ValueError("Invalid tool argument delta")
+                    arguments.setdefault(index, []).append(fragment)
+                elif delta_kind == "citations_delta":
+                    citation = delta["citation"]
+                    if block["type"] != "text" or not isinstance(citation, dict):
+                        raise ValueError("Invalid citation delta")
+                    block.setdefault("citations", []).append(citation)
+            elif kind == "message_delta":
+                delta = event["delta"]
+                if active or not isinstance(delta, dict):
+                    raise ValueError("Invalid message delta")
+                for name in ("stop_reason", "stop_sequence"):
+                    if name in delta:
+                        if delta[name] is not None and not isinstance(delta[name], str):
+                            raise ValueError("Invalid message stop reason")
+                        message[name] = delta[name]
+                if isinstance(event.get("usage"), dict):
+                    # These counters are cumulative, not per-event token increments.
+                    usage.update(event["usage"])
+            elif kind == "message_stop":
+                if active or not message.get("stop_reason"):
+                    raise ValueError("Message stopped before its content completed")
+                stopped = True
+                break
+    except httpx.TimeoutException as error:
+        raise failure("Gateway stream timed out", 504) from error
+    except httpx.HTTPError as error:
+        raise failure("Gateway stream connection failed") from error
+    except (KeyError, TypeError, ValueError) as error:
+        raise failure("Gateway returned an unsupported Anthropic stream schema") from error
+    if not stopped or message is None:
+        raise failure("Gateway returned an unfinished Anthropic stream")
+    message["content"] = blocks
+    message["usage"] = usage
+    return message
 
 
 class CliGatewayAdapter:
@@ -663,11 +835,6 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
         path = str(runtime_config.get("path", "/v1/messages")).replace(
             "{model}", str(route["model_key"])
         )
-        if request.stream:
-            raise GatewayInvocationError(
-                "Streaming is not supported on the Anthropic invocation endpoint",
-                status_code=400,
-            )
         system_messages = [
             message.content
             for message in request.messages
@@ -682,7 +849,7 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
             "messages": _anthropic_messages(request),
             "max_tokens": request.max_output_tokens
             or int(runtime_config.get("default_max_tokens", 512)),
-            "stream": False,
+            "stream": request.stream,
         }
         if system_messages:
             body["system"] = "\n\n".join(system_messages)
@@ -705,32 +872,31 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
             runtime_config.get("anthropic_version", "2023-06-01")
         )
         try:
-            response = self._client.post(
-                f"{self._base_url(route)}{path}",
-                headers=headers,
-                json=body,
-                timeout=float(runtime_config.get("timeout_seconds", 120)),
-            )
-            response.raise_for_status()
+            if request.stream:
+                with self._client.stream(
+                    "POST", f"{self._base_url(route)}{path}", headers=headers, json=body,
+                    timeout=float(runtime_config.get("timeout_seconds", 120)),
+                ) as response:
+                    if response.is_error:
+                        response.read()
+                    response.raise_for_status()
+                    payload = _anthropic_stream_message(response)
+            else:
+                response = self._client.post(
+                    f"{self._base_url(route)}{path}",
+                    headers=headers,
+                    json=body,
+                    timeout=float(runtime_config.get("timeout_seconds", 120)),
+                )
+                response.raise_for_status()
+                payload = response.json()
         except httpx.HTTPStatusError as error:
             response = error.response
-            propagated_headers = {
-                name: response.headers[name]
-                for name in (
-                    "x-request-id",
-                    "x-correlation-id",
-                    "request-id",
-                    "retry-after",
-                    "x-ratelimit-remaining-tokens",
-                    "x-quota-remaining-tokens",
-                )
-                if name in response.headers
-            }
             raise GatewayInvocationError(
                 f"Gateway request failed ({response.status_code}): "
                 f"{_http_error_detail(response)}",
                 status_code=response.status_code,
-                headers=propagated_headers,
+                headers=_anthropic_error_headers(response),
             ) from error
         except httpx.TimeoutException as error:
             raise GatewayInvocationError(
@@ -738,26 +904,27 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
             ) from error
         except httpx.HTTPError as error:
             raise GatewayInvocationError(f"Gateway request failed: {error}") from error
+        except ValueError as error:
+            raise GatewayInvocationError(
+                "Gateway returned an unsupported response schema",
+            ) from error
 
-        payload = response.json()
-        content, tool_calls, raw_content = _anthropic_message(payload)
-
-        raw_usage = payload.get("usage")
-        usage = None
-        if isinstance(raw_usage, dict):
-            usage = InvocationUsage(
-                input_tokens=int(raw_usage.get("input_tokens", 0)),
-                cached_tokens=int(raw_usage.get("cache_creation_input_tokens", 0))
-                + int(raw_usage.get("cache_read_input_tokens", 0)),
-                cache_write_tokens=int(raw_usage.get("cache_creation_input_tokens", 0)),
-                output_tokens=int(raw_usage.get("output_tokens", 0)),
-                estimated=False,
-            )
+        try:
+            usage = _anthropic_usage(payload.get("usage") if isinstance(payload, dict) else None)
+        except (TypeError, ValueError) as error:
+            raise GatewayInvocationError("Gateway returned an unsupported usage schema") from error
+        try:
+            content, tool_calls, raw_content = _anthropic_message(payload)
+        except GatewayInvocationError as error:
+            error.usage = usage
+            error.headers = _anthropic_error_headers(response)
+            raise
         correlation_id = (
             response.headers.get("x-correlation-id")
             or response.headers.get("request-id")
             or response.headers.get("x-ms-request-id")
             or response.headers.get("apim-request-id")
+            or payload.get("id")
         )
         return GatewayResult(
             content=content,
