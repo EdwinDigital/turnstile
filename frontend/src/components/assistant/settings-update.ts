@@ -25,3 +25,23 @@ export function assistantSettingsUpdate(
   }
   return next
 }
+
+export function assistantSettingsModel(
+  settings: AssistantSettings,
+  draft: AssistantSettingsWrite,
+) {
+  return settings.available_models.find((model) => model.id === draft.model_id)
+    ?? settings.available_models.find((model) =>
+      !draft.api_format || model.api_formats?.includes(draft.api_format))
+    ?? settings.available_models[0]
+}
+
+export function assistantSettingsChanged(
+  settings: AssistantSettings,
+  draft: AssistantSettingsWrite,
+) {
+  const saved = assistantSettingsUpdate(settings, {})
+  return draft.model_id !== saved.model_id
+    || draft.auto_title !== saved.auto_title
+    || (draft.api_format ?? null) !== (saved.api_format ?? null)
+}
