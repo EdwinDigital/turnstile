@@ -403,7 +403,7 @@ def test_selected_responses_protocol_is_saved_and_used_for_answer_and_title() ->
     reply = service.ask(AssistantAskRequest(question="Usage?"), user_id=USER, user_name=USER)
     service.title_conversation(UUID(reply.conversation_id), USER, "en")
     assert all("input" in body and "messages" not in body for body in sent)
-    assert sent[-1]["max_output_tokens"] == 32
+    assert sent[-1]["max_output_tokens"] == 256
 
 
 @pytest.mark.parametrize("api", ["openai_chat", "openai_responses"])

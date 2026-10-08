@@ -577,10 +577,11 @@ class AssistantService:
                         ),
                     ],
                     temperature=0,
-                    # A title cannot be long, so neither can the budget for one. This is
-                    # also the backstop against a model that ignores the prompt and starts
-                    # writing the answer again.
-                    max_output_tokens=32,
+                    # Responses counts reasoning against this budget as well; the
+                    # visible title remains bounded by TITLE_PROMPT and clean_title.
+                    max_output_tokens=(
+                        256 if api_format is InvocationApiFormat.OPENAI_RESPONSES else 32
+                    ),
                     api_format=api_format,
                 ),
                 enforce_user_model_access=False,
