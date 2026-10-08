@@ -42,6 +42,25 @@ Connection registration does not accept an API key or publish a model. Add the f
 
 Compatible Chat Completions connections use `max_tokens`; Foundry keeps its configured `max_completion_tokens` behavior. Measured cache usage prefers `prompt_tokens_details.cached_tokens`, including explicit zero, and falls back to top-level `cached_tokens` only when the nested measurement is absent. Provider display metadata does not change routing, credentials, or pricing. Configure actual model rates explicitly.
 
+### FinOps Assistant API protocol
+
+Apply migration `009_assistant_api_format` before deploying the updated API. The assistant
+setting `api_format` accepts `openai_chat`, `openai_responses`, `anthropic_messages`, or
+`null` for automatic selection. Settings advertise the compatible protocols per model and
+the effective public API path. Invalid overrides are rejected before provider dispatch;
+an override that later becomes unavailable visibly falls back to automatic selection.
+
+Foundry Claude uses the Messages route even when its shared Connection declares OpenAI
+Chat. GPT-6 tool calls use Responses. Claude content blocks, including signed thinking,
+and Responses reasoning items are retained only inside the current analysis loop and
+never returned to the browser or written into conversation history.
+
+Production requests still require APIM. Changing the protocol neither creates a gateway
+operation nor publishes a model or changes credentials. The active revision must contain
+the model alias on its matching operation. Managed Responses support follows the publisher's
+existing Foundry binding boundary (`/openai/v1/chat/completions`); arbitrary compatible
+Chat connections are not assumed to support Responses. Local mocks do not verify live routes.
+
 ### Governed image generation
 
 `IMAGE_GENERATION_ENABLED` defaults to `false`. Enable it only after the API, Control-plane package, required migrations and image-ready APIM parent policy have been deployed and verified together. The Registry advertises `image_generation_supported` and `image_configuration_schema_version: 4`; an older backend must not be treated as image-capable.

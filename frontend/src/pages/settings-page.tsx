@@ -4,6 +4,8 @@ import { AlertTriangle, Check, Languages, Monitor, Moon, RefreshCw, Settings, Sp
 
 import { assistantApi } from "../components/assistant/api"
 import { assistantSettingsKey, assistantSettingsQuery } from "../components/assistant/queries"
+import { assistantSettingsUpdate } from "../components/assistant/settings-update"
+import type { AssistantApiFormat, AssistantSettingsWrite } from "../components/assistant/types"
 import { CopilotLogo } from "../components/brand-logos"
 import { CopilotSettingsSection } from "../data-sources/github-copilot/settings-section"
 import { Button } from "../components/ui/button"
@@ -11,6 +13,7 @@ import { Switch } from "../components/ui/switch"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -43,6 +46,11 @@ type Pane = "preferences" | "assistant" | "copilot"
  *  than as an empty value: "let the registry decide" is a choice an administrator makes,
  *  not the absence of one, and Base UI reads an empty string as nothing selected. */
 const AUTOMATIC = "automatic"
+const API_LABELS: Record<AssistantApiFormat, string> = {
+  openai_chat: "Chat Completions",
+  openai_responses: "Responses",
+  anthropic_messages: "Anthropic Messages",
+}
 
 function price(value: number | null | undefined) {
   return value === null || value === undefined ? "\u2014" : `$${value}`
@@ -52,7 +60,7 @@ function AssistantSection() {
   const queryClient = useQueryClient()
   const settings = useQuery(assistantSettingsQuery())
   const save = useMutation({
-    mutationFn: (body: { model_id: string | null; auto_title: boolean }) =>
+    mutationFn: (body: AssistantSettingsWrite) =>
       assistantApi.saveSettings(body),
     // The response is the whole settings object, so the cache is written rather than
     // invalidated: there is nothing left to fetch.
@@ -78,16 +86,21 @@ function AssistantSection() {
         <p>FinOps 助手回答问题时调用的模型。仅列出已启用且支持工具调用的模型。</p>
       </div>
       <Select
+        items={[
+          { value: AUTOMATIC, label: automaticLabel },
+          ...(value?.available_models ?? []).map((model) => ({
+            value: model.id, label: model.display_name,
+          })),
+        ]}
         // A pin the server can no longer honour is shown as automatic, because automatic
         // is what is actually running. Leaving the dangling id as the value would make
         // the control claim a selection that matches none of its options, and would put
         // a dead model id back on the wire the next time the switch below is toggled.
         value={value && value.model_available ? value.model_id ?? AUTOMATIC : AUTOMATIC}
         disabled={!value || save.isPending}
-        onValueChange={(next) => next && value && save.mutate({
+        onValueChange={(next) => next && value && save.mutate(assistantSettingsUpdate(value, {
           model_id: next === AUTOMATIC ? null : String(next),
-          auto_title: value.auto_title,
-        })}
+        }))}
       >
         <SelectTrigger aria-label="助手模型" className="settings-select-trigger">
           <SelectValue>
@@ -97,6 +110,7 @@ function AssistantSection() {
           </SelectValue>
         </SelectTrigger>
         <SelectContent align="start" alignItemWithTrigger={false}>
+          <SelectGroup>
           <SelectItem value={AUTOMATIC}>{automaticLabel}</SelectItem>
           {(value?.available_models ?? []).map((model) => <SelectItem key={model.id} value={model.id}>
             <span className="settings-model-option">
@@ -107,6 +121,7 @@ function AssistantSection() {
               </small>
             </span>
           </SelectItem>)}
+          </SelectGroup>
         </SelectContent>
       </Select>
       {value?.effective_model_name && <small>
@@ -139,6 +154,57 @@ function AssistantSection() {
       </small>}
     </div>
     <div className="settings-section compact">
+      <h2>接口协议</h2>
+      <Select
+        items={[
+          { value: AUTOMATIC, label: automaticLabel },
+          ...(value?.available_api_formats ?? []).map((api) => ({
+            value: api, label: API_LABELS[api],
+          })),
+        ]}
+        value={value?.api_available === false ? AUTOMATIC : value?.api_format ?? AUTOMATIC}
+        disabled={!value?.available_api_formats?.length || save.isPending}
+        onValueChange={(next) => next && value && save.mutate(assistantSettingsUpdate(value, {
+          api_format: next === AUTOMATIC ? null : next as AssistantApiFormat,
+        }))}
+      >
+        <SelectTrigger aria-label="接口协议" className="settings-select-trigger">
+          <SelectValue>
+            {value?.api_format && value.api_available !== false
+              ? <span data-no-localize>{API_LABELS[value.api_format]}</span>
+              : automaticLabel}
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent align="start" alignItemWithTrigger={false}>
+          <SelectGroup>
+            <SelectItem value={AUTOMATIC}>{automaticLabel}</SelectItem>
+            {(value?.available_api_formats ?? []).map((api) => (
+              <SelectItem key={api} value={api}>
+                <span data-no-localize>{API_LABELS[api]}</span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+      {value?.effective_api_format && value.effective_api_path && <small>
+        实际接口：<span data-no-localize>
+          {API_LABELS[value.effective_api_format]} · POST {value.effective_api_path}
+        </span>
+      </small>}
+      {value?.api_available === false && <p className="settings-warning" role="alert">
+        <AlertTriangle size={13} />
+        指定协议已不可用，当前使用自动匹配的接口。
+      </p>}
+      {save.isError && <p className="settings-warning" role="alert">
+        <AlertTriangle size={13} />
+        <span>
+          助手设置保存失败
+          <br />
+          <span data-no-localize>{save.error instanceof Error ? save.error.message : ""}</span>
+        </span>
+      </p>}
+    </div>
+    <div className="settings-section compact">
       <div>
         <h2>自动生成对话标题</h2>
         <p>新对话产生首个回答后，额外调用一次模型为其命名。关闭后沿用首个问题作为标题。</p>
@@ -150,12 +216,11 @@ function AssistantSection() {
           // is real, so nobody toggles a value that is about to be replaced.
           checked={value?.auto_title ?? false}
           disabled={!value || save.isPending}
-          onCheckedChange={(checked) => value && save.mutate({
+          onCheckedChange={(checked) => value && save.mutate(assistantSettingsUpdate(value, {
             // Same reason as the Select above: never write back a pin the server has
             // already refused to honour.
-            model_id: value.model_available ? value.model_id : null,
             auto_title: checked === true,
-          })}
+          }))}
         />
         <span>{value ? (value.auto_title ? "已开启" : "已关闭") : "\u2014"}</span>
       </label>

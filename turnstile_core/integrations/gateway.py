@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -16,12 +16,15 @@ from ..domain.images import ImageInvocationRequest
 from ..domain.runtime_models import (
     GatewayKind,
     HealthStatus,
+    InvocationApiFormat,
     InvocationUsage,
     ModelInvocationRequest,
     RuntimeHealth,
     RuntimeKind,
     ToolCall,
+    ToolFunctionCall,
 )
+from .gateway_protocol import model_protocol_route
 
 if TYPE_CHECKING:
     from .image_generation import ImageGatewayResult
@@ -66,6 +69,8 @@ class GatewayResult:
     gateway: str
     correlation_id: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    responses_output: list[dict[str, Any]] | None = field(default=None, repr=False)
+    anthropic_content: list[dict[str, Any]] | None = field(default=None, repr=False)
 
 
 class GatewayAdapter(Protocol):
@@ -110,6 +115,163 @@ def _openai_usage(raw_usage: Mapping[str, Any]) -> InvocationUsage:
         output_tokens=int(raw_usage.get("completion_tokens", 0) or 0),
         estimated=False,
     )
+
+
+def _responses_input(request: ModelInvocationRequest) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for message in request.messages:
+        if message._responses_output is not None:
+            items.extend(message._responses_output)
+            continue
+        if message.role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": message.tool_call_id,
+                "output": message.content,
+            })
+            continue
+        if message.content:
+            items.append({"role": message.role, "content": message.content})
+        for call in message.tool_calls or []:
+            items.append({
+                "type": "function_call",
+                "call_id": call.id,
+                "name": call.function.name,
+                "arguments": call.function.arguments,
+            })
+    return items
+
+
+def _responses_body(request: ModelInvocationRequest, model: str) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "model": model,
+        "input": _responses_input(request),
+        "store": False,
+        "stream": False,
+        "include": ["reasoning.encrypted_content"],
+    }
+    if request.tools:
+        # Responses defaults to strict schemas; existing tools have optional arguments
+        # and validate locally, so retain Chat Completions' non-strict behavior.
+        body["tools"] = [
+            {"type": "function", **tool.function.model_dump(), "strict": False}
+            for tool in request.tools
+        ]
+    if request.max_output_tokens is not None:
+        body["max_output_tokens"] = request.max_output_tokens
+    if request.response_format is not None:
+        body["text"] = {"format": {"type": request.response_format}}
+    return body
+
+
+def _responses_message(payload: Any) -> tuple[str, tuple[ToolCall, ...], list[dict[str, Any]]]:
+    try:
+        if not isinstance(payload, dict) or not isinstance(payload["output"], list):
+            raise ValueError("Expected a Responses output array")
+        if payload.get("status") in {"failed", "incomplete", "cancelled", "in_progress", "queued"}:
+            raise GatewayInvocationError("Gateway returned an unfinished Responses result")
+        content: list[str] = []
+        calls: list[ToolCall] = []
+        output: list[dict[str, Any]] = payload["output"]
+        for item in output:
+            if item["type"] == "message":
+                for block in item["content"]:
+                    if block["type"] == "output_text":
+                        content.append(block["text"])
+                    elif block["type"] == "refusal":
+                        content.append(block["refusal"])
+            elif item["type"] == "function_call":
+                calls.append(ToolCall(
+                    id=item["call_id"],
+                    function=ToolFunctionCall(name=item["name"], arguments=item["arguments"]),
+                ))
+        text = "".join(content)
+        if not text and not calls:
+            raise GatewayInvocationError("Gateway returned neither content nor a tool call")
+        return text, tuple(calls), output
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise GatewayInvocationError("Gateway returned an unsupported response schema") from error
+
+
+def _anthropic_messages(request: ModelInvocationRequest) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    previous_was_tool = False
+    try:
+        for message in request.messages:
+            if message.role == "system":
+                continue
+            if message.role == "tool":
+                result: dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": message.tool_call_id,
+                    "content": message.content,
+                }
+                try:
+                    payload = json.loads(message.content or "")
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict) and set(payload) == {"error"}:
+                    result["is_error"] = True
+                # All results for parallel calls belong to one immediately following user turn.
+                if previous_was_tool:
+                    messages[-1]["content"].append(result)
+                else:
+                    messages.append({"role": "user", "content": [result]})
+                previous_was_tool = True
+                continue
+            previous_was_tool = False
+            if message._anthropic_content is not None:
+                content: str | list[dict[str, Any]] = message._anthropic_content
+            elif message.tool_calls:
+                content = []
+                if message.content:
+                    content.append({"type": "text", "text": message.content})
+                for call in message.tool_calls:
+                    arguments = json.loads(call.function.arguments)
+                    if not isinstance(arguments, dict):
+                        raise ValueError("Anthropic tool arguments must be an object")
+                    content.append({
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.function.name,
+                        "input": arguments,
+                    })
+            else:
+                content = message.content or ""
+            messages.append({"role": message.role, "content": content})
+    except (TypeError, ValueError) as error:
+        raise GatewayInvocationError("Invalid Anthropic tool history", status_code=400) from error
+    return messages
+
+
+def _anthropic_message(payload: Any) -> tuple[str, tuple[ToolCall, ...], list[dict[str, Any]]]:
+    try:
+        if not isinstance(payload, dict) or not isinstance(payload["content"], list):
+            raise ValueError("Expected Anthropic content blocks")
+        if payload.get("stop_reason") in {"max_tokens", "pause_turn"}:
+            raise GatewayInvocationError("Gateway returned an unfinished Anthropic result")
+        output: list[dict[str, Any]] = payload["content"]
+        text: list[str] = []
+        calls: list[ToolCall] = []
+        for block in output:
+            if block["type"] == "text":
+                text.append(block["text"])
+            elif block["type"] == "tool_use":
+                if not isinstance(block["input"], dict):
+                    raise ValueError("Anthropic tool arguments must be an object")
+                calls.append(ToolCall(
+                    id=block["id"],
+                    function=ToolFunctionCall(
+                        name=block["name"],
+                        arguments=json.dumps(block["input"], ensure_ascii=False),
+                    ),
+                ))
+        content = "\n".join(text)
+        if not content and not calls:
+            raise GatewayInvocationError("Gateway returned neither content nor a tool call")
+        return content, tuple(calls), output
+    except (KeyError, TypeError, ValueError) as error:
+        raise GatewayInvocationError("Gateway returned an unsupported response schema") from error
 
 
 def _sse_json_events(response: httpx.Response) -> list[dict[str, Any]]:
@@ -263,7 +425,16 @@ class OpenAICompatibleGatewayAdapter:
         }
 
     def invoke(self, request: ModelInvocationRequest, route: dict[str, Any]) -> GatewayResult:
+        has_tool_context = bool(request.tools) or any(
+            message.tool_calls or message.role == "tool" or message._responses_output is not None
+            for message in request.messages
+        )
+        try:
+            route = model_protocol_route(route, request.api_format, tools=has_tool_context)
+        except ValueError as error:
+            raise GatewayInvocationError(str(error), status_code=400) from error
         runtime_config = dict(route["runtime_config"])
+        use_responses = runtime_config.get("api_format") == InvocationApiFormat.OPENAI_RESPONSES
         upstream_model = str(
             route["model_key"]
             if self._implementation is GatewayKind.APIM
@@ -304,6 +475,13 @@ class OpenAICompatibleGatewayAdapter:
             body[max_tokens_field] = request.max_output_tokens
         if request.response_format is not None:
             body["response_format"] = {"type": request.response_format}
+        if use_responses:
+            if request.stream:
+                raise GatewayInvocationError(
+                    "Streaming tool calls are not supported by this invocation endpoint",
+                    status_code=400,
+                )
+            body = _responses_body(request, upstream_model)
         try:
             if request.stream:
                 with self._client.stream(
@@ -389,13 +567,17 @@ class OpenAICompatibleGatewayAdapter:
         except httpx.HTTPError as error:
             raise GatewayInvocationError(f"Gateway request failed: {error}") from error
         payload = response.json()
+        responses_output = None
         try:
-            message = payload["choices"][0]["message"]
-            # A turn that only calls tools has content null, which is not a schema error.
-            content = str(message.get("content") or "")
-            tool_calls = tuple(
-                ToolCall.model_validate(call) for call in (message.get("tool_calls") or [])
-            )
+            if use_responses:
+                content, tool_calls, responses_output = _responses_message(payload)
+            else:
+                message = payload["choices"][0]["message"]
+                # A turn that only calls tools has content null, which is not a schema error.
+                content = str(message.get("content") or "")
+                tool_calls = tuple(
+                    ToolCall.model_validate(call) for call in (message.get("tool_calls") or [])
+                )
         except (KeyError, IndexError, TypeError, ValueError) as error:
             raise GatewayInvocationError(
                 "Gateway returned an unsupported response schema"
@@ -405,7 +587,11 @@ class OpenAICompatibleGatewayAdapter:
         raw_usage = payload.get("usage")
         usage = None
         if isinstance(raw_usage, dict):
-            usage = _openai_usage(raw_usage)
+            usage = _openai_usage({
+                "prompt_tokens": raw_usage.get("input_tokens"),
+                "completion_tokens": raw_usage.get("output_tokens"),
+                "prompt_tokens_details": raw_usage.get("input_tokens_details"),
+            }) if use_responses else _openai_usage(raw_usage)
         if usage is None:
             prompt = _prompt([message.model_dump() for message in request.messages])
             usage = _estimate_usage(prompt, content)
@@ -420,6 +606,7 @@ class OpenAICompatibleGatewayAdapter:
             gateway=self._implementation.value,
             correlation_id=correlation_id,
             tool_calls=tool_calls,
+            responses_output=responses_output,
         )
 
     def check(self, route: dict[str, Any]) -> RuntimeHealth:
@@ -453,16 +640,22 @@ class ApimGatewayAdapter(OpenAICompatibleGatewayAdapter):
 
 class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
     def invoke(self, request: ModelInvocationRequest, route: dict[str, Any]) -> GatewayResult:
+        try:
+            route = model_protocol_route(
+                route, request.api_format,
+                tools=bool(request.tools) or any(
+                    message.tool_calls or message.role == "tool" for message in request.messages
+                ),
+            )
+        except ValueError as error:
+            raise GatewayInvocationError(str(error), status_code=400) from error
         runtime_config = dict(route["runtime_config"])
         path = str(runtime_config.get("path", "/v1/messages")).replace(
             "{model}", str(route["model_key"])
         )
-        if request.tools:
-            # Anthropic's tool schema is a different shape from OpenAI's, and the
-            # assistant only ever routes to an OpenAI-compatible model. Failing loudly
-            # beats silently dropping the tools and letting the model invent an answer.
+        if request.stream:
             raise GatewayInvocationError(
-                "Tool calling is not supported on the Anthropic Messages route",
+                "Streaming is not supported on the Anthropic invocation endpoint",
                 status_code=400,
             )
         system_messages = [
@@ -471,18 +664,27 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
             if message.role == "system" and message.content
         ]
         body: dict[str, Any] = {
-            "model": route["model_key"],
-            "messages": [
-                message.model_dump(exclude_none=True)
-                for message in request.messages
-                if message.role != "system"
-            ],
+            "model": (
+                route["model_key"]
+                if self._implementation is GatewayKind.APIM
+                else route.get("upstream_model_id") or route["model_key"]
+            ),
+            "messages": _anthropic_messages(request),
             "max_tokens": request.max_output_tokens
             or int(runtime_config.get("default_max_tokens", 512)),
             "stream": False,
         }
         if system_messages:
             body["system"] = "\n\n".join(system_messages)
+        if request.tools:
+            body["tools"] = [
+                {
+                    "name": tool.function.name,
+                    "description": tool.function.description,
+                    "input_schema": tool.function.parameters,
+                }
+                for tool in request.tools
+            ]
         if request.temperature is not None and runtime_config.get(
             "supports_temperature", False
         ):
@@ -528,16 +730,7 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
             raise GatewayInvocationError(f"Gateway request failed: {error}") from error
 
         payload = response.json()
-        raw_content = payload.get("content")
-        if not isinstance(raw_content, list):
-            raise GatewayInvocationError("Gateway returned an unsupported response schema")
-        text_blocks = [
-            str(block["text"])
-            for block in raw_content
-            if isinstance(block, dict) and block.get("type") == "text" and "text" in block
-        ]
-        if not text_blocks:
-            raise GatewayInvocationError("Gateway returned no text content")
+        content, tool_calls, raw_content = _anthropic_message(payload)
 
         raw_usage = payload.get("usage")
         usage = None
@@ -546,6 +739,7 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
                 input_tokens=int(raw_usage.get("input_tokens", 0)),
                 cached_tokens=int(raw_usage.get("cache_creation_input_tokens", 0))
                 + int(raw_usage.get("cache_read_input_tokens", 0)),
+                cache_write_tokens=int(raw_usage.get("cache_creation_input_tokens", 0)),
                 output_tokens=int(raw_usage.get("output_tokens", 0)),
                 estimated=False,
             )
@@ -556,10 +750,12 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
             or response.headers.get("apim-request-id")
         )
         return GatewayResult(
-            content="\n".join(text_blocks),
+            content=content,
             usage=usage,
             gateway=self._implementation.value,
             correlation_id=correlation_id,
+            tool_calls=tool_calls,
+            anthropic_content=raw_content,
         )
 
 
@@ -600,16 +796,8 @@ class GatewayRouter:
 
 
 def supports_tool_calling(runtime_kind: str, runtime_config: Mapping[str, Any] | None) -> bool:
-    """Whether `adapter()` would return an adapter that can carry OpenAI tool calls.
-
-    This mirrors the branch order in `GatewayRouter.adapter` and lives beside it so the
-    two cannot drift silently: adding an adapter forces a decision here in the same edit.
-    A CLI runtime has no tool protocol at all, and the Anthropic route uses a different
-    tool schema that this project does not translate.
-    """
-    if RuntimeKind(runtime_kind) is RuntimeKind.COPILOT_CLI:
-        return False
-    return dict(runtime_config or {}).get("api_format") != "anthropic_messages"
+    """CLI runtimes have no tool protocol; both HTTP adapters carry function calls."""
+    return RuntimeKind(runtime_kind) is not RuntimeKind.COPILOT_CLI
 
 
 def elapsed_ms(started: float) -> int:
