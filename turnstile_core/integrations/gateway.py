@@ -131,7 +131,17 @@ def _responses_input(request: ModelInvocationRequest) -> list[dict[str, Any]]:
             })
             continue
         if message.content:
-            items.append({"role": message.role, "content": message.content})
+            block: dict[str, Any] = {
+                "type": "output_text" if message.role == "assistant" else "input_text",
+                "text": message.content,
+            }
+            if message.role == "assistant":
+                block["annotations"] = []
+            items.append({
+                "type": "message",
+                "role": message.role,
+                "content": [block],
+            })
         for call in message.tool_calls or []:
             items.append({
                 "type": "function_call",

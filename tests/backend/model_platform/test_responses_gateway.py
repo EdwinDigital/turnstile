@@ -123,8 +123,14 @@ def test_gpt6_tools_use_responses_and_keep_apim_alias_and_attribution(
         assert body == {
             "model": "department-assistant",
             "input": [
-                {"role": "system", "content": "Use tools to query actual usage."},
-                {"role": "user", "content": "Which department uses the most?"},
+                {
+                    "type": "message", "role": "system",
+                    "content": [{"type": "input_text", "text": "Use tools to query actual usage."}],
+                },
+                {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "Which department uses the most?"}],
+                },
             ],
             "tools": [{
                 "type": "function",
@@ -278,6 +284,51 @@ def test_responses_translate_chat_tool_history_and_json_format(
     OpenAICompatibleGatewayAdapter(
         GatewayKind.APIM, httpx.Client(transport=httpx.MockTransport(handler)),
     ).invoke(invocation, route)
+
+
+def test_responses_send_explicit_message_types_for_all_history_roles(
+    invocation: ModelInvocationRequest, route: dict[str, Any],
+) -> None:
+    invocation.messages.extend([
+        ChatMessage(role="assistant", content="The previous result was 120 tokens."),
+        ChatMessage(role="user", content="Compare that with this month."),
+        ChatMessage(
+            role="assistant", content="Checking the latest usage.",
+            tool_calls=[ToolCall(id="call-1", function=ToolFunctionCall(
+                name="query_usage", arguments='{"dimension":"department"}',
+            ))],
+        ),
+        ChatMessage(role="tool", tool_call_id="call-1", content='{"tokens":140}'),
+    ])
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        body = json.loads(incoming.content)
+        for item in body["input"]:
+            assert item["type"] in {"message", "function_call", "function_call_output"}
+            if item["type"] != "message":
+                continue
+            assert isinstance(item["content"], list)
+            for block in item["content"]:
+                expected_type = "output_text" if item["role"] == "assistant" else "input_text"
+                assert block["type"] == expected_type
+                assert isinstance(block["text"], str)
+        assert body["input"][2] == {
+            "type": "message", "role": "assistant",
+            "content": [{
+                "type": "output_text", "text": "The previous result was 120 tokens.",
+                "annotations": [],
+            }],
+        }
+        assert body["input"][-2]["type"] == "function_call"
+        assert body["input"][-1] == {
+            "type": "function_call_output", "call_id": "call-1", "output": '{"tokens":140}',
+        }
+        return httpx.Response(200, json={"output": [ANSWER]})
+
+    result = OpenAICompatibleGatewayAdapter(
+        GatewayKind.APIM, httpx.Client(transport=httpx.MockTransport(handler)),
+    ).invoke(invocation, route)
+    assert result.content == "OK"
 
 
 @pytest.mark.parametrize("model,tools", [("gpt-5.6-luna", True), ("gpt-6.1-sol", False)])

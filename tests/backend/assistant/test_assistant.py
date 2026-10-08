@@ -323,6 +323,11 @@ def test_gpt6_assistant_queries_real_data_through_stateless_responses() -> None:
     assert "messages" not in sent[0]
     assert sent[0]["store"] is False
     assert sent[0]["model"] == picked.model_key
+    assert all(item["type"] == "message" for item in sent[0]["input"])
+    assert all(
+        block["type"] == "input_text"
+        for item in sent[0]["input"] for block in item["content"]
+    )
     assert {tool["name"] for tool in sent[0]["tools"]} == {tool.name for tool in REGISTRY}
     assert sent[1]["input"][2:4] == [reasoning, function_call]
     assert sent[1]["input"][-1]["type"] == "function_call_output"
