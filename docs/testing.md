@@ -42,6 +42,23 @@ private PostgreSQL records; Microsoft sessions continue to use Graph photos.
 Only password sessions can update the current account's name, avatar, or password. Successful
 password changes revoke all Turnstile sessions without changing Microsoft credentials.
 
+The reproducible migration suite starts and stops only its own local PostgreSQL 16+
+cluster, using a private Unix socket and rejecting TCP connections. It does not read
+`DATABASE_URL` or `TEST_USER_SETTINGS_DATABASE_URL` as a target. With `initdb` and
+`postgres` available on `PATH`, run:
+
+```bash
+uv run pytest -q tests/backend/persistence/test_user_settings_migration.py
+```
+
+It covers fresh installation through `011`, upgrade with historical account/session/budget/
+usage preservation, unchanged migration checksums and timestamps on rerun, rejection of
+applied-file changes, and schema/ledger rollback on failure. Missing or older PostgreSQL
+tools explicitly skip these tests; a skipped run is not migration evidence.
+The fresh-Owner case exercises migration followed by real bootstrap, session issuance
+with the new avatar schema, display-name/password updates and a restart-style rerun
+that must preserve the new name/password and the existing migration ledger.
+
 Run the self-service API and UI source checks with the ordinary suite. To exercise real
 transaction locking, rollback, avatar persistence, audit and password attempt limiting,
 explicitly set `TEST_USER_SETTINGS_DATABASE_URL` to an isolated, migrated PostgreSQL database
