@@ -413,7 +413,7 @@ PersonalUsage
 
 `app_user.display_name/password_hash/role` 与 `user_session` 已存在，名称/密码修改不需要新增这些列；头像修改需新增独立 `app_user_avatar` 表，由 AuthStore 管理，不在 app_user 行中混入图片大字段，也不新增组织或部门列。
 
-头像表及持久化审计/限流通过 `010_user_settings_profile.up.sql` 建立。保留初始开发编号以避免与独立助手功能的 `009_assistant_api_format` 冲突；本迁移不依赖 `009`，可从上游 `001-008` 独立升级。不得修改已应用的 `001_initial_schema` 或其他历史迁移。迁移带文件类型/字节长度和账号外键约束；不将默认头像图片或实际用户图片写入迁移。部署顺序、执行入口及应用回滚边界见[升级说明](../../docs/deployment.md#user-settings-database-upgrade)。
+头像表及持久化审计/限流通过 `011_user_settings_profile.up.sql` 建立。上线前发现当前 repo 的定价功能已应用 `010_models_dev_pricing`，因此将未上线的个人设置迁移顺延为 `011`；不修改已应用文件。本迁移不依赖 `009/010`，可从上游 `001-008` 独立升级，也可在当前 repo 的完整链后应用。迁移带文件类型/字节长度和账号外键约束；不将默认头像图片或实际用户图片写入迁移。部署顺序、执行入口及应用回滚边界见[升级说明](../../docs/deployment.md#user-settings-database-upgrade)。
 
 建议新增文件：
 
@@ -433,7 +433,7 @@ PersonalUsage
 
 认证继续只使用真实 `AuthStore`，不为 demo 增加“可编辑假账号”。demo 只读数据必须明确来自 demo，不能混入真实 APIM 或宣称是真实用户预算。
 
-实现已新增业务代码及 `010_user_settings_profile.up.sql`，未调整依赖锁文件、部署参数或 CI 配置；该迁移只在隔离的本地 PostgreSQL 中执行。
+实现已新增业务代码及 `011_user_settings_profile.up.sql`，未调整依赖锁文件、部署参数或 CI 配置；该迁移上线前只在隔离的本地 PostgreSQL 中执行。
 
 ## 9. 实施顺序与验证
 
@@ -475,3 +475,9 @@ PersonalUsage
 - Ruff、Mypy（184 个源文件）、前端类型检查/生产构建、Bicep 编译、APIM XML、OpenAPI 校验及差异空白检查通过。
 - 保留既有 Starlette 弃用提示、前端大包提示、Bicep/OpenAPI 警告；未调整无关配置来消除这些警告。
 - 数据库升级只在本地测试环境执行；真实 Microsoft OAuth/Graph、云端升级和模型调用仍未验证。
+
+### 10.2 当前仓库合并与发布准备
+
+- 上游 PR 创建后，按用户要求合并至当前 repo `main` 并发布；保留已有助手与定价功能。
+- 发现定价迁移 `010_models_dev_pricing` 已应用，未上线的用户设置迁移重命名为 `011_user_settings_profile`；同步更新 PR、契约测试及升级文档。
+- 第 10.1 节的迁移验证记录对应更名前的候选；实际发布以合并后完整迁移链的复验及私有发布证据为准。

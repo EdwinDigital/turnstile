@@ -90,12 +90,12 @@ local-key authentication or weaken networking merely to complete installation.
 
 ### User settings database upgrade
 
-The user-settings API requires `migrations/010_user_settings_profile.up.sql`. It adds
+The user-settings API requires `migrations/011_user_settings_profile.up.sql`. It adds
 `app_user_avatar` for private normalized avatars and `account_security_event` for account
 change auditing and password-verification throttling. It does not rewrite existing accounts,
 sessions, budgets or usage, and needs no infrastructure changes or new Graph permissions.
-The migration number is independent of the assistant-protocol upgrade; it does not depend
-on `009_assistant_api_format`.
+The migration number avoids the assistant-protocol and pricing upgrades; it does not depend
+on `009_assistant_api_format` or `010_models_dev_pricing`.
 
 1. Back up the existing database and record its `schema_migration` versions and checksums.
    Use the installation's existing secret configuration and authorized migration environment;
@@ -108,7 +108,7 @@ on `009_assistant_api_format`.
 
    The runner applies each pending file transactionally and verifies existing checksums.
    Rerunning it skips applied files; do not run the SQL directly or edit an applied file.
-3. Confirm `010_user_settings_profile` appears once in `schema_migration`, both new tables
+3. Confirm `011_user_settings_profile` appears once in `schema_migration`, both new tables
    exist, and earlier checksums and account/budget/usage data are unchanged. Deploy the
    matching API and frontend packages through the existing deployment process.
 4. Verify password-account display-name and avatar updates, wrong-password rejection,

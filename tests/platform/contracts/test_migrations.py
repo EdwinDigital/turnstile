@@ -33,13 +33,13 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "006_versioned_budget_evidence.up.sql",
         "007_model_price_source.up.sql",
         "008_price_review_and_guard.up.sql",
-        "010_user_settings_profile.up.sql",
+        "011_user_settings_profile.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
 
 
 def test_user_settings_upgrade_is_additive_and_keeps_private_data_bounded() -> None:
-    sql = (MIGRATIONS / "010_user_settings_profile.up.sql").read_text(encoding="utf-8")
+    sql = (MIGRATIONS / "011_user_settings_profile.up.sql").read_text(encoding="utf-8")
     assert table_names(sql) == {"app_user_avatar", "account_security_event"}
     assert sql.count("REFERENCES app_user(id) ON DELETE CASCADE") == 2
     assert "octet_length(image_bytes) BETWEEN 1 AND 65536" in sql

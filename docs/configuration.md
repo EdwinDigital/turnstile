@@ -26,7 +26,7 @@ Copy `.env.example` to `.env` for the API and `frontend/.env.example` to `fronte
 
 The frontend uses the Microsoft `organizations` authority. Tenant admission is enforced by exact email-domain matching in the backend. The self-service deployment script creates the first password Owner only when the user table is empty. Password users can change their own display name, avatar, and password from User settings. Microsoft sessions show read-only profiles. Operators can still use `python -m backend.accounts` for account maintenance; application restarts never reset the bootstrap account.
 
-Apply `010_user_settings_profile` through the [user-settings upgrade procedure](deployment.md#user-settings-database-upgrade)
+Apply `011_user_settings_profile` through the [user-settings upgrade procedure](deployment.md#user-settings-database-upgrade)
 before the updated API. Local avatars are normalized
 static images, at most 64 KiB, stored privately in PostgreSQL; they do not require Blob
 Storage or new Graph permissions. Account changes are audited without storing image or

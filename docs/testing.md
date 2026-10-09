@@ -22,7 +22,7 @@ git diff --check
 
 ## Database validation
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, and `010_user_settings_profile`), then run the command again and verify that no migration is reapplied.
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, and `011_user_settings_profile`), then run the command again and verify that no migration is reapplied.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
@@ -32,7 +32,7 @@ Request-attempt validation must prove that two APIM attempts with the same `requ
 
 ### Personal user settings
 
-Apply `010_user_settings_profile` before deploying the updated authentication API, following
+Apply `011_user_settings_profile` before deploying the updated authentication API, following
 the [upgrade procedure](deployment.md#user-settings-database-upgrade). Personal avatars are
 private PostgreSQL records; Microsoft sessions continue to use Graph photos.
 Only password sessions can update the current account's name, avatar, or password. Successful
