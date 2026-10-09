@@ -35,6 +35,7 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "008_price_review_and_guard.up.sql",
         "009_assistant_api_format.up.sql",
         "010_models_dev_pricing.up.sql",
+        "011_user_settings_profile.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
 
@@ -45,6 +46,16 @@ def test_assistant_api_upgrade_defaults_to_automatic_without_rewriting_settings(
     assert "'openai_chat', 'openai_responses', 'anthropic_messages'" in sql
     assert "NULL selects" in sql
     assert not re.search(r"^\s*(INSERT|UPDATE|DELETE|TRUNCATE|DROP)\b", sql, re.MULTILINE)
+
+
+def test_user_settings_upgrade_is_additive_and_keeps_private_data_bounded() -> None:
+    sql = (MIGRATIONS / "011_user_settings_profile.up.sql").read_text(encoding="utf-8")
+    assert table_names(sql) == {"app_user_avatar", "account_security_event"}
+    assert sql.count("REFERENCES app_user(id) ON DELETE CASCADE") == 2
+    assert "octet_length(image_bytes) BETWEEN 1 AND 65536" in sql
+    assert "media_type IN ('image/png', 'image/jpeg', 'image/webp')" in sql
+    assert "ON account_security_event(app_user_id, action, created_at)" in sql
+    assert not re.search(r"^\s*(ALTER|INSERT|UPDATE|DELETE|TRUNCATE|DROP)\b", sql, re.MULTILINE)
 
 
 def test_the_review_baseline_and_the_pending_price_are_separate_columns() -> None:
