@@ -43,6 +43,8 @@ import type {
   PriceCatalogModelsResponse,
   PriceCatalogOptionsResponse,
   PriceSyncResponse,
+  PricePreviewRequest,
+  PricePreviewResponse,
   OptimizationEvent,
   PeopleBudgetFilter,
   RunDetail,
@@ -356,6 +358,9 @@ export const dataSource = {
     "/api/v1/model-management/price-sync",
     { model_ids: modelIds ?? null },
   ).then((result) => ({ ...result, registry: normalizeRegistry(result.registry) })),
+  pricePreview: (value: PricePreviewRequest) => writeJson<PricePreviewResponse>(
+    "/api/v1/model-management/price-preview", value,
+  ),
   deleteModel: (id: string) => request<GatewayPublicationAccepted>(
     `/api/v1/model-management/models/${encodeURIComponent(id)}`,
     { method: "DELETE" },

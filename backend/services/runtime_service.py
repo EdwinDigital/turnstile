@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from collections.abc import Sequence
+from dataclasses import asdict, replace
 from datetime import UTC, date, datetime
 from typing import Any, NoReturn
 from urllib.parse import unquote, urlsplit
@@ -18,6 +19,7 @@ from turnstile_core.config import Settings
 from turnstile_core.domain.billable_requests import BillableBudgetExceeded, BillableRequestPlan
 from turnstile_core.domain.images import ImageInvocationRequest, ImageInvocationResponse
 from turnstile_core.domain.models import ModelPrice, TokenUsageRecord
+from turnstile_core.domain.pricing import PriceConfigurationChanged
 from turnstile_core.domain.runtime_models import (
     FOUNDRY_INFERENCE_RESOURCE,
     FOUNDRY_INFERENCE_ROLE_ID,
@@ -40,6 +42,8 @@ from turnstile_core.domain.runtime_models import (
     PriceCatalogModelsResponse,
     PriceCatalogOption,
     PriceCatalogOptionsResponse,
+    PricePreviewRequest,
+    PricePreviewResponse,
     PriceSource,
     PriceSyncDetail,
     PriceSyncResponse,
@@ -63,9 +67,16 @@ from turnstile_core.domain.runtime_models import (
 from turnstile_core.integrations.gateway import GatewayInvocationError, GatewayRouter, elapsed_ms
 from turnstile_core.integrations.gateway_protocol import model_protocol_route
 from turnstile_core.persistence.repository import QueryRepository
-from turnstile_core.pricing.catalog import CompositeCatalog, build_default_catalog
-from turnstile_core.pricing.sync import plan_price_sync
+from turnstile_core.pricing.catalog import (
+    CATALOG_DEADLINE,
+    CatalogEntry,
+    CompositeCatalog,
+    build_default_catalog,
+)
+from turnstile_core.pricing.sync import ModelPriceUpdate, plan_price_sync
 from turnstile_core.security import CredentialCipher, credential_hint
+
+from .model_pricing import ModelPricingService
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +190,7 @@ class ModelRuntimeService:
                     output_per_million=option.entry.output_per_million,
                     cached_per_million=option.entry.cached_per_million,
                     cache_write_per_million=option.entry.cache_write_per_million,
+                    context_window=option.entry.context_window,
                 )
                 for option in found.options
             ],
@@ -188,72 +200,159 @@ class ModelRuntimeService:
             complete=found.complete,
         )
 
-    def sync_prices(self, only: Sequence[UUID] | None = None) -> PriceSyncResponse:
+    def price_preview(
+        self, request: PricePreviewRequest, *, user_id: str,
+    ) -> PricePreviewResponse:
+        return ModelPricingService(
+            self.registry(), self._price_catalog, self.invoke, user_id=user_id,
+        ).preview(request)
+
+    def sync_prices(
+        self, only: Sequence[UUID] | None = None, *, refresh: bool = False,
+        dry_run: bool = False, user_id: str = "system",
+    ) -> PriceSyncResponse:
+        token = CATALOG_DEADLINE.set(time.monotonic() + 55)
+        try:
+            return self._sync_prices(only, refresh=refresh, dry_run=dry_run, user_id=user_id)
+        finally:
+            CATALOG_DEADLINE.reset(token)
+
+    def _sync_prices(
+        self, only: Sequence[UUID] | None = None, *, refresh: bool,
+        dry_run: bool, user_id: str,
+    ) -> PriceSyncResponse:
         registry = self.registry()
-        summary = plan_price_sync(registry.models, self._price_catalog, only=only)
-        written = self._repository.apply_model_price_sync(
-            [
-                {
-                    "model_id": update.model_id,
-                    "writes": update.writes,
-                    "status": update.status.value,
-                    "message": update.message,
-                    "input_cost_per_million": update.input_cost_per_million,
-                    "output_cost_per_million": update.output_cost_per_million,
-                    "cached_cost_per_million": update.cached_cost_per_million,
-                    "cache_write_cost_per_million": update.cache_write_cost_per_million,
-                    "list_input_cost_per_million": update.list_input_cost_per_million,
-                    "list_output_cost_per_million": update.list_output_cost_per_million,
-                    "list_cached_cost_per_million": update.list_cached_cost_per_million,
-                    "list_cache_write_cost_per_million": (
-                        update.list_cache_write_cost_per_million
-                    ),
-                    "pending_list_price": update.pending_list_price,
-                    "expected_source": update.expected_source,
-                    "expected_reference": update.expected_reference,
-                    "expected_discount_percent": update.expected_discount_percent,
-                }
-                for update in summary.updates
-            ]
+        deadline = time.monotonic() + 55
+        selected = [model for model in registry.models if only is None or model.id in only]
+        if only and set(only) - {model.id for model in selected}:
+            raise HTTPException(status_code=404, detail="Unknown model in price sync")
+        sources: set[PriceSource] = {model.price_source for model in selected
+                                    if model.price_source is not PriceSource.MANUAL}
+        failures = self._price_catalog.refresh(sources) if refresh else {}
+        pricing = ModelPricingService(
+            registry, self._price_catalog, self.invoke, user_id=user_id, allow_ai=not dry_run,
         )
-        # The plan intended `summary.written` writes and the repository performed `written`. The
-        # difference is exactly the rows whose pricing changed while the sync was talking to the
-        # price feed, so the guard refused them. Reported rather than absorbed: "considered 45,
-        # updated 44" with nothing saying why is the kind of arithmetic nobody chases.
-        superseded = max(summary.written - written, 0)
-        details = [
-            PriceSyncDetail(
-                model_id=update.model_id,
-                model_key=update.model_key,
-                status=update.status,
-                message=update.message,
-            )
-            for update in summary.updates
-            if update.status is not PriceSyncStatus.OK
-        ]
-        refreshed = self.registry()
-        if superseded:
-            planned = {update.model_id for update in summary.updates if update.writes}
-            details.extend(
-                PriceSyncDetail(
-                    model_id=model.id,
-                    model_key=model.model_key,
-                    status=PriceSyncStatus.SUPERSEDED,
-                    message=model.price_sync_message,
+        updates: list[ModelPriceUpdate] = []
+        details: list[PriceSyncDetail] = []
+        partial_fields = 0
+        for model in selected:
+            if model.price_source is PriceSource.MANUAL:
+                details.append(PriceSyncDetail(
+                    model_id=model.id, model_key=model.model_key, outcome="skipped_manual",
+                    price_source=model.price_source,
+                ))
+                continue
+            error = failures.get(model.price_source)
+            status = PriceSyncStatus.STALE
+            candidate = model
+            preview = None
+            if time.monotonic() >= deadline:
+                error, status = "同步执行时间预算已耗尽，请重试", PriceSyncStatus.DEFERRED
+            elif "image_generation" in model.capabilities:
+                error, status = "图片模型价格需人工配置", PriceSyncStatus.UNSUPPORTED
+            elif model.price_source is PriceSource.MODELS_DEV and not error:
+                pricing.timeout_ms = max(1000, min(15000, int((deadline-time.monotonic()) * 1000)))
+                preview = pricing.preview(PricePreviewRequest(
+                    model_id=model.id, price_reference=model.price_reference,
+                    price_discount_percent=model.price_discount_percent,
+                ))
+                if preview.status != "matched" or not preview.match:
+                    error = "；".join(preview.warnings)
+                    status = PriceSyncStatus(preview.status)
+                else:
+                    candidate = model.model_copy(
+                        update={"price_reference": preview.match.reference},
+                    )
+                    if any("保留已有" in warning for warning in preview.warnings):
+                        partial_fields += 1
+            if error:
+                update = ModelPriceUpdate(
+                    model_id=model.id, model_key=model.model_key, status=status, message=error,
+                    expected_source=model.price_source.value,
+                    expected_reference=model.price_reference,
+                    expected_discount_percent=model.effective_discount_percent,
+                    expected_configured=model.price_source_configured,
+                    expected_updated_at=model.updated_at,
+                    expected_price_updated_at=model.price_config_updated_at,
                 )
-                for model in refreshed.models
-                if model.id in planned
-                and model.price_sync_status is PriceSyncStatus.SUPERSEDED
+            else:
+                resolved_entries = None
+                if preview and preview.list_prices and preview.match:
+                    resolved_entries = {candidate.id: CatalogEntry(
+                        reference=preview.match.reference, label=preview.match.name,
+                        source=PriceSource.MODELS_DEV,
+                        input_per_million=preview.list_prices.input,
+                        output_per_million=preview.list_prices.output,
+                        cached_per_million=preview.list_prices.cached,
+                        cache_write_per_million=preview.list_prices.cache_write,
+                    )}
+                update = plan_price_sync(
+                    [candidate], self._price_catalog, resolved_entries=resolved_entries,
+                ).updates[0]
+                update = replace(
+                    update, expected_reference=model.price_reference,
+                    match_metadata=preview.match.model_dump(mode="json")
+                    if preview and preview.match else model.match_metadata,
+                    source_snapshot={
+                        "version": 1, "entry_digest": preview.entry_digest,
+                        "snapshot_id": preview.catalog_snapshot_id,
+                        "fetched_at": (
+                            preview.fetched_at.isoformat() if preview.fetched_at else None
+                        ),
+                        "source_updated_at": preview.source_updated_at,
+                    } if preview else model.source_snapshot,
+                )
+            updates.append(update)
+        if not dry_run:
+            self._repository.apply_model_price_sync([asdict(update) for update in updates])
+        refreshed = self.registry() if not dry_run else registry
+        by_id = {model.id: model for model in refreshed.models}
+        counts: dict[str, int] = {}
+        for update in updates:
+            before = next(model for model in selected if model.id == update.model_id)
+            after = by_id.get(update.model_id)
+            accepted = dry_run or bool(
+                after and after.price_source == before.price_source
+                and after.price_reference == update.price_reference
+                and after.price_sync_status == update.status
+                and after.updated_at >= before.updated_at
+                and after.effective_discount_percent == before.effective_discount_percent
             )
+            outcome = update.status.value
+            if update.writes:
+                if not accepted:
+                    outcome = "superseded"
+                else:
+                    changed = any(
+                        getattr(before, field) != getattr(update, field)
+                        for field in (
+                            "input_cost_per_million", "output_cost_per_million",
+                            "cached_cost_per_million", "cache_write_cost_per_million",
+                        )
+                    )
+                    outcome = "updated" if changed else "unchanged"
+            elif not dry_run and (
+                after is None or after.price_source != before.price_source
+                or after.price_reference != before.price_reference
+                or after.effective_discount_percent != before.effective_discount_percent
+                or after.updated_at != before.updated_at
+            ):
+                outcome = "superseded"
+            counts[outcome] = counts.get(outcome, 0) + 1
+            details.append(PriceSyncDetail(
+                model_id=update.model_id, model_key=update.model_key,
+                status=PriceSyncStatus.SUPERSEDED if outcome == "superseded" else update.status,
+                outcome=outcome, message=update.message, price_source=before.price_source,
+                price_reference=update.price_reference or before.price_reference,
+            ))
         return PriceSyncResponse(
-            considered=len(summary.updates),
-            updated=written,
-            unmapped=summary.unmapped,
-            review_needed=summary.review_needed,
-            stale=summary.stale,
-            superseded=superseded,
-            details=details,
-            registry=refreshed,
+            total=len(selected), considered=len(updates), details=details, registry=refreshed,
+            skipped_manual=len(selected)-len(updates), partial_fields=partial_fields,
+            dry_run=dry_run,
+            **{key: counts.get(key, 0) for key in (
+                "updated", "unchanged", "unmapped", "review_needed", "stale",
+                "superseded", "ambiguous", "unsupported", "deferred",
+            )},
         )
 
     def registry(self) -> RegistryResponse:
@@ -891,30 +990,69 @@ class ModelRuntimeService:
             "cached_cost_per_million", "cache_write_cost_per_million",
         )
         current_model = ManagedModel.model_validate(current) if current is not None else None
-        if write.price_source is not PriceSource.MANUAL and (
+        source_explicit = "price_source" in write.model_fields_set
+        values = write.model_dump(mode="python")
+        values.pop("price_entry_digest", None)
+        values.pop("allow_unpriced", None)
+        if not source_explicit and current_model is not None:
+            values["price_source"] = current_model.price_source
+            values["price_reference"] = current_model.price_reference
+            values["price_discount_percent"] = current_model.price_discount_percent
+            write = write.model_copy(update={
+                field: values[field] for field in (
+                    "price_source", "price_reference", "price_discount_percent",
+                )
+            })
+        if write.price_source is not PriceSource.MANUAL and write.price_reference and (
             current_model is None
             or any(getattr(current_model, field) != getattr(write, field) for field in price_fields)
+            or write.price_entry_digest is not None
         ):
-            try:
-                entry = self._price_catalog.lookup(write.price_reference or "")
-            except Exception as error:  # noqa: BLE001
+            preview = self.price_preview(PricePreviewRequest(
+                model_id=item_id, runtime_id=write.runtime_id,
+                price_source=write.price_source, price_reference=write.price_reference,
+                price_discount_percent=write.price_discount_percent,
+            ), user_id="system")
+            if preview.status != "matched" or preview.effective_prices is None:
                 raise HTTPException(
-                    status_code=503, detail="The selected price source is unavailable"
-                ) from error
-            if (
-                entry is None
-                or not entry.complete
-                or entry.input_per_million is None
-                or entry.output_per_million is None
-            ):
-                raise HTTPException(
-                    status_code=409,
+                    status_code=503 if preview.status == "stale" else 409,
                     detail=(
                         "The selected catalog price is incomplete; existing prices are unchanged"
                     ),
                 )
-        self._save("model", write.model_dump(mode="python"), item_id)
+            if write.price_entry_digest and preview.entry_digest != write.price_entry_digest:
+                raise HTTPException(status_code=409, detail="目录价格已变化，请重新同步并确认")
+            values.update(self._accepted_price_values(preview))
+            if current_model:
+                values["pricing_expected_updated_at"] = current_model.updated_at
+        elif write.price_source is PriceSource.MODELS_DEV and not write.price_reference \
+                and source_explicit and not write.allow_unpriced:
+            raise HTTPException(status_code=422, detail="请同步定价或明确确认暂不计价")
+        if not source_explicit and current_model and not current_model.price_source_configured:
+            for field in ("price_source", "price_reference", "price_discount_percent"):
+                values.pop(field, None)
+        self._save("model", values, item_id)
         return self.registry()
+
+    @staticmethod
+    def _accepted_price_values(preview: PricePreviewResponse) -> dict[str, Any]:
+        assert preview.match and preview.effective_prices and preview.list_prices
+        values: dict[str, Any] = {}
+        for key, column in (
+            ("input", "input_cost_per_million"), ("output", "output_cost_per_million"),
+            ("cached", "cached_cost_per_million"), ("cache_write", "cache_write_cost_per_million"),
+        ):
+            values[column] = getattr(preview.effective_prices, key)
+            if getattr(preview.list_prices, key) is not None:
+                values[f"list_{column}"] = getattr(preview.list_prices, key)
+        values["match_metadata"] = preview.match.model_dump(mode="json")
+        values["source_snapshot"] = {
+            "version": 1, "entry_digest": preview.entry_digest,
+            "snapshot_id": preview.catalog_snapshot_id,
+            "fetched_at": preview.fetched_at.isoformat() if preview.fetched_at else None,
+            "source_updated_at": preview.source_updated_at,
+        }
+        return values
 
     def check_runtime(self, runtime_id: UUID) -> RuntimeHealth:
         route = self._repository.invocation_route(runtime_id, None)
@@ -1351,6 +1489,8 @@ class ModelRuntimeService:
                 self._repository.create_registry_item(kind, values)
             elif self._repository.update_registry_item(kind, item_id, values) is None:
                 raise HTTPException(status_code=404, detail=f"Unknown {kind}: {item_id}")
+        except PriceConfigurationChanged as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 

@@ -2,6 +2,10 @@
 
 ## Clean installation
 
+Pricing upgrade `010_models_dev_pricing` adds the public catalog source and matching metadata
+without rewriting accepted prices. Verify explicit manual configurations remain manual, absent
+configurations follow the public default, and the numbered migration is applied once.
+
 ```bash
 uv sync --frozen
 npm --prefix frontend ci

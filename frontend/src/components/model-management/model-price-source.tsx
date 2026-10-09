@@ -11,6 +11,7 @@ import type {
 import { Button } from "../ui/button"
 import { Input } from "../ui/input"
 import { FieldHelp } from "./field-help"
+import { PublicModelPricing } from "./public-model-pricing"
 import {
   applyCatalogOption,
   discountedRate,
@@ -20,6 +21,7 @@ import {
 } from "./model-edit-form"
 
 const SOURCE_LABEL: Record<string, string> = {
+  models_dev: "从公网同步定价",
   manual: "手工填写",
   azure_retail: "Azure 零售价",
   anthropic: "Anthropic 列表价",
@@ -67,7 +69,7 @@ export function ModelPriceSourceFields({ model, draft, setDraft, busy, connectio
   // appears to do nothing.
   const [reselecting, setReselecting] = useState(false)
 
-  const following = draft.priceSource !== "manual"
+  const following = draft.priceSource !== "manual" && draft.priceSource !== "models_dev"
   const discount = resolveDiscount(draft, connectionDiscount)
   const storedModelKey = draft.priceReference ? modelKeyFromReference(draft.priceReference) : null
 
@@ -164,19 +166,32 @@ export function ModelPriceSourceFields({ model, draft, setDraft, busy, connectio
     <div className="registry-field-label-row">
       <span className="registry-field-label">价格来源</span>
       <FieldHelp>
-        「跟随官方价」按 官方价 × 折扣 自动维护单价；折扣由你维护，不会被任何来源覆盖。
+        {draft.priceSource === "models_dev"
+          ? "公开参考价用于费用估算，不代表实际账单。"
+          : "「跟随官方价」按 官方价 × 折扣 自动维护单价；折扣由你维护，不会被任何来源覆盖。"}
       </FieldHelp>
     </div>
     <div className="model-price-source-choice" role="radiogroup" aria-label="价格来源">
-      {(["manual", "azure_retail", "anthropic"] as const).map((source) => (
+      {(["models_dev", "manual", "azure_retail", "anthropic"] as const).map((source) => (
         <label key={source} className="model-editor-checkbox">
           <input type="radio" name="price-source" value={source} disabled={busy}
             checked={draft.priceSource === source}
-            onChange={() => setDraft((current) => ({ ...current, priceSource: source }))} />
+            onChange={() => setDraft((current) => ({
+              ...current, priceSource: source,
+              priceReference: source === current.priceSource ? current.priceReference : "",
+              priceEntryDigest: "", allowUnpriced: false,
+            }))} />
           <span>{SOURCE_LABEL[source]}</span>
         </label>
       ))}
     </div>
+    {draft.priceSource === "models_dev" && <PublicModelPricing
+      request={{ model_id: model.id, runtime_id: model.runtime_id }}
+      draft={draft} busy={busy}
+      onChange={updater => setDraft(current => ({ ...current, ...updater(current) }))} />}
+    {draft.priceSource === "models_dev" && <DiscountField
+      draft={draft} busy={busy} connectionDiscount={connectionDiscount} discount={discount}
+      setDraft={updater => setDraft(current => ({ ...current, ...updater(current) }))} />}
 
     {following && <div className="model-price-follow">
       <ModelStep
@@ -201,7 +216,8 @@ export function ModelPriceSourceFields({ model, draft, setDraft, busy, connectio
         busy={busy || !details?.complete} onChoose={chooseOption} />}
 
       <DiscountField
-        draft={draft} setDraft={setDraft} busy={busy || details?.complete === false}
+        draft={draft} setDraft={updater => setDraft(current => ({ ...current, ...updater(current) }))}
+        busy={busy || details?.complete === false}
         connectionDiscount={connectionDiscount} discount={discount} />
 
       <PriceArithmetic model={model} draft={draft} percent={discount.percent}
@@ -345,9 +361,9 @@ function RegionStep({ peers, selected, busy, onChoose }: {
   </div>
 }
 
-function DiscountField({ draft, setDraft, busy, connectionDiscount, discount }: {
-  draft: ModelEditDraft
-  setDraft: (updater: (current: ModelEditDraft) => ModelEditDraft) => void
+export function DiscountField({ draft, setDraft, busy, connectionDiscount, discount }: {
+  draft: Pick<ModelEditDraft, "discountPercent"> & Partial<Pick<ModelEditDraft, "priceSource">>
+  setDraft: (updater: (current: Pick<ModelEditDraft, "discountPercent">) => Pick<ModelEditDraft, "discountPercent">) => void
   busy: boolean
   connectionDiscount: number | null
   discount: { percent: number | null; inherited: boolean }
@@ -357,7 +373,9 @@ function DiscountField({ draft, setDraft, busy, connectionDiscount, discount }: 
       <label htmlFor="model-discount" className="registry-field-label">折扣</label>
       <span className="model-editor-unit" data-no-localize>%</span>
       <FieldHelp>
-        官方价乘以这个百分比得到实际单价。90 表示九折。留空则继承连接的折扣。
+        {draft.priceSource === "models_dev"
+          ? "参考价乘以此百分比。留空继承连接折扣。"
+          : "官方价乘以这个百分比得到实际单价。90 表示九折。留空则继承连接的折扣。"}
       </FieldHelp>
     </div>
     <Input id="model-discount" type="number" inputMode="decimal" min={0} max={100} step="any"
@@ -368,7 +386,7 @@ function DiscountField({ draft, setDraft, busy, connectionDiscount, discount }: 
         setDraft((current) => ({ ...current, discountPercent: event.target.value }))} />
     <p className="publication-form-note">
       {discount.percent === null
-        ? "当前按官方价原价计费。"
+        ? draft.priceSource === "models_dev" ? "当前按公开参考原价计费。" : "当前按官方价原价计费。"
         : discount.inherited
           ? `当前继承连接折扣 ${discount.percent}%。`
           : `当前使用本模型单独设置的 ${discount.percent}%。`}

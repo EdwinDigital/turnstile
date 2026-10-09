@@ -34,6 +34,7 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "007_model_price_source.up.sql",
         "008_price_review_and_guard.up.sql",
         "009_assistant_api_format.up.sql",
+        "010_models_dev_pricing.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
 

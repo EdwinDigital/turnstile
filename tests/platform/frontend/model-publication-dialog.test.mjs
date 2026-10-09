@@ -7,6 +7,7 @@ import { runInNewContext } from "node:vm"
 
 import * as connections from "../../../frontend/src/components/model-management/model-publication-connections.ts"
 import * as compatible from "../../../frontend/src/components/model-management/openai-compatible.ts"
+import * as modelEditForm from "../../../frontend/src/components/model-management/model-edit-form.ts"
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
@@ -70,6 +71,15 @@ function harness(rawRegistry = registry(), publication) {
     } },
     "../../data-sources/apim/queries": { finopsKeys: { gatewayPublication: id => [id] }, finopsQueries: { gatewayPublication: () => ({}) } },
     "./model-publication-connections": connections, "./openai-compatible": compatible,
+    "./model-edit-form": modelEditForm,
+    "./public-model-pricing": {
+      PublicModelPricing: "PublicModelPricing",
+      emptyPricingDraft: () => ({
+        priceSource: "models_dev", priceReference: "", priceEntryDigest: "",
+        allowUnpriced: false, discountPercent: "", contextWindow: "",
+        inputPrice: "", outputPrice: "", cacheReadPrice: "", cacheWritePrice: "",
+      }),
+    },
     "../brand-logos": { GatewayBrandLogo: "GatewayBrandLogo", ProviderBrandLogo: "ProviderBrandLogo", gatewayBrandFromIdentity: () => "generic", providerBrandFromMetadata: () => "generic" },
   }
   runInNewContext(compiled, { exports, require: name => imports[name] ?? primitives })
@@ -97,6 +107,36 @@ test("normalized backend image capability controls the real component option", (
     const view = harness(registry({ image_generation_supported: enabled, image_configuration_schema_version: version }))
     assert.equal(view.find(node => node.type === "SelectItem" && node.props.value === "image_generation").props.disabled, disabled)
   }
+})
+
+test("public pricing is default and its confirmed mapping accompanies publication", async () => {
+  const view = harness()
+  view.input("foundry-deployment", "gpt-5")
+  const pricing = view.find(node => node.type === "PublicModelPricing")
+  assert.equal(pricing.props.draft.priceSource, "models_dev")
+  pricing.props.onChange(current => ({
+    ...current, priceReference: "models_dev:openai:gpt-5", priceEntryDigest: "a".repeat(64),
+    contextWindow: "400000", inputPrice: "1.25", outputPrice: "10", cacheReadPrice: "0",
+  }))
+  await view.submit()
+  assert.equal(view.writes.length, 1)
+  assert.equal(view.writes[0].model.price_source, "models_dev")
+  assert.equal(view.writes[0].model.price_reference, "models_dev:openai:gpt-5")
+  assert.equal(view.writes[0].model.price_entry_digest, "a".repeat(64))
+  assert.equal(view.writes[0].model.context_window, 400000)
+  assert.equal(view.writes[0].model.cached_cost_per_million, 0)
+})
+
+test("switching to manual preserves prices and does not collapse pricing", () => {
+  const view = harness()
+  view.find(node => node.type === "PublicModelPricing").props.onChange(current => ({
+    ...current, inputPrice: "1.25", outputPrice: "10",
+  }))
+  view.find(node => node.type === "input" && node.props.value === "manual").props.onChange()
+  assert.equal(view.find(node => node.type === "details" && node.props.className === "simple-pricing").props.open, true)
+  const price = view.find(node => node.type === "Input" && node.props.id === "publication-input-price")
+  assert.equal(price.props.value, "1.25")
+  assert.equal(price.props.disabled, false)
 })
 
 test("single gateway uses summary, multiple gateways use a selector and empty stays blocked", () => {
