@@ -2,7 +2,7 @@
 
 ## 1. 状态与设计原则
 
-日期：2026-10-09。状态：已批准、已实现，发布验证中。需求见 [requirements.md](requirements.md)。
+日期：2026-10-09。状态：已实现、已部署，基础线上验证通过。需求见 [requirements.md](requirements.md)，验证边界见 [verification.md](verification.md)。
 
 分析基于本地 `712a1c9`。本文为审批后的设计基线，具体合同以实现和生成的 OpenAPI 为准。
 

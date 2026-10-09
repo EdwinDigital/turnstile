@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 日期 | 2026-10-09 |
-| 状态 | 已批准、已实现，发布验证中 |
+| 状态 | 已实现、已部署，基础线上验证通过；边界见 verification.md |
 | 功能目录 | `plan/model-pricing-sync/` |
 | 目标开发分支 | `codex/model-pricing-sync` |
 | 关联设计 | [design.md](design.md) |

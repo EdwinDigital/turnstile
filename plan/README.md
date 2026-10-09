@@ -4,6 +4,6 @@
 
 | 功能 | 需求分析 | 设计文档 | 状态 |
 | --- | --- | --- | --- |
-| 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已批准、已实现，发布验证中 |
+| 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已实现、已部署，基础线上验证通过 |
 
 每个功能使用独立子目录。需求和实现发生变化时，应同步更新对应文档；不得将计划中的能力描述成现有行为。
