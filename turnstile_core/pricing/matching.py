@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from turnstile_core.pricing.catalog import CatalogEntry
 
@@ -122,12 +123,16 @@ def match_model(
     *,
     brand: str,
     kind: str,
+    operation: Literal["chat", "image_generation"] = "chat",
     judge: Callable[[str], str] | None = None,
 ) -> MatchResult:
     normalized = [name_tokens(name) for name in names if name.strip()]
     if not normalized:
         return MatchResult(None, "unmapped", reason="请输入模型或部署名称")
-    eligible = [entry for entry in entries if not entry.unsupported and entry.priced]
+    eligible = [
+        entry for entry in entries
+        if not entry.unsupported and entry.priced and entry.operation == operation
+    ]
     # Higher-priority identity names win; a generic display name must not broaden an exact ID.
     for name in normalized:
         exact = [entry for entry in eligible if name in entry_names(entry)]

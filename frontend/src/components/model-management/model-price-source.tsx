@@ -1,5 +1,5 @@
 import { AlertTriangle, LoaderCircle, RefreshCw, Search } from "lucide-react"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 import { dataSource } from "../../data-sources/apim/api"
 import type {
@@ -68,27 +68,48 @@ export function ModelPriceSourceFields({ model, draft, setDraft, busy, connectio
   // picker and a stored reference and helpfully puts the old choice straight back, so the button
   // appears to do nothing.
   const [reselecting, setReselecting] = useState(false)
+  const generation = useRef({ search: 0, options: 0 })
+  const currentSource = useRef(draft.priceSource)
+  currentSource.current = draft.priceSource
+  const imageGeneration = model.capabilities.includes("image_generation")
 
   const following = draft.priceSource !== "manual" && draft.priceSource !== "models_dev"
   const discount = resolveDiscount(draft, connectionDiscount)
   const storedModelKey = draft.priceReference ? modelKeyFromReference(draft.priceReference) : null
 
+  useEffect(() => {
+    setMatches(null)
+    setChosenModel(null)
+    setDetails(null)
+    setError(null)
+    setSearching(false)
+    setLoadingOptions(false)
+    setReselecting(false)
+    return () => {
+      generation.current.search++
+      generation.current.options++
+    }
+  }, [draft.priceSource, model.id])
+
   // Reopening the dialog on a model that already follows a list price should show what it
   // follows, not an empty picker.
   useEffect(() => {
-    if (!following || chosenModel || !storedModelKey || details || reselecting) return
+    if (!following || chosenModel || !storedModelKey || details || reselecting
+      || !storedModelKey.startsWith(`${draft.priceSource}:`)) return
     let cancelled = false
+    const source = draft.priceSource
     setLoadingOptions(true)
     dataSource.priceCatalogOptions(storedModelKey)
       .then((response) => {
-        if (cancelled) return
+        if (cancelled || currentSource.current !== source
+          || response.model_entry.source !== source) return
         setChosenModel(response.model_entry)
         setDetails(response)
       })
       .catch(() => undefined)
       .finally(() => { if (!cancelled) setLoadingOptions(false) })
     return () => { cancelled = true }
-  }, [following, storedModelKey, chosenModel, details, reselecting])
+  }, [following, draft.priceSource, storedModelKey, chosenModel, details, reselecting])
 
   // A stored reference names one region, while an option covers every region charging alike, so
   // matching on the option's own reference alone would fail to recognise a saved choice that is
@@ -112,29 +133,41 @@ export function ModelPriceSourceFields({ model, draft, setDraft, busy, connectio
   // Re-pricing on a discount change keeps the rates honest while the dialog is open; without it
   // the box would say 66% while the rates below still showed the old figures.
   useEffect(() => {
-    if (!following || !selectedOption || !chosenModel || !details?.complete) return
-    setDraft((current) =>
-      applyCatalogOption(current, chosenModel.source, selectedOption, discount.percent))
+    if (!following || !selectedOption || !chosenModel || !details?.complete
+      || chosenModel.source !== draft.priceSource) return
+    setDraft((current) => current.priceSource === chosenModel.source
+      ? applyCatalogOption(current, current.priceSource, selectedOption, discount.percent) : current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.discountPercent])
 
   const search = async () => {
+    const source = draft.priceSource
+    const token = ++generation.current.search
+    const active = () => token === generation.current.search && currentSource.current === source
     setSearching(true)
     setError(null)
     try {
-      const response = await dataSource.priceCatalogModels(query)
-      setMatches(response.models)
-      if (response.unavailable.length) {
-        setError(`这些来源暂时读不到：${response.unavailable.join("、")}`)
+      const response = await dataSource.priceCatalogModels(query, source)
+      if (!active()) return
+      setMatches(response.models.filter(candidate => candidate.source === source))
+      const unavailable = response.unavailable.filter(value => value === source)
+      if (unavailable.length) {
+        setError(`这些来源暂时读不到：${unavailable.join("、")}`)
       }
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "价目表读取失败")
+      if (active()) setError(failure instanceof Error ? failure.message : "价目表读取失败")
     } finally {
-      setSearching(false)
+      if (active()) setSearching(false)
     }
   }
 
   const chooseModel = async (candidate: PriceCatalogModel) => {
+    const source = draft.priceSource
+    if (candidate.source !== source || !candidate.key.startsWith(`${source}:`)) return
+    const token = ++generation.current.options
+    const active = () => token === generation.current.options && currentSource.current === source
+    generation.current.search++
+    setSearching(false)
     setReselecting(false)
     setChosenModel(candidate)
     setDetails(null)
@@ -143,23 +176,26 @@ export function ModelPriceSourceFields({ model, draft, setDraft, busy, connectio
     setError(null)
     try {
       const response = await dataSource.priceCatalogOptions(candidate.key)
+      if (!active() || response.model_entry.source !== source
+        || response.model_entry.key !== candidate.key) return
       setDetails(response)
       const first = response.options[0]
-      if (response.complete && first) {
-        setDraft((current) =>
-          applyCatalogOption(current, candidate.source, first, discount.percent))
+      if (response.complete && first?.reference.startsWith(`${source}:`)) {
+        setDraft((current) => current.priceSource === source
+          ? applyCatalogOption(current, source, first, discount.percent) : current)
       }
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "价目表读取失败")
+      if (active()) setError(failure instanceof Error ? failure.message : "价目表读取失败")
     } finally {
-      setLoadingOptions(false)
+      if (active()) setLoadingOptions(false)
     }
   }
 
   const chooseOption = (option: PriceCatalogOption) => {
-    if (!chosenModel || !details?.complete) return
-    setDraft((current) =>
-      applyCatalogOption(current, chosenModel.source, option, discount.percent))
+    if (!chosenModel || !details?.complete || chosenModel.source !== draft.priceSource
+      || !option.reference.startsWith(`${draft.priceSource}:`)) return
+    setDraft((current) => current.priceSource === chosenModel.source
+      ? applyCatalogOption(current, current.priceSource, option, discount.percent) : current)
   }
 
   return <div className="model-price-source">
@@ -172,21 +208,28 @@ export function ModelPriceSourceFields({ model, draft, setDraft, busy, connectio
       </FieldHelp>
     </div>
     <div className="model-price-source-choice" role="radiogroup" aria-label="价格来源">
-      {(["models_dev", "manual", "azure_retail", "anthropic"] as const).map((source) => (
+      {(imageGeneration ? ["models_dev", "manual"] as const
+        : ["models_dev", "manual", "azure_retail", "anthropic"] as const).map((source) => (
         <label key={source} className="model-editor-checkbox">
           <input type="radio" name="price-source" value={source} disabled={busy}
             checked={draft.priceSource === source}
-            onChange={() => setDraft((current) => ({
-              ...current, priceSource: source,
-              priceReference: source === current.priceSource ? current.priceReference : "",
-              priceEntryDigest: "", allowUnpriced: false,
-            }))} />
+            onChange={() => {
+              generation.current.search++
+              generation.current.options++
+              currentSource.current = source
+              setDraft((current) => ({
+                ...current, priceSource: source,
+                priceReference: source === current.priceSource ? current.priceReference : "",
+                priceEntryDigest: "", allowUnpriced: false,
+              }))
+            }} />
           <span>{SOURCE_LABEL[source]}</span>
         </label>
       ))}
     </div>
     {draft.priceSource === "models_dev" && <PublicModelPricing
-      request={{ model_id: model.id, runtime_id: model.runtime_id }}
+      request={{ model_id: model.id, runtime_id: model.runtime_id,
+        operation: imageGeneration ? "image_generation" : "chat" }}
       draft={draft} busy={busy}
       onChange={updater => setDraft(current => ({ ...current, ...updater(current) }))} />}
     {draft.priceSource === "models_dev" && <DiscountField
@@ -198,6 +241,10 @@ export function ModelPriceSourceFields({ model, draft, setDraft, busy, connectio
         busy={busy} query={query} setQuery={setQuery} searching={searching}
         matches={matches} chosen={chosenModel} onSearch={search} onChoose={chooseModel}
         onClear={() => {
+          generation.current.options++
+          generation.current.search++
+          setLoadingOptions(false)
+          setSearching(false)
           setReselecting(true)
           setChosenModel(null); setDetails(null); setMatches(null)
         }} />

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -130,11 +131,25 @@ class ModelsDevCatalog:
                     modalities = model.get("modalities") or {}
                     if not isinstance(modalities, dict):
                         continue
+                    output = modalities.get("output")
+                    # GPT Image publishes text input/cache and image output in USD/1M tokens.
+                    # Other image families may put text-output or per-image rates in cost.output.
+                    image_tokens = (
+                        isinstance(output, list)
+                        and "image" in output
+                        and all(value in ("text", "image") for value in output)
+                        and any(
+                            re.search(r"(?:^|/)gpt-image-\d", identity)
+                            for identity in (
+                                str(model_id), str(model.get("canonical_model_id") or ""),
+                            )
+                        )
+                    )
                     unsupported = None
                     if cost.get("tiers") or cost.get("context_over_200k"):
                         unsupported = "阶梯价格不能用当前四项单价表示"
-                    elif modalities.get("output") != ["text"]:
-                        unsupported = "该条目的输出用途不适用聊天 Token 单价"
+                    elif output != ["text"] and not image_tokens:
+                        unsupported = "该条目的输出用途或计费单位无法用于当前 Token 单价"
                     elif model.get("status") == "deprecated":
                         unsupported = "目录条目已废弃，请人工确认价格来源"
                     elif any(cost.get(key) is not None for key in ("input_audio", "output_audio")):
@@ -170,17 +185,19 @@ class ModelsDevCatalog:
                         input_per_million=_rate(cost.get("input")),
                         output_per_million=_rate(cost.get("output")),
                         cached_per_million=_rate(cost.get("cache_read")),
-                        cache_write_per_million=_rate(cost.get("cache_write")),
+                        cache_write_per_million=None
+                        if image_tokens else _rate(cost.get("cache_write")),
                         complete=all(
                             key not in cost or _rate(cost[key]) is not None
                             for key in ("input", "output", "cache_read", "cache_write")
                         ),
-                        context_window=context,
+                        context_window=None if image_tokens else context,
                         provider_id=str(provider_id),
                         model_id=str(model_id),
                         canonical_model_id=model.get("canonical_model_id")
                         if isinstance(model.get("canonical_model_id"), str) else None,
                         unsupported=unsupported,
+                        operation="image_generation" if image_tokens else "chat",
                         metadata={
                             "version": 1,
                             "snapshot_id": snapshot,

@@ -137,7 +137,9 @@ class ModelRuntimeService:
         )
         self.authorize(role, authorization, manage=changes_routing_identity)
 
-    def price_catalog_models(self, query: str, *, limit: int = 60) -> PriceCatalogModelsResponse:
+    def price_catalog_models(
+        self, query: str, *, limit: int = 60, source: PriceSource | None = None,
+    ) -> PriceCatalogModelsResponse:
         """The models a person can point a registry model at, one row each.
 
         Deliberately a search over names rather than an automatic match: the caller picks, and
@@ -145,7 +147,7 @@ class ModelRuntimeService:
         names are ambiguous, and nothing downstream would notice.
         """
         try:
-            found = self._price_catalog.search_models(query, limit=limit)
+            found = self._price_catalog.search_models(query, limit=limit, source=source)
         except Exception as error:  # noqa: BLE001 - an unreachable vendor is not a server fault
             raise HTTPException(
                 status_code=503, detail=f"价目表暂时读取不到：{type(error).__name__}"
@@ -248,8 +250,6 @@ class ModelRuntimeService:
             preview = None
             if time.monotonic() >= deadline:
                 error, status = "同步执行时间预算已耗尽，请重试", PriceSyncStatus.DEFERRED
-            elif "image_generation" in model.capabilities:
-                error, status = "图片模型价格需人工配置", PriceSyncStatus.UNSUPPORTED
             elif model.price_source is PriceSource.MODELS_DEV and not error:
                 pricing.timeout_ms = max(1000, min(15000, int((deadline-time.monotonic()) * 1000)))
                 preview = pricing.preview(PricePreviewRequest(
@@ -285,6 +285,8 @@ class ModelRuntimeService:
                         output_per_million=preview.list_prices.output,
                         cached_per_million=preview.list_prices.cached,
                         cache_write_per_million=preview.list_prices.cache_write,
+                        operation="image_generation"
+                        if "image_generation" in model.capabilities else "chat",
                     )}
                 update = plan_price_sync(
                     [candidate], self._price_catalog, resolved_entries=resolved_entries,

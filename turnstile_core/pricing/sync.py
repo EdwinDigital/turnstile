@@ -139,6 +139,11 @@ def _plan_one(
     *, entry: CatalogEntry | None = None,
 ) -> ModelPriceUpdate:
     reference = model.price_reference or ""
+    if reference and reference.partition(":")[0] != model.price_source.value:
+        return _planned_against(
+            model, status=PriceSyncStatus.UNSUPPORTED,
+            message="价格引用与所选来源不一致，保留已有单价",
+        )
     try:
         if entry is None:
             entry = catalog.lookup(reference)
@@ -157,6 +162,18 @@ def _plan_one(
     if entry.unsupported:
         return _planned_against(
             model, status=PriceSyncStatus.UNSUPPORTED, message=entry.unsupported,
+        )
+    operation = "image_generation" if "image_generation" in model.capabilities else "chat"
+    if entry.operation != operation:
+        return _planned_against(
+            model, status=PriceSyncStatus.UNSUPPORTED,
+            message="目录价格用途与模型不一致，保留已有单价",
+        )
+    if operation == "image_generation" and entry.cached_per_million is None \
+            and model.cached_cost_per_million is None:
+        return _planned_against(
+            model, status=PriceSyncStatus.UNMAPPED,
+            message="目录缺少缓存文字单价，请使用手动定价",
         )
     if not entry.priced:
         return _planned_against(

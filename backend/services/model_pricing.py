@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
@@ -201,15 +201,13 @@ class ModelPricingService:
         )
         if provider is None:
             raise HTTPException(status_code=404, detail="Unknown provider")
-        if (
-            request.operation == "image_generation"
-            or model
-            and ("image_generation" in model.capabilities)
-        ):
-            return PricePreviewResponse(
-                status="unsupported",
-                warnings=["图片单价不能由普通聊天 Token 价格推导"],
-            )
+        image_generation = (
+            "image_generation" in model.capabilities
+            if model else request.operation == "image_generation"
+        )
+        operation: Literal["chat", "image_generation"] = (
+            "image_generation" if image_generation else "chat"
+        )
         if request.price_source is PriceSource.MANUAL:
             return PricePreviewResponse(status="unsupported", warnings=["手动定价不执行同步"])
         if request.refresh:
@@ -256,6 +254,7 @@ class ModelPricingService:
                     ],
                     brand=brand,
                     kind=provider.provider_kind.value,
+                    operation=operation,
                     judge=self._judge if self.allow_ai and self.ai_calls < 20 else None,
                 )
                 if matched.entry is None:
@@ -281,6 +280,10 @@ class ModelPricingService:
             return PricePreviewResponse(status="stale", warnings=["价格来源读取失败"])
         if entry is None:
             return PricePreviewResponse(status="unmapped", warnings=["保存的目录引用未找到"])
+        if entry.operation != operation:
+            return PricePreviewResponse(
+                status="unsupported", warnings=["目录价格用途与模型不一致，保留已有单价"],
+            )
         if entry.unsupported or not entry.priced or not entry.complete:
             return PricePreviewResponse(
                 status="unsupported" if entry.unsupported else "unmapped",
@@ -301,6 +304,10 @@ class ModelPricingService:
                     warnings.append(f"来源缺少{field}价格，保留已有单价")
         if basis == "origin_reference":
             warnings.append("公开参考价，不代表当前部署实际报价")
+        if image_generation and effective.cached is None:
+            return PricePreviewResponse(
+                status="unmapped", warnings=["目录缺少缓存文字单价，请使用手动定价"],
+            )
         return PricePreviewResponse(
             status="matched",
             match=price_match(

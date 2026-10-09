@@ -56,6 +56,10 @@ paths:
       - in: query
         name: q
         schema: {type: string, maxLength: 120}
+      - in: query
+        name: source
+        description: Read only this source; omission searches all sources for compatibility.
+        schema: {$ref: '../../openapi.yaml#/components/schemas/PriceSource'}
       responses:
         '200':
           description: Catalog model names and unavailable sources

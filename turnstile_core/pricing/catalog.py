@@ -36,7 +36,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
-from typing import Any, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 
 import httpx
 
@@ -150,6 +150,7 @@ class CatalogEntry:
     model_id: str | None = None
     canonical_model_id: str | None = None
     unsupported: str | None = None
+    operation: Literal["chat", "image_generation"] = "chat"
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property
@@ -772,11 +773,15 @@ class CompositeCatalog:
     def __init__(self, catalogs: Sequence[PriceCatalog]) -> None:
         self._catalogs = list(catalogs)
 
-    def search_models(self, query: str, *, limit: int = 60) -> ModelSearch:
+    def search_models(
+        self, query: str, *, limit: int = 60, source: PriceSource | None = None,
+    ) -> ModelSearch:
         terms = [term for term in re.split(r"[^a-z0-9.]+", query.lower()) if term]
         scored: list[tuple[int, int, str, CatalogModel]] = []
         unavailable: list[str] = []
         for catalog in self._catalogs:
+            if source is not None and catalog.source is not source:
+                continue
             try:
                 candidates = catalog.models()
             except (httpx.HTTPError, ValueError):
@@ -799,6 +804,8 @@ class CompositeCatalog:
 
     def options(self, model_key: str) -> CatalogOptions | None:
         for catalog in self._catalogs:
+            if model_key.partition(":")[0] != str(catalog.source):
+                continue
             try:
                 models = catalog.models()
             except (httpx.HTTPError, ValueError):

@@ -146,8 +146,8 @@ export function ModelEditDialog({ registry, model, busy, error, onClose, onSave 
               <span className="simple-section-title"><b id={`${id}-pricing`}>价格与限制</b></span>
               <span className="model-editor-unit" data-no-localize>USD / 1M Tokens</span>
             </div>
-            {!imageGeneration && <ModelPriceSourceFields model={model} draft={draft} setDraft={setDraft}
-              busy={busy} connectionDiscount={runtime?.price_discount_percent ?? null} />}
+            <ModelPriceSourceFields model={model} draft={draft} setDraft={setDraft}
+              busy={busy} connectionDiscount={runtime?.price_discount_percent ?? null} />
             <div className={imageGeneration ? "form-grid" : "form-grid three"}>
               {!imageGeneration && <ModelEditNumberField id={`${id}-context`} label="上下文窗口" unit="Tokens" integer value={draft.contextWindow} onChange={(value) => update("contextWindow", value)} busy={busy} />}
               <ModelEditNumberField id={`${id}-input`} label={imageGeneration ? "文字输入单价" : "输入单价"} value={draft.inputPrice} onChange={(value) => update("inputPrice", value)} busy={busy || followingListPrice} />

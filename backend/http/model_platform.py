@@ -293,13 +293,14 @@ def search_price_catalog_models(
     service: RuntimeService,
     identity: CurrentSession,
     q: Annotated[str, Query(max_length=120)] = "",
+    source: Annotated[PriceSource | None, Query()] = None,
     authorization: Authorization = None,
 ) -> PriceCatalogModelsResponse:
     # Reading a vendor's published price list changes nothing and reveals nothing the vendor
     # does not print on its own website, so this is gated like the registry read it sits beside
     # rather than like the write it leads to.
     service.authorize(identity.role, authorization, manage=False)
-    return service.price_catalog_models(q)
+    return service.price_catalog_models(q, source=source)
 
 
 @protected_router.get(

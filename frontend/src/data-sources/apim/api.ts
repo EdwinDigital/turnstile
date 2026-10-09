@@ -40,6 +40,7 @@ import type {
   ImageInvocationRequest,
   ImageInvocationResponse,
   ModelRegistry,
+  PriceCatalogModel,
   PriceCatalogModelsResponse,
   PriceCatalogOptionsResponse,
   PriceSyncResponse,
@@ -346,8 +347,8 @@ export const dataSource = {
     { method: "DELETE" },
   ).then(normalizeRegistry),
   saveModel: (value: Record<string, unknown>, id?: string) => saveRegistry("/api/v1/model-management/models", value, id),
-  priceCatalogModels: (query: string) => request<PriceCatalogModelsResponse>(
-    `/api/v1/model-management/price-catalog/models?q=${encodeURIComponent(query)}`,
+  priceCatalogModels: (query: string, source: PriceCatalogModel["source"]) => request<PriceCatalogModelsResponse>(
+    `/api/v1/model-management/price-catalog/models?q=${encodeURIComponent(query)}&source=${encodeURIComponent(source)}`,
   ),
   priceCatalogOptions: (modelKey: string) => request<PriceCatalogOptionsResponse>(
     `/api/v1/model-management/price-catalog/options?model=${encodeURIComponent(modelKey)}`,

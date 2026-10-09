@@ -137,7 +137,7 @@ export function PublicModelPricing({ request, draft, onChange, busy }: {
       {error && <p className="publication-form-note" role="alert">{error}</p>}
       {preview?.warnings.map((warning, index) => <p className="publication-form-note" key={index}>{warning}</p>)}
     </div>
-    {!draft.priceReference && <label className="model-editor-checkbox">
+    {!draft.priceReference && request.operation !== "image_generation" && <label className="model-editor-checkbox">
       <Checkbox checked={draft.allowUnpriced} disabled={busy || loading}
         onCheckedChange={checked => onChange(current => ({ ...current, allowUnpriced: checked === true }))} />
       <span>暂不计价</span>

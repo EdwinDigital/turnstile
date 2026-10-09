@@ -188,6 +188,7 @@ test("connection type uses a neutral OpenAI-compatible icon and retains provider
 test("image price states accept explicit zero and submit all three rates without chat fields", async () => {
   const view = harness()
   view.select("chat", "image_generation")
+  view.find(node => node.type === "input" && node.props.value === "manual").props.onChange()
   view.input("foundry-deployment", " image-deployment ")
   await view.submit()
   assert.equal(view.writes.length, 0)
@@ -208,6 +209,26 @@ test("image price states accept explicit zero and submit all three rates without
   assert.equal(sent.model.cached_cost_per_million, 1.25)
   assert.equal(sent.model.context_window, null)
   assert.equal(sent.model.cache_write_cost_per_million, null)
+})
+
+test("image publication defaults to public synchronization and keeps the confirmed mapping", async () => {
+  const view = harness()
+  view.select("chat", "image_generation")
+  view.input("foundry-deployment", "gpt-image-2.5-flare")
+  const pricing = view.find(node => node.type === "PublicModelPricing")
+  assert.equal(pricing.props.request.operation, "image_generation")
+  assert.equal(pricing.props.draft.priceSource, "models_dev")
+  await view.submit()
+  assert.equal(view.writes.length, 0)
+  pricing.props.onChange(current => ({
+    ...current, priceReference: "models_dev:azure:gpt-image-2.5-flare",
+    priceEntryDigest: "a".repeat(64), inputPrice: "5", outputPrice: "30", cacheReadPrice: "1.25",
+  }))
+  await view.submit()
+  assert.equal(view.writes[0].model.price_source, "models_dev")
+  assert.equal(view.writes[0].model.price_reference, "models_dev:azure:gpt-image-2.5-flare")
+  assert.equal(view.writes[0].model.output_cost_per_million, 30)
+  assert.equal(view.writes[0].model.context_window, null)
 })
 
 test("connection changes clear credentials, model operation, prices and deployment", () => {

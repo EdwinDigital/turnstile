@@ -242,7 +242,7 @@ export function ModelPublicationDialog({
   const setOutputPrice = (value: string) => setPricingDraft(current => ({ ...current, outputPrice: value }))
   const setCacheReadPrice = (value: string) => setPricingDraft(current => ({ ...current, cacheReadPrice: value }))
   const setCacheWritePrice = (value: string) => setPricingDraft(current => ({ ...current, cacheWritePrice: value }))
-  const followingPublicPrice = !imageGeneration && pricingDraft.priceSource === "models_dev"
+  const followingPublicPrice = pricingDraft.priceSource === "models_dev"
   useEffect(() => {
     setPricingDraft(current => ({ ...current, priceReference: "", priceEntryDigest: "", allowUnpriced: false }))
   }, [runtimeId, foundryDeployment, upstreamModelId, modelKey, modelOperation])
@@ -304,7 +304,8 @@ export function ModelPublicationDialog({
   }
 
   const validate = () => {
-    if (followingPublicPrice && !pricingDraft.priceReference && !pricingDraft.allowUnpriced) {
+    if (followingPublicPrice && !pricingDraft.priceReference
+      && (imageGeneration || !pricingDraft.allowUnpriced)) {
       return "请同步定价或明确确认暂不计价。"
     }
     if (!selectedGateway) return "没有可用的 Azure API Management 网关。"
@@ -351,7 +352,7 @@ export function ModelPublicationDialog({
           output_cost_per_million: numberOrNull(outputPrice),
           cached_cost_per_million: numberOrNull(cacheReadPrice),
           cache_write_cost_per_million: imageGeneration ? null : numberOrNull(cacheWritePrice),
-          price_source: imageGeneration ? "manual" : pricingDraft.priceSource,
+          price_source: pricingDraft.priceSource,
           price_reference: followingPublicPrice ? pricingDraft.priceReference || null : null,
           price_entry_digest: followingPublicPrice ? pricingDraft.priceEntryDigest || null : null,
           allow_unpriced: pricingDraft.allowUnpriced,
@@ -596,7 +597,7 @@ export function ModelPublicationDialog({
               onToggle={event => setPricingOpen(event.currentTarget.open)}>
               <summary><span>价格与限制</span><span className="publication-pricing-status">{pricingStatus}</span></summary>
               <div className="simple-pricing-fields">
-                {!imageGeneration && <div className="model-price-source">
+                <div className="model-price-source">
                   <span className="registry-field-label">价格来源</span>
                   <div className="model-price-source-choice" role="radiogroup" aria-label="价格来源">
                     {(["models_dev", "manual"] as const).map(source => <label className="model-editor-checkbox" key={source}>
@@ -609,7 +610,8 @@ export function ModelPublicationDialog({
                     </label>)}
                   </div>
                   {followingPublicPrice && <PublicModelPricing
-                    request={{ runtime_id: runtimeId, deployment_name: foundry ? foundryDeployment : undefined,
+                    request={{ runtime_id: runtimeId, operation: imageGeneration ? "image_generation" : "chat",
+                      deployment_name: foundry ? foundryDeployment : undefined,
                       upstream_model_id: foundry ? undefined : upstreamModelId,
                       model_key: foundry ? undefined : effectiveModelKey,
                       display_name: foundry ? undefined : effectiveDisplayName }}
@@ -618,7 +620,7 @@ export function ModelPublicationDialog({
                     busy={publishing} connectionDiscount={selectedRuntime?.price_discount_percent ?? null}
                     discount={resolveDiscount(pricingDraft, selectedRuntime?.price_discount_percent ?? null)}
                     setDraft={updater => setPricingDraft(current => ({ ...current, ...updater(current) }))} />}
-                </div>}
+                </div>
                 <div className={imageGeneration ? "form-grid" : "form-grid three"}>
                   {!imageGeneration && <label className="registry-field"><span className="registry-field-label">上下文窗口</span><Input id="publication-context-window" type="number" min="1" value={contextWindow} onChange={(event) => setPricingDraft(current => ({ ...current, contextWindow: event.target.value, contextOrigin: "user" }))} disabled={publishing} /></label>}
                   <label className="registry-field"><span className="registry-field-label">{imageGeneration ? "文字输入 $/M" : "输入 $/M"}</span><Input id="publication-input-price" type="number" min="0" step="0.000001" value={inputPrice} onChange={(event) => setInputPrice(event.target.value)} disabled={publishing || followingPublicPrice} required={imageGeneration} /></label>

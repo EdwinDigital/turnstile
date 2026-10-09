@@ -45,8 +45,7 @@ export function createModelEditDraft(model: ManagedModel): ModelEditDraft {
     allowedRoles: [...model.allowed_roles],
     enabled: model.enabled,
     isDefault: model.is_default,
-    priceSource: model.capabilities.includes("image_generation") ? "manual"
-      : model.price_source_configured === false ? "models_dev" : model.price_source ?? "models_dev",
+    priceSource: model.price_source_configured === false ? "models_dev" : model.price_source ?? "models_dev",
     priceReference: model.price_reference ?? "",
     discountPercent: model.price_discount_percent?.toString() ?? "",
     priceEntryDigest: "",

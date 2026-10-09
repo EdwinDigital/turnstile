@@ -30,6 +30,29 @@ def catalog(**overrides: Any) -> ModelsDevCatalog:
     return ModelsDevCatalog(fetch=lambda: document(**overrides))
 
 
+def image_document(**overrides: Any) -> dict[str, Any]:
+    return {"azure": {"name": "Azure", "models": {"gpt-image-2.5-flare": {
+        "id": "gpt-image-2.5-flare", "name": "GPT Image 2.5 Flare",
+        "canonical_model_id": "openai/gpt-image-2.5-flare",
+        "cost": {"input": 5, "output": 30, "cache_read": 1.25},
+        "modalities": {"input": ["text", "image"], "output": ["image"]},
+        "limit": {"context": 0, "output": 0}, **overrides,
+    }}}}
+
+
+def image_service(**overrides: Any) -> tuple[ModelRuntimeService, dict[str, Any]]:
+    runtime, _, model = service()
+    model.update(
+        upstream_model_id="gpt-image-2.5-flare", display_name="GPT Image 2.5 Flare",
+        capabilities=["image_generation"], context_window=None,
+        input_cost_per_million=5, output_cost_per_million=30, cached_cost_per_million=1.25,
+    )
+    runtime._price_catalog = CompositeCatalog([
+        ModelsDevCatalog(fetch=lambda: image_document(**overrides)),
+    ])
+    return runtime, model
+
+
 def service() -> tuple[ModelRuntimeService, InMemoryRepository, dict[str, Any]]:
     repository = InMemoryRepository()
     model = repository.models[0]
@@ -314,3 +337,96 @@ def test_catalog_timeout_is_bounded_by_operation_deadline() -> None:
     finally:
         CATALOG_DEADLINE.reset(token)
     assert price_request_timeout(15) == 15
+
+
+@pytest.mark.parametrize("outputs", [["image"], ["text", "image"]])
+def test_image_preview_save_and_bulk_use_image_token_prices(outputs: list[str]) -> None:
+    runtime, model = image_service(modalities={"output": outputs})
+    before = dict(model)
+    preview = runtime.price_preview(PricePreviewRequest(model_id=model["id"]), user_id="owner")
+    assert model == before
+    assert preview.status == "matched" and preview.match
+    assert preview.match.reference == "models_dev:azure:gpt-image-2.5-flare"
+    assert preview.context_window is None
+    assert preview.effective_prices
+    assert preview.effective_prices.model_dump() == {
+        "input": 5, "output": 30, "cached": 1.25, "cache_write": None,
+    }
+    write = ManagedModelWrite.model_validate({
+        **{key: value for key, value in model.items() if key in ManagedModelWrite.model_fields},
+        "price_source": "models_dev", "price_reference": preview.match.reference,
+        "price_entry_digest": preview.entry_digest,
+    })
+    runtime.save_model(write, model["id"])
+    runtime._price_catalog.public_catalog()._fetch = lambda: image_document(
+        cost={"input": 5, "output": 33, "cache_read": 1.25},
+        modalities={"output": outputs},
+    )
+    result = runtime.sync_prices([model["id"]], refresh=True)
+    assert result.updated == 1
+    assert model["output_cost_per_million"] == 33
+    assert model["context_window"] is None and model["cache_write_cost_per_million"] is None
+    assert runtime.sync_prices([model["id"]]).unchanged == 1
+
+
+def test_new_image_preview_and_unconfigured_image_batch_are_supported() -> None:
+    runtime, model = image_service()
+    preview = runtime.price_preview(PricePreviewRequest(
+        runtime_id=model["runtime_id"], deployment_name="gpt-image-2.5-flare",
+        operation="image_generation",
+    ), user_id="owner")
+    assert preview.status == "matched"
+    assert runtime.sync_prices([model["id"]]).unchanged == 1
+    assert model["price_source"] == "models_dev"
+    assert model["price_reference"] == "models_dev:azure:gpt-image-2.5-flare"
+
+
+def test_image_reference_cannot_price_a_chat_model_or_the_reverse() -> None:
+    runtime, model = image_service()
+    reference = "models_dev:azure:gpt-image-2.5-flare"
+    assert runtime.price_preview(PricePreviewRequest(
+        runtime_id=model["runtime_id"], deployment_name="gpt-image-2.5-flare",
+        price_reference=reference, operation="chat",
+    ), user_id="owner").status == "unsupported"
+    runtime._price_catalog = CompositeCatalog([catalog()])
+    assert runtime.price_preview(PricePreviewRequest(
+        model_id=model["id"], price_reference="models_dev:openai:gpt-5",
+    ), user_id="owner").status == "unsupported"
+    model.update(price_source="models_dev", price_reference="models_dev:openai:gpt-5")
+    assert runtime.sync_prices([model["id"]]).unsupported == 1
+    assert model["output_cost_per_million"] == 30
+
+
+def test_missing_image_cache_price_preserves_existing_but_cannot_price_a_new_image() -> None:
+    runtime, model = image_service(cost={"input": 5, "output": 30})
+    existing = runtime.price_preview(PricePreviewRequest(model_id=model["id"]), user_id="owner")
+    assert existing.status == "matched" and existing.effective_prices
+    assert existing.effective_prices.cached == 1.25 and existing.warnings
+    new = runtime.price_preview(PricePreviewRequest(
+        runtime_id=model["runtime_id"], deployment_name="gpt-image-2.5-flare",
+        operation="image_generation",
+    ), user_id="owner")
+    assert new.status == "unmapped"
+
+
+def test_image_matching_does_not_silently_drop_a_variant() -> None:
+    runtime, model = image_service()
+    preview = runtime.price_preview(PricePreviewRequest(
+        model_id=model["id"], deployment_name="gpt-image-2.5-sunburst",
+        display_name="GPT Image 2.5 Sunburst", model_key="gpt-image-2.5-sunburst",
+    ), user_id="owner")
+    assert preview.status != "matched"
+
+
+def test_manual_image_batch_never_reads_public_catalog() -> None:
+    runtime, model = image_service()
+    model["price_source"] = "manual"
+    runtime._price_catalog.public_catalog()._fetch = lambda: pytest.fail("Manual image fetch")
+    assert runtime.sync_prices([model["id"]], refresh=True).skipped_manual == 1
+
+
+def test_batch_rejects_a_reference_from_a_different_configured_source() -> None:
+    runtime, _, model = service()
+    model.update(price_source="azure_retail", price_reference="models_dev:openai:gpt-5")
+    assert runtime.sync_prices([model["id"]]).unsupported == 1
+    assert model["input_cost_per_million"] is None
