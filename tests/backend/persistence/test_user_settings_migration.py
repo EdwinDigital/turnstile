@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
@@ -16,11 +17,15 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
+from pydantic import SecretStr
 
 from backend import migrate as migration_runner
+from backend.bootstrap import bootstrap_initial_owner
+from backend.services.auth_service import hash_password, hash_session_token, verify_password
 from tests.platform.api.api_support import _usage_record
 from tests.support.paths import REPOSITORY_ROOT
 from turnstile_core.config import Settings
+from turnstile_core.persistence.auth_store import AuthStore
 from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
 
 TARGET = "011_user_settings_profile.up.sql"
@@ -179,6 +184,54 @@ def test_clean_installation_through_user_settings_migration_is_repeatable(
         assert connection.execute("SELECT count(*) FROM account_security_event").fetchone() == (0,)
     before = ledger(info)
     assert migration_runner.migrate() == [] and ledger(info) == before
+
+
+def test_fresh_installation_bootstraps_owner_and_preserves_changed_password_on_restart(
+    candidate: tuple[str, Path],
+) -> None:
+    info, directory = candidate
+    shutil.copy2(MIGRATIONS / TARGET, directory / TARGET)
+    assert migration_runner.migrate()[-1] == VERSION
+    original_hash = hash_password("original-owner-password")
+    settings = Settings(
+        database_url=info, production=False, bootstrap_owner_email="OWNER@EXAMPLE.COM",
+        bootstrap_owner_password_hash=SecretStr(original_hash),
+    )
+    store = AuthStore(info)
+    try:
+        assert bootstrap_initial_owner(store, settings)
+        user = store.find_user_by_email("owner@example.com")
+        assert user is not None and user["role"] == "owner" and user["enabled"]
+        digest = hash_session_token("fresh-owner-test-session")
+        now = datetime.now(UTC)
+        assert store.create_session(
+            user["id"], digest, "password", now, now + timedelta(hours=1),
+            expected_password_hash=original_hash,
+        )
+        owner = store.session_owner(digest)
+        assert owner is not None and owner["avatar_revision"] is None
+        store.update_display_name(user["id"], digest, "Updated Owner")
+        store.change_password(
+            user["id"], digest, "original-owner-password", "changed-owner-password",
+            verify_password, hash_password,
+        )
+        assert store.session_owner(digest) is None
+
+        before = ledger(info)
+        assert migration_runner.migrate() == []
+        assert not bootstrap_initial_owner(store, settings)
+        assert ledger(info) == before
+        saved = store.find_user_by_email("owner@example.com")
+        assert saved is not None and saved["display_name"] == "Updated Owner"
+        assert saved["role"] == "owner"
+        assert verify_password("changed-owner-password", saved["password_hash"])
+        assert not verify_password("original-owner-password", saved["password_hash"])
+        assert store.create_session(
+            saved["id"], hash_session_token("new-owner-test-session"), "password",
+            now, now + timedelta(hours=1), expected_password_hash=saved["password_hash"],
+        )
+    finally:
+        store.close()
 
 
 def test_failed_pending_upgrade_rolls_back_schema_and_migration_ledger(

@@ -51,6 +51,9 @@ It covers fresh installation through `011`, upgrade with historical account/sess
 usage preservation, unchanged migration checksums and timestamps on rerun, rejection of
 applied-file changes, and schema/ledger rollback on failure. Missing or older PostgreSQL
 tools explicitly skip these tests; a skipped run is not migration evidence.
+The fresh-Owner case exercises migration followed by real bootstrap, session issuance
+with the new avatar schema, display-name/password updates and a restart-style rerun
+that must preserve the new name/password and the existing migration ledger.
 
 Run the self-service API and UI source checks with the ordinary suite. To exercise real
 transaction locking, rollback, avatar persistence, audit and password attempt limiting,

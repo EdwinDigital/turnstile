@@ -97,6 +97,12 @@ sessions, budgets or usage, and needs no infrastructure changes or new Graph per
 The migration number avoids the assistant-protocol and pricing upgrades; it does not depend
 on `009_assistant_api_format` or `010_models_dev_pricing`.
 
+For a fresh deployment, the existing API staging step includes all numbered migrations,
+including `011`. App Service runs migration, initial-Owner bootstrap and API startup in
+that order with `&&`; migration failure prevents bootstrap and API startup. No new Bicep
+parameter, Owner field, Graph scope, Blob Storage resource or deployment mode is required.
+The explicit pre-deployment migration procedure below is for an existing installation.
+
 No second SQL upgrade script is required: clean installs and existing installations use
 the same numbered migration through `backend.migrate`. If `011` is already recorded with
 the matching checksum, leave it unchanged and let the runner skip it. A later schema change
@@ -328,11 +334,18 @@ need `Microsoft.ApiManagement/service/apis/operations/write`.
 
 The deployment command reads the password interactively and never sends plaintext to ARM. It deploys only the scrypt hash. API startup applies the schema and atomically creates the Owner only when `app_user` is empty; restarts and reruns do not reset the account. Enabled Owner accounts are immediately listed in People under the default AI Platform department so the bootstrap Owner can assign model access before generating gateway traffic. Member department placement still comes from attributed gateway usage.
 
-To rotate a password later, run the existing account command from an authorized application execution context:
+Password users can change their own password in User settings. Operators can also use
+the existing account command from an authorized application execution context:
 
 ```bash
 python -m backend.accounts <owner-email> --role owner
 ```
+
+After changing the Owner password, use the current password for deployment verification.
+Update any private `--owner-credentials` file used by automation, retaining mode `0600`.
+Do not replace the deployment state, platform keys or stored bootstrap hash: that hash
+creates an Owner only while the account table is empty. Existing accounts and their
+display names/passwords remain unchanged by restarts and repeated bootstrap attempts.
 
 ## Customer Foundry onboarding
 
