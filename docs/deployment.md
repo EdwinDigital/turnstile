@@ -97,6 +97,20 @@ sessions, budgets or usage, and needs no infrastructure changes or new Graph per
 The migration number avoids the assistant-protocol and pricing upgrades; it does not depend
 on `009_assistant_api_format` or `010_models_dev_pricing`.
 
+No second SQL upgrade script is required: clean installs and existing installations use
+the same numbered migration through `backend.migrate`. If `011` is already recorded with
+the matching checksum, leave it unchanged and let the runner skip it. A later schema change
+needs a new numbered migration; do not add a second script that recreates these tables.
+
+Use the installation's actual backup capabilities. Azure PostgreSQL Burstable does not
+support customer on-demand backups; do not change its SKU or network rules just to run an
+upgrade. Verify existing automatic backups and recovery retention, and use a compatible
+`pg_dump --format=custom` in the authorized database environment when a fresh logical
+backup is needed. Encrypt the backup, restrict its permissions, and retain its recovery key
+outside Git. `pg_restore --list` validates the archive catalog, not a successful restore;
+test restoration separately against an explicitly authorized isolated database.
+Deployment-state secrets and installation-specific SCM/backup helpers remain private.
+
 1. Back up the existing database and record its `schema_migration` versions and checksums.
    Use the installation's existing secret configuration and authorized migration environment;
    do not put `DATABASE_URL` or credentials into Git or the command line.
@@ -108,6 +122,9 @@ on `009_assistant_api_format` or `010_models_dev_pricing`.
 
    The runner applies each pending file transactionally and verifies existing checksums.
    Rerunning it skips applied files; do not run the SQL directly or edit an applied file.
+   The API startup migration check does not replace this pre-deployment step. Run it in
+   the existing authorized database environment without exposing credentials or temporarily
+   opening the database firewall.
 3. Confirm `011_user_settings_profile` appears once in `schema_migration`, both new tables
    exist, and earlier checksums and account/budget/usage data are unchanged. Deploy the
    matching API and frontend packages through the existing deployment process.
