@@ -18,8 +18,23 @@
 - 本地生产构建 Playwright：1440x1000 与 390x844，Image 编辑/新增、
   三项价格预填、Azure 专属搜索、来源重置、手动编辑通过；无空白页、
   框架错误、控制台错误或横向溢出。使用隔离 API fixture，不冒充线上证明。
-- 本次仅更新现有 API 与前端，无新迁移或 Control-plane 更新。线上验收
-  结果将在发布后记录；未执行付费图片请求。
+- 功能提交 `0349441` 已部署至原线上环境，仅更新现有 API 与前端，
+  无新迁移或 Control-plane 更新。已完成以下真实线上验证：
+  - 部署 status 4/active；挂载 API ZIP 哈希与构建一致，前端 JS 字节一致。
+  - Image 的新增、编辑页预填真实目录价格；Azure 查询携带来源，Grok 4.7
+    本次返回空结果，未回退公网。桌面与手机的手动编辑、来源重置也通过，
+    无控制台错误、框架覆盖层或横向溢出。
+  - 真实 PostgreSQL 中图片价格保存、批量更新、再次无变化通过；
+    所有写入置于强制回滚事务，验证前后业务配置指纹一致。
+  - 10 个迁移、Control-plane 部署、API 运行设置和身份角色保持不变。
+  - 发布至验收间观察到 `managed_model`、`managed_model_price` 的配置变化，
+    未由浏览器检查提交，也未被还原；只在验收自身的前后快照间断言一致。
+  - 首次资源校验读到旧前端、一次 SCM 命令超时均通过后续只读检查恢复，
+    没有重复上传应用包。没有付费模型调用或真实图片发布探测。
+
+私有包、回滚包和验收证据：`.turnstile/deployments/model-pricing-fixes/`。
+线上浏览器证据及截图：`/private/tmp/turnstile-pricing-fixes-live-qa.json`、
+`/private/tmp/turnstile-pricing-fixes-live-{image,azure,add}-{1440,390}.png`。
 
 ## 本地验证
 
