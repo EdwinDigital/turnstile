@@ -143,23 +143,23 @@ function MappingEditor({ connection, mappings, units, onSaved }: {
     <div className="directory-context-heading"><h3>Group 映射</h3><Button variant="outline" size="sm" onClick={() => {
       setItems((values) => [...values, { group_id: "", unit_id: "", membership_mode: "direct", enabled: true }]); setDirty(true)
     }}><Plus data-icon="inline-start" />新增映射</Button></div>
-    <FieldGroup>{items.map((item, index) => <Field key={index} className="directory-mapping-row">
-      <FieldLabel htmlFor={`sync-group-${index}`}>Group ID</FieldLabel>
-      <Input id={`sync-group-${index}`} value={item.group_id} maxLength={36}
-        onChange={(event) => update(index, { group_id: event.target.value })} />
-      <DirectorySelect label="目标部门或团队" value={item.unit_id}
+    <FieldGroup>{items.map((item, index) => <div key={index} className="directory-mapping-row">
+      <Field><FieldLabel htmlFor={`sync-group-${index}`}>Group ID</FieldLabel>
+        <Input id={`sync-group-${index}`} value={item.group_id} maxLength={36}
+          onChange={(event) => update(index, { group_id: event.target.value })} /></Field>
+      <Field><FieldLabel>目标部门或团队</FieldLabel><DirectorySelect label="目标部门或团队" value={item.unit_id}
         items={units.filter((unit) => unit.status === "active").map((unit) => ({
           value: unit.id, label: `${unit.kind === "department" ? "部门" : "团队"} · ${unit.name}`,
-        }))} onChange={(unit_id) => update(index, { unit_id })} />
-      <DirectorySelect label="成员范围" value={item.membership_mode}
+        }))} onChange={(unit_id) => update(index, { unit_id })} /></Field>
+      <Field><FieldLabel>成员范围</FieldLabel><DirectorySelect label="成员范围" value={item.membership_mode}
         items={[{ value: "direct", label: "直接成员" }, { value: "transitive", label: "递归成员" }]}
-        onChange={(membership_mode) => update(index, { membership_mode: membership_mode as "direct" | "transitive" })} />
+        onChange={(membership_mode) => update(index, { membership_mode: membership_mode as "direct" | "transitive" })} /></Field>
       <label className="directory-checkbox-line"><Checkbox checked={item.enabled}
         onCheckedChange={(enabled) => update(index, { enabled })} />启用</label>
       <Button variant="ghost" size="icon-sm" aria-label="移除映射" title="移除映射" onClick={() => {
         setItems((values) => values.filter((_, itemIndex) => itemIndex !== index)); setDirty(true)
       }}><Trash2 /></Button>
-    </Field>)}</FieldGroup>
+    </div>)}</FieldGroup>
     {!items.length && <Empty><EmptyTitle>暂无映射</EmptyTitle></Empty>}
     {save.error && <Alert><AlertDescription>{save.error.message}</AlertDescription></Alert>}
     <Button disabled={!dirty || save.isPending || items.some((item) => !item.group_id || !item.unit_id)}
