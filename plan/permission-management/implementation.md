@@ -79,3 +79,18 @@ Playwright/Edge在隔离真实数据库逐页验证五个治理页面正常加�
 
 本地完整回归`1774 passed, 7 skipped`；7项显式数据库测试另跑全部通过。
 Ruff/Mypy（264文件）、前端构建及diff检查通过。修复无新迁移，现有001-018保持。
+
+修复提交`4c2dadc`已推送origin并上线。生产备份路径为同一发布根目录下
+`policy-rollout/4c2dadc/before`；隔离恢复、001-018 checksum和重复迁移无变更验证通过。
+仅更新API/前端包，挂载文件逐项一致；完整settings和两个Function包文件保持不变。
+
+使用截图中的`test-1@test.com`普通用户进行短时只读浏览器验收：
+用量分布/使用趋势/异常治理/请求追踪全部通过，页面请求无403或运行错误。
+当前近30天启用范围内该账号本人请求数为0，显示空态符合数据查询结果。
+没有修改真实权限矩阵、账号密码/角色或业务数据；临时10分钟测试会话完成后撤销，
+本地和远端临时凭据文件已删除。生产9张客户目录表及历史账务保持，
+128请求/37030 tokens和2份既有报表仍可读取。
+
+私有证据：`api-package-proof.json`、`ordinary-user-browser-proof.json`、
+`session-cleanup-proof.json`、`customer-after-proof.json`、`ai-finops-live-api-proof.json`。
+本次回滚保留兼容018的旧API包；修复无数据库改动，不需要数据恢复或新迁移。
