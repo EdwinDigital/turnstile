@@ -445,7 +445,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
     || units.data && unitId && !selectedUnit
   return <div className="finops-workspace directory-workspace">
     <header className="finops-header"><div>
-      <Button variant="ghost" size="icon-sm" aria-label="切换导航栏" title="切换导航栏" onClick={onToggleSidebar}><PanelLeft /></Button>
+      <Button variant="ghost" size="icon-sm" className="finops-sidebar-trigger" aria-label="切换导航栏" title="切换导航栏" onClick={onToggleSidebar}><PanelLeft /></Button>
       <span className="finops-header-icon"><FolderTree size={17} aria-hidden="true" /></span><h1>组织管理</h1>
     </div><Button variant="ghost" size="icon-sm" aria-label="刷新组织信息" title="刷新组织信息" onClick={() => void refresh()}><RefreshCw /></Button></header>
     {!capabilities ? <Empty><EmptyTitle>正在加载</EmptyTitle></Empty> : !canRead ? <Empty><EmptyTitle>无组织管理权限</EmptyTitle></Empty>

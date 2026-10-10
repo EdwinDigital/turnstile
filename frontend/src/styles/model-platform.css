@@ -26,7 +26,7 @@
 .smh-page-header > div,
 .smh-header-actions { display: flex; align-items: center; gap: 8px; }
 .smh-page-header > div:first-child { min-width: 0; gap: 10px; }
-.model-mobile-sidebar-toggle { display: none !important; }
+.model-mobile-sidebar-toggle[data-slot="button"] { width: 30px; min-width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; padding: 0; flex: 0 0 30px; }
 .smh-header-icon { width: 30px; height: 30px; display: grid; place-items: center; flex: 0 0 30px; border-radius: 7px; background: var(--muted); color: var(--muted-foreground); }
 .smh-page-header h1 { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; }
 .smh-page-header > div:first-child > span:not(.smh-header-icon) {

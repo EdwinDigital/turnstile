@@ -20,7 +20,8 @@
 	background: var(--background);
 }
 .finops-header > div { min-width: 0; display: flex; align-items: center; gap: 10px; }
-.finops-header .finops-sidebar-trigger { display: none; }
+.finops-header .finops-sidebar-trigger[data-slot="button"][data-size="icon-sm"] { display: inline-flex; width: 30px; min-width: 30px; min-height: 30px; height: 30px; padding: 0; flex: 0 0 30px; }
+.finops-header .finops-sidebar-trigger[data-slot="button"] > svg { width: 16px; height: 16px; flex: 0 0 16px; }
 .finops-header .finops-header-refresh, .finops-header-refresh { appearance: none; width: 30px; height: 30px; flex: 0 0 30px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted-foreground); }
 .finops-header .finops-header-refresh:hover:not(:disabled), .finops-header-refresh:hover:not(:disabled) { background: transparent; color: var(--foreground); }
 .finops-header-icon { width: 30px; height: 30px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 7px; background: var(--muted); color: var(--muted-foreground); }

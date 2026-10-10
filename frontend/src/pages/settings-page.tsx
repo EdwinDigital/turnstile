@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { Tabs } from "@base-ui/react/tabs"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { AlertTriangle, Check, Languages, Monitor, Moon, RefreshCw, Save, Settings, Sparkles, Sun } from "lucide-react"
+import { AlertTriangle, Check, Languages, Monitor, Moon, PanelLeft, RefreshCw, Save, Settings, Sparkles, Sun } from "lucide-react"
 
 import { assistantApi } from "../components/assistant/api"
 import { assistantSettingsKey, assistantSettingsQuery } from "../components/assistant/queries"
@@ -254,8 +254,9 @@ function AssistantSection({ editor, canEdit }: {
   </form>
 }
 
-export function SettingsPage({ dataSource }: {
+export function SettingsPage({ dataSource, onToggleSidebar }: {
   dataSource: "apim" | "github-copilot"
+  onToggleSidebar: () => void
 }) {
   const [pane, setPane] = useState<Pane>(() => dataSource === "apim" ? "preferences" : "copilot")
   useEffect(() => {
@@ -274,6 +275,8 @@ export function SettingsPage({ dataSource }: {
     onValueChange={(next) => setPane(next as Pane)}>
     <header className="smh-page-header">
       <div>
+        <Button type="button" variant="ghost" size="icon-sm" className="model-mobile-sidebar-toggle"
+          aria-label="切换导航栏" title="切换导航栏" onClick={onToggleSidebar}><PanelLeft size={16} /></Button>
         <span className="smh-header-icon"><Settings size={17} /></span><h1>设置</h1>
       </div>
       {activePane === "assistant" && <div className="smh-header-actions settings-save-actions">

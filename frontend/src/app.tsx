@@ -1557,7 +1557,7 @@ export function App() {
         <div
           className={`page ${page === "settings" ? "settings-host" : ""} ${page === "models" || page === "apim-native-routes" || page === "gateway-releases" || page === "applications" ? "registry-workspace-host" : ""} ${workspacePage ? "finops-workspace-host" : ""}`}
         >
-          {page === "settings" && <SettingsPage key={selectedDataSource} dataSource={selectedDataSource} />}
+          {page === "settings" && <SettingsPage key={selectedDataSource} dataSource={selectedDataSource} onToggleSidebar={toggleSidebar} />}
           {page === "user-settings" && <UserSettingsPage onToggleSidebar={toggleSidebar} />}
           {selectedDataSource === "apim" && page === "organization-management" && <OrganizationManagementPage
             onToggleSidebar={toggleSidebar} capabilities={directoryCapabilities.data} />}
