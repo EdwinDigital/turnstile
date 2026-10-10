@@ -279,7 +279,17 @@ class AzureUpgradeBackend:
             return None
         if response.status_code != 200:
             raise ApimUpgradeError(f"ARM upgrade read returned HTTP {response.status_code}")
-        value = response.json()
+        policy_text = response.text.lstrip("\ufeff \t\r\n")
+        if policy and policy_text.startswith("<"):
+            try:
+                parse_policy(policy_text)
+            except ElementTree.ParseError as error:
+                raise ApimUpgradeError("ARM returned malformed raw XML policy") from error
+            return {"properties": {"value": policy_text}}
+        try:
+            value = response.json()
+        except ValueError as error:
+            raise ApimUpgradeError("ARM upgrade read returned invalid JSON") from error
         if not isinstance(value, dict):
             raise ApimUpgradeError("ARM upgrade read returned an invalid object")
         return value
