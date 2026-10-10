@@ -38,9 +38,9 @@ P2 同步、身份绑定、投影和独立 APIM 升级代码已提交并部署�
 
 ## 本地验证
 
-- 完整回归：`1685 passed / 7 skipped`。跳过项不计作通过，新增目录真实 DB 套件未跳过。
+- 完整回归：`1687 passed / 7 skipped`。跳过项不计作通过，新增目录真实 DB 套件未跳过。
   后续策略单行表达式及独立计划版本修正通过49项专项回归，并在提交前重跑完整回归通过。
-- Ruff、mypy（234个文件）、frontend typecheck/build、diff检查通过。
+- Ruff、mypy（235个文件）、frontend typecheck/build、diff检查通过。
 - main、目录settings和directory-identity升级模板编译通过；main保留3条既有警告。
   APIM XML通过，OpenAPI lint通过并保留43条既有警告；目录schema引用遗漏已修复并单独重验。
 - 真实隔离 PostgreSQL 16+：空初始化、并发迁移重跑、不可变旧checksum、历史账务保留、
@@ -148,6 +148,13 @@ P2 同步、身份绑定、投影和独立 APIM 升级代码已提交并部署�
 此次发现Group映射行共享Field导致重复控件ID及错误标签，拆分独立Field并补回归；
 桌面1440x1000和移动390x844截图、控件ID唯一及完整链路重跑通过。
 真实Graph权限、分页和员工token仍未验证。
+
+同步应用规模补验：此前仅240人应用，追加真实PostgreSQL十万人审核staging测试。
+首次审计写入超过20秒语句期限并完整回滚；定位临时表缺索引/统计后，添加仅事务
+生命周期的object/person索引及ANALYZE，十万人完整应用耗时10.8419秒，审计及任职各
+十万条，不创建账号/预算。另以审计trigger注入应用中途故障，证明人员、任职、
+外部绑定、目录版本及checkpoint全部回滚，job记录failed。未修改已应用012迁移。
+该结果不是真实Graph吞吐或生产延迟承诺。
 
 `24f05c3`前端修复已发布：新旧API实际包和完整settings备份，core digest与两个Functions
 保持一致，因此仅更新API包，没有schema或基础设施变更。首次健康先于新资源切换，

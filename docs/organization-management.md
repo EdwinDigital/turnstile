@@ -135,6 +135,9 @@ Reads process bounded segments and persist encrypted resource/page progress, sou
 analysis cursors. A recovered lease resumes that job. Missing-source members are staged only
 after every source resource is complete. Application uses one set-based transaction, preserving
 membership, profile and source-status audit snapshots; a failed application advances no cursor.
+The set-based transaction indexes and analyzes its temporary staging joins. A real local
+PostgreSQL test applies 100,000 reviewed people with complete per-person membership audit;
+this is application-scale evidence, not live Graph throughput or a production latency SLA.
 
 Application read permissions and tenant administrator consent are external prerequisites,
 not Bicep side effects. Import does not automatically create login accounts or grant Owner,

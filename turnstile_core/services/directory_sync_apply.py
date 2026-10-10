@@ -23,6 +23,11 @@ def apply_staged_directory(
            FROM directory_sync_stage s WHERE s.job_id=%s""",
         (job["previewed_at"], job["id"]),
     )
+    connection.execute(
+        """CREATE UNIQUE INDEX ON sync_apply(object_id);
+           CREATE INDEX ON sync_apply(person_id);
+           ANALYZE sync_apply"""
+    )
     invalid = connection.execute(
         """SELECT 1 FROM sync_apply s
            LEFT JOIN directory_person p ON p.id=s.person_id
@@ -51,6 +56,7 @@ def apply_staged_directory(
              AND b.connection_id=%s AND b.object_type='user'""",
         (saved["id"],),
     )
+    connection.execute("CREATE UNIQUE INDEX ON sync_before(object_id)")
     connection.execute(
         """ALTER TABLE sync_before ADD COLUMN memberships jsonb;
            UPDATE sync_before old SET memberships=(
@@ -58,6 +64,7 @@ def apply_staged_directory(
              FROM directory_membership m JOIN sync_apply s ON s.person_id=m.person_id
              WHERE s.object_id=old.object_id AND m.valid_to IS NULL)""",
     )
+    connection.execute("ANALYZE sync_before")
     connection.execute(
         """INSERT INTO directory_person(id,governance_user_id,display_name,contact_email,
              job_title,updated_by)

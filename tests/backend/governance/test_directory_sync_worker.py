@@ -4,6 +4,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
 from cryptography.fernet import Fernet
 
@@ -463,3 +464,46 @@ def test_large_snapshot_read_and_analysis_resume_without_early_directory_mutatio
     applied = worker.run_once(worker_id="applier")
     assert applied and applied["status"] == "succeeded", applied
     assert service.people(owner).total == 240
+
+
+def test_apply_failure_rolls_back_people_audit_memberships_and_checkpoint(
+    directory: tuple[DirectoryService, DirectoryPrincipal],
+) -> None:
+    service, owner = directory
+    connections, worker, _, saved, _ = setup_sync(service, owner)
+    job = connections.create_job(owner, UUID(saved["id"]), SyncJobWrite(), "apply-failure")
+    preview = worker.run_once(worker_id="reader")
+    assert preview and preview["status"] == "awaiting_review"
+    approve(connections, owner, service, job)
+    with service.store.connection() as db:
+        before = db.execute("SELECT count(*) AS n FROM directory_change_audit").fetchone()
+        version = db.execute("SELECT active_version FROM directory_control_state").fetchone()
+        db.execute(
+            """CREATE FUNCTION reject_sync_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+               BEGIN
+                 IF NEW.action='sync_create' THEN RAISE EXCEPTION 'injected audit failure'; END IF;
+                 RETURN NEW;
+               END $$;
+               CREATE TRIGGER reject_sync_audit BEFORE INSERT ON directory_change_audit
+                 FOR EACH ROW EXECUTE FUNCTION reject_sync_audit()"""
+        )
+    with pytest.raises(psycopg.errors.RaiseException, match="injected audit failure"):
+        worker.run_once(worker_id="applier")
+    with service.store.connection() as db:
+        assert db.execute("SELECT count(*) AS n FROM directory_change_audit").fetchone() == before
+        assert (
+            db.execute("SELECT active_version FROM directory_control_state").fetchone() == version
+        )
+        for table in (
+            "directory_person",
+            "directory_membership",
+            "directory_external_binding",
+            "directory_sync_checkpoint",
+        ):
+            assert not db.execute(f"SELECT 1 FROM {table}").fetchone()
+        failed = db.execute(
+            "SELECT status,error_code FROM directory_sync_job WHERE id=%s",
+            (UUID(job["id"]),),
+        ).fetchone()
+        assert failed and failed["status"] == "failed"
+        assert failed["error_code"] == "sync_execution_failed"
