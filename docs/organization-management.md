@@ -203,6 +203,14 @@ different code digest. Back up the current compatible package trio, settings and
 then build all three new packages with an identical core digest. Verify all applied migration
 checksums and the isolated backup restore before publication.
 
+For the 015-017 upgrade, compare all existing personnel fields except the added
+`organization_id`, and verify that its backfill matches current primary memberships.
+Only legal legacy department appointments may be imported by 015. The control state's
+permission revision advances twice; other control fields and gateway-projection versions
+remain unchanged. Verify that only scheduled/conflicted transfer plans are cancelled by
+016, while all other historical rows, original migration checksums/timestamps and billing
+tables remain unchanged. Repeat migration and require an empty result.
+
 Stop the three writers, temporarily disable write triggers (including telemetry Event Hub
 consumption) and merge the new
 `DIRECTORY_EXPECTED_CORE_DIGEST` into every current setting map. Review a what-if limited to
@@ -220,6 +228,15 @@ steps; a token captured at the start of a maintenance window may expire before r
 The ordinary `scripts.deploy` path rejects mixed directory authority or an expected core digest
 that differs from the source being published before uploading runtime packages. This guard
 does not automate or replace the maintenance procedure above.
+
+Use an isolated, clearly identified organization for deployed write validation. Exercise
+person/password creation, required primary department, additional department/team membership,
+exact organization/department/team appointments and revocation. Compare all pre-existing
+customer rows and billing facts after validation. Revoke test appointments, archive only
+the owned test people/units/organization and disable their login accounts; preserve immutable
+audit records. A failed test script must still perform cleanup with freshly read revisions.
+Loading-state screenshots are not final layout evidence; wait for real candidate and
+administrator queries to complete before capturing desktop/mobile and Light/Dark results.
 
 Azure Functions may repack a ZIP before storing the active `released-package.zip`.
 Record both uploaded and actual-package SHA-256, then verify archive integrity, the runtime
