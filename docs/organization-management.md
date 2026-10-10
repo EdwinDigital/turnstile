@@ -155,6 +155,15 @@ The ordinary `scripts.deploy` path rejects mixed directory authority or an expec
 that differs from the source being published before uploading runtime packages. This guard
 does not automate or replace the maintenance procedure above.
 
+Azure Functions may repack a ZIP before storing the active `released-package.zip`.
+Record both uploaded and actual-package SHA-256, then verify archive integrity, the runtime
+manifest and every file's SHA-256. An outer ZIP hash difference alone is not a code mismatch;
+never waive a changed/missing file or mismatched core digest. Preserve the readback evidence.
+Use bounded retries for transient management-network failures and refresh tokens during
+long windows. A failed settings what-if/create/readback is not successful publication:
+restore matching packages/configuration or retry the same reviewed change, then verify the
+complete final settings and function indexing before claiming success.
+
 ## Synchronization And Login
 
 The Control-plane `synchronize_directory` timer is independently disabled by default.
