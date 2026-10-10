@@ -221,7 +221,7 @@ do not alter already applied migrations, reactivate the legacy directory or reru
 Back up the current database, packages and full settings before a maintenance update.
 Apply additive `013_menu_permission_groups`, `014_multiple_menu_permission_groups`
 `015_scoped_menu_administrators`, `016_organization_members` and `017_department_memberships`
-through `backend.migrate` before starting the new
+plus `018_permission_management` through `backend.migrate` before starting the new
 runtime trio. Fresh installations use the same migration chain. Unassigned existing people
 default to Ordinary User; Owner keeps its independent menus.
 014 preserves single assignments from 013 as arrays; the singular API field remains only for
@@ -233,6 +233,33 @@ Owner/Member profiles, assigned/unassigned navigation, data scopes and existing 
 Retain the column and migration ledger on compatible-package rollback; do not restore an older
 database and lose new teams/personnel or menu assignments. This update does not deploy APIM policy,
 enable Graph sync or complete Microsoft login configuration.
+
+### Configurable Menu And Automatic Data Permissions
+
+Permission Management follows Organization Management under Platform Management. Only Owner
+can read or save the four-group menu matrix; existing administrator appointments stay in the
+organization directory. Complete saves use compare-and-swap revisions and immutable audit.
+Menu access does not delegate budget/model writes, Owner privileges, Graph consent or APIM
+invocation authorization.
+
+In database-directory mode ordinary Members now see only themselves. Organization
+administrators see their organization, department administrators their effective departments,
+and team administrators their effective teams' people. Same-level cross-memberships are
+combined; team parent departments are navigation context, not whole-department grants.
+Lists, facets, totals, details, budget read projections and assistant tools enforce the same
+automatic scope. Saved reports/conversations record versioned department/user scopes in the
+existing `directory_scope` column; restricted viewers cannot read old global snapshots.
+
+Shared usage APIs are authorized by their actual consuming pages. Granting Usage Breakdown
+alone must authorize its summary and distribution reads without also granting Overview.
+Scope enforcement still applies to every query, including malicious or multi-value filters.
+See [requirements and review](../plan/permission-management/review.md).
+
+Migration 018 adds the default role policy/audit and updates effective appointments without
+rewriting budgets, telemetry or primary billing membership. Previously global Member reads
+are intentionally tightened. Do not roll back to pre-permission packages with Member access
+enabled: retain additive schema and audit, use a secured compatible runtime or maintenance
+mode. Database restoration is separate and is not a routine package rollback.
 
 ## Empty Installation
 
@@ -309,7 +336,7 @@ different code digest. Back up the current compatible package trio, settings and
 then build all three new packages with an identical core digest. Verify all applied migration
 checksums and the isolated backup restore before publication.
 
-For compatible updates after 017 with no new migrations, require all 17 applied checksums
+For compatible updates after 018 with no new migrations, require all 18 applied checksums
 to match the candidate and require both migration runs to return an empty result.
 Compare every restored table before and after the isolated no-op migration. Do not replay
 the 015-017 backfill assertions or accept an older migration baseline. Production verification
@@ -334,6 +361,9 @@ Function triggers, verify indexing and read back actual deployed packages before
 recorded trigger settings and application states. Never leave an old package running with a
 new expected digest. A package/configuration failure must restore the matching previous digest,
 compatible trio and complete settings; retain the active database directory and additive schema.
+Only use a previous runtime with compatible menu/row protection; pre-018 behavior must not
+restore global Member reads. If core content is unchanged, API-only updates may retain the
+two identical Function packages after verifying their actual file contents and full settings.
 Verify real login, directory data, disabled identities, billing baselines and Function indexing
 after both rollback and republish. Restoring a database backup is not part of this drill.
 Refresh Azure management credentials before long-running deployment readbacks and recovery
