@@ -5,10 +5,10 @@
 | 功能目录 | `plan/organization-management/` |
 | 分析日期 | 2026-10-10 |
 | 源码基线 | `12dc1ee`，分支 `codex/org-people-management` |
-| 状态 | 开发进行中；实施进度见[实施记录](implementation.md)，尚未完成整体验收或发布 |
+| 状态 | P1已上线；P2代码已实现，真实Entra和员工身份验收待配置；未完成整体验收，见[实施记录](implementation.md) |
 | 配套文档 | [设计文档](design.md) |
 | 规范核查 | [项目规范核查记录](review.md)，含初始化、升级与发布边界 |
-| 核查边界 | 当前仓库源码、迁移及官方 Graph 文档；未连接线上数据库、APIM 或 Entra 租户 |
+| 核查边界 | 下文现状分析保留`12dc1ee`设计基线；实际数据库/APIM发布证据见实施记录，真实Graph未配置 |
 
 ## 1. 目标
 

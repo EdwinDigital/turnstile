@@ -95,14 +95,23 @@ different code digest. Back up the current compatible package trio, settings and
 then build all three new packages with an identical core digest. Verify all applied migration
 checksums and the isolated backup restore before publication.
 
-Stop the three writers, temporarily disable timer functions and merge the new
+Stop the three writers, temporarily disable write triggers (including telemetry Event Hub
+consumption) and merge the new
 `DIRECTORY_EXPECTED_CORE_DIGEST` into every current setting map. Review a what-if limited to
-those appsettings. Publish and read back all three compatible packages before restoring the
-recorded timer settings and application states. Never leave an old package running with a
+those appsettings. Publish all three compatible packages, then start the apps with write
+triggers still disabled. A stopped Flex app can upload its package but fail trigger sync with
+`403 Site Disabled`; successful upload is not Function readiness. Explicitly synchronize
+Function triggers, verify indexing and read back actual deployed packages before restoring the
+recorded trigger settings and application states. Never leave an old package running with a
 new expected digest. A package/configuration failure must restore the matching previous digest,
 compatible trio and complete settings; retain the active database directory and additive schema.
 Verify real login, directory data, disabled identities, billing baselines and Function indexing
 after both rollback and republish. Restoring a database backup is not part of this drill.
+Refresh Azure management credentials before long-running deployment readbacks and recovery
+steps; a token captured at the start of a maintenance window may expire before rollback.
+The ordinary `scripts.deploy` path rejects mixed directory authority or an expected core digest
+that differs from the source being published before uploading runtime packages. This guard
+does not automate or replace the maintenance procedure above.
 
 ## Synchronization And Login
 

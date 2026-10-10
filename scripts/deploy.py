@@ -1596,6 +1596,22 @@ def gateway_upgrade(
         print("API and Control-plane remain stopped; resume through the reviewed package rollout")
 
 
+def validate_directory_runtime_release(settings: Mapping[str, Mapping[str, Any]]) -> None:
+    if not any(values.get("DIRECTORY_SOURCE") == "database" for values in settings.values()):
+        return
+    expected = core_runtime_digest()
+    if set(settings) != {"api", "telemetry", "control-plane"} or any(
+        values.get("DIRECTORY_SOURCE") != "database"
+        or values.get("DIRECTORY_EXPECTED_CORE_DIGEST") != expected
+        for values in settings.values()
+    ):
+        raise DeploymentError(
+            "Active database directory requires a compatible three-package maintenance update. "
+            "Do not publish a changed core against the old expected digest. "
+            "Follow docs/organization-management.md Compatible Runtime Updates."
+        )
+
+
 def execute(args: argparse.Namespace, runner: CommandRunner) -> None:
     inputs = DeploymentInputs.load(
         args.subscription,
@@ -1673,6 +1689,19 @@ def execute(args: argparse.Namespace, runner: CommandRunner) -> None:
             inputs,
             _output_string(platform_outputs, "controlPlaneFunctionName"),
         )
+        if (
+            api_settings.get("DIRECTORY_SOURCE") == "database"
+            or control_plane_settings.get("DIRECTORY_SOURCE") == "database"
+        ):
+            validate_directory_runtime_release(
+                {
+                    "api": api_settings,
+                    "control-plane": control_plane_settings,
+                    "telemetry": current_app_settings(
+                        runner, inputs, _output_string(platform_outputs, "telemetryFunctionName")
+                    ),
+                }
+            )
         release_parameters = runtime_release_parameters(
             secrets_,
             platform_outputs,
