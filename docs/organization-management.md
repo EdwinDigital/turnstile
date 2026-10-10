@@ -312,6 +312,14 @@ long windows. A failed settings what-if/create/readback is not successful public
 restore matching packages/configuration or retry the same reviewed change, then verify the
 complete final settings and function indexing before claiming success.
 
+An SCM command response timeout is not proof that the remote backup/readback failed.
+Before replaying the command, read its completed immutable result from the private remote
+directory with bounded polling. Require all expected packages and the validated database dump,
+then independently download and compare their hashes and package contents. If the completed
+result is missing or any content check fails, retain the recovery path; never turn a timeout
+into a successful release merely because the apps are running. Record failed attempts and
+protective recovery separately from the final verified publication.
+
 ## Synchronization And Login
 
 The Control-plane `synchronize_directory` timer is independently disabled by default.
