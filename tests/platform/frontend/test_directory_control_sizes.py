@@ -27,3 +27,21 @@ def test_directory_header_and_permission_tags_keep_compact_readable_dimensions()
         ".directory-people-table th:nth-child(3) { width: 200px; white-space: nowrap; }"
         in styles
     )
+
+
+def test_directory_creation_buttons_and_hover_colors_follow_the_theme_variants() -> None:
+    directory = (FRONTEND_SOURCE / "pages/organization-management-page.tsx").read_text()
+    styles = (FRONTEND_SOURCE / "styles/organization-management.css").read_text()
+    for label in ("新增人员", "添加成员"):
+        line = next(line for line in directory.splitlines() if f">{label}</Button>" in line)
+        assert 'variant="outline" size="sm"' in line
+    assert '[data-slot="button"]:hover:not(:disabled)' not in styles
+    outline = styles.split(
+        '.directory-dialog [data-slot="button"][data-variant="outline"] {', 1
+    )[1].split("}", 1)[0]
+    assert "background: var(--background)" in outline
+    assert "color: var(--foreground)" in outline
+    assert "border-color: var(--border)" in outline
+    assert '[data-variant="outline"]:hover:not(:disabled)' in styles
+    assert '[data-variant="default"]:hover:not(:disabled)' in styles
+    assert "var(--primary) 85%, var(--background)" in styles

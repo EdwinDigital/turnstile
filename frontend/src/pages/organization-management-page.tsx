@@ -503,8 +503,8 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                     ...Object.entries(statusNames).map(([value, label]) => ({ value, label }))]}
                     onChange={(value) => setStatus(value as DirectoryStatus | "all")} />
                   <span className="directory-count">{people.data?.total ?? "--"} 人</span>
-                  {!selectedUnit && owner && <Button size="sm" onClick={() => setEditor({ kind: "person" })}><Plus data-icon="inline-start" />新增人员</Button>}
-                  {selectedUnit && editPeople && <Button size="sm" onClick={() => setAddingMembers(true)}><Plus data-icon="inline-start" />添加成员</Button>}
+                  {!selectedUnit && owner && <Button variant="outline" size="sm" onClick={() => setEditor({ kind: "person" })}><Plus data-icon="inline-start" />新增人员</Button>}
+                  {selectedUnit && editPeople && <Button variant="outline" size="sm" onClick={() => setAddingMembers(true)}><Plus data-icon="inline-start" />添加成员</Button>}
                 </div>
                 <div className="directory-table-scroll"><ResizableTable className="directory-table directory-people-table" minWidths={peopleColumnMinWidths}>
                   <caption className="sr-only">组织人员</caption><thead><tr>

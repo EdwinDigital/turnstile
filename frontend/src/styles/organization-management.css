@@ -20,9 +20,14 @@
 .directory-workspace [data-slot="button"][data-size^="icon"], .directory-dialog [data-slot="button"][data-size^="icon"] { min-height: 28px; width: 28px; height: 28px; padding: 0; }
 .directory-workspace [data-slot="button"] > svg, .directory-dialog [data-slot="button"] > svg { width: 14px; height: 14px; flex: 0 0 14px; }
 .directory-workspace [data-slot="button"][data-variant="ghost"], .directory-dialog [data-slot="button"][data-variant="ghost"] { background: transparent; }
-.directory-workspace [data-slot="button"][data-variant="outline"], .directory-dialog [data-slot="button"][data-variant="outline"] { background: var(--background); border-color: var(--border); }
+.directory-workspace [data-slot="button"][data-variant="outline"], .directory-dialog [data-slot="button"][data-variant="outline"] { background: var(--background); color: var(--foreground); border-color: var(--border); }
 .directory-workspace [data-slot="button"][data-variant="default"], .directory-dialog [data-slot="button"][data-variant="default"] { background: var(--primary); color: var(--primary-foreground); }
-.directory-workspace [data-slot="button"]:hover:not(:disabled), .directory-dialog [data-slot="button"]:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
+.directory-workspace [data-slot="button"][data-variant="outline"]:hover:not(:disabled),
+.directory-dialog [data-slot="button"][data-variant="outline"]:hover:not(:disabled),
+.directory-workspace [data-slot="button"][data-variant="ghost"]:hover:not(:disabled),
+.directory-dialog [data-slot="button"][data-variant="ghost"]:hover:not(:disabled) { background: var(--muted); color: var(--foreground); }
+.directory-workspace [data-slot="button"][data-variant="default"]:hover:not(:disabled),
+.directory-dialog [data-slot="button"][data-variant="default"]:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 85%, var(--background)); color: var(--primary-foreground); }
 .directory-person-menu [data-slot="dropdown-menu-item"] { min-height: 30px; padding: 5px 8px; gap: 8px; font-size: 12px; line-height: 18px; }
 .directory-person-menu [data-slot="dropdown-menu-item"] > svg { width: 14px; height: 14px; flex: 0 0 14px; }
 .directory-person-trigger { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground); cursor: pointer; }
