@@ -88,6 +88,22 @@ Plans bind the database instance, migration checksums, code digest, legacy sourc
 billing/account baseline. Drift requires new investigation; never edit the stored baseline to
 make verification pass. Unknown historical identities remain candidates, not guessed employees.
 
+### Compatible Runtime Updates
+
+After database activation, routine updates must not rerun backfill or activation against a
+different code digest. Back up the current compatible package trio, settings and database,
+then build all three new packages with an identical core digest. Verify all applied migration
+checksums and the isolated backup restore before publication.
+
+Stop the three writers, temporarily disable timer functions and merge the new
+`DIRECTORY_EXPECTED_CORE_DIGEST` into every current setting map. Review a what-if limited to
+those appsettings. Publish and read back all three compatible packages before restoring the
+recorded timer settings and application states. Never leave an old package running with a
+new expected digest. A package/configuration failure must restore the matching previous digest,
+compatible trio and complete settings; retain the active database directory and additive schema.
+Verify real login, directory data, disabled identities, billing baselines and Function indexing
+after both rollback and republish. Restoring a database backup is not part of this drill.
+
 ## Synchronization And Login
 
 The Control-plane `synchronize_directory` timer is independently disabled by default.
@@ -143,6 +159,11 @@ python -m scripts.directory_gateway_upgrade rollback --subscription <subscriptio
 ```
 
 Drain publication/rollback work and stop API/Control-plane for the maintenance window.
+If source code changes after a failed prepare, do not delete or overwrite the bound plan,
+journal or failed candidate. Use a new `--plan-id <reviewed-run-name>` on `plan`, then use
+that same ID on `prepare`, `promote` and `rollback`. Each run has a separate private evidence
+directory; all runs share the environment lock and still verify the current source revision.
+Review the new what-if before any writes. The previous candidate remains noncurrent.
 `prepare` verifies the complete candidate but does not promote it. Run real signed employee-token
 probes against the candidate with the configured publisher/employee client and scope. Read back
 the identity projection and all existing budget partitions. Do not use a CLI user's Graph token

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -49,6 +50,15 @@ from .stage_deployment import REPOSITORY_ROOT
 VERSION = "directory-identity-v1"
 
 
+def directory_plan_directory(state_path: Path, plan_id: str | None) -> Path:
+    directory = state_path.with_suffix(".upgrades") / VERSION
+    if plan_id is None:
+        return directory
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", plan_id) is None:
+        raise DeploymentError("Directory plan ID must be 1-64 lowercase letters, digits or hyphens")
+    return directory / "runs" / plan_id
+
+
 def plan_directory_upgrade(
     api_resource_id: str,
     snapshot: GatewaySnapshot,
@@ -57,6 +67,7 @@ def plan_directory_upgrade(
     cloud: str,
     endpoint: str,
     table: str,
+    plan_id: str | None = None,
 ) -> ImageUpgradePlan:
     validate_parent_policy(snapshot.parent_policy, canonical)
     if "directoryIdentityPolicyVersion" in snapshot.parent_policy:
@@ -80,6 +91,7 @@ def plan_directory_upgrade(
             "source": snapshot.fingerprint(),
             "parent": policy_digest(parent),
             "version": VERSION,
+            **({"run": plan_id} if plan_id is not None else {}),
         }
     )
     # The existing revision engine is shared; directory plans never initialize image operations.
@@ -196,6 +208,7 @@ def execute(
     cloud: str,
     assume_yes: bool = False,
     candidate_evidence: dict[str, Any] | None = None,
+    plan_id: str | None = None,
 ) -> None:
     if action not in {"plan", "prepare", "promote", "rollback"}:
         raise DeploymentError("Unknown directory identity upgrade action")
@@ -248,7 +261,7 @@ def execute(
             )
         },
     }
-    directory = inputs.state_path.with_suffix(".upgrades") / VERSION
+    directory = directory_plan_directory(inputs.state_path, plan_id)
     credentials = runner.run_json(
         [
             "az",
@@ -264,7 +277,7 @@ def execute(
     )
     token = credentials.pop("accessToken")
     with (
-        _upgrade_lock(directory),
+        _upgrade_lock(directory_plan_directory(inputs.state_path, None)),
         httpx.Client(
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             timeout=60,
@@ -347,6 +360,7 @@ def execute(
                     cloud=cloud,
                     endpoint=endpoint,
                     table=table,
+                    plan_id=plan_id,
                 ).document()
             ):
                 raise DeploymentError("Directory plan does not match the reviewed transformation")
@@ -362,6 +376,7 @@ def execute(
                 cloud=cloud,
                 endpoint=endpoint,
                 table=table,
+                plan_id=plan_id,
             )
             _write_private_json(plan_path, {"binding": bindings, "plan": plan.document()})
         if not plan.required:
@@ -372,6 +387,7 @@ def execute(
                 cloud=cloud,
                 endpoint=endpoint,
                 table=table,
+                plan_id=plan_id,
             ).required:
                 raise DeploymentError(
                     "The current API no longer satisfies the no-change directory plan"
@@ -396,6 +412,7 @@ def execute(
                 cloud=cloud,
                 endpoint=endpoint,
                 table=table,
+                plan_id=plan_id,
             ).required
         ):
             print("The current revision retains the completed directory identity upgrade")
@@ -427,6 +444,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--cloud", choices=("public", "usgov", "china"), default="public")
     parser.add_argument("--candidate-evidence", type=Path)
+    parser.add_argument(
+        "--plan-id",
+        help="Independent reviewed plan run; retains previous plans and failed candidate evidence",
+    )
     parser.add_argument("--yes", action="store_true")
     args = parser.parse_args(argv)
     evidence = None
@@ -448,6 +469,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         cloud=args.cloud,
         assume_yes=args.yes,
         candidate_evidence=evidence,
+        plan_id=args.plan_id,
     )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
@@ -35,11 +36,12 @@ def _identity_block(cloud: str, endpoint: str, table: str) -> ET.Element:
       Guid oid;
       if (!Guid.TryParse((string)context.Variables["employeeTenant"], out tenant)
         || !Guid.TryParse((string)context.Variables["employeeObjectId"], out oid)) { return ""; }
-      var partition = "I|1|" + (string)context.Variables["directoryIdentityCloud"]
+      var pk = "I|1|" + (string)context.Variables["directoryIdentityCloud"]
         + "|" + tenant.ToString();
+      var row = oid.ToString();
+      var filter = Uri.EscapeDataString("PartitionKey eq '" + pk + "' and RowKey eq '" + row + "'");
       return (string)context.Variables["directoryIdentityEndpoint"] + "/"
-        + (string)context.Variables["directoryIdentityTable"] + "(PartitionKey='"
-        + Uri.EscapeDataString(partition) + "',RowKey='" + oid.ToString() + "')";
+        + (string)context.Variables["directoryIdentityTable"] + "()?$filter=" + filter;
     }""",
     )
     request = ET.SubElement(
@@ -69,8 +71,18 @@ def _identity_block(cloud: str, endpoint: str, table: str) -> ET.Element:
         """@{
       var response = context.Variables.GetValueOrDefault<IResponse>(
         "directoryIdentityResponse", null);
-      return response != null && response.StatusCode == 200
-        ? response.Body.As<string>(preserveContent: true) : "{}";
+      if (response == null || response.StatusCode != 200) { return ""; }
+      try {
+        if (response.Headers.ContainsKey("x-ms-continuation-NextPartitionKey")
+          || response.Headers.ContainsKey("x-ms-continuation-NextRowKey")) { return ""; }
+        var payload = response.Body.As<JObject>(preserveContent: true);
+        var rows = payload["value"] as JArray;
+        if (rows == null || rows.Count > 1 || payload["odata.nextLink"] != null
+          || payload["@odata.nextLink"] != null) { return ""; }
+        if (rows.Count == 0) { return "{}"; }
+        if (!(rows[0] is JObject) || !rows[0].HasValues) { return ""; }
+        return rows[0].ToString(Newtonsoft.Json.Formatting.None);
+      } catch { return ""; }
     }""",
     )
     _variable(
@@ -80,11 +92,16 @@ def _identity_block(cloud: str, endpoint: str, table: str) -> ET.Element:
       var response = context.Variables.GetValueOrDefault<IResponse>(
         "directoryIdentityResponse", null);
       if (response == null) { return "unavailable"; }
-      if (response.StatusCode == 404) { return "missing"; }
       if (response.StatusCode != 200) { return "unavailable"; }
       try {
         var row = JObject.Parse((string)context.Variables["directoryIdentityJson"]);
+        if (row.Count == 0) { return "missing"; }
         if ((int?)row["ProtocolVersion"] != 1
+          || (string)row["PartitionKey"] != "I|1|"
+            + (string)context.Variables["directoryIdentityCloud"] + "|"
+            + ((string)context.Variables["employeeTenant"]).ToLowerInvariant()
+          || (string)row["RowKey"] !=
+            ((string)context.Variables["employeeObjectId"]).ToLowerInvariant()
           || (string)row["Cloud"] != (string)context.Variables["directoryIdentityCloud"]
           || (string)row["TenantId"] !=
             ((string)context.Variables["employeeTenant"]).ToLowerInvariant()
@@ -201,7 +218,21 @@ def compose_directory_identity_policy(
         raise PolicyCompilationError("The reviewed employee attribution anchors are missing")
     ledger_url = employee.find(".//set-variable[@name='ledgerUrl']")
     assert ledger_url is not None
-    if f"{endpoint.rstrip('/')}/{table}()" not in ledger_url.get("value", ""):
+    ledger_expression = ledger_url.get("value", "")
+    exact_target = f"{endpoint.rstrip('/')}/{table}()"
+    configured = urlparse(endpoint)
+    equivalent_targets = [
+        urlparse(value) for value in re.findall(r'"(https://[^"]+)"', ledger_expression)
+    ]
+    same_table = any(
+        target.scheme == configured.scheme
+        and target.netloc == configured.netloc
+        and target.path.lstrip("/") == f"{table}()"
+        and target.query == "$filter="
+        and not target.fragment
+        for target in equivalent_targets
+    )
+    if exact_target not in ledger_expression and not same_table:
         raise PolicyCompilationError("Identity lookup must reuse the existing employee ledger")
     partition = employee.find(".//set-variable[@name='ledgerPartition']")
     reservations = [

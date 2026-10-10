@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,8 +13,10 @@ from scripts.apim_upgrade import (
     execute_image_upgrade,
     verify_upgrade_snapshot,
 )
+from scripts.deploy import DeploymentError
 from scripts.directory_gateway_upgrade import (
     VERSION,
+    directory_plan_directory,
     directory_upgrade_parameters,
     plan_directory_upgrade,
     validate_candidate_evidence,
@@ -162,3 +165,36 @@ def test_candidate_probe_drift_cannot_be_declared_success() -> None:
     proof["candidate_fingerprint"] = "not-the-reviewed-candidate"
     with pytest.raises(ApimUpgradeError, match="incomplete"):
         validate_candidate_evidence(backend.snapshots[value.revision], proof)
+
+
+def test_independent_plan_run_keeps_default_evidence_directory() -> None:
+    state = Path("/private/state/deployment.json")
+    base = directory_plan_directory(state, None)
+    assert base == state.with_suffix(".upgrades") / VERSION
+    assert directory_plan_directory(state, "policy-compile-2") == base / "runs/policy-compile-2"
+    first = plan_directory_upgrade(
+        API_ID,
+        snapshot(image=True),
+        CANONICAL_PARENT,
+        cloud="public",
+        endpoint="__LEDGER_TABLE_ENDPOINT__",
+        table="__LEDGER_TABLE_NAME__",
+        plan_id="first-run",
+    )
+    second = plan_directory_upgrade(
+        API_ID,
+        snapshot(image=True),
+        CANONICAL_PARENT,
+        cloud="public",
+        endpoint="__LEDGER_TABLE_ENDPOINT__",
+        table="__LEDGER_TABLE_NAME__",
+        plan_id="second-run",
+    )
+    assert first.parent_policy == second.parent_policy
+    assert first.revision != second.revision
+
+
+@pytest.mark.parametrize("plan_id", ["", "../old", "/tmp", "UPPER", "a" * 65, "a/b"])
+def test_plan_run_cannot_escape_evidence_directory(plan_id: str) -> None:
+    with pytest.raises(DeploymentError, match="plan ID"):
+        directory_plan_directory(Path("/private/state/deployment.json"), plan_id)

@@ -130,3 +130,51 @@ def test_directory_upgrade_requires_exact_existing_ledger_target() -> None:
             endpoint="__LEDGER_TABLE_ENDPOINT__",
             table="__LEDGER_TABLE_NAME__",
         )
+
+
+def test_legacy_double_slash_ledger_url_keeps_exact_table_target() -> None:
+    endpoint = "https://example.table.core.windows.net/"
+    live = BASE.replace(
+        "__LEDGER_TABLE_ENDPOINT__/__LEDGER_TABLE_NAME__",
+        endpoint + "/TurnstileLedger",
+    )
+    upgraded = compose_directory_identity_policy(
+        live,
+        cloud="public",
+        endpoint=endpoint,
+        table="TurnstileLedger",
+    )
+    assert component_digest(parse_policy(strip_validated_directory_identity_policy(upgraded))) == (
+        component_digest(parse_policy(live))
+    )
+    with pytest.raises(PolicyCompilationError, match="existing employee ledger"):
+        compose_directory_identity_policy(
+            live,
+            cloud="public",
+            endpoint=endpoint,
+            table="WrongTable",
+        )
+
+
+def test_collection_lookup_distinguishes_missing_from_invalid_or_unavailable() -> None:
+    root = parse_policy(composed())
+    url = root.find(".//set-variable[@name='directoryIdentityUrl']")
+    payload = root.find(".//set-variable[@name='directoryIdentityJson']")
+    status = root.find(".//set-variable[@name='directoryIdentityStatus']")
+    assert url is not None and payload is not None and status is not None
+    assert "Uri.EscapeDataString" in url.get("value", "")
+    assert "RowKey eq" in next(
+        line for line in url.get("value", "").splitlines() if "Uri.EscapeDataString" in line
+    )
+    assert "()?$filter=" in url.get("value", "")
+    assert "(PartitionKey=" not in url.get("value", "")
+    expression = payload.get("value", "")
+    assert 'rows.Count == 0) { return "{}"; }' in expression
+    assert 'rows.Count > 1' in expression
+    assert "x-ms-continuation-NextPartitionKey" in expression
+    assert "x-ms-continuation-NextRowKey" in expression
+    assert 'catch { return ""; }' in expression
+    validation = status.get("value", "")
+    assert 'response.StatusCode != 200) { return "unavailable"; }' in validation
+    assert 'StatusCode == 404' not in validation
+    assert 'row["PartitionKey"]' in validation and 'row["RowKey"]' in validation
