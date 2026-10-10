@@ -441,3 +441,58 @@ def test_renamed_department_has_one_ranking_and_trend_identity(
     assert len(trend["points"]) == 1
     assert trend["points"][0]["label"] == "After Rename"
     assert trend["points"][0]["totals"]["total_tokens"] == 20
+
+
+@pytest.mark.parametrize("interval", ["hour", "day", "week"])
+@pytest.mark.parametrize("timezone", ["UTC", "Asia/Shanghai"])
+def test_ungrouped_trends_support_overview_governance_and_scoped_queries(
+    directory_http: tuple[TestClient, dict[str, Any]],
+    interval: str,
+    timezone: str,
+) -> None:
+    client, data = directory_http
+    repository = app.dependency_overrides[get_repository]()
+    now = datetime(2026, 10, 10, 12, 30, tzinfo=UTC)
+    for index, (department, tokens, domain) in enumerate(
+        (
+            (data["first"], 10, "apim"),
+            (data["second"], 20, "apim"),
+            (data["first"], 1000, "github_copilot"),
+        )
+    ):
+        repository.write_token_usage(
+            _usage_record(str(uuid4()), "test-runtime", tokens).model_copy(
+                update={
+                    "ts": now + timedelta(minutes=index),
+                    "organization_id": data["organization"]["id"],
+                    "organization": "Example",
+                    "department_id": department["id"],
+                    "department": department["name"],
+                    "usage_domain": domain,
+                }
+            )
+        )
+    params = {
+        "from": (now - timedelta(hours=1)).isoformat(),
+        "to": (now + timedelta(hours=1)).isoformat(),
+        "group_by": "none",
+        "interval": interval,
+        "timezone": timezone,
+    }
+    response = client.get("/api/v1/observability/trends", params=params)
+    assert response.status_code == 200, response.text
+    points = response.json()["points"]
+    assert len(points) == 1
+    assert points[0]["key"] == points[0]["label"] == "all"
+    assert points[0]["totals"]["total_tokens"] == 30
+    assert points[0]["totals"]["calls"] == 2
+    client.cookies.set("turnstile_session", "directory-member")
+    scoped = client.get("/api/v1/observability/trends", params=params)
+    assert scoped.status_code == 200, scoped.text
+    assert scoped.json()["points"][0]["totals"]["total_tokens"] == 10
+    outside = client.get(
+        "/api/v1/observability/trends",
+        params={**params, "department_id": data["second"]["id"]},
+    )
+    assert outside.status_code == 200, outside.text
+    assert outside.json()["points"] == []

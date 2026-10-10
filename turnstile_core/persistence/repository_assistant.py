@@ -572,7 +572,9 @@ class PostgreSqlAssistantRepositoryMixin:
         # A percentile cannot be merged across groups, so a chart of the window's own tail
         # latency per bucket needs the bucket ungrouped. Grouping by a constant gives one row
         # per bucket whose percentile is the real one.
-        id_field, name_field = ("'all'", "'all'") if group_by == "none" else fields[group_by]
+        id_field, name_field = (
+            ("'all'::text", "'all'::text") if group_by == "none" else fields[group_by]
+        )
         filter_sql, filter_parameters = self._filter_sql(filters)
         with self._connection() as connection:
             rows = connection.execute(

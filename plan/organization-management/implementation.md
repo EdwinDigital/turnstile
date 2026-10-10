@@ -39,9 +39,9 @@ P2 同步、身份绑定、投影和独立 APIM 升级代码已提交并部署�
 
 ## 本地验证
 
-- 完整回归：`1687 passed / 7 skipped`。跳过项不计作通过，新增目录真实 DB 套件未跳过。
+- 完整回归：`1694 passed / 7 skipped`。跳过项不计作通过，新增目录真实 DB 套件未跳过。
   后续策略单行表达式及独立计划版本修正通过49项专项回归，并在提交前重跑完整回归通过。
-- Ruff、mypy（235个文件）、frontend typecheck/build、diff检查通过。
+- Ruff、mypy（236个文件）、frontend typecheck/build、diff检查通过。
 - main、目录settings和directory-identity升级模板编译通过；main保留3条既有警告。
   APIM XML通过，OpenAPI lint通过并保留43条既有警告；目录schema引用遗漏已修复并单独重验。
 - 真实隔离 PostgreSQL 16+：空初始化、并发迁移重跑、不可变旧checksum、历史账务保留、
@@ -176,6 +176,20 @@ P2 同步、身份绑定、投影和独立 APIM 升级代码已提交并部署�
 
 未将静态员工归因说成动态目录已生效。Graph/identity projection始终关闭，
 person_admission_mode仍为unverified，因此线上不开放未经验证的调岗预约。
+
+## 用量查询与组件回归
+
+2026-10-10 用户截图中的总览“用量数据加载失败”和异常治理500已在真实自定义域复现。
+相同查询窗口的overview/distribution/anomalies/requests正常，仅
+`observability/trends?group_by=none`的小时/每日聚合500。真实PostgreSQL诊断为
+`array_agg(unknown) is not unique`：目录改名聚合改为最新名称array_agg时，
+未分组常量`all`未显式指定text类型。修复常量类型，不改历史用量或计费事实。
+新增真实DB/API回归覆盖hour/day/week、UTC/Asia/Shanghai、范围Member及Copilot隔离。
+
+组织管理28px按钮原使用24px lucide图标，菜单触发器被包装后出现原生边框；
+补Button尺寸/variant元数据及本模块局部样式，28px操作配14px图标、30px菜单项，
+保留键盘焦点/悬浮提示/禁用态，不改变其他模块全局尺寸。本地桌面/移动端菜单与
+编辑弹窗已用真实API验证，生产验证结果待本轮发布读回。
 
 ## 未验收与外部前置
 

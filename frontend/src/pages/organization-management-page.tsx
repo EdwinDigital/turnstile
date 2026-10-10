@@ -498,9 +498,9 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                     <td><Badge variant="outline">{person.externally_managed ? "Entra ID" : "本地"}</Badge></td>
                     <td><Badge variant={person.status === "active" && !person.source_disabled ? "secondary" : "outline"}>
                       {person.source_disabled ? "来源已停用" : statusNames[person.status]}</Badge></td>
-                    <td>{editPeople && <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm"
+                    <td>{editPeople && <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" className="directory-person-trigger"
                       aria-label={`操作 ${person.display_name}`} title="人员操作" />}><Ellipsis /></DropdownMenuTrigger>
-                      <DropdownMenuContent align="end"><DropdownMenuGroup>
+                      <DropdownMenuContent align="end" className="directory-person-menu"><DropdownMenuGroup>
                         <DropdownMenuItem onClick={() => setEditor({ kind: "person", row: person })}><Pencil />编辑</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => setAction({ person, action: "teams" })}><Users />团队成员</DropdownMenuItem>
                         {owner && <>
