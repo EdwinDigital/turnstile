@@ -77,3 +77,57 @@ passed: **1758 passed, 7 skipped**. Ruff, mypy (257 files), frontend build, XML,
 Bicep compilation and OpenAPI validation passed with existing warnings retained.
 Both local browser suites passed again. Release and deployed acceptance are recorded
 separately after execution; this preflight is not production verification.
+
+## Production Release (2026-10-11)
+
+Application commit `9cc17fa` was pushed to `origin/codex/org-people-management`
+and deployed to the existing authorized production site. All three packages use
+core digest `b392262ea8b3e5f2d2a3af6cc9b775306084e982dab59eda1c636ac3ba7947e1`.
+The actual mounted API, Telemetry and Control-plane packages were downloaded and
+compared file by file with the candidate. Functions repacking is allowed only for
+outer ZIP metadata; file hashes and runtime manifests must match.
+
+Before release, the existing three packages, complete appsettings, private deployment
+state and encryption key were backed up. The database custom dump was 479696 bytes,
+with a separately encrypted copy. Isolated restore verified 17 migrations,
+18 people, 27 units, 12 accounts, 124 usage rows and 3 budgets. All applied checksums
+matched and two no-op migration runs preserved every restored table.
+
+The compatible maintenance release stopped the three writers and paused write
+triggers. Settings what-if allowed only the three appsettings resources and no
+Delete. Two production migration runs were empty. Package readback succeeded,
+original trigger settings were restored and all three apps returned to Running.
+Telemetry and Control-plane each indexed four functions. Real Owner login and
+directory/billing preservation passed before completing the release.
+
+Production read-only validation passed for the saved report, original links,
+directory search, fixed AI FinOps navigation, deferred report fetching and
+Light/Dark desktop 1440x1000/mobile 390x844. All five usage pages passed default
+Enabled, the three archive options, multi-select, clearing and real API loading.
+Organization/member controls, exact administrator tags, budget default collapse/
+archive hiding and department scope, platform menu order and Copilot separation
+also passed. No relevant console, framework overlay or API errors remained.
+The first additional browser/audit attempts encountered transient login/navigation
+and TLS connection timeouts; read-only retries passed without redeployment.
+Early loading-state screenshots were replaced after explicit report-load assertions.
+
+Legacy API totals remain 124 requests and 31696 Tokens. UI All explicitly includes
+active and archived managed attribution, yielding 38 requests and 14243 Tokens for
+the same checked window. Unknown/historical records were retained, not deleted.
+Existing saved report snapshots and their original queries remain unchanged.
+The archive partition, organization selection union and trend/overview totals matched.
+The complete APIM fingerprint and revision remained unchanged.
+Post-smoke directory tables, account configuration and billing fingerprints matched
+the maintenance baseline; pending publication/release/billing work remained zero.
+
+Private evidence is indexed by `policy-rollout/9cc17fa`: `before` contains rollback
+packages, configuration and database backup; `journal.json`, `final`,
+`migration-proof.json`, API/browser proofs and post-smoke audit record the release.
+No credentials, database dumps or environment-specific screenshots are committed.
+No production business mutation, paid model call or real Entra synchronization was
+performed. Rollback was not deliberately exercised again in this release.
+
+For application rollback, restore the matching **before** package trio, previous core
+digest and complete settings using the same paused-trigger maintenance procedure.
+Preserve the active database directory and schema 001-017; never rerun initialization,
+backfill or activation. Production database restore requires separate approval.
