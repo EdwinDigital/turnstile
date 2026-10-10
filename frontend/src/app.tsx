@@ -1190,7 +1190,7 @@ export function App() {
         : page === "applications"
           ? "订阅"
         : page === "settings"
-          ? "设置"
+          ? "系统配置"
           : "模型管理",
     icon:
       page === "apim-native-routes"
@@ -1234,12 +1234,12 @@ export function App() {
     });
   }
   navGroups.push({
-    label: "系统管理",
+    label: "平台管理",
     items: [
-      { label: "设置", icon: Settings, page: "settings" },
       ...(selectedDataSource === "apim" && directoryCapabilities.data?.available
         ? [{ label: "组织管理", icon: Network, page: "organization-management" as Page }]
         : []),
+      { label: "系统配置", icon: Settings, page: "settings" },
     ],
   });
   const visibleNavGroups = navGroups

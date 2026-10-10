@@ -277,7 +277,7 @@ export function SettingsPage({ dataSource, onToggleSidebar }: {
       <div>
         <Button type="button" variant="ghost" size="icon-sm" className="model-mobile-sidebar-toggle"
           aria-label="切换导航栏" title="切换导航栏" onClick={onToggleSidebar}><PanelLeft size={16} /></Button>
-        <span className="smh-header-icon"><Settings size={17} /></span><h1>设置</h1>
+        <span className="smh-header-icon"><Settings size={17} /></span><h1>系统配置</h1>
       </div>
       {activePane === "assistant" && <div className="smh-header-actions settings-save-actions">
         <span role="status" className="settings-save-status">
@@ -294,7 +294,7 @@ export function SettingsPage({ dataSource, onToggleSidebar }: {
       </div>}
     </header>
     <div className="settings-toolbar">
-      <Tabs.List className="settings-tabs usage-metric-segment" aria-label="设置">
+      <Tabs.List className="settings-tabs usage-metric-segment" aria-label="系统配置">
         {dataSource === "github-copilot" && <Tabs.Tab value="copilot"><CopilotLogo size={14} />GitHub Copilot</Tabs.Tab>}
         <Tabs.Tab value="preferences"><Settings size={14} />偏好设置</Tabs.Tab>
         {dataSource === "apim" && <Tabs.Tab value="assistant"><Sparkles size={14} /><span data-no-localize>FinOps Assistant</span></Tabs.Tab>}

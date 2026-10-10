@@ -1168,6 +1168,8 @@ export const ENGLISH_CORE_PHRASES: Record<string, string> = {
   "放弃并切换": "Discard and switch",
   "运行时配置": "Runtime Configuration",
   "系统管理": "System",
+  "平台管理": "Platform Management",
+  "系统配置": "System Configuration",
   "平台设置": "Platform settings",
   "设置": "Settings",
   "偏好设置": "Preferences",
