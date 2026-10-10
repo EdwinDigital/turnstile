@@ -260,6 +260,15 @@ GitHub Copilot 继续隐藏组织管理，保留独立企业团队入口。
 
 ### 最新成员流程修正（2026-10-10）
 
+范围角色补充：在查询层返回有效 `menu_administrator_scopes`（kind、scope ID、
+organization ID、name），人员列表服务派生当前节点 `scope_menu_permission_groups` 和
+`scope_menu_administrator_scopes`；未任命时普通用户，父范围角色不自动作为下级任命。
+列表/人员弹窗只用当前节点投影。Profile 保留全局菜单并集且公开本人精确任命，
+core `is_menu_administrator`/`menu_permissions_for_scope` 和 frontend `isMenuAdministrator`
+提供统一精确匹配接口，不比较显示名称。旧显式角色字段不生成任命或数据范围。
+业务授权保留 Owner 及 department grant，每个部门能力单独映射并检查；编辑控件用同图，
+防止多个部门能力的笛卡尔并集。此修正无新 schema、不改变原任命或模型/APIM策略。
+
 最新要求覆盖本文件旧调岗/历史身份编辑设计：组织节点独占新增人员，必填名称、邮箱、
 登录密码和启用的同组织归属部门。`OrganizationPersonCreate` 使用 SecretStr 接收密码，
 共享 core scrypt 与现有认证格式保持一致；事务创建 Member、人员、primary_department、

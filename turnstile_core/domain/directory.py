@@ -29,15 +29,43 @@ class DirectoryModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class MenuAdministratorScope(DirectoryModel):
+    scope_kind: AdministratorScopeKind
+    scope_id: str
+    organization_id: str
+    scope_name: str
+
+
 class DirectoryPrincipal(DirectoryModel):
     account_id: UUID | None = None
     email: str
     role: Literal["owner", "member", "system"] = "member"
     department_ids: tuple[str, ...] | None = None
     capabilities: tuple[DirectoryCapability, ...] = ()
+    department_capabilities: dict[str, tuple[DirectoryCapability, ...]] | None = None
     permission_revision: int = 0
     menu_permission_group: MenuPermissionGroup = "user"
     menu_permission_groups: tuple[MenuPermissionGroup, ...] = ("user",)
+    menu_administrator_scopes: tuple[MenuAdministratorScope, ...] = ()
+
+    def is_menu_administrator(self, scope_kind: AdministratorScopeKind, scope_id: str) -> bool:
+        return any(
+            item.scope_kind == scope_kind and item.scope_id == scope_id
+            for item in self.menu_administrator_scopes
+        )
+
+    def menu_permissions_for_scope(
+        self, scope_kind: AdministratorScopeKind, scope_id: str
+    ) -> tuple[str, ...]:
+        scope_groups: dict[AdministratorScopeKind, MenuPermissionGroup] = {
+            "organization": "organization_admin", "department": "department_admin",
+            "team": "team_admin",
+        }
+        groups: tuple[MenuPermissionGroup, ...] = (
+            (scope_groups[scope_kind],)
+            if self.is_menu_administrator(scope_kind, scope_id) else ("user",)
+        )
+        return menu_permissions(groups, owner=self.owner)
 
     @property
     def menu_permissions(self) -> tuple[str, ...]:
@@ -58,7 +86,10 @@ class DirectoryPrincipal(DirectoryModel):
             department_id is None
             or self.department_ids is None
             or department_id not in self.department_ids
-            or capability not in self.capabilities
+            or capability not in (
+                self.department_capabilities.get(department_id, ())
+                if self.department_capabilities is not None else self.capabilities
+            )
         ):
             raise DirectoryError("scope_not_found", "Directory scope not found", 404)
 

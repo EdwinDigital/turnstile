@@ -31,7 +31,7 @@ import { useAuth } from "../providers/auth-provider"
 import { useTimezone } from "../providers/timezone-provider"
 import { getIntlLocale } from "../locales/index"
 import { FINOPS_NAVIGATE_EVENT } from "../lib/navigation"
-import { menuPermissionGroupNames, type MenuPermissionGroup } from "../api/auth"
+import { menuPermissionGroupNames, type MenuAdministratorScope, type MenuPermissionGroup } from "../api/auth"
 
 const statusNames: Record<DirectoryStatus, string> = { active: "启用", inactive: "停用", archived: "已归档" }
 const peopleColumnMinWidths = [160, 160, 200, 160, 80, 100, 60] as const
@@ -49,11 +49,16 @@ function FormInput({ id, label, children }: { id: string; label: string; childre
   return <Field><FieldLabel htmlFor={id}>{label}</FieldLabel>{children}</Field>
 }
 
-function MenuGroupTags({ groups }: { groups: MenuPermissionGroup[] }) {
+function MenuGroupTags({ groups, scopes = [] }: {
+  groups: MenuPermissionGroup[]; scopes?: MenuAdministratorScope[]
+}) {
   const admins = groups.filter((group) => group !== "user")
   return <div className="directory-permission-tags">
     {(admins.length ? admins : ["user"] as MenuPermissionGroup[]).map((group) =>
-      <Badge key={group} variant="outline">{menuPermissionGroupNames[group]}</Badge>)}
+      <Badge key={group} variant="outline"
+        title={scopes.filter((scope) => `${scope.scope_kind}_admin` === group).map((scope) => scope.scope_name).join("、") || undefined}>
+        {menuPermissionGroupNames[group]}
+      </Badge>)}
   </div>
 }
 
@@ -72,7 +77,7 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
   const [password, setPassword] = useState("")
   const [primaryDepartmentId, setPrimaryDepartmentId] = useState("")
   const [employee, setEmployee] = useState(person?.employee_number ?? "")
-  const menuGroups = person?.menu_permission_groups ?? [person?.menu_permission_group ?? "user"]
+  const menuGroups = person?.scope_menu_permission_groups ?? ["user"]
   const [description, setDescription] = useState(entity?.description ?? "")
   const [status, setStatus] = useState<DirectoryStatus>(entity?.status ?? "active")
   const [dirty, setDirty] = useState(false)
@@ -147,7 +152,7 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
             <FormInput id="directory-employee" label="员工号"><Input id="directory-employee" value={employee}
               maxLength={64} onChange={(event) => change(setEmployee)(event.target.value)} /></FormInput>
             <Field><FieldLabel>菜单权限组</FieldLabel>
-              <MenuGroupTags groups={menuGroups} />
+              <MenuGroupTags groups={menuGroups} scopes={person?.scope_menu_administrator_scopes} />
             </Field>
           </> : <>
             <FormInput id="directory-description" label="描述"><Textarea id="directory-description"
@@ -432,7 +437,9 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
     ])
   }
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["directory"] })
-  const editPeople = owner || capabilities?.capabilities.includes("directory.edit_people")
+  const localCapabilities = capabilities?.department_capabilities?.[departmentId] ?? []
+  const editPeople = owner || localCapabilities.includes("directory.edit_people")
+  const editTeams = owner || localCapabilities.includes("directory.edit_teams")
   const selectOrganization = (id: string) => {
     if (confirmDirectoryLeave()) { setOrganizationId(id); setUnitId(""); setTab("people") }
   }
@@ -476,11 +483,11 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
               <Badge variant="outline">{statusNames[selectedUnit?.status ?? organization.status]}</Badge>
               <small data-no-localize>{selectedUnit?.code ?? organization.code}</small>
             </div><div>
-              {(owner || selectedUnit?.kind === "team") && <Button variant="outline" size="sm" onClick={() => setEditor({
+              {(owner || selectedUnit?.kind === "team" && editTeams) && <Button variant="outline" size="sm" onClick={() => setEditor({
                 kind: selectedUnit?.kind ?? "organization", row: selectedUnit ?? organization,
               })}><Pencil data-icon="inline-start" />编辑</Button>}
               {owner && !selectedUnit && <Button variant="outline" size="sm" onClick={() => setEditor({ kind: "department" })}><Plus data-icon="inline-start" />新增部门</Button>}
-              {selectedUnit?.kind === "department" && (owner || capabilities?.capabilities.includes("directory.edit_teams")) &&
+              {selectedUnit?.kind === "department" && editTeams &&
                 <Button variant="outline" size="sm" onClick={() => setEditor({ kind: "team" })}><Plus data-icon="inline-start" />新增团队</Button>}
             </div></div>
             <Tabs value={tab} onValueChange={(value) => { if (confirmDirectoryLeave()) setTab(String(value)) }}>
@@ -508,12 +515,13 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                     <td><strong data-no-localize>{person.display_name}</strong><small data-no-localize>{person.governance_user_id}</small>
                       {person.employee_number && <small data-no-localize>{person.employee_number}</small>}</td>
                     <td><span data-no-localize>{person.department_name ?? "--"}</span><small data-no-localize>{person.team_ids.map((id) => units.data?.find((unit) => unit.id === id)?.name ?? id).join("、") || "--"}</small></td>
-                    <td><MenuGroupTags groups={person.menu_permission_groups ?? [person.menu_permission_group ?? "user"]} /></td>
+                    <td><MenuGroupTags groups={person.scope_menu_permission_groups ?? ["user"]}
+                      scopes={person.scope_menu_administrator_scopes} /></td>
                     <td><span data-no-localize>{person.account_email ?? "--"}</span><small>{person.app_user_id ? person.account_enabled ? "启用" : "停用" : "未关联"}</small></td>
                     <td><Badge variant="outline">{person.externally_managed ? "Entra ID" : "本地"}</Badge></td>
                     <td><Badge variant={person.status === "active" && !person.source_disabled ? "secondary" : "outline"}>
                       {person.source_disabled ? "来源已停用" : statusNames[person.status]}</Badge></td>
-                    <td>{editPeople && <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" className="directory-person-trigger"
+                    <td>{(owner || (person.department_id && capabilities?.department_capabilities?.[person.department_id]?.includes("directory.edit_people"))) && <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" className="directory-person-trigger"
                       aria-label={`操作 ${person.display_name}`} title="人员操作" />}><Ellipsis /></DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="directory-person-menu"><DropdownMenuGroup>
                         <DropdownMenuItem onClick={() => setEditor({ kind: "person", row: person })}><Pencil />编辑</DropdownMenuItem>

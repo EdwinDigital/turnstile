@@ -35,6 +35,7 @@ import httpx
 import jwt
 from jwt import PyJWKClient
 
+from turnstile_core.domain.directory import MenuAdministratorScope
 from turnstile_core.services.passwords import (
     hash_password as _hash_password,
 )
@@ -64,6 +65,7 @@ class SessionIdentity:
     directory_person_active: bool | None = None
     menu_permission_group: str = "user"
     menu_permission_groups: tuple[str, ...] = ("user",)
+    menu_administrator_scopes: tuple[MenuAdministratorScope, ...] = ()
     menu_permissions: tuple[str, ...] = ()
 
     @property

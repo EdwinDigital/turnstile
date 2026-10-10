@@ -289,10 +289,19 @@ def test_scoped_admin_endpoints_update_labels_and_do_not_alias_team_or_create_ow
     assert set(person["menu_permission_groups"]) == {
         "organization_admin", "department_admin", "team_admin",
     }
+    scoped = client.get(f"{root}/people", params={"team_id": team["id"]}).json()["items"][0]
+    assert scoped["scope_menu_permission_groups"] == ["team_admin"]
+    assert scoped["scope_menu_administrator_scopes"][0]["scope_id"] == team["id"]
     client.cookies.set("turnstile_session", "directory-member")
     profile = client.get("/api/v1/auth/me").json()
     assert set(profile["menu_permission_groups"]) == set(person["menu_permission_groups"])
     assert profile["role"] == "member"
+    assert {
+        (item["scope_kind"], item["scope_id"]) for item in profile["menu_administrator_scopes"]
+    } == {
+        ("organization", data["organization"]["id"]),
+        ("department", data["first"]["id"]), ("team", team["id"]),
+    }
     assert client.get(f"{root}/accounts").status_code == 403
     assert client.get(
         f"{root}/menu-administrators/organization/{data['organization']['id']}"

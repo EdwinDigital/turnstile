@@ -27,11 +27,15 @@ def test_menu_gates_cover_routes_search_prefetch_and_floating_entry_points() -> 
     assert "菜单权限组" in person and 'label="岗位"' not in person
     assert "job_title:" not in person
     assert 'MenuSelect label="菜单权限组"' not in person
-    assert "<MenuGroupTags groups={person.menu_permission_groups" in person
+    assert "<MenuGroupTags groups={person.scope_menu_permission_groups" in person
     editor = person.split("function DirectoryEditor(", 1)[1].split(
         "function PersonActionDialog(", 1
     )[0]
-    assert "<MenuGroupTags groups={menuGroups} />" in editor
+    assert "const menuGroups = person?.scope_menu_permission_groups" in editor
+    assert (
+        "<MenuGroupTags groups={menuGroups} scopes={person?.scope_menu_administrator_scopes}"
+        in editor
+    )
     assert "setMenuGroups" not in editor
     assert "canAssignMenus" not in person
     assert "menu_permission_groups:" not in editor
@@ -47,6 +51,8 @@ def test_scope_admin_configuration_is_present_at_all_levels_without_parent_alias
     assert 'value="administrators">管理员' in person
     assert 'kind={selectedUnit?.kind ?? "organization"}' in person
     assert "scope={selectedUnit ?? organization}" in person
+    assert "capabilities?.department_capabilities?.[departmentId]" in person
+    assert "capabilities?.capabilities.includes" not in person
     assert "directoryApi.menuAdministrators(kind, scope.id)" in person
     assert "directoryApi.setMenuAdministrators(kind, scope.id, value)" in person
     assert '...(kind === "team" ? { team_id: scope.id } : {})' in person

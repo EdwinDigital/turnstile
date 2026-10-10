@@ -5,7 +5,7 @@ def test_member_creation_and_selection_are_separate_and_retired_tabs_are_absent(
     source = (FRONTEND_SOURCE / "pages/organization-management-page.tsx").read_text()
     assert '!selectedUnit && owner && <Button' in source
     assert 'selectedUnit && editPeople && <Button' in source
-    assert 'selectedUnit?.kind === "department" &&' in source
+    assert 'selectedUnit?.kind === "department" && editTeams' in source
     assert 'available_unit_id: unit.id' in source
     assert 'directoryApi.addMembers(unit.id' in source
     assert "organization_id: organizationId, display_name: name, email, password" in source

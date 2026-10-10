@@ -89,3 +89,20 @@ schemas:
         items:
           type: string
         description: Server-derived menu union, not APIM or business API authorization.
+      menu_administrator_scopes:
+        type: array
+        default: []
+        description: Effective exact administrator appointments. Never infer scope from the global menu group union.
+        items:
+          type: object
+          required: [scope_kind, scope_id, organization_id, scope_name]
+          properties:
+            scope_kind:
+              type: string
+              enum: [organization, department, team]
+            scope_id:
+              type: string
+            organization_id:
+              type: string
+            scope_name:
+              type: string

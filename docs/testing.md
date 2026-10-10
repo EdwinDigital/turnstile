@@ -56,6 +56,11 @@ appointments or altering APIM, model access or historical billing. Verify old mi
 deduplication, rerun safety, real team-member validation, organization configuration, revocation,
 Owner/Member protection and consistent personnel/profile labels. Department appointments keep the
 existing department-scope contract through the legacy grant projection; there is no second UI.
+Scope matching regression must cover one person in two teams (including identical names),
+administrator in only one, unrelated departments/organizations, exact kind/ID matching,
+revocation and disabled memberships. Profile menu unions remain compatible but must not imply
+resource authority. Check selected-node personnel/editor tags, exact profile scope fields,
+per-department capability isolation and unchanged Owner/model/budget controls.
 
 Migration `016_organization_members` backfills explicit organization ownership from current
 primary departments, retains all historical memberships and retires pending transfer plans.

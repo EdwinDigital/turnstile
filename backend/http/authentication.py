@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from turnstile_core.config import Settings, get_settings
+from turnstile_core.domain.directory import MenuAdministratorScope
 from turnstile_core.domain.menu_permissions import MenuPermissionGroup, menu_permissions
 from turnstile_core.persistence.auth_store import AuthStore, ExternalIdentityConflict
 from turnstile_core.services.directory_catalog import directory_store
@@ -65,6 +66,7 @@ class Profile(BaseModel):
     menu_permission_group: str = "user"
     menu_permission_groups: list[str] = Field(default_factory=lambda: ["user"])
     menu_permissions: list[str] = Field(default_factory=list)
+    menu_administrator_scopes: list[MenuAdministratorScope] = Field(default_factory=list)
 
 
 def _issue(
@@ -104,6 +106,7 @@ def _issue(
     governance_user_id = None
     menu_group: MenuPermissionGroup = "user"
     menu_groups: tuple[MenuPermissionGroup, ...] = ("user",)
+    menu_scopes: tuple[MenuAdministratorScope, ...] = ()
     menus = menu_permissions(owner=user["role"] == "owner")
     if settings.directory_source == "database" and settings.database_url:
         directory = directory_store(settings.database_url)
@@ -115,6 +118,7 @@ def _issue(
         permission_revision = principal.permission_revision
         menu_group = principal.menu_permission_group
         menu_groups = principal.menu_permission_groups
+        menu_scopes = principal.menu_administrator_scopes
         menus = principal.menu_permissions
         person = directory.linked_person(UUID(str(user["id"])))
         governance_user_id = str(person["governance_user_id"]) if person else None
@@ -135,6 +139,7 @@ def _issue(
         governance_user_id=governance_user_id,
         menu_permission_group=menu_group,
         menu_permission_groups=list(menu_groups),
+        menu_administrator_scopes=list(menu_scopes),
         menu_permissions=list(menus),
     )
 
@@ -202,6 +207,7 @@ def whoami(identity: CurrentSession, response: Response) -> Profile:
         governance_user_id=identity.governance_user_id,
         menu_permission_group=identity.menu_permission_group,
         menu_permission_groups=list(identity.menu_permission_groups),
+        menu_administrator_scopes=list(identity.menu_administrator_scopes),
         menu_permissions=list(identity.menu_permissions),
     )
 

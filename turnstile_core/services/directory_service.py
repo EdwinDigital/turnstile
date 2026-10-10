@@ -64,6 +64,7 @@ class DirectoryService:
                 else list(principal.capabilities)
             ),
             "department_ids": list(principal.department_ids or ()),
+            "department_capabilities": principal.department_capabilities or {},
             "permission_revision": state["permission_revision"],
             "directory_version": state["active_version"],
             "protocol_version": state["protocol_version"],
@@ -392,6 +393,19 @@ class DirectoryService:
                 total = int(first[0]["_total_count"]) if first else 0
         for row in rows:
             row.pop("_total_count", None)
+            # Global menu availability is not an appointment in the node being viewed.
+            context_kind = "team" if team_id else "department" if department_id else "organization"
+            context_id = team_id or department_id or organization_id
+            matching = [
+                item for item in row["menu_administrator_scopes"]
+                if item["scope_kind"] == context_kind and item["scope_id"] == context_id
+            ]
+            row["scope_menu_permission_groups"] = sorted({
+                f"{item['scope_kind']}_admin" for item in matching
+            }) or ["user"]
+            row["scope_menu_administrator_scopes"] = matching
+            if not principal.owner:
+                row["menu_administrator_scopes"] = matching
         return DirectoryPage(
             items=json_value(rows),
             total=total,

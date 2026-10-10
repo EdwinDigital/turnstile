@@ -37,6 +37,13 @@ Local `user`, `organization_admin`, `department_admin` and `team_admin` groups c
 application navigation only. Administrator groups can coexist and menus are their union.
 API `menu_permission_groups` is the effective appointment projection; singular/explicit old
 personnel fields are retained for compatibility, not a second administrator configuration UI.
+It is a navigation union, not a current-resource administrator check. Resource-context role
+matching must compare effective `menu_administrator_scopes.scope_kind` and `.scope_id`, never
+names, parent membership or a bare global role. Personnel labels use the selected-node
+`scope_menu_permission_groups`; organization/department/team appointments are not aliases.
+Login/profile expose exact appointments to support future scoped menu decisions; all business
+APIs still enforce their existing authorization. Department capabilities are matched per
+department, so an edit grant in one scope cannot authorize edits in a read-only scope.
 Unassigned and unlinked accounts default to `user`; active
 linked people supply the local group. Disabled/source-disabled people lose its menus.
 Owner independently retains all applicable menus and is the only role allowed to change groups.

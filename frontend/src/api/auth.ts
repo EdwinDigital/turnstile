@@ -2,6 +2,12 @@ import { apiUrl, ApiError } from "./client"
 
 export type SignInMethod = "password" | "entra"
 export type MenuPermissionGroup = "user" | "organization_admin" | "department_admin" | "team_admin"
+export type MenuAdministratorScope = {
+  scope_kind: "organization" | "department" | "team"
+  scope_id: string
+  organization_id: string
+  scope_name: string
+}
 export const menuPermissionGroupNames: Record<MenuPermissionGroup, string> = {
   user: "普通用户", organization_admin: "组织管理员", department_admin: "部门管理员", team_admin: "团队管理员",
 }
@@ -18,9 +24,18 @@ export type AuthUser = {
   governance_user_id?: string | null
   menu_permission_group?: MenuPermissionGroup
   menu_permission_groups?: MenuPermissionGroup[]
+  menu_administrator_scopes?: MenuAdministratorScope[]
   menu_permissions?: string[]
   /** Absent only while a newly built frontend is talking to a pre-expiry-field API. */
   session_expires_at?: string
+}
+
+export function isMenuAdministrator(
+  user: AuthUser | null | undefined, scopeKind: MenuAdministratorScope["scope_kind"], scopeId: string,
+): boolean {
+  return user?.menu_administrator_scopes?.some(
+    (scope) => scope.scope_kind === scopeKind && scope.scope_id === scopeId,
+  ) ?? false
 }
 
 async function readProfile(): Promise<AuthUser | null> {

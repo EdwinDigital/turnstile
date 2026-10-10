@@ -1,5 +1,5 @@
 import { apiUrl, ApiError, SESSION_EXPIRED_EVENT } from "../../../api/client"
-import type { MenuPermissionGroup } from "../../../api/auth"
+import type { MenuAdministratorScope, MenuPermissionGroup } from "../../../api/auth"
 
 export type DirectoryStatus = "active" | "inactive" | "archived"
 export type DirectoryCapabilities = {
@@ -9,6 +9,7 @@ export type DirectoryCapabilities = {
   can_manage_connections: boolean
   capabilities: string[]
   department_ids: string[]
+  department_capabilities?: Record<string, string[]>
   permission_revision: number
   directory_version: number
   protocol_version: number
@@ -32,6 +33,9 @@ export type DirectoryPerson = {
   employee_number: string | null; job_title: string; status: DirectoryStatus
   menu_permission_group: MenuPermissionGroup
   menu_permission_groups: MenuPermissionGroup[]
+  scope_menu_permission_groups?: MenuPermissionGroup[]
+  menu_administrator_scopes?: MenuAdministratorScope[]
+  scope_menu_administrator_scopes?: MenuAdministratorScope[]
   manual_disabled: boolean; revision: number; department_id: string | null
   department_name: string | null; organization_id: string | null; team_ids: string[]
   manual_team_ids: string[]; source_team_ids: string[]

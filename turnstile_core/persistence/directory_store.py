@@ -14,7 +14,12 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from ..domain.directory import DIRECTORY_PROTOCOL_VERSION, DirectoryError, DirectoryPrincipal
+from ..domain.directory import (
+    DIRECTORY_PROTOCOL_VERSION,
+    DirectoryError,
+    DirectoryPrincipal,
+    MenuAdministratorScope,
+)
 from ..domain.menu_permissions import MenuPermissionGroup
 from ..domain.models import EnterpriseEntity, EnterpriseEntityCatalog
 
@@ -150,6 +155,10 @@ class DirectoryStore:
                     menu_permission_group=cast(
                         MenuPermissionGroup, person["menu_permission_group"] if person else "user"
                     ),
+                    menu_administrator_scopes=(
+                        tuple(MenuAdministratorScope.model_validate(item)
+                              for item in person["menu_administrator_scopes"]) if person else ()
+                    ),
                 )
             subject = connection.execute(
                 "SELECT 1 FROM directory_department_grant WHERE app_user_id = %s LIMIT 1",
@@ -181,6 +190,13 @@ class DirectoryStore:
             if subject
             else None,
             capabilities=tuple(sorted({item for row in grants for item in row["capabilities"]})),
+            department_capabilities={
+                department_id: tuple(sorted({
+                    capability for row in grants if row["department_id"] == department_id
+                    for capability in row["capabilities"]
+                }))
+                for department_id in {row["department_id"] for row in grants}
+            },
             permission_revision=state["permission_revision"],
             menu_permission_group=cast(
                 MenuPermissionGroup, person["menu_permission_group"] if person else "user"
@@ -189,6 +205,10 @@ class DirectoryStore:
                 cast(list[MenuPermissionGroup], person["menu_permission_groups"])
                 if person
                 else ["user"]
+            ),
+            menu_administrator_scopes=(
+                tuple(MenuAdministratorScope.model_validate(item)
+                      for item in person["menu_administrator_scopes"]) if person else ()
             ),
         )
 
@@ -403,7 +423,8 @@ class DirectoryStore:
                           p.menu_permission_groups AS assigned_menu_permission_groups,
                           COALESCE(menu_groups.ids, ARRAY['user']::text[])
                             AS menu_permission_groups,
-                          COALESCE(menu_groups.ids[1], 'user') AS menu_permission_group
+                          COALESCE(menu_groups.ids[1], 'user') AS menu_permission_group,
+                          COALESCE(menu_scopes.items, '[]'::jsonb) AS menu_administrator_scopes
                    FROM directory_person p
                    LEFT JOIN LATERAL (
                      SELECT m.unit_id FROM directory_membership m
@@ -422,6 +443,18 @@ class DirectoryStore:
                        WHERE g.app_user_id=l.app_user_id
                      ) appointments WHERE menu_group <> 'user'
                    ) menu_groups ON TRUE
+                   LEFT JOIN LATERAL (
+                     SELECT jsonb_agg(jsonb_build_object(
+                       'scope_kind', g.scope_kind,
+                       'scope_id', COALESCE(g.unit_id,g.organization_id),
+                       'organization_id', g.organization_id,
+                       'scope_name', COALESCE(target.name,org.name)
+                     ) ORDER BY g.scope_kind,COALESCE(g.unit_id,g.organization_id)) AS items
+                     FROM directory_effective_menu_administrator g
+                     JOIN directory_organization org ON org.id=g.organization_id
+                     LEFT JOIN directory_unit target ON target.id=g.unit_id
+                     WHERE g.app_user_id=l.app_user_id
+                   ) menu_scopes ON TRUE
                    LEFT JOIN LATERAL (
                      SELECT array_agg(DISTINCT m.unit_id ORDER BY m.unit_id) AS ids,
                        array_agg(DISTINCT m.unit_id ORDER BY m.unit_id)

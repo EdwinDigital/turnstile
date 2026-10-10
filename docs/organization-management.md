@@ -51,6 +51,26 @@ Administrator-only changes do not create directory gateway-projection work.
 
 ### Scoped Administrator Compatibility
 
+Personnel tables and their read-only editor display `scope_menu_permission_groups` for the
+selected node, not the global group union. Matching requires both `scope_kind` and stable
+`scope_id`: a Test Team administrator is an ordinary member in Team Example unless separately
+appointed there. An organization/department appointment is not silently inherited as a team
+appointment. `scope_menu_administrator_scopes` identifies the exact matching assignments;
+scope names are display/tooltip data, never authorization keys.
+
+Login/current-profile responses retain `menu_permission_groups`/`menu_permissions` as global
+navigation availability and expose effective `menu_administrator_scopes` with kind, ID,
+organization ID and display name. Use exact scope matching for resource-context menus;
+never authorize a business operation by `team_admin`/`department_admin` text or menu visibility.
+Legacy unscoped person group fields remain navigation compatibility only and do not invent
+appointments. Backend `menu_permissions_for_scope` and frontend `isMenuAdministrator` use
+exact appointments; Owner bypass is explicit and independent.
+
+Department capabilities are checked from a per-department map, not the union across grants.
+Current-node edit controls use that same map. Appointment-only organization/team roles do not
+grant Owner operations, department data capabilities, budgets or model/APIM admission.
+This fix requires no new schema or appointment data rewrite.
+
 `015_scoped_menu_administrators` adds scoped appointments and a validated effective view.
 Personnel and current-profile group arrays are server-derived from those appointments, with
 pre-existing explicit legacy menu groups retained for compatibility. Owner retains all menus
