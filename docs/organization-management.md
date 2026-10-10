@@ -78,6 +78,12 @@ three `applications` entries named `api`, `telemetry`, `control-plane`. Each ent
 the matching `configured_core_digest`, and the exact `package_sha256`. Do not manufacture
 evidence from intended settings without verifying the deployed packages and Azure state.
 
+When `uv` wheel downloads fail, the packager's pip fallback requires an existing Python
+3.11+ interpreter with pip. Set `TURNSTILE_BUILD_PYTHON` when the default interpreter has
+no pip; it installs only into the private staged target and still checks every package
+against `uv.lock`. An older host interpreter may incorrectly evaluate dependency markers
+for the Linux/Python 3.11 target and is not accepted.
+
 Plans bind the database instance, migration checksums, code digest, legacy source digest and
 billing/account baseline. Drift requires new investigation; never edit the stored baseline to
 make verification pass. Unknown historical identities remain candidates, not guessed employees.
