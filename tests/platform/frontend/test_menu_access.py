@@ -20,8 +20,10 @@ def test_menu_gates_cover_routes_search_prefetch_and_floating_entry_points() -> 
     assert "normalizePageForAccess(next, page, user)" in source
     assert "visibleNavGroups.map" in source
     assert ".filter((item) => canAccessMenu(user, item.id))" in source
-    for page in ("assistant", "pinned-report", "finops-governance"):
+    for page in ("assistant", "finops-governance"):
         assert f'canAccessMenu(user, "{page}")' in source
+    assert '{ label: "报表中心", icon: FileSpreadsheet, page: "pinned-report" as Page }' in source
+    assert "group.items.filter((item) => canAccessMenu(user, item.page))" in source
     assert 'if (!canAccessMenu(user, nextPage)) return' in source
     person = (FRONTEND_SOURCE / "pages/organization-management-page.tsx").read_text()
     assert "菜单权限组" in person and 'label="岗位"' not in person

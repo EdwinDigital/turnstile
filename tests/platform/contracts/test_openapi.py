@@ -95,7 +95,7 @@ def test_openapi_root_is_a_small_domain_index() -> None:
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
     assert len(paths) == 117
-    assert len(schemas) == 214
+    assert len(schemas) == 216
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -127,6 +127,29 @@ def test_user_settings_contract_matches_served_self_service_routes() -> None:
     assert schemas["PasswordUpdate"]["additionalProperties"] is False
     passwords = cast(dict[str, dict[str, object]], schemas["PasswordUpdate"]["properties"])
     assert all(value["writeOnly"] for value in passwords.values())
+
+
+def test_usage_query_contract_exposes_multiselect_and_distinct_directory_states() -> None:
+    operation = cast(
+        dict[str, object], _documented_paths()["/api/v1/enterprise/query-entities"]["get"],
+    )
+    parameters = cast(list[dict[str, object]], operation["parameters"])
+    repeated = [item for item in parameters if item.get("name") in {
+        "organization_id", "department_id", "user_id", "directory_status",
+    }]
+    assert len(repeated) == 4
+    assert all(item["explode"] is True for item in repeated)
+    assert all(cast(dict[str, object], item["schema"])["type"] == "array" for item in repeated)
+    entity = cast(
+        dict[str, dict[str, object]], _documented_schemas()["UsageQueryEntity"]["properties"],
+    )
+    assert set(cast(list[str], entity["directory_status"]["enum"])) == {
+        "active", "archived", "historical", "unattributed",
+    }
+    generated = app.openapi()["paths"]["/api/v1/observability/requests"]["get"]["parameters"]
+    assert all(any(row["name"] == field for row in generated) for field in (
+        "organization_id", "department_id", "agent_id", "user_id", "directory_status",
+    ))
 
 
 def test_directory_contract_matches_served_routes_and_generated_dtos() -> None:

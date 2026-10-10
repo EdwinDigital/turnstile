@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time as clock
 from collections.abc import Mapping, Sequence
@@ -16,11 +17,11 @@ from ..domain.application_access import UsageApplicationAttribution
 from ..domain.enterprise import historical_entity_catalog
 from ..domain.models import (
     ApimCacheReadBucket,
-    EnterpriseEntityCatalog,
     ModelIdentity,
     ModelPrice,
     ReconciledUsage,
     TokenUsageRecord,
+    UsageQueryEntityCatalog,
 )
 from .personal_usage import PostgreSqlPersonalUsageRepositoryMixin
 from .repository_applications import PostgreSqlApplicationRepositoryMixin
@@ -749,6 +750,24 @@ class PostgreSqlOpsDbProxy(
         if filters.allowed_department_ids is not None:
             clauses.append(f"{alias}.department_id = ANY(%s)")
             parameters.append(list(filters.allowed_department_ids))
+        if filters.directory_scope is not None:
+            scope = filters.directory_scope
+            clauses.append(
+                f"""(CASE
+                  WHEN {alias}.organization_id='unattributed'
+                    OR {alias}.department_id='unattributed' THEN 'unattributed'
+                  WHEN {alias}.organization_id=ANY(%s) OR {alias}.department_id=ANY(%s)
+                    OR {alias}.user_id=ANY(%s) THEN 'archived'
+                  WHEN {alias}.organization_id=ANY(%s)
+                    AND (%s::jsonb ->> {alias}.department_id)={alias}.organization_id
+                    THEN 'active'
+                  ELSE 'historical' END)=ANY(%s)"""
+            )
+            parameters.extend([
+                list(scope.archived_organizations), list(scope.archived_departments),
+                list(scope.archived_users), list(scope.active_organizations),
+                json.dumps(dict(scope.active_departments)), list(scope.statuses),
+            ])
         for column, value in (
             ("organization_id", filters.organization_id),
             ("department_id", filters.department_id),
@@ -1028,13 +1047,14 @@ class PostgreSqlOpsDbProxy(
         from_: datetime,
         to: datetime,
         filters: UsageFilters,
-    ) -> EnterpriseEntityCatalog:
+    ) -> UsageQueryEntityCatalog:
         filter_sql, parameters = self._filter_sql(filters)
         with self._connection() as connection:
             rows = connection.execute(
-                f"""SELECT DISTINCT ON (dimension.scope_type,dimension.scope_id)
+                f"""SELECT DISTINCT ON (dimension.scope_type,dimension.scope_id,
+                                         dimension.parent_scope_id)
                       dimension.scope_type,dimension.scope_id,dimension.scope_name,
-                      dimension.parent_scope_id
+                      dimension.parent_scope_id,usage.ts AS observed_at,usage.id AS observation_id
                     FROM token_usage usage CROSS JOIN LATERAL (VALUES
                       ('organization',usage.organization_id,usage.organization,NULL::text),
                       ('department',usage.department_id,usage.department,usage.organization_id),
@@ -1043,10 +1063,13 @@ class PostgreSqlOpsDbProxy(
                       ('user',usage.user_id,usage.user_ref,usage.department_id)
                     ) dimension(scope_type,scope_id,scope_name,parent_scope_id)
                     WHERE usage.ts>=%s AND usage.ts<%s{filter_sql}
-                    ORDER BY dimension.scope_type,dimension.scope_id,usage.ts DESC,usage.id DESC""",
+                    ORDER BY dimension.scope_type,dimension.scope_id,dimension.parent_scope_id,
+                             usage.ts DESC,usage.id DESC""",
                 [from_, to, *parameters],
             ).fetchall()
-        return historical_entity_catalog(rows)
+        return historical_entity_catalog(sorted(
+            rows, key=lambda row: (row["observed_at"], row["observation_id"]), reverse=True,
+        ))
 
     def observed_users(self) -> Sequence[dict[str, Any]]:
         """People who actually called the gateway, newest attribution wins.

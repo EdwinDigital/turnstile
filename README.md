@@ -55,7 +55,7 @@ Turnstile is a self-hosted control plane for governed AI model access. It combin
 - Versioned gateway releases, integrity checks, rollback, and protected releases
 - Owner-only application subscription provisioning and key management
 - Password-based and Microsoft Entra authentication
-- FinOps Assistant and report collections grounded in stored telemetry
+- AI FinOps with a FinOps Assistant and a directory-based Report Center grounded in stored telemetry ([design](plan/ai-finops/design.md))
 - GitHub Copilot usage and governance integration (in active development)
 
 > [!WARNING]

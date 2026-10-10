@@ -36,7 +36,6 @@ import {
   Network,
   PanelLeft,
   PanelLeftClose,
-  Pin,
   Plus,
   Search,
   Settings,
@@ -58,12 +57,9 @@ import { dataSource, usageWindow } from "./data-sources/apim/api";
 import {
   finopsQueries,
 } from "./data-sources/apim/queries";
-import { assistantApi } from "./components/assistant/api";
-import { pinnedChartsKey, pinnedChartsQuery } from "./components/assistant/queries";
-import type { PinnedReport } from "./components/assistant/types";
 import { AssistantPanel } from "./components/assistant/assistant-panel";
 import { AssistantPage } from "./pages/assistant-page";
-import { PinnedReportPage } from "./pages/pinned-report-page";
+import { ReportCenterPage } from "./pages/report-center-page";
 import { Button } from "./components/ui/button";
 import {
   DropdownMenu,
@@ -873,7 +869,6 @@ export function App() {
       directoryCapabilities.data.permission_revision !== (user?.directory_permission_revision ?? 0)
     ) void refreshProfile();
   }, [directoryCapabilities.data?.permission_revision, user?.directory_permission_revision, refreshProfile]);
-  const assistantOwner = user?.email ?? null;
   const [requestedPage, setPage] = useState<Page>(() =>
     normalizePageForSource(selectedDataSource, pageFromUrl()));
   const page = normalizePageForAccess(selectedDataSource, requestedPage, user);
@@ -942,9 +937,6 @@ export function App() {
     refetchInterval: 5 * 60_000,
   });
   const anomalyCount = anomalyQuery.data?.length ?? 0;
-  const [pinnedChartId, setPinnedChartId] = useState(
-    () => new URLSearchParams(window.location.search).get("chart"),
-  );
   const [assistantConversationId, setAssistantConversationId] = useState(
     () => new URLSearchParams(window.location.search).get("conversation"),
   );
@@ -957,14 +949,6 @@ export function App() {
     if (page === "gateway-releases") return;
     setGatewayReleaseDrawerOpen(false);
   }, [page]);
-  const pinnedCharts = useQuery({
-    ...pinnedChartsQuery(assistantOwner),
-    enabled: selectedDataSource === "apim" && canAccessMenu(user, "pinned-report") && page !== "user-settings" && Boolean(assistantOwner),
-  });
-  // Open by default, matching SmartHive's `<Collapsible defaultOpen>`. Not persisted for
-  // the same reason it is not there: the group is small and re-expanding is one click,
-  // whereas a remembered collapse can hide reports a person forgot they had.
-  const [pinnedOpen, setPinnedOpen] = useState(true);
   const prefetchNavigation = (nextPage: Page) => {
     if (!canAccessMenu(user, nextPage)) return;
     if (nextPage === "user-settings") return;
@@ -1146,28 +1130,6 @@ export function App() {
     else url.searchParams.delete("conversation");
     window.history.replaceState(null, "", url);
   };
-  const openPinnedReport = (chartId: string) => {
-    if (!canAccessMenu(user, "pinned-report")) return;
-    setPinnedChartId(chartId);
-    setPage("pinned-report");
-    const url = new URL(window.location.href);
-    url.searchParams.set("page", "pinned-report");
-    url.searchParams.set("chart", chartId);
-    window.history.replaceState(null, "", url);
-  };
-  const forgetPinnedReport = (id: string) => {
-    // Removing the row we just deleted is exact, so invalidating and paying for a round
-    // trip to be told the same thing would only add a spinner to a settled outcome.
-    queryClient.setQueryData(pinnedChartsKey(assistantOwner ?? ""), (current: PinnedReport[] | undefined) =>
-      current?.filter((item) => item.id !== id));
-    // Deleting the report that is currently open would leave the page describing its
-    // own absence, so the reader is moved off it rather than left staring at that.
-    if (page === "pinned-report" && pinnedChartId === id) navigatePage("finops-overview");
-  };
-  const deletePinnedReport = useMutation({
-    mutationFn: (id: string) => assistantApi.unpin(id),
-    onSuccess: (_result, id) => forgetPinnedReport(id),
-  });
   useEffect(() => {
     const handleCreateInvocationShortcut = (event: KeyboardEvent) => {
       if (selectedDataSource !== "apim" || !canAccessMenu(user, "finops-invoke")) return;
@@ -1218,6 +1180,15 @@ export function App() {
   };
   const navGroups: NavGroup[] = [
     {
+      label: "AI FinOps",
+      items: [
+        { label: "FinOps助手", icon: Sparkles, page: "assistant" },
+        ...(selectedDataSource === "apim"
+          ? [{ label: "报表中心", icon: FileSpreadsheet, page: "pinned-report" as Page }]
+          : []),
+      ],
+    },
+    {
       label: "AI 用量治理",
       items: sourcePages.map((item) => ({ label: item.label, icon: item.icon, page: item.id })),
     },
@@ -1236,7 +1207,7 @@ export function App() {
   navGroups.push({
     label: "平台管理",
     items: [
-      ...(selectedDataSource === "apim" && directoryCapabilities.data?.available
+      ...(selectedDataSource === "apim"
         ? [{ label: "组织管理", icon: Network, page: "organization-management" as Page }]
         : []),
       { label: "系统配置", icon: Settings, page: "settings" },
@@ -1250,10 +1221,6 @@ export function App() {
   // It stays in the palette because dropping the nav entry would otherwise make a page
   // that still exists unsearchable -- a silent loss the de-duplication never asked for.
   const searchablePages = [
-    // The assistant is listed explicitly for the same reason the invocation console is:
-    // this array is derived from navGroups, and both of those live outside them, so
-    // neither would otherwise be findable in the palette.
-    { id: "assistant" as Page, label: "FinOps Assistant", icon: Sparkles },
     { id: "user-settings" as Page, label: "用户设置", icon: Settings },
     ...visibleNavGroups.flatMap((group) => group.items.map((item) => ({ id: item.page, label: item.label, icon: item.icon }))),
     ...(selectedDataSource === "apim"
@@ -1363,85 +1330,6 @@ export function App() {
             }}
           >
             <nav>
-                {/* SmartHive's first SidebarGroup: primary destinations, no group label, above
-                  the reports group. Chat lives there rather than inside a labelled section
-                  because it is a place you go, not a report you read -- and a label would
-                  imply a category that has one member. */}
-              {canAccessMenu(user, "assistant") && <div className="nav-group sidebar-group" key="assistant">
-                <div className="sidebar-group-content">
-                  <ul className="sidebar-menu sidebar-nav-menu">
-                    <li className="sidebar-menu-item">
-                      <button
-                        className={`sidebar-menu-button ${page === "assistant" ? "active" : ""}`}
-                        onClick={() => {
-                          navigatePage("assistant");
-                          setSidebarOpenMobile(false);
-                        }}
-                      >
-                        <Sparkles size={16} />
-                        <span>FinOps Assistant</span>
-                      </button>
-                    </li>
-                  </ul>
-                </div>
-              </div>}
-              {selectedDataSource === "apim" && canAccessMenu(user, "pinned-report") && pinnedCharts.data && pinnedCharts.data.length > 0 && (
-                <div className="nav-group sidebar-group pinned-group" key="pinned">
-                    {/* Mirrors SmartHive's pinned group interaction, but names this report-only
-                      collection by its resource. The label itself is the trigger, the caret
-                      turns on open, and the count only fades in on hover. */}
-                  <button
-                    type="button"
-                    className="nav-label pinned-group-trigger"
-                    aria-expanded={pinnedOpen}
-                    onClick={() => setPinnedOpen((open) => !open)}
-                  >
-                    <span>报表</span>
-                    <ChevronRight size={12} className="pinned-group-caret" />
-                    <span className="pinned-group-count">{pinnedCharts.data.length}</span>
-                  </button>
-                  {pinnedOpen && (
-                  <div className="sidebar-group-content">
-                    <ul className="sidebar-menu sidebar-nav-menu">
-                      {pinnedCharts.data.map((item) => (
-                        <li className="sidebar-menu-item" key={item.id}>
-                          <button
-                            className={`sidebar-menu-button ${page === "pinned-report" && pinnedChartId === item.id ? "active" : ""}`}
-                            title={item.title}
-                            /* Both the label and the tooltip are the reader's own report
-                               name, so nothing inside this button may be translated. */
-                            data-no-localize
-                            onClick={() => {
-                              openPinnedReport(item.id);
-                              setSidebarOpenMobile(false);
-                            }}
-                          >
-                            <Pin size={16} />
-                            <span>{item.title}</span>
-                          </button>
-                          {/* Only past one: a "1" on every single-chart report is noise. */}
-                          {item.charts.length > 1 && (
-                            <span className="sidebar-menu-badge">{item.charts.length}</span>
-                          )}
-                          {/* SmartHive's pin rows close with a small X rather than a bin,
-                              revealed on hover. It shares the slot with the count, which
-                              yields while it is shown: two boxes pinned to the same right
-                              edge would otherwise sit on top of each other. */}
-                          {item.can_manage && <button
-                            type="button"
-                            className="sidebar-menu-action"
-                            title="删除报表"
-                            aria-label="删除报表"
-                            disabled={deletePinnedReport.isPending}
-                            onClick={() => deletePinnedReport.mutate(item.id)}
-                          ><X size={12} /></button>}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                  )}
-                </div>
-              )}
               {visibleNavGroups.map((group) => (
                 <div className="nav-group sidebar-group" key={group.label}>
                   <span className="nav-label">{group.label}</span>
@@ -1574,8 +1462,8 @@ export function App() {
               onToggleSidebar={toggleSidebar}
             />
           )}
-          {selectedDataSource === "apim" && page === "pinned-report" && pinnedChartId && (
-            <PinnedReportPage chartId={pinnedChartId} onToggleSidebar={toggleSidebar} onDeleted={forgetPinnedReport} />
+          {selectedDataSource === "apim" && page === "pinned-report" && (
+            <ReportCenterPage onToggleSidebar={toggleSidebar} />
           )}
           {selectedDataSource === "apim" && renderApimPage({ page, onToggleSidebar: toggleSidebar, days: finopsDays, scope: finopsScope, onDaysChange: setFinopsDays, onScopeChange: setFinopsScope, onOpenRequest: (requestId) => navigatePage("finops-requests", requestId) })}
           {selectedDataSource === "github-copilot" && githubCopilotOwnsPage(page) && renderGithubCopilotPage(page, toggleSidebar)}

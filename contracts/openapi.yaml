@@ -345,6 +345,10 @@ components:
       $ref: ./openapi/schemas/organization-management.yaml#/schemas/DirectoryPage
     EnterpriseEntityCatalog:
       $ref: ./openapi/schemas/observability.yaml#/schemas/EnterpriseEntityCatalog
+    UsageQueryEntityCatalog:
+      $ref: ./openapi/schemas/observability.yaml#/schemas/UsageQueryEntityCatalog
+    UsageQueryEntity:
+      $ref: ./openapi/schemas/observability.yaml#/schemas/UsageQueryEntity
     EnterpriseEntity:
       $ref: ./openapi/schemas/observability.yaml#/schemas/EnterpriseEntity
     ExternalBindingWrite:

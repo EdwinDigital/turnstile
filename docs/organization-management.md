@@ -11,6 +11,12 @@ The GitHub Copilot workspace hides this menu and search entry. Its enterprise te
 features retain their own data source. Switching workspaces does not delete directory data or
 stop background jobs.
 
+Fixed sidebar destinations are derived from the selected workspace and the authenticated
+menu profile, not asynchronously inserted after a directory-capabilities request. Capability
+reads still govern organization-page data and actions; backend scope checks remain authoritative.
+The dynamic report group loads after the fixed menu groups so new reports do not shift their
+positions. No persisted menu or cached permission snapshot is used to bypass session checking.
+
 Readiness requires schemas 012-017, the configured directory authority and compatible packages.
 An HTTP health response alone does not prove directory, Graph or gateway readiness.
 
@@ -19,6 +25,48 @@ An HTTP health response alone does not prove directory, Graph or gateway readine
 window up to 366 days. It retains original unknown/archived IDs and latest in-window
 attribution without editing historical requests. The query client does not rewrite legacy
 user IDs into today's governance identities.
+
+## Usage Query Filters
+
+The five APIM usage pages share multi-select organization, department, agent and personnel
+dropdowns. A repeated query key is a union within that dimension; different dimensions and
+the authenticated department scope intersect. Do not comma-join IDs or aggregate multiple
+requests in the browser. Time range remains a single choice.
+
+The UI exposes only Enabled and Archived, defaults to `directory_status=active`, and maps
+All to the union of active and archived. Historical attribution and unattributed are not
+management states and have no UI options; stale selections normalize to active.
+The API keeps its existing all-status
+behavior when that parameter is omitted. Status filters apply to both facets and aggregate,
+trend, anomaly and request queries. Active means an active organization/department pair with
+no archived managed person; archived matches retained managed scopes/personnel. Unknown old
+scope pairs are historical attribution, and `unattributed` organization/department IDs are
+a separate unattributed category, not fabricated archived entities. Current ancestors remain
+available when selecting their archived descendants.
+
+Current directory names win over historical labels. `parent_ids` retains every in-window
+parent edge and the current parent; the original request identities, names, amounts and
+primary billing department are not rewritten. Query-only historical people remain queryable
+under valid current organization/department attribution, but never become login/invocation
+identities. The selected status does not establish a menu, APIM or model permission.
+
+The 2026-10-10 read-only diagnosis found 81 publication-probe requests attributed to
+`system-gateway-publication`, two protocol-validation requests attributed to
+`turnstile-internal`, and one request with unattributed organization in the 90-day/124-request
+sample. The publisher intentionally supplies those probe identities. The old query catalog
+merged them into normal-looking organization options without status/source metadata and
+allowed historical names to overwrite current labels. Do not delete these actual invocation
+and billing facts. The active default hides their non-directory scopes in both options and
+results; direct API queries retain historical/unattributed diagnostic access. UI All does
+not restore those non-directory categories.
+Active custom departments, including test-named departments, remain real configured records;
+names alone must never trigger automatic archive or deletion.
+
+No budget storage/enforcement, migration, ingestion domain or APIM policy changes are required.
+Global cache-read metrics cannot be assigned to a directory status intersection; only the
+unfiltered all-status query may merge the existing global correction. Facet queries exclude
+their own dimension selections to keep sibling options available, and query caches normalize
+selection ordering and include status. Failed reads do not reset selections to an unfiltered view.
 
 ## Archive Visibility
 

@@ -456,6 +456,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["directory"] }),
       queryClient.invalidateQueries({ queryKey: ["reference", "enterprise-entities"] }),
+      queryClient.invalidateQueries({ queryKey: ["reference", "enterprise-query-entities"] }),
       queryClient.invalidateQueries({ queryKey: ["finops"] }),
       queryClient.invalidateQueries({ queryKey: ["user-settings"] }),
     ])

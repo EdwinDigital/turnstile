@@ -16,12 +16,12 @@ from ..domain.ledger import (
 from ..domain.models import (
     ApimCacheReadBucket,
     AuditFindingUpdate,
-    EnterpriseEntityCatalog,
     ModelIdentity,
     ModelPrice,
     OptimizationEventCreate,
     ReconciledUsage,
     TokenUsageRecord,
+    UsageQueryEntityCatalog,
 )
 from .repository_support import UsageFilters
 
@@ -178,7 +178,7 @@ class QueryRepository(ABC):
         from_: datetime,
         to: datetime,
         filters: UsageFilters,
-    ) -> EnterpriseEntityCatalog: ...
+    ) -> UsageQueryEntityCatalog: ...
 
     @abstractmethod
     def application_owners(self) -> Sequence[dict[str, Any]]: ...

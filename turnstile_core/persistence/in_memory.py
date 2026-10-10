@@ -14,12 +14,12 @@ from ..domain.ledger import BudgetReservationAdmission, BudgetReservationFinaliz
 from ..domain.models import (
     ApimCacheReadBucket,
     AuditFindingUpdate,
-    EnterpriseEntityCatalog,
     ModelIdentity,
     ModelPrice,
     OptimizationEventCreate,
     ReconciledUsage,
     TokenUsageRecord,
+    UsageQueryEntityCatalog,
 )
 from .in_memory_applications import InMemoryApplicationRepositoryMixin
 from .in_memory_assistant import InMemoryAssistantRepositoryMixin
@@ -615,6 +615,10 @@ class InMemoryRepository(
             return False
         if record.usage_domain != "apim":
             return False
+        if filters.directory_scope is not None and filters.directory_scope.status(
+            record.organization_id, record.department_id, record.user_id,
+        ) not in filters.directory_scope.statuses:
+            return False
         for field, value in (
             ("organization_id", filters.organization_id),
             ("department_id", filters.department_id),
@@ -888,7 +892,7 @@ class InMemoryRepository(
         from_: datetime,
         to: datetime,
         filters: UsageFilters,
-    ) -> EnterpriseEntityCatalog:
+    ) -> UsageQueryEntityCatalog:
         rows: list[dict[str, Any]] = []
         for record in sorted(
             self._usage_between(from_, to, filters),

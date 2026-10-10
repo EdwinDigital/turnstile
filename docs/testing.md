@@ -1,5 +1,16 @@
 # Testing
 
+Usage directory filter changes require real PostgreSQL and API coverage for repeated IDs,
+same-field union/cross-field intersection, authenticated scope isolation, active/archived/
+historical/unattributed classification, current-name precedence and all historical parent edges.
+Check totals agree across overview, distribution and hour/day/week trends for the same filters.
+Omitted status preserves the older all-status query, whereas UI reset returns to active.
+UI archive options are only All, Enabled and Archived. All must send active plus archived,
+not omit the status constraint; stale historical/unattributed UI selections return to active.
+Archived child scopes retain active ancestors in the facet list. Never prove these read changes
+by deleting usage rows or saving budgets. Browser checks cover five pages, theme/mobile layouts,
+multi-select persistence and clearing, cascading options, no console/API errors and zero writes.
+
 ## Clean installation
 
 Pricing upgrade `010_models_dev_pricing` adds the public catalog source and matching metadata

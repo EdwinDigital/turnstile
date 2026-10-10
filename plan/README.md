@@ -7,6 +7,7 @@
 | 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已实现、已部署，基础线上验证通过 | [xuleihive/turnstile#31](https://github.com/xuleihive/turnstile/pull/31)，待合并 |
 | 用户设置 | [requirements.md](user-settings/requirements.md) | [design.md](user-settings/design.md) | 已实现；发布与验证记录见设计文档 | [xuleihive/turnstile#32](https://github.com/xuleihive/turnstile/pull/32)，待合并 |
 | 组织管理 | [requirements.md](organization-management/requirements.md) | [design.md](organization-management/design.md) | P1 已实现、已部署及线上验证；P2 代码已实现，APIM 候选编译通过，真实 Entra 同步与身份验收待外部配置；详见[实施记录](organization-management/implementation.md) | 未提交 |
+| AI FinOps 与报表中心 | [功能范围](ai-finops/design.md) | [design.md](ai-finops/design.md) | 已实现；完整本地回归 1758 passed / 7 skipped，浏览器验证通过；发布进行中 | 未提交 |
 
 每个功能使用独立子目录。需求和实现发生变化时，应同步更新对应文档；不得将计划中的能力描述成现有行为。
 

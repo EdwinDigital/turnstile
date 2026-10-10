@@ -12,17 +12,20 @@ export type MetricTotals = {
   failed_calls: number
 }
 
+export type UsageDirectoryStatus = "active" | "archived" | "historical" | "unattributed"
+
 export type UsageFilters = {
   from: string
   to: string
-  organization_id?: string
-  department_id?: string
-  project_id?: string
-  agent_id?: string
-  model_id?: string
-  user_id?: string
+  organization_id?: string | string[]
+  department_id?: string | string[]
+  project_id?: string | string[]
+  agent_id?: string | string[]
+  model_id?: string | string[]
+  user_id?: string | string[]
   runtime?: string[]
   status_code?: number
+  directory_status?: UsageDirectoryStatus[]
 }
 
 export type ExecutiveTotals = {
@@ -181,6 +184,19 @@ export type AnomalyRule = AnomalyRuleWrite & {
 }
 
 export type EnterpriseEntity = { id: string; name: string; parent_id: string | null }
+export type UsageQueryEntity = EnterpriseEntity & {
+  directory_status: UsageDirectoryStatus
+  source: "directory" | "historical"
+  parent_ids: string[]
+}
+export type UsageQueryEntityCatalog = {
+  organizations: UsageQueryEntity[]
+  departments: UsageQueryEntity[]
+  projects: UsageQueryEntity[]
+  agents: UsageQueryEntity[]
+  users: UsageQueryEntity[]
+  invocation_testers: EnterpriseEntity[]
+}
 export type EnterpriseEntityCatalog = {
   organizations: EnterpriseEntity[]
   departments: EnterpriseEntity[]

@@ -27,12 +27,22 @@ from turnstile_core.domain.models import (
     TrendResponse,
     UsageAnomaly,
     UsageAnomalyListResponse,
+    UsageQueryEntityCatalog,
     UsageRequestDetail,
     UsageRequestListResponse,
     UsageRequestSummary,
 )
 from turnstile_core.persistence.repository import UsageFilters
+from turnstile_core.persistence.repository_support import (
+    USAGE_DIRECTORY_STATUSES,
+    UsageDirectoryStatus,
+)
 from turnstile_core.services.directory_catalog import catalog_for
+from turnstile_core.services.usage_directory import (
+    scoped_usage_catalog,
+    usage_directory_scope,
+    usage_query_catalog,
+)
 
 from .dependencies import Repository
 from .session import (
@@ -53,25 +63,39 @@ router = APIRouter(
 
 def usage_filters(
     identity: CurrentSession,
-    organization_id: str | None = None,
-    department_id: str | None = None,
-    project_id: str | None = None,
-    agent_id: str | None = None,
-    model_id: str | None = None,
-    user_id: str | None = None,
+    repository: Repository,
+    settings: Config,
+    organization_id: Annotated[list[str] | None, Query(max_length=100)] = None,
+    department_id: Annotated[list[str] | None, Query(max_length=100)] = None,
+    project_id: Annotated[list[str] | None, Query(max_length=100)] = None,
+    agent_id: Annotated[list[str] | None, Query(max_length=100)] = None,
+    model_id: Annotated[list[str] | None, Query(max_length=100)] = None,
+    user_id: Annotated[list[str] | None, Query(max_length=100)] = None,
     runtime: Annotated[list[str] | None, Query()] = None,
     status_code: Annotated[int | None, Query(ge=100, le=599)] = None,
+    directory_status: Annotated[list[UsageDirectoryStatus] | None, Query(max_length=4)] = None,
 ) -> UsageFilters:
+    directory_scope = None
+    if directory_status and set(directory_status) != set(USAGE_DIRECTORY_STATUSES):
+        allowed = identity.directory_department_ids
+        current = scoped_usage_catalog(
+            catalog_for(repository, settings, allowed_department_ids=allowed), allowed,
+        )
+        complete = scoped_usage_catalog(catalog_for(
+            repository, settings, include_inactive=True, allowed_department_ids=allowed,
+        ), allowed)
+        directory_scope = usage_directory_scope(current, complete, tuple(directory_status))
     return UsageFilters(
-        organization_id=organization_id,
-        department_id=department_id,
-        project_id=project_id,
-        agent_id=agent_id,
-        model_id=model_id,
-        user_id=user_id,
+        organization_id=tuple(sorted(set(organization_id))) if organization_id else None,
+        department_id=tuple(sorted(set(department_id))) if department_id else None,
+        project_id=tuple(sorted(set(project_id))) if project_id else None,
+        agent_id=tuple(sorted(set(agent_id))) if agent_id else None,
+        model_id=tuple(sorted(set(model_id))) if model_id else None,
+        user_id=tuple(sorted(set(user_id))) if user_id else None,
         runtime=tuple(runtime) if runtime else None,
         status_code=status_code,
         allowed_department_ids=identity.directory_department_ids,
+        directory_scope=directory_scope,
     )
 
 
@@ -111,7 +135,7 @@ def get_enterprise_entities(
     )
 
 
-@router.get("/api/v1/enterprise/query-entities", response_model=EnterpriseEntityCatalog)
+@router.get("/api/v1/enterprise/query-entities", response_model=UsageQueryEntityCatalog)
 def get_query_entities(
     repository: Repository,
     settings: Config,
@@ -119,21 +143,24 @@ def get_query_entities(
     filters: UsageFilterSet,
     from_: Annotated[datetime, Query(alias="from")],
     to: datetime,
-) -> EnterpriseEntityCatalog:
+    directory_status: Annotated[list[UsageDirectoryStatus] | None, Query(max_length=4)] = None,
+) -> UsageQueryEntityCatalog:
     if from_.tzinfo is None or to.tzinfo is None or to <= from_ or to - from_ > timedelta(days=366):
         raise HTTPException(
             status_code=422, detail="Select an aware query window of at most 366 days"
         )
-    current = get_enterprise_entities(repository, settings, identity)
+    allowed = identity.directory_department_ids
+    current = scoped_usage_catalog(
+        catalog_for(repository, settings, allowed_department_ids=allowed), allowed,
+    )
+    complete = scoped_usage_catalog(catalog_for(
+        repository, settings, include_inactive=True, allowed_department_ids=allowed,
+    ), allowed)
     historical = repository.historical_entities(from_, to, filters)
-    merged = {}
-    for key in ("organizations", "departments", "projects", "agents", "users"):
-        by_id = {row.id: row for row in getattr(current, key)}
-        by_id.update({row.id: row for row in getattr(historical, key)})
-        merged[key] = sorted(by_id.values(), key=lambda row: (row.name.casefold(), row.id))
     # Query-only snapshots never become selectable invocation identities.
-    merged["invocation_testers"] = []
-    return EnterpriseEntityCatalog.model_validate(merged)
+    return usage_query_catalog(
+        current, complete, historical, tuple(directory_status or USAGE_DIRECTORY_STATUSES),
+    )
 
 
 @router.get(
