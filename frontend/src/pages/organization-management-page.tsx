@@ -32,6 +32,7 @@ import { useAuth } from "../providers/auth-provider"
 import { useTimezone } from "../providers/timezone-provider"
 import { getIntlLocale } from "../locales/index"
 import { FINOPS_NAVIGATE_EVENT } from "../lib/navigation"
+import { menuPermissionGroupNames, type MenuPermissionGroup } from "../api/auth"
 
 const statusNames: Record<DirectoryStatus, string> = { active: "启用", inactive: "停用", archived: "已归档" }
 const actionNames: Record<string, string> = {
@@ -47,8 +48,17 @@ function FormInput({ id, label, children }: { id: string; label: string; childre
   return <Field><FieldLabel htmlFor={id}>{label}</FieldLabel>{children}</Field>
 }
 
-function DirectoryEditor({ editor, organizationId, departmentId, units, onClose, onSaved }: {
+function MenuGroupTags({ groups }: { groups: MenuPermissionGroup[] }) {
+  const admins = groups.filter((group) => group !== "user")
+  return <div className="directory-permission-tags">
+    {(admins.length ? admins : ["user"] as MenuPermissionGroup[]).map((group) =>
+      <Badge key={group} variant="outline">{menuPermissionGroupNames[group]}</Badge>)}
+  </div>
+}
+
+function DirectoryEditor({ editor, organizationId, departmentId, units, canAssignMenus, onClose, onSaved }: {
   editor: Editor; organizationId: string; departmentId: string; units: DirectoryUnit[]
+  canAssignMenus: boolean
   onClose: () => void; onSaved: (id: string) => void
 }) {
   const row = editor.row
@@ -61,7 +71,8 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
   ))
   const [identity, setIdentity] = useState(person?.governance_user_id ?? "")
   const [employee, setEmployee] = useState(person?.employee_number ?? "")
-  const [title, setTitle] = useState(person?.job_title ?? "")
+  const [menuGroups, setMenuGroups] = useState<MenuPermissionGroup[]>(() =>
+    (person?.menu_permission_groups ?? [person?.menu_permission_group ?? "user"]).filter((group) => group !== "user"))
   const [description, setDescription] = useState(entity?.description ?? "")
   const [status, setStatus] = useState<DirectoryStatus>(entity?.status ?? "active")
   const [teamIds, setTeamIds] = useState(person?.team_ids ?? [])
@@ -74,11 +85,13 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
       if (editor.kind === "person") {
         if (person) return directoryApi.updatePerson(person.id, {
           display_name: name, contact_email: email || null, employee_number: employee || null,
-          job_title: title, expected_revision: person.revision,
+          ...(canAssignMenus ? { menu_permission_groups: menuGroups } : {}),
+          expected_revision: person.revision,
         })
         return directoryApi.createPerson({
           display_name: name, governance_user_id: identity, contact_email: email || identity,
-          employee_number: employee || null, job_title: title, department_id: departmentId,
+          employee_number: employee || null, department_id: departmentId,
+          ...(canAssignMenus ? { menu_permission_groups: menuGroups } : {}),
           team_ids: teamIds,
         }, key)
       }
@@ -131,9 +144,17 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
           {editor.kind === "person" ? <>
             <FormInput id="directory-employee" label="员工号"><Input id="directory-employee" value={employee}
               maxLength={64} onChange={(event) => change(setEmployee)(event.target.value)} /></FormInput>
-            <FormInput id="directory-title" label="岗位"><Input id="directory-title" value={title}
-              disabled={person?.externally_managed}
-              maxLength={160} onChange={(event) => change(setTitle)(event.target.value)} /></FormInput>
+            <FieldSet data-disabled={!canAssignMenus}><FieldLegend>菜单权限组</FieldLegend>
+              <MenuGroupTags groups={menuGroups} />
+              <div className="directory-checkboxes">
+                {(["organization_admin", "department_admin", "team_admin"] as const).map((group) =>
+                  <label key={group}><Checkbox checked={menuGroups.includes(group)} disabled={!canAssignMenus}
+                    onCheckedChange={(checked) => {
+                      setMenuGroups((current) => checked ? [...current, group] : current.filter((value) => value !== group))
+                      setDirty(true)
+                    }} />{menuPermissionGroupNames[group]}</label>)}
+              </div>
+            </FieldSet>
             {!person && teams.length > 0 && <FieldSet><FieldLegend>团队</FieldLegend>
               <div className="directory-checkboxes">{teams.map((team) => <label key={team.id}>
                 <Checkbox checked={teamIds.includes(team.id)} onCheckedChange={(checked) => {
@@ -308,7 +329,7 @@ function DepartmentAdministrators({ department, owner, scopeKey, onSaved }: {
     <Input aria-label="搜索管理员候选人" placeholder="搜索人员" value={query}
       onChange={(event) => { setQuery(event.target.value); setCursor(""); setPrevious([]) }} />
     {existing.error && <Alert><AlertDescription>{existing.error.message}</AlertDescription></Alert>}
-    <FieldSet><FieldLegend>部门管理员</FieldLegend><div className="directory-checkboxes">
+    <FieldSet><FieldLegend>部门数据范围授权</FieldLegend><div className="directory-checkboxes">
       {candidates.map((person) => <label key={person.id}><Checkbox
         checked={selected.includes(person.app_user_id!)} disabled={!owner}
         onCheckedChange={(checked) => setSelection(checked ? [...selected, person.app_user_id!] : selected.filter((id) => id !== person.app_user_id))} />
@@ -469,7 +490,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
             </div></div>
             <Tabs value={tab} onValueChange={(value) => { if (confirmDirectoryLeave()) setTab(String(value)) }}>
               <TabsList><TabsTrigger value="people">人员</TabsTrigger>
-                {department && <TabsTrigger value="administrators">管理员</TabsTrigger>}
+                {department && <TabsTrigger value="administrators">数据授权</TabsTrigger>}
                 <TabsTrigger value="audit">变更记录</TabsTrigger>
                 {owner && <TabsTrigger value="sync">Entra ID</TabsTrigger>}
                 {owner && <TabsTrigger value="transfers">调岗计划</TabsTrigger>}
@@ -486,14 +507,14 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                 </div>
                 <div className="directory-table-scroll"><ResizableTable className="directory-table">
                   <caption className="sr-only">组织人员</caption><thead><tr>
-                    <th><span>人员</span></th><th><span>部门 / 团队</span></th><th><span>岗位</span></th>
+                    <th><span>人员</span></th><th><span>部门 / 团队</span></th><th><span>菜单权限组</span></th>
                     <th><span>账号</span></th><th><span>来源</span></th><th><span>状态</span></th><th><span>操作</span></th>
                   </tr></thead>
                   <tbody>{(people.data?.items ?? []).map((person) => <tr key={person.id}>
                     <td><strong data-no-localize>{person.display_name}</strong><small data-no-localize>{person.governance_user_id}</small>
                       {person.employee_number && <small data-no-localize>{person.employee_number}</small>}</td>
                     <td><span data-no-localize>{person.department_name ?? "--"}</span><small data-no-localize>{person.team_ids.map((id) => units.data?.find((unit) => unit.id === id)?.name ?? id).join("、") || "--"}</small></td>
-                    <td data-no-localize>{person.job_title || "--"}</td>
+                    <td><MenuGroupTags groups={person.menu_permission_groups ?? [person.menu_permission_group ?? "user"]} /></td>
                     <td><span data-no-localize>{person.account_email ?? "--"}</span><small>{person.app_user_id ? person.account_enabled ? "启用" : "停用" : "未关联"}</small></td>
                     <td><Badge variant="outline">{person.externally_managed ? "Entra ID" : "本地"}</Badge></td>
                     <td><Badge variant={person.status === "active" && !person.source_disabled ? "secondary" : "outline"}>
@@ -562,7 +583,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
         </main>
       </div>}
     {editor && <DirectoryEditor key={`${editor.kind}-${editor.row?.id ?? "new"}`} editor={editor}
-      organizationId={effectiveOrgId} departmentId={departmentId} units={units.data ?? []}
+      organizationId={effectiveOrgId} departmentId={departmentId} units={units.data ?? []} canAssignMenus={owner}
       onClose={() => setEditor(null)} onSaved={(id) => {
         if (editor.kind === "organization" && !editor.row) { setOrganizationId(id); setUnitId("") }
         if (editor.kind === "department" && !editor.row) setUnitId(id)

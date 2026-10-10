@@ -34,6 +34,20 @@ It does not import customers, change login roles, rewrite budgets or activate di
 Run the isolated directory migration, service, synchronization and transfer suites before
 approving the separate business backfill and authority switch.
 
+Migration `013_menu_permission_groups` adds a local navigation group with Ordinary User
+as the default, without translating job titles or existing department grants.
+Apply it before the new authentication runtime. Verify fresh-install/rerun behavior,
+historical account/session/budget/usage/title/grant preservation, Owner-only assignment,
+source-import preservation, and unchanged API data scopes/model authorization.
+Menu-only saves must not add APIM projection work. Exercise all four groups in a real
+browser, including direct URL, search, source switch, existing-session downgrade and
+desktop/mobile rendering. See the menu matrix in the organization-management plan.
+
+Migration `014_multiple_menu_permission_groups` adds the authoritative group array,
+preserving any single-group assignments from 013. Check combinations of administrator
+groups, menu union, single-label removal and fallback to Ordinary User after the last
+administrator label is removed. Personnel forms use checkboxes and tags, not a dropdown.
+
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
 For an existing installation, run the same migration command to apply only pending upgrades. Verify that the initial migration checksum and existing usage rows are unchanged. Migration `002` replaces the unique caller-request index with a non-unique `(request_id, ts DESC)` index; it does not rewrite historical usage. Apply it before running the updated telemetry consumer, and drain older telemetry consumers before enabling the new version. Do not overlap consumers that use the old and new identity rules. Index replacement takes a table lock, so schedule the upgrade for an appropriate maintenance window. Migration `007` only adds nullable columns and defaults every existing model to `price_source = 'manual'`, so rates already in the registry are left exactly as they were and the price sync skips those rows until someone opts a model in.

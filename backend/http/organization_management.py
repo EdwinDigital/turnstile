@@ -66,6 +66,7 @@ def capabilities(
     response.headers["Cache-Control"] = "no-store"
     if not settings.organization_management_enabled or not settings.database_url:
         return {
+            "available": False,
             "can_read": False,
             "can_manage_organizations": False,
             "can_manage_connections": False,
@@ -78,6 +79,7 @@ def capabilities(
     store = directory_store(settings.database_url)
     principal = store.principal(UUID(identity.id), identity.email, identity.role)
     return {
+        "available": True,
         **DirectoryService(store).capabilities(principal),
         "sync_available": settings.directory_sync_enabled,
         "identity_projection_available": settings.directory_identity_projection_enabled,

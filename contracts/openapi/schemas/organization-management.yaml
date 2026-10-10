@@ -344,6 +344,29 @@ schemas:
         maxLength: 160
         title: Job Title
         default: ''
+      menu_permission_group:
+        anyOf:
+        - type: string
+          enum:
+          - user
+          - organization_admin
+          - department_admin
+          - team_admin
+        - type: 'null'
+        title: Menu Permission Group
+      menu_permission_groups:
+        anyOf:
+        - items:
+            type: string
+            enum:
+            - user
+            - organization_admin
+            - department_admin
+            - team_admin
+          type: array
+          maxItems: 3
+        - type: 'null'
+        title: Menu Permission Groups
       governance_user_id:
         type: string
         maxLength: 255
@@ -431,6 +454,29 @@ schemas:
         maxLength: 160
         title: Job Title
         default: ''
+      menu_permission_group:
+        anyOf:
+        - type: string
+          enum:
+          - user
+          - organization_admin
+          - department_admin
+          - team_admin
+        - type: 'null'
+        title: Menu Permission Group
+      menu_permission_groups:
+        anyOf:
+        - items:
+            type: string
+            enum:
+            - user
+            - organization_admin
+            - department_admin
+            - team_admin
+          type: array
+          maxItems: 3
+        - type: 'null'
+        title: Menu Permission Groups
     additionalProperties: false
     type: object
     required:

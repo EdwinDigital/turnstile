@@ -67,6 +67,9 @@ class SessionIdentity:
     directory_permission_revision: int = 0
     governance_user_id: str | None = None
     directory_person_active: bool | None = None
+    menu_permission_group: str = "user"
+    menu_permission_groups: tuple[str, ...] = ("user",)
+    menu_permissions: tuple[str, ...] = ()
 
     @property
     def effective_user_id(self) -> str:

@@ -191,6 +191,7 @@ def test_sync_preview_apply_checkpoint_and_stable_identity(
     approve(connections, owner, service, job)
     assert worker.run_once(worker_id="test")["status"] == "succeeded"  # type: ignore[index]
     person = service.people(owner).items[0]
+    assert person["menu_permission_group"] == "user"
     with service.store.connection() as db:
         assert db.execute("SELECT count(*) AS n FROM app_user").fetchone()["n"] == 1  # type: ignore[index]
         assert not db.execute("SELECT 1 FROM app_user_external_identity").fetchone()
@@ -198,6 +199,11 @@ def test_sync_preview_apply_checkpoint_and_stable_identity(
             "SELECT checkpoint_ciphertext FROM directory_sync_checkpoint"
         ).fetchone()
         assert cipher and b"private" not in cipher["checkpoint_ciphertext"]
+        db.execute(
+            """UPDATE directory_person SET menu_permission_group='team_admin',
+                 menu_permission_groups=ARRAY['team_admin','department_admin'] WHERE id=%s""",
+            (person["id"],),
+        )
     graph.users[0]["mail"] = "renamed@example.com"
     graph.users[0]["displayName"] = "Renamed"
     job = connections.create_job(owner, UUID(saved["id"]), SyncJobWrite(mode="delta"), "second")
@@ -208,6 +214,8 @@ def test_sync_preview_apply_checkpoint_and_stable_identity(
     assert edited["id"] == person["id"]
     assert edited["governance_user_id"] == "example@example.com"
     assert edited["contact_email"] == "renamed@example.com"
+    assert edited["menu_permission_group"] == "team_admin"
+    assert set(edited["menu_permission_groups"]) == {"team_admin", "department_admin"}
     assert graph.checkpoints[-1] and "private" in graph.checkpoints[-1]
 
 

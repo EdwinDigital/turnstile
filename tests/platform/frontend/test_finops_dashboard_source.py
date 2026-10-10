@@ -161,7 +161,8 @@ def test_data_source_switcher_replaces_the_legacy_access_channel_filter() -> Non
     assert '<ApimLogo size={17} />' in app_source
     assert '<CopilotLogo size={17} />' in app_source
     assert "function normalizePageForSource" in app_source
-    assert "normalizePageForSource(next, page)" in app_source
+    assert "normalizePageForAccess(next, page, user)" in app_source
+    assert "normalizePageForSource(source, page)" in app_source
     assert "export function normalizeApimPage" in apim_source
     assert 'return apimPageIds.has(page) ? page : "finops-overview"' in apim_source
     assert "function AccessPointFilter" not in dashboard_source

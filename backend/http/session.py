@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, Request
 
 from turnstile_core.config import Settings, get_settings
 from turnstile_core.domain.directory import DirectoryError
+from turnstile_core.domain.menu_permissions import menu_permissions
 from turnstile_core.persistence.auth_store import AuthStore
 from turnstile_core.services.directory_catalog import directory_store
 
@@ -47,6 +48,9 @@ def require_authenticated_session(
     permission_revision = 0
     governance_user_id: str | None = None
     directory_person_active: bool | None = None
+    menu_group = "user"
+    menu_groups: tuple[str, ...] = ("user",)
+    menus = menu_permissions(owner=role == "owner")
     if settings.directory_source == "legacy" and settings.database_url:
         state = directory_store(settings.database_url).state_if_present()
         if state is not None and state["source"] != "legacy":
@@ -60,6 +64,9 @@ def require_authenticated_session(
         principal = directory.principal(UUID(str(owner["id"])), str(owner["email"]), role)
         department_ids = principal.department_ids
         permission_revision = principal.permission_revision
+        menu_group = principal.menu_permission_group
+        menu_groups = principal.menu_permission_groups
+        menus = principal.menu_permissions
         person = directory.linked_person(UUID(str(owner["id"])))
         if person:
             directory_person_active = (
@@ -84,6 +91,9 @@ def require_authenticated_session(
         directory_permission_revision=permission_revision,
         governance_user_id=governance_user_id,
         directory_person_active=directory_person_active,
+        menu_permission_group=menu_group,
+        menu_permission_groups=menu_groups,
+        menu_permissions=menus,
     )
 
 

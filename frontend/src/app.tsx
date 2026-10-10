@@ -52,6 +52,8 @@ import { TurnstileMark } from "./components/turnstile-logo";
 import { ApimLogo, CopilotLogo } from "./components/brand-logos";
 import { DIRECTORY_BEFORE_LEAVE_EVENT, FINOPS_NAVIGATE_EVENT } from "./lib/navigation";
 import { useAuth } from "./providers/auth-provider";
+import type { AuthUser } from "./api/auth";
+import { canAccessMenu } from "./lib/menu-access";
 import { dataSource, usageWindow } from "./data-sources/apim/api";
 import {
   finopsQueries,
@@ -139,6 +141,12 @@ function normalizePageForSource(source: DataSource, page: Page): Page {
   return (source === "github-copilot"
     ? normalizeGithubCopilotPage(page)
     : normalizeApimPage(page)) as Page;
+}
+
+function normalizePageForAccess(source: DataSource, page: Page, user: AuthUser | null): Page {
+  const normalized = normalizePageForSource(source, page);
+  if (canAccessMenu(user, normalized)) return normalized;
+  return source === "apim" && canAccessMenu(user, "finops-invoke") ? "finops-invoke" : "user-settings";
 }
 
 const DATA_SOURCE_STORAGE_KEY = "turnstile_data_source";
@@ -866,9 +874,10 @@ export function App() {
     ) void refreshProfile();
   }, [directoryCapabilities.data?.permission_revision, user?.directory_permission_revision, refreshProfile]);
   const assistantOwner = user?.email ?? null;
-  const [page, setPage] = useState<Page>(() =>
+  const [requestedPage, setPage] = useState<Page>(() =>
     normalizePageForSource(selectedDataSource, pageFromUrl()));
-  const routedPage = normalizePageForSource(selectedDataSource, page);
+  const page = normalizePageForAccess(selectedDataSource, requestedPage, user);
+  const routedPage = page;
 
   useEffect(() => {
     const syncPageFromUrl = (event: Event) => {
@@ -881,7 +890,7 @@ export function App() {
       }
       const nextSource = dataSourceFromStorage();
       const requestedPage = pageFromUrl();
-      const nextPage = normalizePageForSource(nextSource, requestedPage);
+      const nextPage = normalizePageForAccess(nextSource, requestedPage, user);
       setSelectedDataSource(nextSource);
       setPage(nextPage);
       if (nextPage !== requestedPage) {
@@ -897,12 +906,12 @@ export function App() {
       window.removeEventListener("popstate", syncPageFromUrl);
       window.removeEventListener(FINOPS_NAVIGATE_EVENT, syncPageFromUrl);
     };
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     const url = new URL(window.location.href);
     localStorage.setItem(DATA_SOURCE_STORAGE_KEY, selectedDataSource);
-    if (routedPage !== page) setPage(routedPage);
+    if (routedPage !== requestedPage) setPage(routedPage);
     if (
       url.searchParams.get("source") === selectedDataSource
       && url.searchParams.get("page") === routedPage
@@ -910,7 +919,7 @@ export function App() {
     url.searchParams.set("source", selectedDataSource);
     url.searchParams.set("page", routedPage);
     window.history.replaceState(null, "", url);
-  }, [page, routedPage, selectedDataSource]);
+  }, [requestedPage, routedPage, selectedDataSource]);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(sidebarOpenFromCookie);
@@ -929,7 +938,7 @@ export function App() {
   const sidebarFilters = useMemo(() => usageWindow(30), []);
   const anomalyQuery = useQuery({
     ...finopsQueries.anomalies(sidebarFilters),
-    enabled: selectedDataSource === "apim" && page !== "user-settings",
+    enabled: selectedDataSource === "apim" && canAccessMenu(user, "finops-governance") && page !== "user-settings",
     refetchInterval: 5 * 60_000,
   });
   const anomalyCount = anomalyQuery.data?.length ?? 0;
@@ -950,13 +959,14 @@ export function App() {
   }, [page]);
   const pinnedCharts = useQuery({
     ...pinnedChartsQuery(assistantOwner),
-    enabled: selectedDataSource === "apim" && page !== "user-settings" && Boolean(assistantOwner),
+    enabled: selectedDataSource === "apim" && canAccessMenu(user, "pinned-report") && page !== "user-settings" && Boolean(assistantOwner),
   });
   // Open by default, matching SmartHive's `<Collapsible defaultOpen>`. Not persisted for
   // the same reason it is not there: the group is small and re-expanding is one click,
   // whereas a remembered collapse can hide reports a person forgot they had.
   const [pinnedOpen, setPinnedOpen] = useState(true);
   const prefetchNavigation = (nextPage: Page) => {
+    if (!canAccessMenu(user, nextPage)) return;
     if (nextPage === "user-settings") return;
     if (selectedDataSource === "github-copilot") {
       prefetchGithubCopilotPage(queryClient, nextPage);
@@ -991,7 +1001,7 @@ export function App() {
     setAssistantConversationId(null);
     localStorage.setItem(DATA_SOURCE_STORAGE_KEY, next);
     setFinopsScope({});
-    const nextPage = normalizePageForSource(next, page);
+    const nextPage = normalizePageForAccess(next, page, user);
     if (nextPage !== page) setPage(nextPage);
     const url = new URL(window.location.href);
     url.searchParams.set("source", next);
@@ -1094,6 +1104,7 @@ export function App() {
     sidebarDrag.current = null;
   };
   const navigatePage = (next: Page, requestId?: string) => {
+    next = normalizePageForAccess(selectedDataSource, next, user);
     if (next !== page && !window.dispatchEvent(
       new CustomEvent(DIRECTORY_BEFORE_LEAVE_EVENT, { cancelable: true })
     )) return;
@@ -1126,6 +1137,7 @@ export function App() {
   /** The floating panel's handover: it closes itself and this opens the same thread on
    *  the full page, which is why the two surfaces need no shared live state. */
   const openAssistantPage = (conversationId?: string) => {
+    if (!canAccessMenu(user, "assistant")) return;
     setAssistantConversationId(conversationId ?? null);
     setPage("assistant");
     const url = new URL(window.location.href);
@@ -1135,6 +1147,7 @@ export function App() {
     window.history.replaceState(null, "", url);
   };
   const openPinnedReport = (chartId: string) => {
+    if (!canAccessMenu(user, "pinned-report")) return;
     setPinnedChartId(chartId);
     setPage("pinned-report");
     const url = new URL(window.location.href);
@@ -1157,7 +1170,7 @@ export function App() {
   });
   useEffect(() => {
     const handleCreateInvocationShortcut = (event: KeyboardEvent) => {
-      if (selectedDataSource !== "apim") return;
+      if (selectedDataSource !== "apim" || !canAccessMenu(user, "finops-invoke")) return;
       if (event.key.toLowerCase() !== "c" || event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable='true']")) return;
       event.preventDefault();
@@ -1165,7 +1178,7 @@ export function App() {
     };
     document.addEventListener("keydown", handleCreateInvocationShortcut);
     return () => document.removeEventListener("keydown", handleCreateInvocationShortcut);
-  }, [selectedDataSource]);
+  }, [selectedDataSource, user]);
   const sourcePages = selectedDataSource === "apim" ? apimPages : githubCopilotPages;
   const pageInfo = sourcePages.find((item) => item.id === page) ?? {
     id: page,
@@ -1224,11 +1237,14 @@ export function App() {
     label: "系统管理",
     items: [
       { label: "设置", icon: Settings, page: "settings" },
-      ...(selectedDataSource === "apim" && directoryCapabilities.data?.can_read
+      ...(selectedDataSource === "apim" && directoryCapabilities.data?.available
         ? [{ label: "组织管理", icon: Network, page: "organization-management" as Page }]
         : []),
     ],
   });
+  const visibleNavGroups = navGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => canAccessMenu(user, item.page)) }))
+    .filter((group) => group.items.length > 0);
   // The invocation console is deliberately absent from the sidebar: the header already
   // has 新建调用 with a keyboard shortcut, and two rows pointing at one page is clutter.
   // It stays in the palette because dropping the nav entry would otherwise make a page
@@ -1239,11 +1255,11 @@ export function App() {
     // neither would otherwise be findable in the palette.
     { id: "assistant" as Page, label: "FinOps Assistant", icon: Sparkles },
     { id: "user-settings" as Page, label: "用户设置", icon: Settings },
-    ...navGroups.flatMap((group) => group.items.map((item) => ({ id: item.page, label: item.label, icon: item.icon }))),
+    ...visibleNavGroups.flatMap((group) => group.items.map((item) => ({ id: item.page, label: item.label, icon: item.icon }))),
     ...(selectedDataSource === "apim"
       ? [{ id: "finops-invoke" as Page, label: "调用测试", icon: Zap }]
       : []),
-  ];
+  ].filter((item) => canAccessMenu(user, item.id));
   return (
     <div
       className="app-shell"
@@ -1316,7 +1332,7 @@ export function App() {
                 <kbd><span>⌘</span>K</kbd>
               </button>
             </li>
-            {selectedDataSource === "apim" && <li className="sidebar-menu-item">
+            {selectedDataSource === "apim" && canAccessMenu(user, "finops-invoke") && <li className="sidebar-menu-item">
               <button
                 className="sidebar-menu-button sidebar-quick-action"
                 type="button"
@@ -1351,7 +1367,7 @@ export function App() {
                   the reports group. Chat lives there rather than inside a labelled section
                   because it is a place you go, not a report you read -- and a label would
                   imply a category that has one member. */}
-              <div className="nav-group sidebar-group" key="assistant">
+              {canAccessMenu(user, "assistant") && <div className="nav-group sidebar-group" key="assistant">
                 <div className="sidebar-group-content">
                   <ul className="sidebar-menu sidebar-nav-menu">
                     <li className="sidebar-menu-item">
@@ -1368,8 +1384,8 @@ export function App() {
                     </li>
                   </ul>
                 </div>
-              </div>
-              {selectedDataSource === "apim" && pinnedCharts.data && pinnedCharts.data.length > 0 && (
+              </div>}
+              {selectedDataSource === "apim" && canAccessMenu(user, "pinned-report") && pinnedCharts.data && pinnedCharts.data.length > 0 && (
                 <div className="nav-group sidebar-group pinned-group" key="pinned">
                     {/* Mirrors SmartHive's pinned group interaction, but names this report-only
                       collection by its resource. The label itself is the trigger, the caret
@@ -1426,7 +1442,7 @@ export function App() {
                   )}
                 </div>
               )}
-              {navGroups.map((group) => (
+              {visibleNavGroups.map((group) => (
                 <div className="nav-group sidebar-group" key={group.label}>
                   <span className="nav-label">{group.label}</span>
                   <div className="sidebar-group-content">
@@ -1568,7 +1584,7 @@ export function App() {
       {/* SmartHive's `isFloatingChatRouteSuppressed`, and for its reason: the full page
           already owns this conversation, so a floating copy of it would be duplication
           the reader has to reconcile. */}
-      {page !== "assistant" && (
+      {canAccessMenu(user, "assistant") && page !== "assistant" && (
         <AssistantPanel
           key={selectedDataSource}
           source={selectedDataSource}

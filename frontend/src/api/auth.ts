@@ -1,6 +1,10 @@
 import { apiUrl, ApiError } from "./client"
 
 export type SignInMethod = "password" | "entra"
+export type MenuPermissionGroup = "user" | "organization_admin" | "department_admin" | "team_admin"
+export const menuPermissionGroupNames: Record<MenuPermissionGroup, string> = {
+  user: "普通用户", organization_admin: "组织管理员", department_admin: "部门管理员", team_admin: "团队管理员",
+}
 
 export type AuthUser = {
   id: string
@@ -12,6 +16,9 @@ export type AuthUser = {
   directory_scope_key?: string
   directory_permission_revision?: number
   governance_user_id?: string | null
+  menu_permission_group?: MenuPermissionGroup
+  menu_permission_groups?: MenuPermissionGroup[]
+  menu_permissions?: string[]
   /** Absent only while a newly built frontend is talking to a pre-expiry-field API. */
   session_expires_at?: string
 }

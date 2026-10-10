@@ -11,7 +11,7 @@ The GitHub Copilot workspace hides this menu and search entry. Its enterprise te
 features retain their own data source. Switching workspaces does not delete directory data or
 stop background jobs.
 
-Readiness requires schema 012, the configured directory authority and compatible packages.
+Readiness requires schemas 012-014, the configured directory authority and compatible packages.
 An HTTP health response alone does not prove directory, Graph or gateway readiness.
 
 `/api/v1/enterprise/entities` remains the active assignment/invocation projection.
@@ -19,6 +19,47 @@ An HTTP health response alone does not prove directory, Graph or gateway readine
 window up to 366 days. It retains original unknown/archived IDs and latest in-window
 attribution without editing historical requests. The query client does not rewrite legacy
 user IDs into today's governance identities.
+
+## Menu Groups, Not Job Titles
+
+Personnel forms/lists display a local menu permission group instead of Job Title.
+Unassigned people default to Ordinary User. Organization Administrator, Department Administrator
+and Team Administrator are navigation presets, not Owner, APIM roles or department data grants.
+Only Owner may assign or change them; an explicit enabled account/person link makes them effective.
+Multiple administrator groups can coexist and are displayed as tags. Checkboxes add/remove
+assignments without a dropdown; menus are the union of selected groups. Removing the last
+administrator tag returns to Ordinary User.
+Existing job-title data is retained for old clients/source imports but never authorizes access.
+The separate Data Authorization tab retains the previous department-capability workflow.
+
+Ordinary User has personal settings and APIM invocation. Team Administrator adds analysis,
+assistant/report, model and organization menus; Department Administrator adds governance/budget
+and Copilot cost-center/unassigned menus; Organization Administrator adds system/platform
+and Copilot enterprise-team menus. Source applicability and existing API permissions still apply.
+A visible page may therefore show no data permission until separately authorized.
+Owner retains all applicable menus. Groups cannot grant model invocation, budget allocation,
+gateway publication or broader data scope.
+
+Login and `/auth/me` return the local group and allowed page IDs. Source changes, direct routes,
+browser history, search, prefetching and floating assistant use the same whitelist.
+Profile refresh updates an existing session without requiring sign-out.
+Only menu changes do not create directory gateway-projection work.
+
+### Upgrade From The Active Directory
+
+Back up the current database, packages and full settings before a maintenance update.
+Apply additive `013_menu_permission_groups` and `014_multiple_menu_permission_groups`
+through `backend.migrate` before starting the new
+runtime trio. Fresh installations use the same migration chain. Existing people, including
+department-data administrators, default to Ordinary User; Owner keeps its independent menus.
+014 preserves single assignments from 013 as arrays; the singular API field remains only for
+legacy-client compatibility. Do not translate old job titles or department grants into groups.
+Do not rerun legacy backfill
+or directory activation. Repeat migration to verify checksum/idempotency and check real
+Owner/Member profiles, assigned/unassigned navigation, data scopes and existing model policies.
+Retain the column and migration ledger on compatible-package rollback; do not restore an older
+database and lose new teams/personnel or menu assignments. This update does not deploy APIM policy,
+enable Graph sync or complete Microsoft login configuration.
 
 ## Empty Installation
 

@@ -50,6 +50,9 @@
 .directory-workspace [data-slot="input"]:focus-visible, .directory-dialog [data-slot="input"]:focus-visible, .directory-dialog [data-slot="textarea"]:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 20%, transparent); }
 .directory-toolbar > [data-slot="input"] { width: min(250px, 100%); }
 .directory-workspace [data-slot="select-trigger"], .directory-dialog [data-slot="select-trigger"] { min-width: 130px; height: 32px; }
+.directory-permission-tags { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.directory-permission-tags [data-slot="badge"] { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.directory-dialog .directory-permission-tags { margin-bottom: 8px; }
 .directory-table-scroll { overflow-x: auto; width: 100%; border: 1px solid var(--border); border-radius: 6px; }
 .directory-table { width: 100%; min-width: 780px; border-collapse: collapse; table-layout: fixed; font-size: 12px; text-align: left; }
 .directory-table th, .directory-table td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; overflow-wrap: anywhere; }

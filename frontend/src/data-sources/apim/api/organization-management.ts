@@ -1,7 +1,9 @@
 import { apiUrl, ApiError, SESSION_EXPIRED_EVENT } from "../../../api/client"
+import type { MenuPermissionGroup } from "../../../api/auth"
 
 export type DirectoryStatus = "active" | "inactive" | "archived"
 export type DirectoryCapabilities = {
+  available?: boolean
   can_read: boolean
   can_manage_organizations: boolean
   can_manage_connections: boolean
@@ -28,6 +30,8 @@ export type DirectoryUnit = Omit<DirectoryOrganization, "contact_email"> & {
 export type DirectoryPerson = {
   id: string; governance_user_id: string; display_name: string; contact_email: string | null
   employee_number: string | null; job_title: string; status: DirectoryStatus
+  menu_permission_group: MenuPermissionGroup
+  menu_permission_groups: MenuPermissionGroup[]
   manual_disabled: boolean; revision: number; department_id: string | null
   department_name: string | null; organization_id: string | null; team_ids: string[]
   manual_team_ids: string[]; source_team_ids: string[]

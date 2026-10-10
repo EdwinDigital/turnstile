@@ -197,10 +197,12 @@ class DirectoryService:
                             )
                         return dict(existing["result"])
                 result = callback(connection)
+                navigation_only = result.pop("_navigation_only", False)
                 updated_state = connection.execute(
-                    """UPDATE directory_control_state SET active_version = active_version + 1,
+                    """UPDATE directory_control_state SET active_version = active_version + %s,
                        permission_revision = permission_revision + 1, updated_at = now()
                        RETURNING active_version""",
+                    (0 if navigation_only else 1,),
                 ).fetchone()
                 assert updated_state is not None
                 version = updated_state["active_version"]
@@ -208,13 +210,18 @@ class DirectoryService:
                     **json_value(result),
                     "directory_state": "saved",
                     "directory_version": version,
-                    "gateway_projection_state": "pending",
+                    "gateway_projection_state": (
+                        "confirmed"
+                        if navigation_only and state["projected_version"] >= version
+                        else "pending"
+                    ),
                 }
-                connection.execute(
-                    """INSERT INTO directory_outbox(entity_id, directory_version)
-                       VALUES (%s, %s)""",
-                    (str(result.get("id", operation)), version),
-                )
+                if not navigation_only:
+                    connection.execute(
+                        """INSERT INTO directory_outbox(entity_id, directory_version)
+                           VALUES (%s, %s)""",
+                        (str(result.get("id", operation)), version),
+                    )
                 if key:
                     connection.execute(
                         """INSERT INTO directory_idempotency(
@@ -648,6 +655,8 @@ class DirectoryService:
         key: str | None = None,
     ) -> dict[str, Any]:
         principal.require("directory.edit_people", write.department_id)
+        if write.requested_menu_groups not in (None, ["user"]):
+            principal.require_owner()
 
         def create(connection: DirectoryConnection) -> dict[str, Any]:
             department = self._entity(connection, "unit", write.department_id)
@@ -666,8 +675,12 @@ class DirectoryService:
                             "reason",
                             "department_id",
                             "team_ids",
+                            "menu_permission_group",
+                            "menu_permission_groups",
                         }
                     ),
+                    "menu_permission_group": (write.requested_menu_groups or ["user"])[0],
+                    "menu_permission_groups": write.requested_menu_groups or ["user"],
                     "updated_by": principal.email,
                 },
             )
@@ -704,9 +717,15 @@ class DirectoryService:
             before = self._person(connection, person_id)
             principal.require("directory.edit_people", before["department_id"])
             self._revision(before, write)
+            if (
+                write.requested_menu_groups is not None
+                and set(write.requested_menu_groups) != set(before["menu_permission_groups"])
+            ):
+                principal.require_owner()
             if before["externally_managed"] and any(
                 getattr(write, field) != before[field]
                 for field in ("display_name", "contact_email", "job_title")
+                if field in write.model_fields_set
             ):
                 raise DirectoryError(
                     "external_field_readonly",
@@ -723,7 +742,21 @@ class DirectoryService:
                 "directory_person",
                 person_id,
                 {
-                    **write.model_dump(exclude={"expected_revision", "reason"}),
+                    **write.model_dump(
+                        exclude={
+                            "expected_revision", "reason",
+                            "menu_permission_group", "menu_permission_groups",
+                        },
+                        exclude_unset=True,
+                    ),
+                    **(
+                        {
+                            "menu_permission_group": write.requested_menu_groups[0],
+                            "menu_permission_groups": write.requested_menu_groups,
+                        }
+                        if write.requested_menu_groups is not None
+                        else {}
+                    ),
                     "updated_by": principal.email,
                 },
             )
@@ -739,6 +772,11 @@ class DirectoryService:
                 organization_id=before["organization_id"],
                 department_id=before["department_id"],
                 reason=write.reason,
+            )
+            # A menu-only save invalidates session navigation without publishing APIM identity.
+            result["_navigation_only"] = all(
+                before[field] == result[field]
+                for field in ("display_name", "contact_email", "employee_number", "job_title")
             )
             return result
 

@@ -73,3 +73,19 @@ schemas:
         type: [string, 'null']
         default: null
         description: Stable governance identity from an explicit current-account person link.
+      menu_permission_group:
+        type: string
+        enum: [user, organization_admin, department_admin, team_admin]
+        default: user
+        description: Local navigation group only; Owner remains a separate platform role.
+      menu_permission_groups:
+        type: array
+        items:
+          type: string
+          enum: [user, organization_admin, department_admin, team_admin]
+        description: Local groups with unioned menus; Ordinary User when none assigned.
+      menu_permissions:
+        type: array
+        items:
+          type: string
+        description: Server-derived menu union, not APIM or business API authorization.

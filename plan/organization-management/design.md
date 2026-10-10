@@ -77,7 +77,8 @@ P1 的合理抽象是一个共享目录服务与范围策略，不先构建通�
 
 ## 3. 数据模型
 
-以下为逻辑 schema。候选迁移 `012` 已提供本地实现，尚未用于生产；实际落点与验证情况见实施记录。
+以下为逻辑 schema。P1 迁移 `012` 已应用生产，本次菜单权限追加 `013/014` 尚未上线；
+实际落点与验证情况见实施记录。
 本地目录表与外部同步能力分期开启，不改已应用迁移。
 
 ### 3.1 主数据表
@@ -86,7 +87,7 @@ P1 的合理抽象是一个共享目录服务与范围策略，不先构建通�
 | --- | --- | --- |
 | `directory_organization` | `id TEXT`、`code`、`name`、`description`、`status`、`revision`、时间/操作者 | ID 不变，规范化 code 全局唯一；状态 `active/inactive/archived` |
 | `directory_unit` | `id TEXT`、`organization_id`、`parent_unit_id`、`kind`、`code`、`name`、`status`、`revision` | 组织内 code 唯一；`kind=department/team`；P1 部门无单位父节点、团队父节点为同组织部门 |
-| `directory_person` | `id UUID`、`governance_user_id TEXT UNIQUE`、`display_name`、`contact_email`、`employee_number`、`job_title`、`status`、`manual_disabled`、`revision` | 内部稳定人员 ID；旧人员保留邮箱形治理 ID；业务资料允许 Unicode；不存密码 |
+| `directory_person` | `id UUID`、`governance_user_id TEXT UNIQUE`、`display_name`、`contact_email`、`employee_number`、兼容 `job_title`、兼容单组（013）、`menu_permission_groups TEXT[]`（014）、`status`、`manual_disabled`、`revision` | 内部稳定人员 ID；可同时指派多个菜单组；独立于数据/APIM 权限；不存密码 |
 | `directory_membership` | `id UUID`、`person_id`、`unit_id`、`organization_id`、`membership_kind`、`valid_from/to`、`source_binding_id`、`revision` | `primary_department/team`；半开有效区间 `[from,to)`；一人有效主部门唯一；团队成员必须在该主部门下 |
 | `directory_account_link` | `person_id`、`app_user_id`、`verified_by/at`、`status` | P1 一对一有效绑定，UUID 外键；账号 enabled/role 仍由账号域管理 |
 | `directory_department_grant` | `id`、`app_user_id`、`department_id`、`capabilities`、`valid_from/to`、授予者 | 权限白名单、有效任职与有效账号；不是第三种 `app_user.role` |
@@ -178,6 +179,55 @@ P1 的合理抽象是一个共享目录服务与范围策略，不先构建通�
 尚未绑定人员的旧账号，其个人页暂时保留“已验证会话邮箱的原有本人查询”兼容路径，并显示未关联；不能因此获得某个候选人员的目录归属。完成可信绑定后统一转到治理 ID 查询，读取历史时不接受客户端自行指定 alias/person ID。新账号绑定与既有自助资料的可编辑规则保持独立。
 
 ## 5. 权限设计
+
+### 5.0 独立菜单权限组（2026-10-10）
+
+本补充以最新需求为准：不把组织管理发展为正式人事系统；前端“岗位”替换为
+“菜单权限组”。新增 `013_menu_permission_groups`，只向 `directory_person` 追加
+`menu_permission_group TEXT NOT NULL DEFAULT 'user'`，数据库约束四个枚举：
+`user`、`organization_admin`、`department_admin`、`team_admin`。
+随后追加 `014_multiple_menu_permission_groups`，以 `menu_permission_groups TEXT[]`
+作为权威字段，保留 013 单组列兼容旧客户端；将其明确已指派组转为一元素数组。
+三种管理员组允许同时存在，菜单取并集；没有管理员时保存 `['user']`。
+新 API 规范化去重，禁止普通用户与管理员混填，同时提交新数组和旧单组字段也拒绝。
+旧客户端单组写入仅替换为对应一元素数组，并执行同样的 Owner 检查。
+不修改已应用的 012/013，不把旧岗位值或既有部门 grant 推断为菜单组。
+`job_title` 与可选人员编号继续兼容旧 API/Graph 数据，前端不再编辑或展示岗位；
+PATCH 未提供字段时保留原值，不能因为新表单不发送岗位而清空旧值。
+
+集中菜单矩阵位于 `turnstile_core/domain/menu_permissions.py`，不依赖 backend。
+有效菜单组只取显式账号关联的启用人员和启用账号；未关联、停用、手工禁用或来源停用
+均回落普通用户。账号仍是 Owner/Member；Owner 独立保留全部适用菜单。
+不以岗位、Graph Group、团队成员关系或部门 grant 推断菜单组。
+组的完整初始菜单矩阵见需求第 1.1 节。
+
+登录响应及 `/auth/me` 返回 `menu_permission_groups`、服务端计算的 `menu_permissions`；
+单数字段仅为兼容投影，不用于计算有效菜单。
+后者包含稳定页面 ID，不是 API capabilities 或 APIM App Roles。
+服务端只允许 Owner 改变人员菜单组；具备部门资料编辑能力的 Member 可以保持原组，
+但不能自行升/降组，也不能创建带管理员菜单组的人员。人员资料与赋组在同一事务保存，
+沿用人员 revision、审计和写源检查。菜单变更递增 permission revision；
+仅改菜单组时不递增 APIM 目录版本、不插入投影 outbox，不触发网关身份重发布。
+同步只写来源字段，不能覆盖本地菜单组或通过来源岗位提升权限。
+
+前端仅消费服务端白名单：侧栏、命令搜索、浮动助手/报表、预取及快捷入口均校验。
+刷新、来源切换、前进/后退、直达 URL 和现有会话降组也做路由归一化：
+APIM 回到可访问的调用测试，否则回到用户设置。每 30 秒及窗口聚焦刷新 profile，
+组/菜单变化清除旧私有缓存，渲染时先使用受控页面，不能短暂挂载被撤销的页面。
+GitHub Copilot 继续隐藏组织管理，保留独立企业团队入口。
+
+菜单控制**不是数据安全边界**。APIM 模型调用、预算限额、限流、订阅、已有 Owner 写入、
+部门数据范围 SQL 均不读取本字段。后台接口继续由原授权体系控制，
+菜单访问不自动扩张业务 API 权限，也不表示新增多租户隔离。
+原“管理员”页签改称“数据授权”，显式区别旧部门能力与本地菜单组。
+
+前端表单以复选框指派管理员组，以多个标签显示当前组；列表也逐组显示标签。
+移除最后一个管理员后立即显示普通用户，不使用单选或多选下拉框。
+初始化随既有迁移链追加 013/014，导入/新建人员使用数据库默认普通组。
+已激活环境按兼容运行包更新流程备份和追加迁移，禁止重做目录切换/回填；
+数据库迁移必须先于新 API 的 Member principal 查询。回滚保留新列与历史审计，
+恢复上一组兼容三包/配置；不自动恢复数据库。验证应覆盖升级幂等、旧值保留、
+赋组/撤销、角色/数据范围/模型授权不变，以及桌面/移动端菜单与直达路由。
 
 ### 5.1 平台角色与部门能力
 
@@ -465,7 +515,11 @@ P2新增独立身份映射分区，键由受信 token的 `(cloud,tid,oid)` 唯�
 
 ### 11.2 Schema、业务回填与开关分离
 
-本次基线最高编号是 `011_user_settings_profile`。实施时重新核对迁移链，从届时下一可用编号追加 `.up.sql`；本文不提前占用012，不改001-011内容或checksum，不新增自动down脚本。
+初始设计基线最高编号是 `011_user_settings_profile`，P1 已追加并应用
+`012_organization_directory`。本次菜单权限改造追加 `013_menu_permission_groups`
+和 `014_multiple_menu_permission_groups`；
+以后重新核对迁移链，从下一可用编号追加 `.up.sql`，不改已应用迁移的内容或
+checksum，不新增自动 down 脚本。
 
 新增 migration 只建目录表、约束、索引及平台升级控制记录。新增 `directory_control_state` 逻辑表：schema/protocol 版本、初始化类型、当前权威源、`active_version`、升级 phase、已确认计划摘要、验证摘要和时间。`directory_upgrade_run` 保存执行 lease/checkpoint；`directory_upgrade_stage` 按 `(run_id, entity_type, stable_key)` 保存候选字段、来源、预期版本和处理状态。它们不是现有已实现表。
 

@@ -15,6 +15,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from ..domain.directory import DIRECTORY_PROTOCOL_VERSION, DirectoryError, DirectoryPrincipal
+from ..domain.menu_permissions import MenuPermissionGroup
 from ..domain.models import EnterpriseEntity, EnterpriseEntityCatalog
 
 DirectoryConnection = Connection[dict[str, Any]]
@@ -140,6 +141,16 @@ class DirectoryStore:
                 permission_revision=state["permission_revision"],
             )
         with self.connection() as connection:
+            person = connection.execute(
+                """SELECT p.menu_permission_group,p.menu_permission_groups
+                   FROM directory_person p
+                   JOIN directory_account_link l ON l.person_id=p.id
+                   JOIN app_user a ON a.id=l.app_user_id AND a.enabled
+                   WHERE l.app_user_id=%s AND p.status='active' AND NOT p.manual_disabled
+                     AND NOT EXISTS(SELECT 1 FROM directory_external_binding e
+                       WHERE e.person_id=p.id AND e.source_disabled)""",
+                (account_id,),
+            ).fetchone()
             subject = connection.execute(
                 "SELECT 1 FROM directory_department_grant WHERE app_user_id = %s LIMIT 1",
                 (account_id,),
@@ -171,6 +182,14 @@ class DirectoryStore:
             else None,
             capabilities=tuple(sorted({item for row in grants for item in row["capabilities"]})),
             permission_revision=state["permission_revision"],
+            menu_permission_group=cast(
+                MenuPermissionGroup, person["menu_permission_group"] if person else "user"
+            ),
+            menu_permission_groups=tuple(
+                cast(list[MenuPermissionGroup], person["menu_permission_groups"])
+                if person
+                else ["user"]
+            ),
         )
 
     def linked_person(self, account_id: UUID) -> dict[str, Any] | None:

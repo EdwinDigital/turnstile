@@ -7,7 +7,9 @@ from email.headerregistry import Address
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from .menu_permissions import MenuPermissionGroup, menu_permissions
 
 DirectoryStatus = Literal["active", "inactive", "archived"]
 DirectoryCapability = Literal["directory.read", "directory.edit_people", "directory.edit_teams"]
@@ -33,6 +35,12 @@ class DirectoryPrincipal(DirectoryModel):
     department_ids: tuple[str, ...] | None = None
     capabilities: tuple[DirectoryCapability, ...] = ()
     permission_revision: int = 0
+    menu_permission_group: MenuPermissionGroup = "user"
+    menu_permission_groups: tuple[MenuPermissionGroup, ...] = ("user",)
+
+    @property
+    def menu_permissions(self) -> tuple[str, ...]:
+        return menu_permissions(self.menu_permission_groups, owner=self.owner)
 
     @property
     def owner(self) -> bool:
@@ -105,6 +113,32 @@ class PersonWrite(DirectoryWrite):
     contact_email: str | None = Field(default=None, max_length=320)
     employee_number: str | None = Field(default=None, max_length=64)
     job_title: str = Field(default="", max_length=160)
+    menu_permission_group: MenuPermissionGroup | None = None
+    menu_permission_groups: list[MenuPermissionGroup] | None = Field(default=None, max_length=3)
+
+    @field_validator("menu_permission_groups")
+    @classmethod
+    def normalize_menu_groups(
+        cls, values: list[MenuPermissionGroup] | None
+    ) -> list[MenuPermissionGroup] | None:
+        if values is None:
+            return None
+        groups = sorted(set(values))
+        if "user" in groups and len(groups) > 1:
+            raise ValueError("Ordinary User cannot be combined with administrator groups")
+        return groups or ["user"]
+
+    @model_validator(mode="after")
+    def one_menu_representation(self) -> PersonWrite:
+        if self.menu_permission_group is not None and self.menu_permission_groups is not None:
+            raise ValueError("Provide either menu_permission_groups or the legacy single group")
+        return self
+
+    @property
+    def requested_menu_groups(self) -> list[MenuPermissionGroup] | None:
+        if self.menu_permission_groups is not None:
+            return self.menu_permission_groups
+        return [self.menu_permission_group] if self.menu_permission_group is not None else None
 
     @field_validator("display_name", "employee_number", "job_title")
     @classmethod

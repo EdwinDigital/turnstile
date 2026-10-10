@@ -330,6 +330,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (
       identityChanged ||
       activeUser.current?.role !== next.role ||
+      activeUser.current?.menu_permission_group !== next.menu_permission_group ||
+      JSON.stringify(activeUser.current?.menu_permission_groups) !== JSON.stringify(next.menu_permission_groups) ||
+      JSON.stringify(activeUser.current?.menu_permissions) !== JSON.stringify(next.menu_permissions) ||
       (activeUser.current?.directory_scope_key ?? "global") !== (next.directory_scope_key ?? "global") ||
       (activeUser.current?.directory_permission_revision ?? 0) !== (next.directory_permission_revision ?? 0) ||
       activeUser.current?.governance_user_id !== next.governance_user_id

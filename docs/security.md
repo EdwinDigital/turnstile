@@ -31,6 +31,25 @@ administrator binding and cannot silently adopt its role. `ENTRA_ALLOWED_TENANT_
 add an exact tenant allow-list without widening the existing email-domain gate.
 Directory sync and Microsoft login configuration are independent.
 
+## Menu Permission Groups
+
+Local `user`, `organization_admin`, `department_admin` and `team_admin` groups control
+application navigation only. Administrator groups can coexist and menus are their union.
+`menu_permission_groups` is authoritative; the singular field is a legacy projection.
+Unassigned and unlinked accounts default to `user`; active
+linked people supply the local group. Disabled/source-disabled people lose its menus.
+Owner independently retains all applicable menus and is the only role allowed to change groups.
+These names do not grant account roles, department capabilities, Graph consent or model access.
+
+The server publishes the menu whitelist in login/current-profile responses. The client applies
+it to navigation, search, direct routes, prefetching and assistant entry points, and refreshes
+it on focus/every 30 seconds. Hiding a menu is not business API authorization: existing Owner
+mutations, department-scoped reads, ordinary Member API read policy and APIM admission remain
+unchanged. API callers must continue to rely on those independent checks.
+Entra profile imports, job titles, team membership and legacy department grants never assign
+local menu groups. A menu-only edit is audited and invalidates permission caches without
+publishing a gateway identity update.
+
 Directory connections store credential references, not secrets. Graph access is read-only,
 uses fixed cloud endpoints, follows only same-cloud HTTPS paging links and encrypts delta
 checkpoints with the existing credential key. Missing permissions, incomplete data and expired

@@ -181,6 +181,56 @@ def test_directory_api_authentication_and_department_scope(
     assert client.get("/api/v1/organization-management/people").status_code == 401
 
 
+def test_menu_group_profile_and_password_login_do_not_change_data_authorization(
+    directory_http: tuple[TestClient, dict[str, Any]],
+) -> None:
+    client, data = directory_http
+    person_url = f"/api/v1/organization-management/people/{data['person']['id']}"
+    client.cookies.set("turnstile_session", "directory-member")
+    before = client.get("/api/v1/auth/me").json()
+    assert before["menu_permission_group"] == "user"
+    assert before["menu_permissions"] == ["user-settings", "finops-invoke"]
+    client.cookies.set("turnstile_session", "directory-owner")
+    person = client.get(person_url).json()
+    response = client.patch(
+        person_url,
+        json={
+            "display_name": person["display_name"],
+            "expected_revision": person["revision"],
+            "menu_permission_groups": ["organization_admin", "team_admin"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    client.cookies.set("turnstile_session", "directory-member")
+    after = client.get("/api/v1/auth/me").json()
+    assert after["menu_permission_group"] == "organization_admin"
+    assert set(after["menu_permission_groups"]) == {"organization_admin", "team_admin"}
+    assert "settings" in after["menu_permissions"]
+    assert after["role"] == before["role"] == "member"
+    assert after["directory_scope_key"] == before["directory_scope_key"]
+    assert after["directory_permission_revision"] > before["directory_permission_revision"]
+    assert client.get("/api/v1/application-access/applications").status_code == 403
+    assert client.get("/api/v1/copilot/status").status_code == 403
+    assert client.get("/api/v1/organization-management/accounts").status_code == 403
+    assert client.get("/api/v1/organization-management/people").json()["total"] == 1
+    denied = client.patch(
+        person_url,
+        json={
+            "display_name": person["display_name"],
+            "expected_revision": response.json()["revision"],
+            "menu_permission_group": "department_admin",
+        },
+    )
+    assert denied.status_code == 403
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "member@example.com", "password": "long-test-directory-password"},
+    )
+    assert login.status_code == 200, login.text
+    assert login.json()["menu_permissions"] == after["menu_permissions"]
+    assert login.json()["menu_permission_groups"] == after["menu_permission_groups"]
+
+
 def test_revoked_department_admin_does_not_recover_legacy_global_read(
     directory_http: tuple[TestClient, dict[str, Any]],
 ) -> None:
