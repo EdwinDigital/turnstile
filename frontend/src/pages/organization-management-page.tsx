@@ -35,6 +35,7 @@ import { FINOPS_NAVIGATE_EVENT } from "../lib/navigation"
 import { menuPermissionGroupNames, type MenuPermissionGroup } from "../api/auth"
 
 const statusNames: Record<DirectoryStatus, string> = { active: "启用", inactive: "停用", archived: "已归档" }
+const peopleColumnMinWidths = [160, 160, 200, 160, 80, 100, 60] as const
 const actionNames: Record<string, string> = {
   created: "新增", updated: "编辑", account_linked: "关联账号", status_changed: "状态变更",
   teams_updated: "团队成员变更", administrators_updated: "管理员变更", scheduled: "计划调岗",
@@ -445,7 +446,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
   return <div className="finops-workspace directory-workspace">
     <header className="finops-header"><div>
       <Button variant="ghost" size="icon-sm" aria-label="切换导航栏" title="切换导航栏" onClick={onToggleSidebar}><PanelLeft /></Button>
-      <span className="finops-header-icon"><FolderTree /></span><h1>组织管理</h1>
+      <span className="finops-header-icon"><FolderTree size={17} aria-hidden="true" /></span><h1>组织管理</h1>
     </div><Button variant="ghost" size="icon-sm" aria-label="刷新组织信息" title="刷新组织信息" onClick={() => void refresh()}><RefreshCw /></Button></header>
     {!capabilities ? <Empty><EmptyTitle>正在加载</EmptyTitle></Empty> : !canRead ? <Empty><EmptyTitle>无组织管理权限</EmptyTitle></Empty>
       : <div className="directory-layout">
@@ -502,7 +503,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                   <span className="directory-count">{people.data?.total ?? "--"} 人</span>
                   {department && editPeople && <Button size="sm" onClick={() => setEditor({ kind: "person" })}><Plus data-icon="inline-start" />新增人员</Button>}
                 </div>
-                <div className="directory-table-scroll"><ResizableTable className="directory-table">
+                <div className="directory-table-scroll"><ResizableTable className="directory-table directory-people-table" minWidths={peopleColumnMinWidths}>
                   <caption className="sr-only">组织人员</caption><thead><tr>
                     <th><span>人员</span></th><th><span>部门 / 团队</span></th><th><span>菜单权限组</span></th>
                     <th><span>账号</span></th><th><span>来源</span></th><th><span>状态</span></th><th><span>操作</span></th>

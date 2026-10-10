@@ -51,7 +51,7 @@
 .directory-toolbar > [data-slot="input"] { width: min(250px, 100%); }
 .directory-workspace [data-slot="select-trigger"], .directory-dialog [data-slot="select-trigger"] { min-width: 130px; height: 32px; }
 .directory-permission-tags { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
-.directory-permission-tags [data-slot="badge"] { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.directory-permission-tags [data-slot="badge"] { flex: 0 0 auto; white-space: nowrap; overflow-wrap: normal; max-width: none; }
 .directory-dialog .directory-permission-tags { margin-bottom: 8px; }
 .directory-table-scroll { overflow-x: auto; width: 100%; border: 1px solid var(--border); border-radius: 6px; }
 .directory-table { width: 100%; min-width: 780px; border-collapse: collapse; table-layout: fixed; font-size: 12px; text-align: left; }
@@ -64,6 +64,12 @@
 .directory-table tr:last-child td { border-bottom: 0; }
 .directory-table td strong { font-size: 12px; font-weight: 500; }
 .directory-table td small { display: block; margin-top: 4px; color: var(--muted-foreground); font-size: 10px; }
+.directory-people-table { min-width: 980px; }
+.directory-people-table th:first-child, .directory-people-table th:nth-child(2), .directory-people-table th:nth-child(4) { width: 180px; }
+.directory-people-table th:nth-child(3) { width: 200px; white-space: nowrap; }
+.directory-people-table th:nth-child(5) { width: 80px; }
+.directory-people-table th:nth-child(6) { width: 100px; }
+.directory-people-table th:last-child { width: 60px; }
 .directory-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 14px 0; font-size: 11px; color: var(--muted-foreground); }
 .directory-dialog[data-slot="dialog-content"] { width: min(480px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); overflow: auto; padding: 24px; }
 .directory-dialog [data-slot="dialog-header"] { margin-bottom: 20px; }
