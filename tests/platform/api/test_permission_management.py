@@ -201,9 +201,16 @@ def test_team_member_scope_never_expands_to_parent_department_or_other_team(
     )
     policy = client.get("/api/v1/permission-management").json()
     policy["groups"]["team_admin"].append("budgets")
-    assert client.put("/api/v1/permission-management", json={
-        "groups": policy["groups"], "expected_revision": policy["revision"],
-    }).status_code == 200
+    assert (
+        client.put(
+            "/api/v1/permission-management",
+            json={
+                "groups": policy["groups"],
+                "expected_revision": policy["revision"],
+            },
+        ).status_code
+        == 200
+    )
     period = datetime.now(UTC).strftime("%Y-%m")
     for kind, scope_id, amount in (
         ("organization", data["organization"]["id"], 100_000),
@@ -211,10 +218,14 @@ def test_team_member_scope_never_expands_to_parent_department_or_other_team(
         ("department", data["second"]["id"], 90_000),
         ("user", member["email"], 1_000),
     ):
-        assert client.put(
-            f"/api/v1/budgets/{kind}/{scope_id}", params={"period": period},
-            json={"token_limit": amount},
-        ).status_code == 200
+        assert (
+            client.put(
+                f"/api/v1/budgets/{kind}/{scope_id}",
+                params={"period": period},
+                json={"token_limit": amount},
+            ).status_code
+            == 200
+        )
     now = datetime.now(UTC)
     repository = app.dependency_overrides[get_repository]()
     for user in (member["email"], "outsider@example.com"):
@@ -261,9 +272,13 @@ def test_team_member_scope_never_expands_to_parent_department_or_other_team(
     }
     parent = next(row for row in budget.json()["items"] if row["scope_id"] == data["first"]["id"])
     assert parent["token_limit"] == 1_000
-    people_budget = client.get("/api/v1/budgets/users", params={
-        "period": period, "department_id": data["first"]["id"],
-    })
+    people_budget = client.get(
+        "/api/v1/budgets/users",
+        params={
+            "period": period,
+            "department_id": data["first"]["id"],
+        },
+    )
     assert people_budget.status_code == 200 and people_budget.json()["total"] == 1
     assert people_budget.json()["department_token_limit"] == 1_000
     assert (
@@ -290,3 +305,121 @@ def test_policy_rejects_unknown_and_owner_delegation(invalid: str) -> None:
     with pytest.raises(ValueError):
         PermissionPolicyWrite(expected_revision=1, groups=groups)
     assert "permission-management" in ALL_MENUS
+
+
+@pytest.mark.parametrize(
+    ("menu", "features"),
+    [
+        ("finops-overview", ("executive-overview", "distribution", "trends", "anomalies")),
+        ("finops-analytics", ("executive-overview", "distribution", "requests")),
+        ("finops-trends", ("executive-overview", "trends", "requests")),
+        (
+            "finops-governance",
+            ("executive-overview", "distribution", "trends", "requests", "anomalies"),
+        ),
+        ("finops-requests", ("executive-overview", "trends", "requests")),
+        ("models", ("executive-overview", "distribution", "trends", "requests")),
+    ],
+)
+def test_one_ordinary_user_menu_authorizes_its_shared_reads_without_widening_data(
+    directory_http: tuple[TestClient, dict[str, Any]],
+    menu: str,
+    features: tuple[str, ...],
+) -> None:
+    client, data = directory_http
+    root = "/api/v1/organization-management"
+    person = client.get(f"{root}/people/{data['person']['id']}").json()
+    department = next(
+        row
+        for row in client.get(f"{root}/organizations/{data['organization']['id']}/units").json()
+        if row["id"] == data["first"]["id"]
+    )
+    assert (
+        client.put(
+            f"{root}/departments/{department['id']}/administrators",
+            json={
+                "account_ids": [],
+                "expected_revision": department["revision"],
+            },
+        ).status_code
+        == 200
+    )
+    configuration = client.get("/api/v1/permission-management").json()
+    configuration["groups"]["user"] = ["user-settings", menu]
+    assert (
+        client.put(
+            "/api/v1/permission-management",
+            json={
+                "groups": configuration["groups"],
+                "expected_revision": configuration["revision"],
+            },
+        ).status_code
+        == 200
+    )
+    now = datetime.now(UTC)
+    repository = app.dependency_overrides[get_repository]()
+    for user, tokens in ((person["governance_user_id"], 10), ("other@example.com", 900)):
+        repository.write_token_usage(
+            _usage_record(str(uuid4()), "Runtime", tokens).model_copy(
+                update={
+                    "ts": now,
+                    "request_id": user,
+                    "user_id": user,
+                    "user": user,
+                    "organization_id": data["organization"]["id"],
+                    "department_id": department["id"],
+                },
+            )
+        )
+    client.cookies.set(data["settings"].session_cookie_name, "directory-member")
+    profile = client.get("/api/v1/auth/me").json()
+    assert profile["menu_permission_groups"] == ["user"]
+    assert set(profile["menu_permissions"]) == {"user-settings", menu}
+    window = {
+        "from": (now - timedelta(hours=1)).isoformat(),
+        "to": (now + timedelta(hours=1)).isoformat(),
+    }
+    for feature in features:
+        params = {**window, **({"dimension": "user"} if feature == "distribution" else {})}
+        if feature == "trends":
+            params.update(interval="day", group_by="none")
+        response = client.get(f"/api/v1/observability/{feature}", params=params)
+        assert response.status_code == 200, (menu, feature, response.text)
+        if feature == "executive-overview":
+            assert response.json()["totals"]["total_requests"] == 1
+            forged = client.get(f"/api/v1/observability/{feature}", params={
+                **window, "user_id": "other@example.com",
+            })
+            assert forged.status_code == 200
+            assert forged.json()["totals"]["total_requests"] == 0
+        elif feature == "requests":
+            assert [row["user_id"] for row in response.json()["items"]] == [
+                person["governance_user_id"],
+            ]
+        elif feature == "distribution":
+            assert sum(row["total_requests"] for row in response.json()["items"]) == 1
+    assert client.get("/api/v1/permission-management").status_code == 403
+    assert (
+        client.get("/api/v1/budgets", params={"period": now.strftime("%Y-%m")}).status_code == 403
+    )
+    configuration["groups"]["user"] = ["user-settings"]
+    if menu not in {"finops-overview", "finops-governance"}:
+        assert client.get("/api/v1/observability/anomalies", params=window).status_code == 403
+    if menu == "finops-trends":
+        assert client.get("/api/v1/observability/distribution", params={
+            **window, "dimension": "user",
+        }).status_code == 403
+    client.cookies.set(data["settings"].session_cookie_name, "directory-owner")
+    latest = client.get("/api/v1/permission-management").json()
+    assert (
+        client.put(
+            "/api/v1/permission-management",
+            json={
+                "groups": configuration["groups"],
+                "expected_revision": latest["revision"],
+            },
+        ).status_code
+        == 200
+    )
+    client.cookies.set(data["settings"].session_cookie_name, "directory-member")
+    assert client.get("/api/v1/observability/executive-overview", params=window).status_code == 403

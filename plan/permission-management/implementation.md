@@ -62,3 +62,20 @@ Ruff、Mypy（264文件）、前端构建、XML和Bicep编译通过；OpenAPI无
 - 私有证据：`permission-live-api-proof.json`、`ai-finops-live-api-proof.json`、
   `customer-after-proof.json`、`final-verification.json`及三包`backup-proof.json`。
 - 本次真实Entra/AD同步、外部Provider/付费推理未测试，功能开关保持原值。
+
+## 单菜单403修复
+
+2026-10-11普通用户配置分布/趋势/治理/追踪后页面仍报`Menu access is not granted`。
+根因：页面共用executive-overview、distribution、trends等统计API，上一版按接口名称
+仅绑定单个菜单，没有覆盖实际消费页面。修正为共享读接口按其消费菜单授权并集，
+不扩大DataAccessScope，不自动勾选管理总览，也不改预算/APIM/历史数据。
+请求详情只允许追踪或治理；撤销所有相关菜单后共享统计API仍403。
+
+主布局在没有组织管理菜单权限时停止查询目录能力，权限profile刷新保留。
+新增六组普通用户“只开放一个菜单”真实PostgreSQL测试，验证本人一条请求、
+同部门他人请求不可见、恶意user_id返回零、Owner/预算接口拒绝及撤权即时生效。
+Playwright/Edge在隔离真实数据库逐页验证五个治理页面正常加载/统计只读本人，
+用量分布切换人员维度正常；Browser插件未提供。全量与上线结果随后补记。
+
+本地完整回归`1774 passed, 7 skipped`；7项显式数据库测试另跑全部通过。
+Ruff/Mypy（264文件）、前端构建及diff检查通过。修复无新迁移，现有001-018保持。

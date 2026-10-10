@@ -864,7 +864,7 @@ export function App() {
   const directoryCapabilities = useQuery({
     queryKey: ["directory", "capabilities", user?.id, user?.directory_scope_key],
     queryFn: directoryApi.capabilities,
-    enabled: selectedDataSource === "apim" && Boolean(user),
+    enabled: selectedDataSource === "apim" && canAccessMenu(user, "organization-management"),
     refetchInterval: 30_000,
   });
   const acceptedUrl = useRef(window.location.href);

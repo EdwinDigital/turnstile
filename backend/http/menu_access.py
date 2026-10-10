@@ -4,6 +4,33 @@ from fastapi import HTTPException, Request
 
 from ..services.auth_service import SessionIdentity
 
+# These scoped reads are shared by multiple pages, not owned by their endpoint names.
+USAGE_SUMMARY_MENUS = (
+    "finops-overview",
+    "finops-analytics",
+    "finops-trends",
+    "finops-governance",
+    "finops-requests",
+    "models",
+)
+OBSERVABILITY_READ_MENUS = {
+    "overview": ("finops-overview",),
+    "executive-overview": USAGE_SUMMARY_MENUS,
+    "distribution": ("finops-overview", "finops-analytics", "finops-governance", "models"),
+    "trends": (
+        "finops-overview",
+        "finops-trends",
+        "finops-governance",
+        "finops-requests",
+        "models",
+    ),
+    "requests": USAGE_SUMMARY_MENUS,
+    "anomalies": ("finops-overview", "finops-governance"),
+    "audit-findings": ("finops-governance",),
+    "runs": ("finops-requests",),
+    "optimization-events": ("finops-governance",),
+}
+
 
 def require_menu_access(request: Request, identity: SessionIdentity) -> None:
     if identity.role == "owner":
@@ -24,16 +51,8 @@ def require_menu_access(request: Request, identity: SessionIdentity) -> None:
         choices = ("pinned-report",) if "/pinned-charts" in path else ("assistant",)
     elif path.startswith("/api/v1/observability/"):
         feature = path.split("/")[4]
-        choices = {
-            "overview": ("finops-overview",),
-            "executive-overview": ("finops-overview",),
-            "distribution": ("finops-analytics",),
-            "trends": ("finops-trends",),
-            "requests": ("finops-requests",),
-            "anomalies": ("finops-governance",),
-            "audit-findings": ("finops-governance",),
-            "runs": ("finops-requests",),
-            "optimization-events": ("finops-governance",),
-        }.get(feature, ())
+        choices = OBSERVABILITY_READ_MENUS.get(feature, ())
+        if feature == "requests" and len(path.rstrip("/").split("/")) > 5:
+            choices = ("finops-requests", "finops-governance")
     if choices and not set(choices).intersection(identity.menu_permissions):
         raise HTTPException(status_code=403, detail="Menu access is not granted")
