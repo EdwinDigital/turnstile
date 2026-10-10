@@ -2,16 +2,17 @@
 
 本目录保存功能的需求分析和设计方案。各功能的实现状态见下表及对应文档；拟议接口、字段和组件不代表已经实现。
 
-更新日期：2026-10-11。源码核对基线 `ee27527`；最近已部署应用提交为 `9cc17fa`，
-发布记录提交为 `ee27527`。本次文档更新不代表重新发布，不将运维恢复等同于代码修复。
+更新日期：2026-10-11。最近已部署应用提交为 `4c2dadc`，发布记录提交为 `0114ec3`。
+组织/权限治理上游 PR #34 已提交；从用户仓库 main 构建和发布结果以实施记录为准。
+文档更新不代表重新发布，不将运维恢复等同于代码修复。
 
 | 功能 | 需求分析 | 设计文档 | 状态 | 已提交 PR |
 | --- | --- | --- | --- | --- |
 | 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已实现、已上线；010不可变，后续共享包保留；原验收边界见验证记录 | [xuleihive/turnstile#31](https://github.com/xuleihive/turnstile/pull/31)，Open，待合并 |
 | 用户设置 | [requirements.md](user-settings/requirements.md) | [design.md](user-settings/design.md) | 已实现、已上线；当前目录集成及本人只读接口已随 `9cc17fa` 复验；真实 Microsoft OAuth/Graph 未重新验收 | [xuleihive/turnstile#32](https://github.com/xuleihive/turnstile/pull/32)，Open，待合并 |
-| 组织管理 | [requirements.md](organization-management/requirements.md) | [design.md](organization-management/design.md) | P1 已上线；001-017 已应用，成员/权限/预算与用量兼容已复验；P2 代码已部署，真实 Entra 与动态网关未验收且开关关闭 | 未提交 PR；代码已推送 origin 功能分支 |
-| 权限管理 | [requirements.md](permission-management/requirements.md) | [design.md](permission-management/design.md) | 已上线：4c2dadc修复单菜单共享API 403，001-018；本地1774通过及另跑7项，线上普通用户四页面验收通过，见[实施记录](permission-management/implementation.md) | 未提交 PR；已推送origin功能分支 |
-| AI FinOps 与报表中心 | [功能范围](ai-finops/design.md) | [design.md](ai-finops/design.md) | 已随 `9cc17fa` 上线；完整本地回归 1758 passed / 7 skipped，线上只读 API、桌面/手机验收通过 | 未提交 PR；代码已推送 origin 功能分支 |
+| 组织管理 | [requirements.md](organization-management/requirements.md) | [design.md](organization-management/design.md) | P1 已上线；001-018 已应用，成员/权限/预算与用量兼容已复验；P2 代码已部署，真实 Entra 与动态网关未验收且开关关闭 | [xuleihive/turnstile#34](https://github.com/xuleihive/turnstile/pull/34)，Open，待上游审查 |
+| 权限管理 | [requirements.md](permission-management/requirements.md) | [design.md](permission-management/design.md) | 已上线：4c2dadc修复单菜单共享API 403，001-018；本地1774通过及另跑7项，线上普通用户四页面验收通过，见[实施记录](permission-management/implementation.md) | [xuleihive/turnstile#34](https://github.com/xuleihive/turnstile/pull/34)，Open，待上游审查 |
+| AI FinOps 与报表中心 | [功能范围](ai-finops/design.md) | [design.md](ai-finops/design.md) | 已随 `9cc17fa` 上线；完整本地回归 1758 passed / 7 skipped，线上只读 API、桌面/手机验收通过 | [xuleihive/turnstile#34](https://github.com/xuleihive/turnstile/pull/34)，纳入组织/权限集成改造 |
 
 每个功能使用独立子目录。需求和实现发生变化时，应同步更新对应文档；不得将计划中的能力描述成现有行为。
 

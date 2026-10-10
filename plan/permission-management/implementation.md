@@ -94,3 +94,16 @@ Ruff/Mypy（264文件）、前端构建及diff检查通过。修复无新迁移�
 私有证据：`api-package-proof.json`、`ordinary-user-browser-proof.json`、
 `session-cleanup-proof.json`、`customer-after-proof.json`、`ai-finops-live-api-proof.json`。
 本次回滚保留兼容018的旧API包；修复无数据库改动，不需要数据恢复或新迁移。
+
+## 上游提交和主分支发布
+
+2026-10-11已提交正式上游PR：
+[xuleihive/turnstile#34](https://github.com/xuleihive/turnstile/pull/34)。
+PR明确标注组织管理/权限治理是跨模块较大改造，涉及人员数据范围、预算只读投影、
+用量/助手/报表查询、初始化与升级脚本。上游未合并#30/#31/#32，当前完整diff包含
+这些前置功能；主体审查可对照用户fork原main基线`12dc1ee`。不宣称整个diff仅为组织功能。
+CI的Ruff/Mypy补齐core，与README校验范围一致；操作文档升级至018。
+
+功能分支完整回归1774通过，另跑7项显式PostgreSQL测试通过；README命令全部通过，
+保留既有Bicep、OpenAPI、前端chunk warning。用户仓库main将以快进方式纳入此分支，
+然后从主仓库干净main重新构建/发布，结果随后记录。
