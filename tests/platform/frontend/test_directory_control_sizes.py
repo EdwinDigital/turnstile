@@ -45,3 +45,25 @@ def test_directory_creation_buttons_and_hover_colors_follow_the_theme_variants()
     assert '[data-variant="outline"]:hover:not(:disabled)' in styles
     assert '[data-variant="default"]:hover:not(:disabled)' in styles
     assert "var(--primary) 85%, var(--background)" in styles
+
+
+def test_person_action_dialog_controls_and_status_values_are_consistent() -> None:
+    source = (FRONTEND_SOURCE / "pages/organization-management-page.tsx").read_text()
+    action = source.split("function PersonActionDialog", 1)[1].split(
+        "function AddMembersDialog", 1,
+    )[0]
+    controls = (FRONTEND_SOURCE / "components/directory-controls.tsx").read_text()
+    styles = (FRONTEND_SOURCE / "styles/organization-management.css").read_text()
+    assert "DialogClose" not in action
+    assert '<Button type="button" variant="outline" disabled={save.isPending}' in action
+    assert 'onClick={onClose}>取消</Button>' in action
+    assert '<dl className="directory-status-facts">' in action
+    assert "<dt>人员状态</dt><dd><Badge>" in action
+    assert 'className="directory-team-name" data-no-localize' in action
+    assert 'title={selectedLabel}' in controls
+    assert 'className="directory-select-content"' in controls
+    trigger = styles.split('\n.directory-dialog [data-slot="select-trigger"] {', 1)[1].split(
+        "}", 1,
+    )[0]
+    assert "width: 100%" in trigger and "min-width: 0" in trigger and "font-size: 12px" in trigger
+    assert '.directory-status-facts [data-slot="badge"] { width: fit-content' in styles

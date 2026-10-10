@@ -111,6 +111,11 @@ class OrganizationWrite(DirectoryWrite):
     contact_email: str | None = Field(default=None, max_length=320)
     status: DirectoryStatus = "active"
 
+    @field_validator("status")
+    @classmethod
+    def normalize_status(cls, value: DirectoryStatus) -> DirectoryStatus:
+        return "archived" if value == "inactive" else value
+
     @field_validator("code")
     @classmethod
     def normalize_code(cls, value: str) -> str:
@@ -240,6 +245,11 @@ class AdministratorsWrite(DirectoryWrite):
 class PersonStatusWrite(DirectoryWrite):
     status: DirectoryStatus
     disable_account: bool = False
+
+    @field_validator("status")
+    @classmethod
+    def normalize_status(cls, value: DirectoryStatus) -> DirectoryStatus:
+        return "archived" if value == "inactive" else value
 
 
 class TransferWrite(DirectoryWrite):

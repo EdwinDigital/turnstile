@@ -6,19 +6,20 @@ import {
 } from "lucide-react"
 import {
   directoryApi, type DirectoryCapabilities, type DirectoryOrganization,
-  type AdministratorScopeKind, type DirectoryPerson, type DirectoryStatus, type DirectoryUnit,
+  type AdministratorScopeKind, type DirectoryPerson, type DirectoryUnit,
 } from "../data-sources/apim/api/organization-management"
 import { Button } from "../components/ui/button"
 import { Input } from "../components/ui/input"
 import { Textarea } from "../components/ui/textarea"
 import { Checkbox } from "../components/ui/checkbox"
+import { Switch } from "../components/ui/switch"
 import { Alert, AlertDescription } from "../components/ui/alert"
 import { Badge } from "../components/ui/badge"
 import { Empty, EmptyContent, EmptyTitle } from "../components/ui/empty"
 import { Field, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "../components/ui/field"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import {
-  Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "../components/ui/dialog"
 import { confirmDirectoryLeave, DirectorySelect as MenuSelect, useDirectoryLeaveGuard } from "../components/directory-controls"
 import { DirectorySyncPanel } from "./directory-sync-panel"
@@ -29,11 +30,15 @@ import { ResizableTable } from "../components/ui/resizable-table"
 import { cn } from "../lib/utils"
 import { useAuth } from "../providers/auth-provider"
 import { useTimezone } from "../providers/timezone-provider"
-import { getIntlLocale } from "../locales/index"
+import { getIntlLocale, useLocale } from "../locales/index"
 import { FINOPS_NAVIGATE_EVENT } from "../lib/navigation"
 import { menuPermissionGroupNames, type MenuAdministratorScope, type MenuPermissionGroup } from "../api/auth"
+import {
+  directoryOrganizationSelection, directoryUnitSelection, managedDirectoryStatus,
+  sortDirectoryNodes, visibleDirectoryOrganizations, visibleDirectoryUnits, type ManagedDirectoryStatus,
+} from "../lib/directory-visibility"
 
-const statusNames: Record<DirectoryStatus, string> = { active: "启用", inactive: "停用", archived: "已归档" }
+const statusNames: Record<ManagedDirectoryStatus, string> = { active: "启用", archived: "已归档" }
 const peopleColumnMinWidths = [160, 160, 200, 160, 80, 100, 60] as const
 const actionNames: Record<string, string> = {
   created: "新增", updated: "编辑", account_linked: "关联账号", status_changed: "状态变更",
@@ -79,7 +84,7 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
   const [employee, setEmployee] = useState(person?.employee_number ?? "")
   const menuGroups = person?.scope_menu_permission_groups ?? ["user"]
   const [description, setDescription] = useState(entity?.description ?? "")
-  const [status, setStatus] = useState<DirectoryStatus>(entity?.status ?? "active")
+  const [status, setStatus] = useState<ManagedDirectoryStatus>(managedDirectoryStatus(entity?.status ?? "active"))
   const [dirty, setDirty] = useState(false)
   useDirectoryLeaveGuard(dirty)
   const key = useMemo(() => crypto.randomUUID(), [])
@@ -159,7 +164,7 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
               value={description} maxLength={2000} onChange={(event) => change(setDescription)(event.target.value)} /></FormInput>
             {entity && <Field><FieldLabel>状态</FieldLabel><MenuSelect label="状态" value={status}
               items={Object.entries(statusNames).map(([value, label]) => ({ value, label }))}
-              onChange={(value) => { setStatus(value as DirectoryStatus); setDirty(true) }} /></Field>}
+              onChange={(value) => { setStatus(value as ManagedDirectoryStatus); setDirty(true) }} /></Field>}
           </>}
         </FieldGroup>
         {mutation.error && <Alert><AlertDescription>{mutation.error.message}</AlertDescription></Alert>}
@@ -201,7 +206,7 @@ function PersonActionDialog({ person, action, units, onClose, onSaved }: {
       if (action === "link") return directoryApi.linkAccount(person.id, { ...common, app_user_id: accountId })
       if (action === "teams") return directoryApi.setTeams(person.id, { ...common, team_ids: teamIds })
       if (action === "status") return directoryApi.setStatus(person.id, {
-        ...common, status: person.status === "active" ? "inactive" : "active", disable_account: disableAccount,
+        ...common, status: person.status === "active" ? "archived" : "active", disable_account: disableAccount,
       })
     },
     onSuccess: onSaved,
@@ -221,20 +226,22 @@ function PersonActionDialog({ person, action, units, onClose, onSaved }: {
         {action === "link" && <Field><FieldLabel>登录账号</FieldLabel><MenuSelect label="登录账号" value={accountId}
           items={(accounts.data ?? []).map((account) => ({ value: account.id, label: `${account.display_name ?? account.email} · ${account.email}` }))}
           onChange={setAccountId} /></Field>}
-        {action === "teams" && <FieldSet><FieldLegend>团队</FieldLegend><div className="directory-checkboxes">
+        {action === "teams" && <FieldSet><FieldLegend>团队</FieldLegend><div className="directory-checkboxes directory-team-options">
           {teams.map((team) => <label key={team.id}><Checkbox
             checked={teamIds.includes(team.id) || sourceTeams.includes(team.id)}
             disabled={sourceTeams.includes(team.id)}
             onCheckedChange={(checked) => setTeamIds((current) => checked ? [...current, team.id] : current.filter((id) => id !== team.id))} />
-            {team.name}{sourceTeams.includes(team.id) && <Badge variant="outline">Entra ID</Badge>}</label>)}
+            <span className="directory-team-name" data-no-localize>{team.name}</span>
+            {sourceTeams.includes(team.id) && <Badge variant="outline">Entra ID</Badge>}</label>)}
           {teams.length === 0 && <span>暂无团队</span>}
         </div></FieldSet>}
         {action === "status" && <>
-          <div className="directory-facts"><span>人员状态</span><Badge>{statusNames[person.status]}</Badge>
-            <span>变更后</span><Badge>{person.status === "active" ? "停用" : "启用"}</Badge>
-            <span>历史预算</span><span>{statusPreview.data?.budgets.length ?? "--"}</span>
-            <span>网关归属</span><Badge variant="outline">待同步</Badge>
-          </div>
+          <dl className="directory-status-facts">
+            <div><dt>人员状态</dt><dd><Badge>{statusNames[managedDirectoryStatus(person.status)]}</Badge></dd></div>
+            <div><dt>变更后</dt><dd><Badge>{person.status === "active" ? "已归档" : "启用"}</Badge></dd></div>
+            <div><dt>历史预算</dt><dd>{statusPreview.data?.budgets.length ?? "--"}</dd></div>
+            <div><dt>网关归属</dt><dd><Badge variant="outline">待同步</Badge></dd></div>
+          </dl>
           {person.status === "active" && person.app_user_id && <label className="directory-checkbox-line">
             <Checkbox checked={disableAccount} onCheckedChange={(checked) => setDisableAccount(Boolean(checked))} />同时停用登录账号
           </label>}
@@ -245,8 +252,8 @@ function PersonActionDialog({ person, action, units, onClose, onSaved }: {
       {(save.error || accounts.error || statusPreview.error) && <Alert><AlertDescription>
         {(save.error || accounts.error || statusPreview.error)?.message}
       </AlertDescription></Alert>}
-      <DialogFooter><DialogClose render={<Button variant="outline" disabled={save.isPending} />}>取消</DialogClose>
-        <Button disabled={!allowed || save.isPending} onClick={() => save.mutate()}><Save data-icon="inline-start" />确认</Button>
+      <DialogFooter><Button type="button" variant="outline" disabled={save.isPending} onClick={onClose}>取消</Button>
+        <Button type="button" disabled={!allowed || save.isPending} onClick={() => save.mutate()}><Save data-icon="inline-start" />确认</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
@@ -369,13 +376,15 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
   onToggleSidebar: () => void; capabilities: DirectoryCapabilities | undefined
 }) {
   const { user, refreshProfile } = useAuth()
+  const { locale } = useLocale()
   const { timezone } = useTimezone()
   const queryClient = useQueryClient()
   const [organizationId, setOrganizationId] = useState(() => new URLSearchParams(location.search).get("directory_org") ?? "")
   const [unitId, setUnitId] = useState(() => new URLSearchParams(location.search).get("directory_unit") ?? "")
   const [query, setQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
-  const [status, setStatus] = useState<DirectoryStatus | "all">("all")
+  const [status, setStatus] = useState<ManagedDirectoryStatus | "all">("all")
+  const [hideArchived, setHideArchived] = useState(true)
   const [cursor, setCursor] = useState("")
   const [previousCursors, setPreviousCursors] = useState<string[]>([])
   const [editor, setEditor] = useState<Editor | null>(null)
@@ -389,13 +398,20 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
     queryKey: ["directory", "organizations", ...scope], queryFn: directoryApi.organizations,
     enabled: canRead,
   })
-  const effectiveOrgId = organizationId || organizations.data?.[0]?.id || ""
+  const sortedOrganizations = useMemo(() => sortDirectoryNodes(organizations.data ?? [], locale),
+    [organizations.data, locale])
+  const visibleOrganizations = visibleDirectoryOrganizations(sortedOrganizations, hideArchived)
+  const effectiveOrgId = directoryOrganizationSelection(sortedOrganizations, organizationId, hideArchived)
   const organization = organizations.data?.find((row) => row.id === effectiveOrgId)
   const units = useQuery({
     queryKey: ["directory", "units", effectiveOrgId, ...scope],
     queryFn: () => directoryApi.units(effectiveOrgId), enabled: canRead && Boolean(organization),
   })
-  const selectedUnit = units.data?.find((row) => row.id === unitId)
+  const sortedUnits = useMemo(() => sortDirectoryNodes(units.data ?? [], locale), [units.data, locale])
+  const visibleUnits = visibleDirectoryUnits(sortedUnits, hideArchived)
+  const effectiveUnitId = effectiveOrgId !== organizationId && organizationId ? ""
+    : directoryUnitSelection(units.data ?? [], unitId, hideArchived)
+  const selectedUnit = visibleUnits.find((row) => row.id === effectiveUnitId)
   const departmentId = selectedUnit?.kind === "department" ? selectedUnit.id : selectedUnit?.parent_unit_id ?? ""
   const department = units.data?.find((row) => row.id === departmentId)
   const teamId = selectedUnit?.kind === "team" ? selectedUnit.id : undefined
@@ -407,7 +423,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
       ...(teamId ? { team_id: teamId } : {}), query: debouncedQuery,
       ...(status !== "all" ? { status } : {}), ...(cursor ? { cursor } : {}),
     }),
-    enabled: canRead && Boolean(organization) && (!unitId || Boolean(selectedUnit)) && tab === "people",
+    enabled: canRead && Boolean(organization) && (!effectiveUnitId || Boolean(selectedUnit)) && tab === "people",
   })
   const audit = useQuery({
     queryKey: ["directory", "audit", departmentId, ...scope],
@@ -419,6 +435,14 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
     return () => clearTimeout(timer)
   }, [query])
   useEffect(() => { setCursor(""); setPreviousCursors([]) }, [unitId, effectiveOrgId, debouncedQuery, status])
+  useEffect(() => {
+    if (!organizations.data) return
+    if (organizationId && effectiveOrgId !== organizationId) {
+      setOrganizationId(effectiveOrgId); setUnitId(""); setTab("people")
+    } else if (units.data && effectiveUnitId !== unitId) {
+      setUnitId(effectiveUnitId); setTab("people")
+    }
+  }, [organizations.data, units.data, organizationId, effectiveOrgId, unitId, effectiveUnitId])
   useEffect(() => {
     const url = new URL(location.href)
     if (organizationId) url.searchParams.set("directory_org", organizationId); else url.searchParams.delete("directory_org")
@@ -446,7 +470,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
   const selectUnit = (id: string) => { if (confirmDirectoryLeave()) { setUnitId(id); setTab("people") } }
   const error = organizations.error || units.error || people.error || audit.error
   const missing = organizations.data && organizationId && !organization
-    || units.data && unitId && !selectedUnit
+    || units.data && effectiveUnitId && !selectedUnit
   return <div className="finops-workspace directory-workspace">
     <header className="finops-header"><div>
       <Button variant="ghost" size="icon-sm" className="finops-sidebar-trigger" aria-label="切换导航栏" title="切换导航栏" onClick={onToggleSidebar}><PanelLeft /></Button>
@@ -457,20 +481,29 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
         <aside className="directory-tree" aria-label="组织目录">
           <div className="directory-tree-heading"><strong>组织目录</strong>{owner && <Button variant="ghost" size="icon-sm"
             aria-label="新增组织" title="新增组织" onClick={() => setEditor({ kind: "organization" })}><Plus /></Button>}</div>
-          {(organizations.data ?? []).map((org) => <div key={org.id}>
-            <button type="button" className={cn("directory-tree-node", effectiveOrgId === org.id && !unitId && "selected")}
-              onClick={() => selectOrganization(org.id)} title={org.name}><Building2 /><span data-no-localize>{org.name}</span></button>
-            {effectiveOrgId === org.id && (units.data ?? []).filter((unit) => unit.kind === "department").map((unit) => <div key={unit.id}>
-              <button type="button" className={cn("directory-tree-node directory-tree-department", unitId === unit.id && "selected")}
+          <label className="directory-tree-filter"><span id="directory-hide-archived-label">隐藏已归档</span><Switch
+            aria-label="隐藏已归档" aria-labelledby="directory-hide-archived-label"
+            checked={hideArchived} onCheckedChange={(checked) => {
+              if (confirmDirectoryLeave()) setHideArchived(Boolean(checked))
+            }} /></label>
+          {visibleOrganizations.map((org) => <div key={org.id}>
+            <button type="button" className={cn("directory-tree-node", effectiveOrgId === org.id && !effectiveUnitId && "selected")}
+              onClick={() => selectOrganization(org.id)} title={org.name}><Building2 /><span data-no-localize>{org.name}</span>
+              {org.status !== "active" && <Badge variant="outline">{statusNames[managedDirectoryStatus(org.status)]}</Badge>}
+            </button>
+            {effectiveOrgId === org.id && visibleUnits.filter((unit) => unit.kind === "department").map((unit) => <div key={unit.id}>
+              <button type="button" className={cn("directory-tree-node directory-tree-department", effectiveUnitId === unit.id && "selected")}
                 onClick={() => selectUnit(unit.id)} title={unit.name}><Users /><span data-no-localize>{unit.name}</span>
-                {unit.status !== "active" && <Badge variant="outline">{statusNames[unit.status]}</Badge>}
+                {unit.status !== "active" && <Badge variant="outline">{statusNames[managedDirectoryStatus(unit.status)]}</Badge>}
               </button>
-              {(units.data ?? []).filter((team) => team.parent_unit_id === unit.id).map((team) => <button type="button" key={team.id}
-                className={cn("directory-tree-node directory-tree-team", unitId === team.id && "selected")}
-                onClick={() => selectUnit(team.id)} title={team.name}><UserRound /><span data-no-localize>{team.name}</span></button>)}
+              {visibleUnits.filter((team) => team.parent_unit_id === unit.id).map((team) => <button type="button" key={team.id}
+                className={cn("directory-tree-node directory-tree-team", effectiveUnitId === team.id && "selected")}
+                onClick={() => selectUnit(team.id)} title={team.name}><UserRound /><span data-no-localize>{team.name}</span>
+                {team.status !== "active" && <Badge variant="outline">{statusNames[managedDirectoryStatus(team.status)]}</Badge>}
+              </button>)}
             </div>)}
           </div>)}
-          {organizations.data?.length === 0 && <Empty><EmptyTitle>暂无组织</EmptyTitle></Empty>}
+          {organizations.data && visibleOrganizations.length === 0 && <Empty><EmptyTitle>暂无组织</EmptyTitle></Empty>}
         </aside>
         <main className="directory-main">
           {error && <Alert><AlertDescription>{error.message}</AlertDescription><Button variant="outline" size="sm" onClick={() => void refresh()}>重试</Button></Alert>}
@@ -480,7 +513,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
           </Empty> : <>
             <div className="directory-context-heading"><div><h2 data-no-localize>{selectedUnit?.name ?? organization.name}</h2>
               <span>{selectedUnit?.kind === "team" ? "团队" : selectedUnit ? "部门" : "组织"}</span>
-              <Badge variant="outline">{statusNames[selectedUnit?.status ?? organization.status]}</Badge>
+              <Badge variant="outline">{statusNames[managedDirectoryStatus(selectedUnit?.status ?? organization.status)]}</Badge>
               <small data-no-localize>{selectedUnit?.code ?? organization.code}</small>
             </div><div>
               {(owner || selectedUnit?.kind === "team" && editTeams) && <Button variant="outline" size="sm" onClick={() => setEditor({
@@ -501,7 +534,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                   onChange={(event) => setQuery(event.target.value)} />
                   <MenuSelect label="人员状态" value={status} items={[{ value: "all", label: "全部状态" },
                     ...Object.entries(statusNames).map(([value, label]) => ({ value, label }))]}
-                    onChange={(value) => setStatus(value as DirectoryStatus | "all")} />
+                    onChange={(value) => setStatus(value as ManagedDirectoryStatus | "all")} />
                   <span className="directory-count">{people.data?.total ?? "--"} 人</span>
                   {!selectedUnit && owner && <Button variant="outline" size="sm" onClick={() => setEditor({ kind: "person" })}><Plus data-icon="inline-start" />新增人员</Button>}
                   {selectedUnit && editPeople && <Button variant="outline" size="sm" onClick={() => setAddingMembers(true)}><Plus data-icon="inline-start" />添加成员</Button>}
@@ -520,7 +553,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                     <td><span data-no-localize>{person.account_email ?? "--"}</span><small>{person.app_user_id ? person.account_enabled ? "启用" : "停用" : "未关联"}</small></td>
                     <td><Badge variant="outline">{person.externally_managed ? "Entra ID" : "本地"}</Badge></td>
                     <td><Badge variant={person.status === "active" && !person.source_disabled ? "secondary" : "outline"}>
-                      {person.source_disabled ? "来源已停用" : statusNames[person.status]}</Badge></td>
+                      {person.source_disabled ? "来源已停用" : statusNames[managedDirectoryStatus(person.status)]}</Badge></td>
                     <td>{(owner || (person.department_id && capabilities?.department_capabilities?.[person.department_id]?.includes("directory.edit_people"))) && <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" className="directory-person-trigger"
                       aria-label={`操作 ${person.display_name}`} title="人员操作" />}><Ellipsis /></DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="directory-person-menu"><DropdownMenuGroup>

@@ -462,13 +462,6 @@ class DirectoryService:
             before = self._entity(connection, "organization", entity_id)
             self._revision(before, write)
             if write.status != "active":
-                active = connection.execute(
-                    """SELECT 1 FROM directory_unit WHERE organization_id=%s
-                       AND status='active' LIMIT 1""",
-                    (entity_id,),
-                ).fetchone()
-                if active:
-                    raise DirectoryError("active_children", "Deactivate dependent units first")
                 jobs = connection.execute(
                     """SELECT 1 FROM directory_connection c JOIN directory_sync_job j
                        ON j.connection_id=c.id WHERE c.organization_id=%s
@@ -574,28 +567,22 @@ class DirectoryService:
             if write.kind != before["kind"] or write.parent_unit_id != before["parent_unit_id"]:
                 raise DirectoryError("immutable_hierarchy", "Unit hierarchy cannot be edited")
             if write.status != "active":
-                dependencies = connection.execute(
-                    """SELECT EXISTS(SELECT 1 FROM directory_membership m
-                         JOIN directory_person p ON p.id=m.person_id AND p.status='active'
-                         WHERE m.unit_id=%s AND (m.valid_to IS NULL OR m.valid_to>now()))
-                       OR EXISTS(SELECT 1 FROM directory_unit
-                         WHERE parent_unit_id=%s AND status='active')
-                       OR EXISTS(SELECT 1 FROM directory_project_reference WHERE department_id=%s)
-                       OR EXISTS(SELECT 1 FROM gateway_application
-                         WHERE department_id=%s AND status <> 'retired')
-                       OR EXISTS(SELECT 1 FROM directory_transfer
-                         WHERE status='scheduled'
-                           AND (source_department_id=%s OR target_department_id=%s))
-                       OR EXISTS(SELECT 1 FROM directory_group_mapping g
-                         JOIN directory_sync_job j ON j.connection_id=g.connection_id
-                         WHERE g.unit_id=%s AND g.enabled
-                           AND j.status IN ('queued','running','awaiting_review','applying'))
-                         AS occupied""",
-                    (entity_id, entity_id, entity_id, entity_id, entity_id, entity_id, entity_id),
+                # Archiving retains members and references; only in-flight sync writes conflict.
+                jobs = connection.execute(
+                    """SELECT 1 FROM directory_connection c
+                       JOIN directory_sync_job j ON j.connection_id=c.id
+                       WHERE j.status IN ('queued','running','awaiting_review','applying')
+                         AND (c.default_department_id=%s OR EXISTS(
+                           SELECT 1 FROM directory_group_mapping g
+                           JOIN directory_unit u ON u.id=g.unit_id
+                           WHERE g.connection_id=c.id AND g.enabled
+                             AND (u.id=%s OR u.parent_unit_id=%s)))
+                       LIMIT 1""",
+                    (entity_id, entity_id, entity_id),
                 ).fetchone()
-                if dependencies is not None and dependencies["occupied"]:
+                if jobs:
                     raise DirectoryError(
-                        "unit_in_use", "Unit has active members or referenced resources"
+                        "unit_sync_pending", "Finish or cancel pending directory jobs first"
                     )
             row = self._update(
                 connection,

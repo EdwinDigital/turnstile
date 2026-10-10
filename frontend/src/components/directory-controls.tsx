@@ -28,10 +28,13 @@ export function DirectorySelect({ label, value, items, onChange, disabled = fals
   label: string; value: string; items: Array<{ value: string; label: string }>
   onChange: (value: string) => void; disabled?: boolean; required?: boolean
 }) {
+  const selectedLabel = items.find((item) => item.value === value)?.label ?? label
   return <Select items={items} value={value} onValueChange={(next) => next && onChange(next)} disabled={disabled} required={required}>
-    <SelectTrigger aria-label={label} aria-required={required || undefined}><SelectValue>{items.find((item) => item.value === value)?.label ?? label}</SelectValue></SelectTrigger>
-    <SelectContent alignItemWithTrigger={false}><SelectGroup>
-      {items.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
+    <SelectTrigger aria-label={label} aria-required={required || undefined} title={selectedLabel}>
+      <SelectValue>{selectedLabel}</SelectValue>
+    </SelectTrigger>
+    <SelectContent className="directory-select-content" alignItemWithTrigger={false}><SelectGroup>
+      {items.map((item) => <SelectItem key={item.value} value={item.value} title={item.label}>{item.label}</SelectItem>)}
     </SelectGroup></SelectContent>
   </Select>
 }

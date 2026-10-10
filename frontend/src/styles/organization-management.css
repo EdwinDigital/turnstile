@@ -36,6 +36,10 @@
 .directory-person-trigger:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .directory-tree { padding: 14px 10px; min-width: 0; overflow-y: auto; border-right: 1px solid var(--border); background: var(--background); }
 .directory-tree-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 8px 14px; font-size: 12px; }
+.directory-tree-filter { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 12px; color: var(--muted-foreground); font-size: 11px; }
+.directory-tree-filter > span { min-width: 0; overflow-wrap: anywhere; }
+.directory-tree-filter [data-slot="switch"] { flex-shrink: 0; }
+.directory-tree-node [data-slot="badge"] { flex-shrink: 0; white-space: nowrap; }
 .directory-tree-node { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--foreground); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .directory-tree-node:hover, .directory-tree-node.selected { background: var(--muted); }
 .directory-tree-node:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
@@ -55,6 +59,9 @@
 .directory-workspace [data-slot="input"]:focus-visible, .directory-dialog [data-slot="input"]:focus-visible, .directory-dialog [data-slot="textarea"]:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 20%, transparent); }
 .directory-toolbar > [data-slot="input"] { width: min(250px, 100%); }
 .directory-workspace [data-slot="select-trigger"], .directory-dialog [data-slot="select-trigger"] { min-width: 130px; height: 32px; }
+.directory-dialog [data-slot="select-trigger"] { width: 100%; min-width: 0; max-width: 100%; border-radius: 6px; background: var(--background); font-size: 12px; }
+.directory-dialog [data-slot="select-value"] { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.directory-select-content [data-slot="select-item"] { font-size: 12px; }
 .directory-permission-tags { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .directory-permission-tags [data-slot="badge"] { flex: 0 0 auto; white-space: nowrap; overflow-wrap: normal; max-width: none; }
 .directory-dialog .directory-permission-tags { margin-bottom: 8px; }
@@ -85,8 +92,13 @@
 .directory-checkboxes { display: grid; gap: 10px; }
 .directory-checkboxes label, .directory-checkbox-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
 .directory-checkboxes small { color: var(--muted-foreground); font-size: 11px; overflow-wrap: anywhere; }
-.directory-facts { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: center; gap: 12px; font-size: 12px; }
-.directory-facts > span:nth-child(odd) { color: var(--muted-foreground); }
+.directory-dialog .directory-team-options > label { flex-wrap: nowrap; align-items: flex-start; }
+.directory-team-name { flex: 1; min-width: 0; overflow-wrap: anywhere; line-height: 18px; }
+.directory-status-facts { display: grid; gap: 12px; margin: 0; font-size: 12px; }
+.directory-status-facts > div { display: grid; grid-template-columns: minmax(80px, 110px) minmax(0, 1fr); align-items: center; gap: 12px; }
+.directory-status-facts dt { min-width: 0; color: var(--muted-foreground); overflow-wrap: anywhere; }
+.directory-status-facts dd { min-width: 0; margin: 0; font-variant-numeric: tabular-nums; }
+.directory-status-facts [data-slot="badge"] { width: fit-content; max-width: 100%; white-space: nowrap; }
 .directory-admins { display: grid; align-content: start; justify-items: start; gap: 20px; padding: 22px 0; }
 .directory-existing-admin { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
 .directory-existing-admin > svg { width: 16px; height: 16px; }

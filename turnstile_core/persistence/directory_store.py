@@ -350,12 +350,16 @@ class DirectoryStore:
         for clause, value in (
             ("p.id=%s", person_id),
             ("l.app_user_id=%s", account_id),
-            ("p.status=%s", status),
             ("COALESCE(u.organization_id,p.organization_id)=%s", organization_id),
         ):
             if value is not None:
                 clauses.append(clause)
                 parameters.append(value)
+        if status == "archived":
+            clauses.append("p.status IN ('inactive','archived')")
+        elif status is not None:
+            clauses.append("p.status=%s")
+            parameters.append(status)
         if department_ids is not None:
             clauses.append("membership.unit_id=ANY(%s)")
             parameters.append(list(department_ids))

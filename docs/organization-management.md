@@ -20,6 +20,64 @@ window up to 366 days. It retains original unknown/archived IDs and latest in-wi
 attribution without editing historical requests. The query client does not rewrite legacy
 user IDs into today's governance identities.
 
+## Archive Visibility
+
+Organizations, departments, teams and personnel use Enabled and Archived in management.
+Existing `inactive` rows remain readable and display as Archived; the archived personnel
+filter includes both stored values. Legacy clients may still send `inactive`, but write DTOs
+normalize it to `archived`. No historical data or applied migration is rewritten.
+Login-account disabling and external-source disabling remain separate controls.
+
+The directory's Hide archived switch is enabled on each page entry. It hides archived
+organizations and their subtrees, archived departments and their subtrees, and archived teams.
+At each sibling level, enabled nodes precede archived nodes; names use the current locale's
+natural ascending order, with stable IDs breaking equal-name ties. Sorting does not mutate
+query caches, memberships or the selected node.
+Turn it off to inspect or restore records. A hidden selected team falls back to an active
+parent department, a hidden department to its organization, and a hidden organization to the
+first active organization or an empty state. Unknown/inaccessible IDs still report an error.
+The URL is reconciled after hiding or archiving, and unsaved changes require confirmation.
+This is navigation filtering, not an authorization boundary or an APIM revocation guarantee.
+
+Archiving an organization, department or team does not require emptying its members,
+children, projects, applications or budgets. It changes only the selected node and its
+normal revision/audit metadata; personnel status, login accounts, memberships, child status,
+billing facts and model configuration are retained. Restoring a node also does not change
+those records. Active assignment/admission projections and scoped administrator effectiveness
+still respect archived scopes; personnel status and a scope's effective access are distinct.
+Pending directory synchronization jobs targeting the organization, unit, its descendant
+team mappings or an all-users default department must finish or be cancelled before archiving.
+Permissions, optimistic revisions and immutable hierarchy checks remain enforced.
+
+## Budget Directory Navigation
+
+The APIM budget hierarchy defaults to collapsed organizations and Hide archived enabled.
+Organization/department rows sort enabled first, then by locale-aware natural names; directory
+archive state is separate from the existing budget risk status. Hiding rows does not remove
+stored budgets or alter overview, risk, history, quota constraints or enforcement totals.
+
+Click an organization or department name to select the personnel scope. Organization selection
+shows all people in its monthly primary-budget departments, including retained archived department
+records; department selection shows its monthly primary-budget people. The team selector contains
+only teams under that selected organization/department. All teams includes people without a team.
+Changing the hierarchy scope resets the team and personnel selection. Selecting a team intersects
+current directory memberships with the original monthly budget personnel; it does not move anyone's
+primary department, create team budgets or reinterpret historical accounting.
+
+The UI reads every required page from the existing department budget and directory membership
+endpoints, with bounded concurrent department requests, before filtering and paginating locally.
+Only already-authorized departments are read. Installations/users without directory-management
+read access retain the scoped current enterprise catalog fallback and do not call protected directory
+lists. Query errors are not shown as fabricated zero totals.
+
+All budget/model write endpoints, payload definitions, allocation validation and database storage
+remain unchanged. Organization views support individual edits and same-primary-department batches;
+mixed-department selections cannot submit a batch. Team selections use explicit governance IDs,
+so the existing all-matching operation cannot accidentally include people outside the team.
+The existing 500-ID limit applies; full unfiltered single-department result selections can still
+use the existing server all-matching mode. No automatic cross-department partial writes are introduced.
+Any future change to budget controls, write contracts or storage requires explicit approval.
+
 ## Menu Groups, Not Job Titles
 
 Personnel forms/lists display a local menu permission group instead of Job Title.
@@ -202,6 +260,13 @@ After database activation, routine updates must not rerun backfill or activation
 different code digest. Back up the current compatible package trio, settings and database,
 then build all three new packages with an identical core digest. Verify all applied migration
 checksums and the isolated backup restore before publication.
+
+For compatible updates after 017 with no new migrations, require all 17 applied checksums
+to match the candidate and require both migration runs to return an empty result.
+Compare every restored table before and after the isolated no-op migration. Do not replay
+the 015-017 backfill assertions or accept an older migration baseline. Production verification
+must preserve directory rows, historical billing and the current APIM revision. Read-only
+release smoke tests must not save budgets, archive customer nodes or enable Graph workers.
 
 For the 015-017 upgrade, compare all existing personnel fields except the added
 `organization_id`, and verify that its backfill matches current primary memberships.

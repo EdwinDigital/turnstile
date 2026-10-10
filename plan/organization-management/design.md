@@ -85,7 +85,7 @@ P1 的合理抽象是一个共享目录服务与范围策略，不先构建通�
 
 | 表 | 关键字段 | 约束与语义 |
 | --- | --- | --- |
-| `directory_organization` | `id TEXT`、`code`、`name`、`description`、`status`、`revision`、时间/操作者 | ID 不变，规范化 code 全局唯一；状态 `active/inactive/archived` |
+| `directory_organization` | `id TEXT`、`code`、`name`、`description`、`status`、`revision`、时间/操作者 | ID 不变，规范化 code 全局唯一；管理状态 `active/archived`，读取兼容旧 `inactive` |
 | `directory_unit` | `id TEXT`、`organization_id`、`parent_unit_id`、`kind`、`code`、`name`、`status`、`revision` | 组织内 code 唯一；`kind=department/team`；P1 部门无单位父节点、团队父节点为同组织部门 |
 | `directory_person` | `id UUID`、`governance_user_id TEXT UNIQUE`、`display_name`、`contact_email`、`employee_number`、兼容 `job_title`、兼容单组（013）、`menu_permission_groups TEXT[]`（014）、`status`、`manual_disabled`、`revision` | 内部稳定人员 ID；可同时指派多个菜单组；独立于数据/APIM 权限；不存密码 |
 | `directory_membership` | `id UUID`、`person_id`、`unit_id`、`organization_id`、`membership_kind`、`valid_from/to`、`source_binding_id`、`revision` | `primary_department/team`；半开有效区间 `[from,to)`；一人有效主部门唯一；团队成员必须在该主部门下 |
@@ -335,15 +335,48 @@ GitHub Copilot 的企业/团队/成本中心 API没有本地部门语义。部�
 
 ## 6. 变更、归属与预算
 
-### 6.1 一般保存与停用
+### 6.1 一般保存与归档
+
+组织、部门、团队和人员管理只使用启用/归档。旧 `inactive` 数据保持原值，
+界面映射为已归档；人员归档查询包含 inactive/archived，写 DTO 将旧客户端
+inactive 归一化保存为 archived，不修改已应用迁移或历史审计。
+账号 enabled、manual_disabled、来源 source_disabled 保持原有独立语义。
+组织/部门/团队归档不要求清空启用人员、子节点或业务引用，仅修改当前节点及
+原有 revision/audit/outbox 元数据，不联动人员/账号/成员关系/子节点状态或历史业务配置。
+组织内待执行同步、当前节点或下属团队映射的待执行同步、all_users 默认部门任务仍需
+先完成或取消；权限、revision 和不可变树结构检查保留。
+当前目录分配/调用及范围管理员有效性仍检查范围是否启用，不能将人员状态与范围权限混同。
+
+组织目录“隐藏已归档”默认开启，仅影响导航，不更改 API 数据范围或授权。
+归档组织及子树、归档部门及子树、归档团队隐藏；关闭开关可查看/恢复。
+各级同级节点先按启用/归档分组，再用当前 locale 的 Intl.Collator（numeric、
+sensitivity=base）按名称升序，同名按 ID 稳定排序。前端仅排序数组副本，
+不改API缓存、后端顺序或成员关系；首个启用组织回退与显示顺序一致。
+
+预算管理层级导航复用目录状态作只读展示：默认隐藏归档、组织折叠，同级启用/名称排序。
+BudgetStatus 仍表示额度风险，不能用目录状态覆盖；KPI/风险/历史以及额度约束仍使用原始
+预算响应，显示隐藏不得改统计、账本或拦截。组织/部门点击使用真实 kind/id 联动人员范围，
+团队下拉仅包含当前范围团队；切范围重置团队/搜索选择状态，全部团队不排除无团队人员。
+人员归属继续使用原月度预算 API 的 primary department，附加部门成员边不转换成预算归属。
+前端分页读取已有部门预算接口，再聚合组织、与当前团队治理ID集合取交集、搜索/状态筛选、
+按50条分页；跨页目录成员均读取，不只过滤当前页。并发部门读取限制4个，每次最多200条。
+不新增后端查询参数或团队预算字段。无目录读取权限使用已有授权enterprise catalog，
+不请求受保护目录列表；读取失败显示错误，不能伪装零数据。
+批量编辑仍单一主部门，团队筛选发送明确人员ID；混合部门禁止提交，不自动拆成多次写入。
+保留原500-ID限制、单部门完整未搜索结果的all_matching、预算编辑器和批量编辑器；
+固定/均分/保留额度、上级与子级校验、Owner写权限、模型配置和存储都不改。
+未来若需原生组织/团队预算接口或跨部门事务，必须先审批，不能用展示需求隐式引入。
+选择回退采用真实 ID，团队到启用部门、部门到组织、组织到首个启用组织；
+没有启用组织显示空态。未知/不可访问 ID 保留错误，不替换到其他范围。
+切换隐藏前执行未保存离开保护，URL 清除已隐藏节点；归档保存后重新查询并应用同一规则。
 
 数据库事务一次完成主数据、audit、outbox；返回保存后的 revision 与独立 `gateway_projection_state`。projector 失败可重试且有告警，用户不应因投影失败重复创建实体。
 
 名称变更仅影响当前展示，不修改原用量名称。联系邮箱变更不改治理 ID；新 alias 先验证，再由受信身份映射将新 claim 解析到旧治理键。
 
-人员停用流程必须分开：
+人员归档流程必须分开：
 
-1. 目录状态立即停用，管理/新预算分配不再接受；绑定账号是否停用须单独选择且 Owner 审批。
+1. 目录状态立即归档，管理/新预算分配不再接受；绑定账号是否停用须单独选择且 Owner 审批。
 2. 如选择账号停用，沿用 `app_user.enabled` 与会话失效检查；不删除账号或密码。
 3. 产生显式网关身份禁用投影，保留模型策略和预算。无预算/无模型策略的人也必须受禁用控制，不能只遍历预算记录。
 4. P1 仍为静态员工 policy 时提示未完成网关撤销，要求授权的 App Role/访问撤销或网关升级；不能声称目录 status 自带 APIM 拒绝能力。
@@ -395,7 +428,7 @@ P1 默认拒绝自动同月转移，有业务需要才实现 Owner 特批的同�
 | 固定报表、图表、共享与导出 | 原保存 ID 继续解析；缓存/共享不成为部门隔离旁路，重算按当前授权与原历史口径 |
 | `user_model_policy/access`、runtime.allowed_roles | 不改 owner/member；停用仍显式拒绝，缺失策略与空策略不同；组同步不自动授模型 |
 | `ledger.py` 与 APIM policy | governance ID及预留协议不变；identity outbox 独立版本；禁用覆盖无预算用户；目录/网关漂移可观测 |
-| `gateway_application.department_id/owner_id`、`application_access` | 保留应用域预算/模型/订阅，不把人等同应用；部门归档需引用检查，应用历史归因不重写 |
+| `gateway_application.department_id/owner_id`、`application_access` | 保留应用域预算/模型/订阅，不把人等同应用；部门归档保留引用，不清空应用，历史归因不重写 |
 | `enterprise_catalog` 项目/智能体 | P1 把既有项目/智能体映射作为兼容数据持久化或保留受控只读配置，部门依赖有注册表；新增部门可无项目，调用需可用的显式上下文 |
 | `TrafficGenerator`、健康/发布探针 | 测试种子与机器身份分离；不得转成真实人员、部门成员或重复消费人员预算 |
 | `ModelPricingMatcher` | 改为操作者已验证目录或独立系统身份，不借固定组织归因实际调用 |
@@ -422,7 +455,7 @@ P1 不将不同旧 ID自动 alias 合并为一个统计实体；该合并会改�
 | --- | --- |
 | `GET /organization-management/capabilities` | 当前账号有效范围/能力，不返回隐藏部门名称 |
 | `GET/POST /organization-management/organizations` | 列表按范围；创建 Owner |
-| `GET/PATCH /organization-management/organizations/{id}` | 详情/修改；状态修改含依赖校验，Owner |
+| `GET/PATCH /organization-management/organizations/{id}` | 详情/修改；归档只检查并发同步，不要求清空成员或子节点，Owner |
 | `GET/POST /organization-management/organizations/{id}/units` | 部门/团队列表；Owner建部门，授权管理员建本部门团队 |
 | `GET/PATCH /organization-management/units/{id}` | 单位详情/资料/状态；按能力限制字段 |
 | `GET/POST /organization-management/people` | 范围搜索/创建，必传可管理主部门，不跨域枚举账号 |
