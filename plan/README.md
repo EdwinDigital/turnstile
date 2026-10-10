@@ -10,7 +10,7 @@
 | 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已实现、已上线；010不可变，后续共享包保留；原验收边界见验证记录 | [xuleihive/turnstile#31](https://github.com/xuleihive/turnstile/pull/31)，Open，待合并 |
 | 用户设置 | [requirements.md](user-settings/requirements.md) | [design.md](user-settings/design.md) | 已实现、已上线；当前目录集成及本人只读接口已随 `9cc17fa` 复验；真实 Microsoft OAuth/Graph 未重新验收 | [xuleihive/turnstile#32](https://github.com/xuleihive/turnstile/pull/32)，Open，待合并 |
 | 组织管理 | [requirements.md](organization-management/requirements.md) | [design.md](organization-management/design.md) | P1 已上线；001-017 已应用，成员/权限/预算与用量兼容已复验；P2 代码已部署，真实 Entra 与动态网关未验收且开关关闭 | 未提交 PR；代码已推送 origin 功能分支 |
-| 权限管理 | [requirements.md](permission-management/requirements.md) | [design.md](permission-management/design.md) | 已实现并通过本地完整回归与四角色浏览器测试；018迁移/部署准备中，见[实施记录](permission-management/implementation.md) | 尚未提交 PR |
+| 权限管理 | [requirements.md](permission-management/requirements.md) | [design.md](permission-management/design.md) | 已上线：094b14e，001-018；本地1768通过及另跑7项数据库测试，四角色/线上Owner验收通过，见[实施记录](permission-management/implementation.md) | 未提交 PR；已推送origin功能分支 |
 | AI FinOps 与报表中心 | [功能范围](ai-finops/design.md) | [design.md](ai-finops/design.md) | 已随 `9cc17fa` 上线；完整本地回归 1758 passed / 7 skipped，线上只读 API、桌面/手机验收通过 | 未提交 PR；代码已推送 origin 功能分支 |
 
 每个功能使用独立子目录。需求和实现发生变化时，应同步更新对应文档；不得将计划中的能力描述成现有行为。
