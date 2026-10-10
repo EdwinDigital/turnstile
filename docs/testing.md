@@ -46,7 +46,9 @@ desktop/mobile rendering. See the menu matrix in the organization-management pla
 Migration `014_multiple_menu_permission_groups` adds the authoritative group array,
 preserving any single-group assignments from 013. Check combinations of administrator
 groups, menu union, single-label removal and fallback to Ordinary User after the last
-administrator label is removed. Personnel forms use checkboxes and tags, not a dropdown.
+administrator assignment is removed. Personnel forms display read-only tags, with no group
+checkboxes or dropdown. Verify profile saves omit both menu-group fields and preserve existing
+assignments, and new-person forms show Ordinary User without granting administrator groups.
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 

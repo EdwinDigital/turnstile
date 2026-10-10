@@ -268,3 +268,36 @@ def test_multiple_group_inputs_deduplicate_and_reject_conflicting_representation
             menu_permission_group="team_admin",
             menu_permission_groups=["department_admin"],
         )
+
+
+def test_person_profile_edit_without_menu_fields_preserves_all_assignments(
+    directory: tuple[DirectoryService, DirectoryPrincipal],
+) -> None:
+    service, owner = directory
+    person, _, account_id = linked_member(service, owner)
+    assigned = service.update_person(
+        owner,
+        UUID(person["id"]),
+        PersonWrite(
+            display_name=person["display_name"],
+            expected_revision=person["revision"],
+            menu_permission_groups=["organization_admin", "department_admin", "team_admin"],
+        ),
+    )
+    edited = service.update_person(
+        owner,
+        UUID(person["id"]),
+        PersonWrite(
+            display_name="Updated Profile",
+            contact_email="contact@example.com",
+            employee_number="profile-01",
+            expected_revision=assigned["revision"],
+        ),
+    )
+    assert edited["display_name"] == "Updated Profile"
+    assert edited["menu_permission_groups"] == assigned["menu_permission_groups"]
+    assert edited["menu_permission_group"] == assigned["menu_permission_group"]
+    principal = service.store.principal(account_id, "member@example.com", "member")
+    assert set(principal.menu_permission_groups) == {
+        "organization_admin", "department_admin", "team_admin"
+    }

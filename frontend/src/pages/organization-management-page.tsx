@@ -56,9 +56,8 @@ function MenuGroupTags({ groups }: { groups: MenuPermissionGroup[] }) {
   </div>
 }
 
-function DirectoryEditor({ editor, organizationId, departmentId, units, canAssignMenus, onClose, onSaved }: {
+function DirectoryEditor({ editor, organizationId, departmentId, units, onClose, onSaved }: {
   editor: Editor; organizationId: string; departmentId: string; units: DirectoryUnit[]
-  canAssignMenus: boolean
   onClose: () => void; onSaved: (id: string) => void
 }) {
   const row = editor.row
@@ -71,8 +70,7 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, canAssig
   ))
   const [identity, setIdentity] = useState(person?.governance_user_id ?? "")
   const [employee, setEmployee] = useState(person?.employee_number ?? "")
-  const [menuGroups, setMenuGroups] = useState<MenuPermissionGroup[]>(() =>
-    (person?.menu_permission_groups ?? [person?.menu_permission_group ?? "user"]).filter((group) => group !== "user"))
+  const menuGroups = person?.menu_permission_groups ?? [person?.menu_permission_group ?? "user"]
   const [description, setDescription] = useState(entity?.description ?? "")
   const [status, setStatus] = useState<DirectoryStatus>(entity?.status ?? "active")
   const [teamIds, setTeamIds] = useState(person?.team_ids ?? [])
@@ -85,13 +83,11 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, canAssig
       if (editor.kind === "person") {
         if (person) return directoryApi.updatePerson(person.id, {
           display_name: name, contact_email: email || null, employee_number: employee || null,
-          ...(canAssignMenus ? { menu_permission_groups: menuGroups } : {}),
           expected_revision: person.revision,
         })
         return directoryApi.createPerson({
           display_name: name, governance_user_id: identity, contact_email: email || identity,
           employee_number: employee || null, department_id: departmentId,
-          ...(canAssignMenus ? { menu_permission_groups: menuGroups } : {}),
           team_ids: teamIds,
         }, key)
       }
@@ -144,17 +140,9 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, canAssig
           {editor.kind === "person" ? <>
             <FormInput id="directory-employee" label="员工号"><Input id="directory-employee" value={employee}
               maxLength={64} onChange={(event) => change(setEmployee)(event.target.value)} /></FormInput>
-            <FieldSet data-disabled={!canAssignMenus}><FieldLegend>菜单权限组</FieldLegend>
+            <Field><FieldLabel>菜单权限组</FieldLabel>
               <MenuGroupTags groups={menuGroups} />
-              <div className="directory-checkboxes">
-                {(["organization_admin", "department_admin", "team_admin"] as const).map((group) =>
-                  <label key={group}><Checkbox checked={menuGroups.includes(group)} disabled={!canAssignMenus}
-                    onCheckedChange={(checked) => {
-                      setMenuGroups((current) => checked ? [...current, group] : current.filter((value) => value !== group))
-                      setDirty(true)
-                    }} />{menuPermissionGroupNames[group]}</label>)}
-              </div>
-            </FieldSet>
+            </Field>
             {!person && teams.length > 0 && <FieldSet><FieldLegend>团队</FieldLegend>
               <div className="directory-checkboxes">{teams.map((team) => <label key={team.id}>
                 <Checkbox checked={teamIds.includes(team.id)} onCheckedChange={(checked) => {
@@ -583,7 +571,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
         </main>
       </div>}
     {editor && <DirectoryEditor key={`${editor.kind}-${editor.row?.id ?? "new"}`} editor={editor}
-      organizationId={effectiveOrgId} departmentId={departmentId} units={units.data ?? []} canAssignMenus={owner}
+      organizationId={effectiveOrgId} departmentId={departmentId} units={units.data ?? []}
       onClose={() => setEditor(null)} onSaved={(id) => {
         if (editor.kind === "organization" && !editor.row) { setOrganizationId(id); setUnitId("") }
         if (editor.kind === "department" && !editor.row) setUnitId(id)

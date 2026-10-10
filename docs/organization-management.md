@@ -26,9 +26,10 @@ Personnel forms/lists display a local menu permission group instead of Job Title
 Unassigned people default to Ordinary User. Organization Administrator, Department Administrator
 and Team Administrator are navigation presets, not Owner, APIM roles or department data grants.
 Only Owner may assign or change them; an explicit enabled account/person link makes them effective.
-Multiple administrator groups can coexist and are displayed as tags. Checkboxes add/remove
-assignments without a dropdown; menus are the union of selected groups. Removing the last
-administrator tag returns to Ordinary User.
+Multiple administrator groups can coexist and are displayed as read-only tags in personnel
+forms/lists. The personnel form has no group assignment controls and never submits menu groups
+when creating or editing a person. Administrator maintenance remains in its separate workflow;
+menus are the union of assigned groups. No administrator assignment means Ordinary User.
 Existing job-title data is retained for old clients/source imports but never authorizes access.
 The separate Data Authorization tab retains the previous department-capability workflow.
 
