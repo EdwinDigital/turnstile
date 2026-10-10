@@ -94,7 +94,7 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 121
+    assert len(paths) == 122
     assert len(schemas) == 216
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())

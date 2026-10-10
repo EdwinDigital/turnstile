@@ -50,6 +50,13 @@ administrator assignment is removed. Personnel forms display read-only tags, wit
 checkboxes or dropdown. Verify profile saves omit both menu-group fields and preserve existing
 assignments, and new-person forms show Ordinary User without granting administrator groups.
 
+Migration `015_scoped_menu_administrators` unifies administrator appointments and menu identity.
+It imports valid legacy department administrators only, without inventing team/organization
+appointments or altering APIM, model access or historical billing. Verify old migration checksums,
+deduplication, rerun safety, real team-member validation, organization configuration, revocation,
+Owner/Member protection and consistent personnel/profile labels. Department appointments keep the
+existing department-scope contract through the legacy grant projection; there is no second UI.
+
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
 For an existing installation, run the same migration command to apply only pending upgrades. Verify that the initial migration checksum and existing usage rows are unchanged. Migration `002` replaces the unique caller-request index with a non-unique `(request_id, ts DESC)` index; it does not rewrite historical usage. Apply it before running the updated telemetry consumer, and drain older telemetry consumers before enabling the new version. Do not overlap consumers that use the old and new identity rules. Index replacement takes a table lock, so schedule the upgrade for an appropriate maintenance window. Migration `007` only adds nullable columns and defaults every existing model to `price_source = 'manual'`, so rates already in the registry are left exactly as they were and the price sync skips those rows until someone opts a model in.

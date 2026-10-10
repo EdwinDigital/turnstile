@@ -252,6 +252,8 @@ paths:
     $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1connections~1{connection_id}~1validate
   /api/v1/organization-management/departments/{department_id}/administrators:
     $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1departments~1{department_id}~1administrators
+  /api/v1/organization-management/menu-administrators/{scope_kind}/{scope_id}:
+    $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1menu-administrators~1{scope_kind}~1{scope_id}
   /api/v1/organization-management/organizations:
     $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1organizations
   /api/v1/organization-management/organizations/{organization_id}:

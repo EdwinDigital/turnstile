@@ -214,7 +214,7 @@ def test_sync_preview_apply_checkpoint_and_stable_identity(
     assert edited["id"] == person["id"]
     assert edited["governance_user_id"] == "example@example.com"
     assert edited["contact_email"] == "renamed@example.com"
-    assert edited["menu_permission_group"] == "team_admin"
+    assert edited["menu_permission_group"] == "department_admin"
     assert set(edited["menu_permission_groups"]) == {"team_admin", "department_admin"}
     assert graph.checkpoints[-1] and "private" in graph.checkpoints[-1]
 

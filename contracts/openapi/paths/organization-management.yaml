@@ -768,6 +768,123 @@ paths:
         create retries use Idempotency-Key. No-store responses and safe errors never
         expose credentials or cursors. Sync does not grant login roles, model access
         or tenant-wide consent.
+  /api/v1/organization-management/menu-administrators/{scope_kind}/{scope_id}:
+    get:
+      tags:
+      - Organization Management
+      summary: Menu Administrators
+      operationId: menu_administrators_api_v1_organization_management_menu_administrators__scope_kind___scope_id__get
+      parameters:
+      - name: scope_kind
+        in: path
+        required: true
+        schema:
+          enum:
+          - organization
+          - department
+          - team
+          type: string
+          title: Scope Kind
+      - name: scope_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Scope Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+                title: Response Menu Administrators Api V1 Organization Management
+                  Menu Administrators  Scope Kind   Scope Id  Get
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Persistent APIM organization directory. Owner manages organizations,
+        account links, connections and reviewed sync jobs. A delegated Member is restricted
+        to explicitly granted departments and capabilities. Writes enforce revisions;
+        create retries use Idempotency-Key. No-store responses and safe errors never
+        expose credentials or cursors. Sync does not grant login roles, model access
+        or tenant-wide consent.
+    put:
+      tags:
+      - Organization Management
+      summary: Set Menu Administrators
+      operationId: set_menu_administrators_api_v1_organization_management_menu_administrators__scope_kind___scope_id__put
+      parameters:
+      - name: scope_kind
+        in: path
+        required: true
+        schema:
+          enum:
+          - organization
+          - department
+          - team
+          type: string
+          title: Scope Kind
+      - name: scope_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Scope Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/AdministratorsWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Set Menu Administrators Api V1 Organization Management
+                  Menu Administrators  Scope Kind   Scope Id  Put
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Persistent APIM organization directory. Owner manages organizations,
+        account links, connections and reviewed sync jobs. A delegated Member is restricted
+        to explicitly granted departments and capabilities. Writes enforce revisions;
+        create retries use Idempotency-Key. No-store responses and safe errors never
+        expose credentials or cursors. Sync does not grant login roles, model access
+        or tenant-wide consent.
   /api/v1/organization-management/organizations:
     get:
       tags:

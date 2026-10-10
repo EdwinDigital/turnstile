@@ -11,7 +11,7 @@ The GitHub Copilot workspace hides this menu and search entry. Its enterprise te
 features retain their own data source. Switching workspaces does not delete directory data or
 stop background jobs.
 
-Readiness requires schemas 012-014, the configured directory authority and compatible packages.
+Readiness requires schemas 012-015, the configured directory authority and compatible packages.
 An HTTP health response alone does not prove directory, Graph or gateway readiness.
 
 `/api/v1/enterprise/entities` remains the active assignment/invocation projection.
@@ -31,7 +31,10 @@ forms/lists. The personnel form has no group assignment controls and never submi
 when creating or editing a person. Administrator maintenance remains in its separate workflow;
 menus are the union of assigned groups. No administrator assignment means Ordinary User.
 Existing job-title data is retained for old clients/source imports but never authorizes access.
-The separate Data Authorization tab retains the previous department-capability workflow.
+Administrator configuration is a single workflow at organization, department and team nodes.
+The matching appointment produces menu-group labels and menu entitlements; department appointments
+also maintain the existing department-capability projection. Team appointments require actual team
+membership and never reuse their parent department's list. Personnel forms remain read-only.
 
 Ordinary User has personal settings and APIM invocation. Team Administrator adds analysis,
 assistant/report, model and organization menus; Department Administrator adds governance/budget
@@ -44,17 +47,36 @@ gateway publication or broader data scope.
 Login and `/auth/me` return the local group and allowed page IDs. Source changes, direct routes,
 browser history, search, prefetching and floating assistant use the same whitelist.
 Profile refresh updates an existing session without requiring sign-out.
-Only menu changes do not create directory gateway-projection work.
+Administrator-only changes do not create directory gateway-projection work.
+
+### Scoped Administrator Compatibility
+
+`015_scoped_menu_administrators` adds scoped appointments and a validated effective view.
+Personnel and current-profile group arrays are server-derived from those appointments, with
+pre-existing explicit legacy menu groups retained for compatibility. Owner retains all menus
+but its profile now also reports actual appointments. The legacy department write endpoint
+delegates to the same appointment service, synchronizing existing data-scope grants atomically.
+No separate Data Authorization editor is required.
+
+Import only current, enabled, linked legacy department administrators whose department membership
+is valid. Do not derive organization administrators from Owner or team administrators from team
+membership. The pre-015 team panel accidentally displayed its parent department's assignments;
+that selection is not proof of a team appointment. Use the new team Administrator tab explicitly.
+Apply 015 after backups and isolated verification; preserve 012-014 checksums and all historical
+business records. This compatibility import changes application navigation, not APIM admission.
+No live Entra consent or model permissions are granted.
 
 ### Upgrade From The Active Directory
 
 Back up the current database, packages and full settings before a maintenance update.
-Apply additive `013_menu_permission_groups` and `014_multiple_menu_permission_groups`
+Apply additive `013_menu_permission_groups`, `014_multiple_menu_permission_groups`
+and `015_scoped_menu_administrators`
 through `backend.migrate` before starting the new
-runtime trio. Fresh installations use the same migration chain. Existing people, including
-department-data administrators, default to Ordinary User; Owner keeps its independent menus.
+runtime trio. Fresh installations use the same migration chain. Unassigned existing people
+default to Ordinary User; Owner keeps its independent menus.
 014 preserves single assignments from 013 as arrays; the singular API field remains only for
-legacy-client compatibility. Do not translate old job titles or department grants into groups.
+legacy-client compatibility. Do not translate job titles into groups. 015 imports valid existing
+department administrator appointments as described above, not arbitrary data grants or team membership.
 Do not rerun legacy backfill
 or directory activation. Repeat migration to verify checksum/idempotency and check real
 Owner/Member profiles, assigned/unassigned navigation, data scopes and existing model policies.

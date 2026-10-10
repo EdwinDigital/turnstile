@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .menu_permissions import MenuPermissionGroup, menu_permissions
 
 DirectoryStatus = Literal["active", "inactive", "archived"]
+AdministratorScopeKind = Literal["organization", "department", "team"]
 DirectoryCapability = Literal["directory.read", "directory.edit_people", "directory.edit_teams"]
 Cloud = Literal["public", "usgov", "china"]
 DIRECTORY_PROTOCOL_VERSION = 1

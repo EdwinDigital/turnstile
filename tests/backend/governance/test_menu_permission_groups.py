@@ -96,7 +96,7 @@ def test_menu_assignment_does_not_grant_data_scope_owner_or_gateway_policy(
             ).fetchone() == {"total": 0}
 
 
-def test_department_data_grant_is_independent_and_cannot_assign_menu_groups(
+def test_department_appointment_sets_menu_identity_and_cannot_assign_other_groups(
     directory: tuple[DirectoryService, DirectoryPrincipal],
 ) -> None:
     service, owner = directory
@@ -108,7 +108,7 @@ def test_department_data_grant_is_independent_and_cannot_assign_menu_groups(
     )
     delegated = service.store.principal(account_id, "member@example.com", "member")
     assert delegated.department_ids == (department["id"],)
-    assert delegated.menu_permission_group == "user"
+    assert delegated.menu_permission_group == "department_admin"
     with pytest.raises(DirectoryError, match="Owner"):
         service.update_person(
             delegated,

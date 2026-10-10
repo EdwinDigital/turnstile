@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 
 from ..domain.directory import (
     AccountLinkWrite,
+    AdministratorScopeKind,
     AdministratorsWrite,
     DirectoryError,
     DirectoryPage,
@@ -719,7 +720,8 @@ class DirectoryService:
             self._revision(before, write)
             if (
                 write.requested_menu_groups is not None
-                and set(write.requested_menu_groups) != set(before["menu_permission_groups"])
+                and set(write.requested_menu_groups)
+                != set(before["assigned_menu_permission_groups"])
             ):
                 principal.require_owner()
             if before["externally_managed"] and any(
@@ -859,6 +861,135 @@ class DirectoryService:
 
         return self._mutate(principal, f"link:{person_id}", write.model_dump(), link)
 
+    def _administrator_scope(
+        self, connection: DirectoryConnection, scope_kind: AdministratorScopeKind, scope_id: str
+    ) -> dict[str, Any]:
+        row = self._entity(
+            connection, "organization" if scope_kind == "organization" else "unit", scope_id
+        )
+        if scope_kind != "organization" and row["kind"] != scope_kind:
+            raise DirectoryError("scope_not_found", "Administrator scope not found", 404)
+        return row
+
+    def menu_administrators(
+        self, principal: DirectoryPrincipal, scope_kind: AdministratorScopeKind, scope_id: str
+    ) -> list[dict[str, Any]]:
+        principal.require_owner()
+        self.store.require_ready()
+        with self.store.connection() as connection:
+            self._administrator_scope(connection, scope_kind, scope_id)
+            rows = connection.execute(
+                """SELECT g.*,a.email,a.display_name,
+                     EXISTS(SELECT 1 FROM directory_effective_menu_administrator e
+                       WHERE e.id=g.id) AS effective
+                   FROM directory_menu_administrator g JOIN app_user a ON a.id=g.app_user_id
+                   WHERE g.scope_kind=%s AND COALESCE(g.unit_id,g.organization_id)=%s
+                     AND g.valid_to IS NULL ORDER BY a.email,g.id""",
+                (scope_kind, scope_id),
+            ).fetchall()
+        return json_value(rows)
+
+    def set_menu_administrators(
+        self, principal: DirectoryPrincipal, scope_kind: AdministratorScopeKind,
+        scope_id: str, write: AdministratorsWrite,
+    ) -> dict[str, Any]:
+        principal.require_owner()
+
+        def update(connection: DirectoryConnection) -> dict[str, Any]:
+            scope = self._administrator_scope(connection, scope_kind, scope_id)
+            self._revision(scope, write)
+            self._active(scope)
+            organization_id = (
+                scope["id"] if scope_kind == "organization" else scope["organization_id"]
+            )
+            self._active(self._entity(connection, "organization", organization_id))
+            if scope_kind == "team":
+                self._active(self._entity(connection, "unit", scope["parent_unit_id"]))
+            candidates = self.store.people_rows(
+                connection,
+                account_ids=tuple(write.account_ids),
+                organization_id=organization_id,
+                department_id=scope_id if scope_kind == "department" else None,
+                team_id=scope_id if scope_kind == "team" else None,
+            )
+            active_departments = {
+                row["id"] for row in connection.execute(
+                    """SELECT id FROM directory_unit WHERE organization_id=%s
+                       AND kind='department' AND status='active'""",
+                    (organization_id,),
+                ).fetchall()
+            }
+            valid = {
+                row["app_user_id"] for row in candidates
+                if row["status"] == "active" and row["account_enabled"]
+                and not row["manual_disabled"] and not row["source_disabled"]
+                and row["department_id"] in active_departments
+            }
+            wanted = set(write.account_ids)
+            if not wanted.issubset(valid):
+                raise DirectoryError(
+                    "invalid_administrator", "Administrators must be active linked scope members"
+                )
+            existing = connection.execute(
+                """SELECT * FROM directory_menu_administrator WHERE scope_kind=%s
+                   AND COALESCE(unit_id,organization_id)=%s AND valid_to IS NULL FOR UPDATE""",
+                (scope_kind, scope_id),
+            ).fetchall()
+            previous = {row["app_user_id"] for row in existing}
+            for row in existing:
+                if row["app_user_id"] not in wanted:
+                    connection.execute(
+                        "UPDATE directory_menu_administrator SET valid_to=now() WHERE id=%s",
+                        (row["id"],),
+                    )
+            for account_id in wanted - previous:
+                connection.execute(
+                    """INSERT INTO directory_menu_administrator(
+                         app_user_id,organization_id,unit_id,scope_kind,granted_by)
+                       VALUES (%s,%s,%s,%s,%s)""",
+                    (account_id, organization_id,
+                     None if scope_kind == "organization" else scope_id,
+                     scope_kind, principal.email),
+                )
+            if scope_kind == "department":
+                data_grants = connection.execute(
+                    """SELECT id,app_user_id FROM directory_department_grant
+                       WHERE department_id=%s AND valid_to IS NULL FOR UPDATE""",
+                    (scope_id,),
+                ).fetchall()
+                current_accounts = {row["app_user_id"] for row in data_grants}
+                for grant in data_grants:
+                    if grant["app_user_id"] not in wanted:
+                        connection.execute(
+                            "UPDATE directory_department_grant SET valid_to=now() WHERE id=%s",
+                            (grant["id"],),
+                        )
+                for account_id in wanted - current_accounts:
+                    connection.execute(
+                        """INSERT INTO directory_department_grant(
+                             app_user_id,department_id,granted_by) VALUES (%s,%s,%s)""",
+                        (account_id, scope_id, principal.email),
+                    )
+            result = self._update(
+                connection, "directory_organization" if scope_kind == "organization"
+                else "directory_unit", scope_id, {"updated_by": principal.email},
+            )
+            self._audit(
+                connection, principal, scope_kind, scope_id, "menu_administrators_updated",
+                before={"account_ids": sorted(str(a) for a in previous)},
+                after={"account_ids": sorted(str(a) for a in wanted)},
+                organization_id=organization_id,
+                department_id=(
+                    scope_id if scope_kind == "department" else scope.get("parent_unit_id")
+                ), reason=write.reason,
+            )
+            result["_navigation_only"] = True
+            return result
+
+        return self._mutate(
+            principal, f"menu-administrators:{scope_kind}:{scope_id}", write.model_dump(), update
+        )
+
     def administrators(
         self,
         principal: DirectoryPrincipal,
@@ -881,66 +1012,7 @@ class DirectoryService:
         department_id: str,
         write: AdministratorsWrite,
     ) -> dict[str, Any]:
-        principal.require_owner()
-
-        def update(connection: DirectoryConnection) -> dict[str, Any]:
-            department = self._entity(connection, "unit", department_id)
-            self._revision(department, write)
-            self._active(department)
-            if department["kind"] != "department":
-                raise DirectoryError(
-                    "department_required", "Administrator scope must be a department"
-                )
-            valid = {
-                row["app_user_id"]
-                for row in self.store.people_rows(connection, department_id=department_id)
-                if row["department_id"] == department_id
-                and row["status"] == "active"
-                and row["account_enabled"]
-                and not row["manual_disabled"]
-                and not row["source_disabled"]
-            }
-            if not set(write.account_ids).issubset(valid):
-                raise DirectoryError(
-                    "invalid_administrator",
-                    "Administrators must be active linked department members",
-                )
-            connection.execute(
-                """UPDATE directory_department_grant SET valid_to=now()
-                   WHERE department_id=%s AND valid_to IS NULL""",
-                (department_id,),
-            )
-            for account_id in set(write.account_ids):
-                connection.execute(
-                    """INSERT INTO directory_department_grant(app_user_id,department_id,granted_by)
-                       VALUES (%s,%s,%s)""",
-                    (account_id, department_id, principal.email),
-                )
-            result = self._update(
-                connection,
-                "directory_unit",
-                department_id,
-                {"updated_by": principal.email},
-            )
-            self._audit(
-                connection,
-                principal,
-                "unit",
-                department_id,
-                "administrators_updated",
-                after={"account_ids": [str(value) for value in write.account_ids]},
-                organization_id=department["organization_id"],
-                department_id=department_id,
-                reason=write.reason,
-            )
-            return result
-
-        return self._mutate(
-            principal,
-            f"administrators:{department_id}",
-            write.model_dump(),
-            update,
-        )
+        return self.set_menu_administrators(principal, "department", department_id, write)
 
     def status_preview(
         self,

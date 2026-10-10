@@ -133,24 +133,24 @@ class DirectoryStore:
         role: str,
     ) -> DirectoryPrincipal:
         state = self.require_ready()
-        if role == "owner":
-            return DirectoryPrincipal(
-                account_id=account_id,
-                email=email,
-                role="owner",
-                permission_revision=state["permission_revision"],
-            )
         with self.connection() as connection:
-            person = connection.execute(
-                """SELECT p.menu_permission_group,p.menu_permission_groups
-                   FROM directory_person p
-                   JOIN directory_account_link l ON l.person_id=p.id
-                   JOIN app_user a ON a.id=l.app_user_id AND a.enabled
-                   WHERE l.app_user_id=%s AND p.status='active' AND NOT p.manual_disabled
-                     AND NOT EXISTS(SELECT 1 FROM directory_external_binding e
-                       WHERE e.person_id=p.id AND e.source_disabled)""",
-                (account_id,),
-            ).fetchone()
+            rows = self.people_rows(connection, account_id=account_id)
+            person = next(
+                (p for p in rows if p["status"] == "active" and not p["manual_disabled"]
+                 and not p["source_disabled"] and p["account_enabled"]),
+                None,
+            )
+            if role == "owner":
+                return DirectoryPrincipal(
+                    account_id=account_id, email=email, role="owner",
+                    permission_revision=state["permission_revision"],
+                    menu_permission_groups=tuple(cast(
+                        list[MenuPermissionGroup], person["menu_permission_groups"]
+                    )) if person else ("user",),
+                    menu_permission_group=cast(
+                        MenuPermissionGroup, person["menu_permission_group"] if person else "user"
+                    ),
+                )
             subject = connection.execute(
                 "SELECT 1 FROM directory_department_grant WHERE app_user_id = %s LIMIT 1",
                 (account_id,),
@@ -312,6 +312,8 @@ class DirectoryStore:
         *,
         at_time: datetime | None = None,
         person_id: UUID | None = None,
+        account_id: UUID | None = None,
+        account_ids: tuple[UUID, ...] | None = None,
         department_ids: tuple[str, ...] | None = None,
         department_id: str | None = None,
         team_id: str | None = None,
@@ -326,6 +328,7 @@ class DirectoryStore:
         parameters: list[Any] = [moment, moment, moment, moment]
         for clause, value in (
             ("p.id=%s", person_id),
+            ("l.app_user_id=%s", account_id),
             ("membership.unit_id=%s", department_id),
             ("p.status=%s", status),
             ("u.organization_id=%s", organization_id),
@@ -336,6 +339,9 @@ class DirectoryStore:
         if department_ids is not None:
             clauses.append("membership.unit_id=ANY(%s)")
             parameters.append(list(department_ids))
+        if account_ids is not None:
+            clauses.append("l.app_user_id=ANY(%s)")
+            parameters.append(list(account_ids))
         if team_id is not None:
             clauses.append(
                 "EXISTS(SELECT 1 FROM directory_membership team_member "
@@ -370,7 +376,11 @@ class DirectoryStore:
                             WHERE external.person_id = p.id) AS externally_managed,
                           EXISTS(SELECT 1 FROM directory_external_binding external
                             WHERE external.person_id = p.id AND external.source_disabled)
-                            AS source_disabled
+                            AS source_disabled,
+                          p.menu_permission_groups AS assigned_menu_permission_groups,
+                          COALESCE(menu_groups.ids, ARRAY['user']::text[])
+                            AS menu_permission_groups,
+                          COALESCE(menu_groups.ids[1], 'user') AS menu_permission_group
                    FROM directory_person p
                    LEFT JOIN LATERAL (
                      SELECT m.unit_id FROM directory_membership m
@@ -380,6 +390,15 @@ class DirectoryStore:
                    LEFT JOIN directory_unit u ON u.id = membership.unit_id
                    LEFT JOIN directory_account_link l ON l.person_id = p.id
                    LEFT JOIN app_user a ON a.id = l.app_user_id
+                   LEFT JOIN LATERAL (
+                     SELECT array_agg(DISTINCT menu_group ORDER BY menu_group) AS ids
+                     FROM (
+                       SELECT unnest(p.menu_permission_groups) AS menu_group
+                       UNION ALL
+                       SELECT g.menu_group FROM directory_effective_menu_administrator g
+                       WHERE g.app_user_id=l.app_user_id
+                     ) appointments WHERE menu_group <> 'user'
+                   ) menu_groups ON TRUE
                    LEFT JOIN LATERAL (
                      SELECT array_agg(DISTINCT m.unit_id ORDER BY m.unit_id) AS ids,
                        array_agg(DISTINCT m.unit_id ORDER BY m.unit_id)

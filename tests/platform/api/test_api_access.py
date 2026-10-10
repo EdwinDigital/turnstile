@@ -176,7 +176,7 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         for route in router.routes
         if isinstance(route, APIRoute)
     ]
-    assert len(directory_routes) == 39
+    assert len(directory_routes) == 41
 
     def dependency_calls(dependency: Any) -> set[Any]:
         return {dependency.call} | {

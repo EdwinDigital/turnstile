@@ -6,7 +6,7 @@ import {
 } from "lucide-react"
 import {
   directoryApi, type DirectoryCapabilities, type DirectoryOrganization,
-  type DirectoryPerson, type DirectoryStatus, type DirectoryUnit,
+  type AdministratorScopeKind, type DirectoryPerson, type DirectoryStatus, type DirectoryUnit,
 } from "../data-sources/apim/api/organization-management"
 import { Button } from "../components/ui/button"
 import { Input } from "../components/ui/input"
@@ -38,6 +38,7 @@ const statusNames: Record<DirectoryStatus, string> = { active: "启用", inactiv
 const actionNames: Record<string, string> = {
   created: "新增", updated: "编辑", account_linked: "关联账号", status_changed: "状态变更",
   teams_updated: "团队成员变更", administrators_updated: "管理员变更", scheduled: "计划调岗",
+  menu_administrators_updated: "菜单管理员变更",
 }
 type Editor = {
   kind: "organization" | "department" | "team" | "person"
@@ -288,27 +289,35 @@ function PersonActionDialog({ person, action, units, onClose, onSaved }: {
   </Dialog>
 }
 
-function DepartmentAdministrators({ department, owner, scopeKey, onSaved }: {
-  department: DirectoryUnit; owner: boolean; scopeKey: string; onSaved: () => void
+function ScopeAdministrators({ scope, kind, owner, scopeKey, onSaved }: {
+  scope: DirectoryOrganization | DirectoryUnit; kind: AdministratorScopeKind
+  owner: boolean; scopeKey: string; onSaved: () => void
 }) {
+  const organizationId = kind === "organization" ? scope.id : (scope as DirectoryUnit).organization_id
+  const departmentId = kind === "department" ? scope.id : kind === "team" ? (scope as DirectoryUnit).parent_unit_id ?? "" : ""
+  const title = menuPermissionGroupNames[`${kind}_admin` as MenuPermissionGroup]
   const existing = useQuery({
-    queryKey: ["directory", "administrators", department.id, scopeKey],
-    queryFn: () => directoryApi.administrators(department.id),
+    queryKey: ["directory", "administrators", kind, scope.id, scopeKey],
+    queryFn: () => directoryApi.menuAdministrators(kind, scope.id),
   })
   const [selection, setSelection] = useState<string[] | null>(null)
   const [query, setQuery] = useState("")
   const [cursor, setCursor] = useState("")
   const [previous, setPrevious] = useState<string[]>([])
   const people = useQuery({
-    queryKey: ["directory", "administrator-candidates", department.id, query, cursor, scopeKey],
-    queryFn: () => directoryApi.people({ department_id: department.id, status: "active", query, cursor }),
+    queryKey: ["directory", "administrator-candidates", kind, scope.id, query, cursor, scopeKey],
+    queryFn: () => directoryApi.people({
+      organization_id: organizationId, ...(departmentId ? { department_id: departmentId } : {}),
+      ...(kind === "team" ? { team_id: scope.id } : {}), status: "active", query, cursor,
+    }),
   })
   useDirectoryLeaveGuard(selection !== null)
   const selected = selection ?? existing.data?.map((row) => row.app_user_id) ?? []
   const save = useMutation({
-    mutationFn: () => directoryApi.setAdministrators(department.id, {
-      account_ids: selected, expected_revision: department.revision,
-    }),
+    mutationFn: () => {
+      const value = { account_ids: selected, expected_revision: scope.revision }
+      return directoryApi.setMenuAdministrators(kind, scope.id, value)
+    },
     onSuccess: () => { setSelection(null); onSaved() },
   })
   const candidates = (people.data?.items ?? []).filter((person) => person.app_user_id && person.account_enabled
@@ -317,16 +326,16 @@ function DepartmentAdministrators({ department, owner, scopeKey, onSaved }: {
     <Input aria-label="搜索管理员候选人" placeholder="搜索人员" value={query}
       onChange={(event) => { setQuery(event.target.value); setCursor(""); setPrevious([]) }} />
     {existing.error && <Alert><AlertDescription>{existing.error.message}</AlertDescription></Alert>}
-    <FieldSet><FieldLegend>部门数据范围授权</FieldLegend><div className="directory-checkboxes">
+    <FieldSet><FieldLegend>{title}</FieldLegend><div className="directory-checkboxes">
       {candidates.map((person) => <label key={person.id}><Checkbox
-        checked={selected.includes(person.app_user_id!)} disabled={!owner}
+        checked={selected.includes(person.app_user_id!)} disabled={!owner || existing.isPending || Boolean(existing.error)}
         onCheckedChange={(checked) => setSelection(checked ? [...selected, person.app_user_id!] : selected.filter((id) => id !== person.app_user_id))} />
         <span data-no-localize>{person.display_name}</span><small data-no-localize>{person.account_email}</small>
       </label>)}
     </div></FieldSet>
     {(existing.data ?? []).filter((admin) => !candidates.some((person) => person.app_user_id === admin.app_user_id)).map((admin) =>
       <label key={admin.id} className="directory-existing-admin">
-        <Checkbox checked={selected.includes(admin.app_user_id)} disabled={!owner}
+        <Checkbox checked={selected.includes(admin.app_user_id)} disabled={!owner || existing.isPending || Boolean(existing.error)}
           onCheckedChange={(checked) => setSelection(checked ? [...selected, admin.app_user_id] : selected.filter((id) => id !== admin.app_user_id))} />
         <Shield /><span data-no-localize>{admin.display_name ?? admin.email}</span><small data-no-localize>{admin.email}</small></label>,
     )}
@@ -340,7 +349,7 @@ function DepartmentAdministrators({ department, owner, scopeKey, onSaved }: {
         onClick={() => { setPrevious((values) => [...values, cursor]); setCursor(people.data?.next_cursor ?? "") }}><ChevronRight /></Button>
     </div>
     {save.error && <Alert><AlertDescription>{save.error.message}</AlertDescription></Alert>}
-    {owner && <Button disabled={selection === null || save.isPending} onClick={() => save.mutate()}>
+    {owner && <Button disabled={selection === null || save.isPending || existing.isPending || Boolean(existing.error)} onClick={() => save.mutate()}>
       <Save data-icon="inline-start" />保存管理员
     </Button>}
   </div>
@@ -478,7 +487,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
             </div></div>
             <Tabs value={tab} onValueChange={(value) => { if (confirmDirectoryLeave()) setTab(String(value)) }}>
               <TabsList><TabsTrigger value="people">人员</TabsTrigger>
-                {department && <TabsTrigger value="administrators">数据授权</TabsTrigger>}
+                {owner && <TabsTrigger value="administrators">管理员</TabsTrigger>}
                 <TabsTrigger value="audit">变更记录</TabsTrigger>
                 {owner && <TabsTrigger value="sync">Entra ID</TabsTrigger>}
                 {owner && <TabsTrigger value="transfers">调岗计划</TabsTrigger>}
@@ -531,8 +540,9 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                     onClick={() => { setPreviousCursors((current) => [...current, cursor]); setCursor(people.data?.next_cursor ?? "") }}><ChevronRight /></Button>
                 </div>
               </TabsContent>
-              {department && <TabsContent value="administrators"><DepartmentAdministrators key={department.id}
-                department={department} scopeKey={scope.join(":")} owner={owner} onSaved={() => void changed()} /></TabsContent>}
+              {owner && <TabsContent value="administrators"><ScopeAdministrators key={selectedUnit?.id ?? organization.id}
+                scope={selectedUnit ?? organization} kind={selectedUnit?.kind ?? "organization"}
+                scopeKey={scope.join(":")} owner={owner} onSaved={() => void changed()} /></TabsContent>}
               {owner && tab === "sync" && <TabsContent value="sync"><DirectorySyncPanel
                 key={effectiveOrgId} organization={organization} units={units.data ?? []}
                 capabilities={capabilities} onSaved={changed} /></TabsContent>}

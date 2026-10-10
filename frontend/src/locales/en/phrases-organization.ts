@@ -1,6 +1,8 @@
 export const ORGANIZATION_PHRASES: Record<string, string> = {
   "组织管理": "Organization Management",
   "菜单权限组": "Menu Permission Group",
+  "管理员": "Administrators",
+  "菜单管理员变更": "Menu Administrators Changed",
   "普通用户": "Ordinary User",
   "组织管理员": "Organization Administrator",
   "团队管理员": "Team Administrator",

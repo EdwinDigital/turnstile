@@ -35,19 +35,26 @@ Directory sync and Microsoft login configuration are independent.
 
 Local `user`, `organization_admin`, `department_admin` and `team_admin` groups control
 application navigation only. Administrator groups can coexist and menus are their union.
-`menu_permission_groups` is authoritative; the singular field is a legacy projection.
+API `menu_permission_groups` is the effective appointment projection; singular/explicit old
+personnel fields are retained for compatibility, not a second administrator configuration UI.
 Unassigned and unlinked accounts default to `user`; active
 linked people supply the local group. Disabled/source-disabled people lose its menus.
 Owner independently retains all applicable menus and is the only role allowed to change groups.
-These names do not grant account roles, department capabilities, Graph consent or model access.
+Appointments produce their matching menu groups. Department appointments also maintain the
+pre-existing department capabilities in the same transaction; they do not grant Owner, Graph
+consent, model access, budget writes or APIM admission.
 
 The server publishes the menu whitelist in login/current-profile responses. The client applies
 it to navigation, search, direct routes, prefetching and assistant entry points, and refreshes
 it on focus/every 30 seconds. Hiding a menu is not business API authorization: existing Owner
 mutations, department-scoped reads, ordinary Member API read policy and APIM admission remain
 unchanged. API callers must continue to rely on those independent checks.
-Entra profile imports, job titles, team membership and legacy department grants never assign
-local menu groups. A menu-only edit is audited and invalidates permission caches without
+Entra profile imports, job titles and team membership never create administrator appointments.
+Migration 015 explicitly imports genuine active legacy department appointments. New department
+writes (including the legacy API) share one appointment service and its data-scope projection.
+Organizations and teams have distinct scope identities; a department appointment is not a team
+appointment. Only Owner may appoint or revoke administrators, and team candidates must be actual
+active linked team members. An administrator-only edit is audited and invalidates caches without
 publishing a gateway identity update.
 
 Directory connections store credential references, not secrets. Graph access is read-only,

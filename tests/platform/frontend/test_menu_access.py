@@ -40,3 +40,15 @@ def test_menu_gates_cover_routes_search_prefetch_and_floating_entry_points() -> 
         "</Field>", 1
     )[0]
     assert "Checkbox" not in permission_field
+
+
+def test_scope_admin_configuration_is_present_at_all_levels_without_parent_alias() -> None:
+    person = (FRONTEND_SOURCE / "pages/organization-management-page.tsx").read_text()
+    assert 'value="administrators">管理员' in person
+    assert 'kind={selectedUnit?.kind ?? "organization"}' in person
+    assert "scope={selectedUnit ?? organization}" in person
+    assert "directoryApi.menuAdministrators(kind, scope.id)" in person
+    assert "directoryApi.setMenuAdministrators(kind, scope.id, value)" in person
+    assert '...(kind === "team" ? { team_id: scope.id } : {})' in person
+    assert "DepartmentAdministrators" not in person
+    assert 'value="data-authorization"' not in person

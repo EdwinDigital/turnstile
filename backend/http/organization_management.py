@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
 from turnstile_core.domain.directory import (
     AccountLinkWrite,
+    AdministratorScopeKind,
     AdministratorsWrite,
     DirectoryError,
     DirectoryPage,
@@ -271,6 +272,21 @@ def set_administrators(
     principal: Principal,
 ) -> dict[str, Any]:
     return service.set_administrators(principal, department_id, write)
+
+
+@router.get("/menu-administrators/{scope_kind}/{scope_id}")
+def menu_administrators(
+    scope_kind: AdministratorScopeKind, scope_id: str, service: Service, principal: Principal,
+) -> list[dict[str, Any]]:
+    return service.menu_administrators(principal, scope_kind, scope_id)
+
+
+@router.put("/menu-administrators/{scope_kind}/{scope_id}")
+def set_menu_administrators(
+    scope_kind: AdministratorScopeKind, scope_id: str, write: AdministratorsWrite,
+    service: Service, principal: Principal,
+) -> dict[str, Any]:
+    return service.set_menu_administrators(principal, scope_kind, scope_id, write)
 
 
 @router.post("/people/{person_id}/status-preview")

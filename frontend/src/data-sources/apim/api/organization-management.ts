@@ -46,6 +46,12 @@ export type DirectoryAdministrator = {
   id: string; app_user_id: string; department_id: string; capabilities: string[]
   email: string; display_name: string | null
 }
+export type AdministratorScopeKind = "organization" | "department" | "team"
+export type DirectoryMenuAdministrator = {
+  id: string; app_user_id: string; organization_id: string; unit_id: string | null
+  scope_kind: AdministratorScopeKind; email: string; display_name: string | null
+  effective: boolean
+}
 export type DirectoryAudit = {
   id: string; entity_type: string; entity_id: string; action: string
   actor_label: string; source: string; changed_at: string; reason: string
@@ -144,6 +150,10 @@ export const directoryApi = {
     directoryRequest<DirectoryAdministrator[]>(`departments/${encodeURIComponent(departmentId)}/administrators`),
   setAdministrators: (departmentId: string, value: unknown) =>
     directoryRequest<DirectoryUnit>(`departments/${encodeURIComponent(departmentId)}/administrators`, "PUT", value),
+  menuAdministrators: (kind: AdministratorScopeKind, id: string) =>
+    directoryRequest<DirectoryMenuAdministrator[]>(`menu-administrators/${kind}/${encodeURIComponent(id)}`),
+  setMenuAdministrators: (kind: AdministratorScopeKind, id: string, value: unknown) =>
+    directoryRequest<DirectoryOrganization | DirectoryUnit>(`menu-administrators/${kind}/${encodeURIComponent(id)}`, "PUT", value),
   audit: (departmentId?: string) =>
     directoryRequest<DirectoryAudit[]>(`audit?${new URLSearchParams(departmentId ? { department_id: departmentId } : {})}`),
   statusPreview: (id: string) =>

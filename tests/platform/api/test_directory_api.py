@@ -188,8 +188,8 @@ def test_menu_group_profile_and_password_login_do_not_change_data_authorization(
     person_url = f"/api/v1/organization-management/people/{data['person']['id']}"
     client.cookies.set("turnstile_session", "directory-member")
     before = client.get("/api/v1/auth/me").json()
-    assert before["menu_permission_group"] == "user"
-    assert before["menu_permissions"] == ["user-settings", "finops-invoke"]
+    assert before["menu_permission_group"] == "department_admin"
+    assert "organization-management" in before["menu_permissions"]
     client.cookies.set("turnstile_session", "directory-owner")
     person = client.get(person_url).json()
     response = client.patch(
@@ -203,8 +203,10 @@ def test_menu_group_profile_and_password_login_do_not_change_data_authorization(
     assert response.status_code == 200, response.text
     client.cookies.set("turnstile_session", "directory-member")
     after = client.get("/api/v1/auth/me").json()
-    assert after["menu_permission_group"] == "organization_admin"
-    assert set(after["menu_permission_groups"]) == {"organization_admin", "team_admin"}
+    assert after["menu_permission_group"] == "department_admin"
+    assert set(after["menu_permission_groups"]) == {
+        "organization_admin", "team_admin", "department_admin"
+    }
     assert "settings" in after["menu_permissions"]
     assert after["role"] == before["role"] == "member"
     assert after["directory_scope_key"] == before["directory_scope_key"]
@@ -255,6 +257,46 @@ def test_revoked_department_admin_does_not_recover_legacy_global_read(
     assert client.get("/api/v1/organization-management/people").status_code == 403
     assert client.get("/api/v1/enterprise/entities").json()["departments"] == []
     assert client.get("/api/v1/application-access/applications").status_code == 403
+
+
+def test_scoped_admin_endpoints_update_labels_and_do_not_alias_team_or_create_owner(
+    directory_http: tuple[TestClient, dict[str, Any]],
+) -> None:
+    client, data = directory_http
+    root = "/api/v1/organization-management"
+    person = client.get(f"{root}/people/{data['person']['id']}").json()
+    account_id = person["app_user_id"]
+    team = client.post(
+        f"{root}/organizations/{data['organization']['id']}/units",
+        json={
+            "name": "Team", "code": "team", "kind": "team",
+            "parent_unit_id": data["first"]["id"],
+        },
+    ).json()
+    assert client.get(f"{root}/menu-administrators/team/{team['id']}").json() == []
+    result = client.put(
+        f"{root}/people/{person['id']}/teams",
+        json={"team_ids": [team["id"]], "expected_revision": person["revision"]},
+    )
+    assert result.status_code == 200
+    for kind, scope in (("organization", data["organization"]), ("team", team)):
+        response = client.put(
+            f"{root}/menu-administrators/{kind}/{scope['id']}",
+            json={"account_ids": [account_id], "expected_revision": scope["revision"]},
+        )
+        assert response.status_code == 200, response.text
+    person = client.get(f"{root}/people/{person['id']}").json()
+    assert set(person["menu_permission_groups"]) == {
+        "organization_admin", "department_admin", "team_admin",
+    }
+    client.cookies.set("turnstile_session", "directory-member")
+    profile = client.get("/api/v1/auth/me").json()
+    assert set(profile["menu_permission_groups"]) == set(person["menu_permission_groups"])
+    assert profile["role"] == "member"
+    assert client.get(f"{root}/accounts").status_code == 403
+    assert client.get(
+        f"{root}/menu-administrators/organization/{data['organization']['id']}"
+    ).status_code == 403
 
 
 def test_invocation_requires_account_binding_and_explicit_delegation(
