@@ -105,5 +105,29 @@ PR明确标注组织管理/权限治理是跨模块较大改造，涉及人员�
 CI的Ruff/Mypy补齐core，与README校验范围一致；操作文档升级至018。
 
 功能分支完整回归1774通过，另跑7项显式PostgreSQL测试通过；README命令全部通过，
-保留既有Bicep、OpenAPI、前端chunk warning。用户仓库main将以快进方式纳入此分支，
-然后从主仓库干净main重新构建/发布，结果随后记录。
+保留既有Bicep、OpenAPI、前端chunk warning。
+
+用户仓库`EdwinDigital/turnstile main`从`12dc1ee`快进至`22897a5`并推送。
+从`/Users/edwin/Development/turnstile`的干净main执行`uv sync --frozen`、
+`npm ci`和README完整验证，1774通过/7跳过，显式数据库7项另跑全部通过。
+源码/staging逐文件匹配，三包core一致；重新构建的三包哈希与前次运行版本相同。
+`main-source-proof.json`记录主仓库路径、main分支、远端SHA和源文件一致性。
+
+2026-10-11实际从main发布至现有线上环境，API挂载包文件逐项读回一致；
+完整settings及两个相同Function包未变，API为Running。生产001-018 checksum匹配、
+隔离恢复与无待应用迁移验证通过，所有既有表保持。
+Owner权限页面、五列矩阵、键盘/搜索/草稿恢复及Light/Dark/移动端通过。
+真实普通用户用量分布/趋势/异常治理/请求追踪四页无403，临时会话已撤销。
+权限矩阵/审计/迁移ledger、九张客户目录表和历史账务基线保持；
+128请求/37030 tokens及2份报表、归档分区/趋势/组织多选仍正常。
+没有实际菜单赋权、预算/模型/APIM写入或真实Entra租户同步。
+
+备份与证据根目录：
+`/Users/edwin/Development/turnstile/.turnstile/deployments/organization-management/17c3d3d/policy-rollout/22897a5`。
+包含旧三包/完整配置/数据库加密备份、隔离恢复/迁移证明、API包读回、
+普通用户浏览器、Owner及用量API、策略基线和会话清理结果。
+
+上游PR#34为Open且非Draft；Actions为`action_required`且jobs为空，需要上游维护者
+批准外部分支CI，不能宣称上游CI已通过。`npm ci/audit`额外发现既有Vite/PostCSS间接依赖
+`nanoid@3.3.16`和`source-map-js@1.2.1`两个high告警；锁文件与上游相同，
+本次没有擅自升级，也不将这些告警记为已解决。
