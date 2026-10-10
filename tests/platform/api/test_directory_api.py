@@ -416,7 +416,9 @@ def test_http_create_retries_and_validation_do_not_echo_private_input(
     client, data = directory_http
     body = {
         "display_name": "Created",
-        "governance_user_id": "created@example.com",
+        "email": "created@example.com",
+        "password": "new-directory-password",
+        "organization_id": data["organization"]["id"],
         "department_id": data["first"]["id"],
     }
     first = client.post(
@@ -436,7 +438,7 @@ def test_http_create_retries_and_validation_do_not_echo_private_input(
         "/api/v1/organization-management/people",
         json={
             **body,
-            "governance_user_id": marker,
+            "email": marker,
         },
     )
     assert bad.status_code == 422 and marker not in bad.text
@@ -448,6 +450,38 @@ def test_http_create_retries_and_validation_do_not_echo_private_input(
     )
     assert oversized.status_code == 413
     assert oversized.headers["cache-control"] == "no-store"
+
+
+def test_new_member_requires_primary_department_and_owner_and_retired_routes_are_absent(
+    directory_http: tuple[TestClient, dict[str, Any]],
+) -> None:
+    client, data = directory_http
+    root = "/api/v1/organization-management"
+    body = {
+        "display_name": "New member", "email": "new-login@example.com",
+        "password": "new-member-test-password", "organization_id": data["organization"]["id"],
+    }
+    assert client.post(f"{root}/people", json=body).status_code == 422
+    body["department_id"] = data["first"]["id"]
+    client.cookies.set("turnstile_session", "directory-member")
+    assert client.post(f"{root}/people", json=body).status_code == 403
+    client.cookies.set("turnstile_session", "directory-owner")
+    response = client.post(f"{root}/people", json=body)
+    assert response.status_code == 201, response.text
+    assert "password" not in response.text
+    assert response.json()["department_id"] == data["first"]["id"]
+    for path in ("transfers", "identity-conflicts"):
+        assert client.get(f"{root}/{path}").status_code == 404
+    assert client.post(
+        f"{root}/people/{data['person']['id']}/transfer-preview", json={}
+    ).status_code in (404, 405)
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": body["email"], "password": body["password"]},
+    )
+    assert login.status_code == 200
+    assert login.json()["role"] == "member"
+    assert login.json()["menu_permission_groups"] == ["user"]
 
 
 def test_budget_scope_does_not_disclose_other_department_allocations(

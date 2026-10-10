@@ -224,16 +224,13 @@ def test_team_memberships_do_not_duplicate_people_or_move_budgets(
     assert person["team_ids"] == [team["id"]]
     assert service.people(owner).total == 1
     assert service.store.catalog().users[0].parent_id == department["id"]
-    with pytest.raises(DirectoryError, match="outside"):
-        service.set_teams(
-            owner,
-            UUID(person["id"]),
-            TeamsWrite(
-                expected_revision=person["revision"],
-                team_ids=[other_team["id"]],
-            ),
-        )
-    assert service.people(owner).items[0]["team_ids"] == [team["id"]]
+    service.set_teams(
+        owner,
+        UUID(person["id"]),
+        TeamsWrite(expected_revision=person["revision"], team_ids=[other_team["id"]]),
+    )
+    assert service.people(owner).items[0]["team_ids"] == [other_team["id"]]
+    assert service.store.catalog().users[0].parent_id == department["id"]
 
 
 def test_person_disable_preserves_model_policy_and_last_owner(

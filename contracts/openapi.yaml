@@ -272,10 +272,6 @@ paths:
     $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1people~1{person_id}~1status-preview
   /api/v1/organization-management/people/{person_id}/teams:
     $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1people~1{person_id}~1teams
-  /api/v1/organization-management/people/{person_id}/transfer-preview:
-    $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1people~1{person_id}~1transfer-preview
-  /api/v1/organization-management/people/{person_id}/transfers:
-    $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1people~1{person_id}~1transfers
   /api/v1/organization-management/sync-jobs:
     $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1sync-jobs
   /api/v1/organization-management/sync-jobs/{job_id}:
@@ -288,14 +284,8 @@ paths:
     $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1sync-jobs~1{job_id}~1changes
   /api/v1/organization-management/units/{unit_id}:
     $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1units~1{unit_id}
-  /api/v1/organization-management/transfers:
-    $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1transfers
-  /api/v1/organization-management/transfers/{transfer_id}/cancel:
-    $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1transfers~1{transfer_id}~1cancel
-  /api/v1/organization-management/identity-conflicts:
-    $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1identity-conflicts
-  /api/v1/organization-management/identity-conflicts/{candidate_id}/resolve:
-    $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1identity-conflicts~1{candidate_id}~1resolve
+  /api/v1/organization-management/units/{unit_id}/members:
+    $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1units~1{unit_id}~1members
 components:
   securitySchemes:
     sessionCookie:
@@ -365,10 +355,8 @@ components:
       $ref: ./openapi/schemas/organization-management.yaml#/schemas/GroupMappingsWrite
     OrganizationWrite:
       $ref: ./openapi/schemas/organization-management.yaml#/schemas/OrganizationWrite
-    ObservationResolveWrite:
-      $ref: ./openapi/schemas/organization-management.yaml#/schemas/ObservationResolveWrite
-    PersonCreate:
-      $ref: ./openapi/schemas/organization-management.yaml#/schemas/PersonCreate
+    OrganizationPersonCreate:
+      $ref: ./openapi/schemas/organization-management.yaml#/schemas/OrganizationPersonCreate
     PersonStatusWrite:
       $ref: ./openapi/schemas/organization-management.yaml#/schemas/PersonStatusWrite
     PersonWrite:
@@ -379,10 +367,8 @@ components:
       $ref: ./openapi/schemas/organization-management.yaml#/schemas/SyncJobWrite
     TeamsWrite:
       $ref: ./openapi/schemas/organization-management.yaml#/schemas/TeamsWrite
-    TransferWrite:
-      $ref: ./openapi/schemas/organization-management.yaml#/schemas/TransferWrite
-    TransferCancelWrite:
-      $ref: ./openapi/schemas/organization-management.yaml#/schemas/TransferCancelWrite
+    UnitMembersWrite:
+      $ref: ./openapi/schemas/organization-management.yaml#/schemas/UnitMembersWrite
     UnitWrite:
       $ref: ./openapi/schemas/organization-management.yaml#/schemas/UnitWrite
     PriceSource:

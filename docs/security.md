@@ -57,6 +57,13 @@ appointment. Only Owner may appoint or revoke administrators, and team candidate
 active linked team members. An administrator-only edit is audited and invalidates caches without
 publishing a gateway identity update.
 
+Organization personnel creation is Owner-only and atomically creates a Member password account
+with a linked person and same-organization primary department. It cannot promote an account,
+overwrite a pre-existing email/password or allocate model access/budget. Creation secrets are
+write-only and excluded from audit/idempotency evidence. Department/team member selection is
+bounded to the target unit's organization; additional membership is not billing delegation.
+Retired transfer/identity-editing endpoints are absent; historical facts remain protected.
+
 Directory connections store credential references, not secrets. Graph access is read-only,
 uses fixed cloud endpoints, follows only same-cloud HTTPS paging links and encrypts delta
 checkpoints with the existing credential key. Missing permissions, incomplete data and expired

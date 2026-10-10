@@ -7,7 +7,7 @@ from email.headerregistry import Address
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from .menu_permissions import MenuPermissionGroup, menu_permissions
 
@@ -165,6 +165,37 @@ class PersonCreate(PersonWrite):
 
 class TeamsWrite(DirectoryWrite):
     team_ids: list[str] = Field(default_factory=list, max_length=200)
+
+
+class OrganizationPersonCreate(DirectoryWrite):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    organization_id: str = Field(min_length=1, max_length=255)
+    department_id: str = Field(min_length=1, max_length=255)
+    display_name: str = Field(min_length=1, max_length=160)
+    email: str = Field(min_length=3, max_length=255)
+    password: SecretStr
+    employee_number: str | None = Field(default=None, max_length=64)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return normalized_email(value)
+
+    @field_validator("display_name", "employee_number", "organization_id", "department_id")
+    @classmethod
+    def normalize_text(cls, value: str | None) -> str | None:
+        return clean_text(value) if value is not None else None
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: SecretStr) -> SecretStr:
+        if not 12 <= len(value.get_secret_value()) <= 256:
+            raise ValueError("Password must contain between 12 and 256 characters")
+        return value
+
+
+class UnitMembersWrite(DirectoryWrite):
+    person_ids: list[UUID] = Field(min_length=1, max_length=100)
 
 
 class AccountLinkWrite(DirectoryWrite):

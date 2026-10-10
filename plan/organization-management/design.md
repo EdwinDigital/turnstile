@@ -258,6 +258,26 @@ GitHub Copilot 继续隐藏组织管理，保留独立企业团队入口。
 迁移提高权限版本但不提高目录投影版本。发布需备份、隔离升级验证以及同核心版本三包，
 不能只发布前端或直接改当前生产库来掩盖标签错误。此修正尚未上线。
 
+### 最新成员流程修正（2026-10-10）
+
+最新要求覆盖本文件旧调岗/历史身份编辑设计：组织节点独占新增人员，必填名称、邮箱、
+登录密码和启用的同组织归属部门。`OrganizationPersonCreate` 使用 SecretStr 接收密码，
+共享 core scrypt 与现有认证格式保持一致；事务创建 Member、人员、primary_department、
+account_link、audit/outbox。幂等摘要排除密码，重试从存储哈希验证，防止存储快速密码摘要；
+重复邮箱返回冲突，不调用覆盖密码的账号 upsert。
+
+部门/团队的“添加成员”使用目标单位 revision 和 UUID 列表，候选通过 available_unit_id
+服务端限定组织、启用及尚未加入状态；追加关系和审计整体提交，坏成员导致整批回滚。
+部门附加边使用新的 membership_kind=department；唯一 primary_department 始终负责
+预算、调用归因和投影。017 扩展成员约束，不改变原主部门唯一/范围有效时间约束。
+仅组织新增表单提供 required 的归属部门 Select，添加成员表单没有部门选择。
+团队候选允许同组织跨部门协作，不能自动给候选人跨部门授权。
+
+016 回填人员 organization_id 并取消未执行旧调岗；组织约束不可静默跨组织变更。
+移除 transfer/identity-conflicts HTTP 端点、相关页签/客户端代码和 Telemetry 月度调岗调用，
+保留旧内部历史结构、历史查询、账务和审计。旧6.3/6.4及相关接口/验收只作为历史设计，
+不再作为新交付能力。部署需要 016/017 及同核心版本兼容运行包，暂未上线。
+
 ### 5.1 平台角色与部门能力
 
 保持 `SessionIdentity.role`、模型/runtime `allowed_roles` 和现有 DB CHECK 的 `owner/member`。添加独立服务端授权上下文：

@@ -19,6 +19,7 @@ from ..domain.directory import (
     DirectoryPrincipal,
     DirectoryWrite,
     ObservationResolveWrite,
+    OrganizationPersonCreate,
     OrganizationWrite,
     PersonCreate,
     PersonStatusWrite,
@@ -26,9 +27,11 @@ from ..domain.directory import (
     TeamsWrite,
     TransferCancelWrite,
     TransferWrite,
+    UnitMembersWrite,
     UnitWrite,
 )
 from ..persistence.directory_store import DirectoryConnection, DirectoryStore
+from .passwords import hash_password, verify_password
 
 EntityKind = Literal["organization", "unit", "person"]
 _TABLES: dict[EntityKind, str] = {
@@ -68,9 +71,7 @@ class DirectoryService:
             "gateway_projection_state": (
                 "confirmed" if state["projected_version"] >= state["active_version"] else "pending"
             ),
-            "can_schedule_transfers": (
-                principal.owner and state["person_admission_mode"] != "unverified"
-            ),
+            "can_schedule_transfers": False,
         }
 
     @staticmethod
@@ -164,6 +165,7 @@ class DirectoryService:
         value: dict[str, Any],
         callback: Callable[[DirectoryConnection], dict[str, Any]],
         key: str | None = None,
+        validate_retry: Callable[[DirectoryConnection, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         self.store.require_ready()
         if key is not None and not 1 <= len(key) <= 128:
@@ -196,6 +198,8 @@ class DirectoryService:
                                 "idempotency_conflict",
                                 "Idempotency key belongs to another request",
                             )
+                        if validate_retry:
+                            validate_retry(connection, existing["result"])
                         return dict(existing["result"])
                 result = callback(connection)
                 navigation_only = result.pop("_navigation_only", False)
@@ -334,6 +338,7 @@ class DirectoryService:
         organization_id: str | None = None,
         query: str = "",
         status: str | None = None,
+        available_unit_id: str | None = None,
         offset: int = 0,
         limit: int = 50,
     ) -> DirectoryPage:
@@ -343,14 +348,28 @@ class DirectoryService:
         if department_id:
             principal.require("directory.read", department_id)
         with self.store.connection() as connection:
+            if team_id:
+                team = self._entity(connection, "unit", team_id)
+                if team["kind"] != "team":
+                    raise DirectoryError("scope_not_found", "Team not found", 404)
+                principal.require("directory.read", team["parent_unit_id"])
+            if available_unit_id:
+                unit = self._entity(connection, "unit", available_unit_id)
+                principal.require("directory.edit_people", self._department_id(unit))
+                organization_id = unit["organization_id"]
+                status = "active"
             rows = self.store.people_rows(
                 connection,
-                department_ids=None if principal.owner else principal.department_ids,
+                department_ids=(
+                    None if principal.owner or available_unit_id or team_id or department_id
+                    else principal.department_ids
+                ),
                 department_id=department_id,
                 team_id=team_id,
                 organization_id=organization_id,
                 query=query,
                 status=status,
+                available_unit_id=available_unit_id,
                 offset=offset,
                 limit=limit,
             )
@@ -358,12 +377,16 @@ class DirectoryService:
             if not rows and offset:
                 first = self.store.people_rows(
                     connection,
-                    department_ids=None if principal.owner else principal.department_ids,
+                    department_ids=(
+                        None if principal.owner or available_unit_id or team_id or department_id
+                        else principal.department_ids
+                    ),
                     department_id=department_id,
                     team_id=team_id,
                     organization_id=organization_id,
                     query=query,
                     status=status,
+                    available_unit_id=available_unit_id,
                     limit=1,
                 )
                 total = int(first[0]["_total_count"]) if first else 0
@@ -595,8 +618,8 @@ class DirectoryService:
         for team_id in set(team_ids):
             team = self._entity(connection, "unit", team_id)
             self._active(team)
-            if team["kind"] != "team" or team["parent_unit_id"] != department["id"]:
-                raise DirectoryError("invalid_team", "Team is outside the primary department")
+            if team["kind"] != "team" or team["organization_id"] != department["organization_id"]:
+                raise DirectoryError("invalid_team", "Team is outside the organization")
         current = connection.execute(
             """SELECT unit_id FROM directory_membership WHERE person_id=%s
                AND membership_kind='team' AND source_key='manual' AND valid_to IS NULL""",
@@ -637,9 +660,8 @@ class DirectoryService:
         if not employee_number:
             return
         duplicate = connection.execute(
-            """SELECT 1 FROM directory_person p JOIN directory_membership m ON m.person_id=p.id
-               WHERE m.organization_id=%s AND m.membership_kind='primary_department'
-                 AND m.valid_from<=now() AND (m.valid_to IS NULL OR m.valid_to>now())
+            """SELECT 1 FROM directory_person p
+               WHERE p.organization_id=%s
                  AND lower(p.employee_number)=lower(%s) AND (%s::uuid IS NULL OR p.id<>%s)
                LIMIT 1""",
             (organization_id, employee_number, person_id, person_id),
@@ -707,6 +729,129 @@ class DirectoryService:
             return result
 
         return self._mutate(principal, "create-person", write.model_dump(), create, key)
+
+    def create_organization_person(
+        self, principal: DirectoryPrincipal, write: OrganizationPersonCreate,
+        key: str | None = None,
+    ) -> dict[str, Any]:
+        principal.require_owner()
+        password = write.password.get_secret_value()
+
+        def validate_retry(connection: DirectoryConnection, result: dict[str, Any]) -> None:
+            account = connection.execute(
+                "SELECT password_hash FROM app_user WHERE id=%s",
+                (UUID(result["app_user_id"]),),
+            ).fetchone()
+            if not account or not verify_password(password, account["password_hash"]):
+                raise DirectoryError(
+                    "idempotency_conflict", "Idempotency key belongs to another request"
+                )
+
+        def create(connection: DirectoryConnection) -> dict[str, Any]:
+            self._active(self._entity(connection, "organization", write.organization_id))
+            department = self._entity(connection, "unit", write.department_id)
+            self._active(department)
+            if (
+                department["kind"] != "department"
+                or department["organization_id"] != write.organization_id
+            ):
+                raise DirectoryError(
+                    "invalid_department", "Primary department is outside this organization"
+                )
+            self._employee_number(connection, write.organization_id, write.employee_number)
+            # Never overwrite a pre-existing account or password, even with the same email.
+            if connection.execute(
+                "SELECT 1 FROM app_user WHERE lower(email)=%s", (write.email,),
+            ).fetchone():
+                raise DirectoryError("account_exists", "Login account already exists")
+            account = connection.execute(
+                """INSERT INTO app_user(email,display_name,password_hash,role)
+                   VALUES (%s,%s,%s,'member') RETURNING id""",
+                (write.email, write.display_name, hash_password(password)),
+            ).fetchone()
+            assert account is not None
+            row = self._insert(connection, "directory_person", {
+                "organization_id": write.organization_id,
+                "governance_user_id": write.email, "display_name": write.display_name,
+                "contact_email": write.email, "employee_number": write.employee_number,
+                "updated_by": principal.email,
+            })
+            connection.execute(
+                """INSERT INTO directory_membership(
+                     person_id,unit_id,organization_id,membership_kind)
+                   VALUES (%s,%s,%s,'primary_department')""",
+                (row["id"], write.department_id, write.organization_id),
+            )
+            connection.execute(
+                """INSERT INTO directory_account_link(person_id,app_user_id,verified_by)
+                   VALUES (%s,%s,%s)""", (row["id"], account["id"], principal.email),
+            )
+            result = self._person(connection, row["id"])
+            self._audit(
+                connection, principal, "person", str(row["id"]), "created", after=result,
+                organization_id=write.organization_id, department_id=write.department_id,
+                reason=write.reason,
+            )
+            return result
+
+        return self._mutate(
+            principal, "create-organization-person", write.model_dump(exclude={"password"}),
+            create, key, validate_retry,
+        )
+
+    def add_unit_members(
+        self, principal: DirectoryPrincipal, unit_id: str, write: UnitMembersWrite,
+    ) -> dict[str, Any]:
+        def add(connection: DirectoryConnection) -> dict[str, Any]:
+            unit = self._entity(connection, "unit", unit_id)
+            principal.require("directory.edit_people", self._department_id(unit))
+            self._revision(unit, write)
+            self._active(unit)
+            self._active(self._entity(connection, "organization", unit["organization_id"]))
+            if unit["kind"] == "team":
+                self._active(self._entity(connection, "unit", unit["parent_unit_id"]))
+            for person_id in sorted(set(write.person_ids)):
+                person = self._person(connection, person_id)
+                if person["organization_id"] != unit["organization_id"]:
+                    raise DirectoryError("invalid_member", "Member is outside this organization")
+                if (
+                    person["status"] != "active"
+                    or person["manual_disabled"] or person["source_disabled"]
+                ):
+                    raise DirectoryError("invalid_member", "Member is not active")
+                if unit["kind"] == "department":
+                    kind = "department"
+                else:
+                    if unit_id in person["team_ids"]:
+                        raise DirectoryError(
+                            "already_assigned", "Member already belongs to this team"
+                        )
+                    kind = "team"
+                if connection.execute(
+                    """SELECT 1 FROM directory_membership WHERE person_id=%s AND unit_id=%s
+                       AND valid_from<=now() AND (valid_to IS NULL OR valid_to>now())""",
+                    (person_id, unit_id),
+                ).fetchone():
+                    raise DirectoryError("already_assigned", "Member already belongs to this unit")
+                connection.execute(
+                    """INSERT INTO directory_membership(
+                         person_id,unit_id,organization_id,membership_kind)
+                       VALUES (%s,%s,%s,%s)""",
+                    (person_id, unit_id, unit["organization_id"], kind),
+                )
+                self._update(
+                    connection, "directory_person", person_id, {"updated_by": principal.email}
+                )
+                self._audit(
+                    connection, principal, "person", str(person_id), "member_added",
+                    after={"unit_id": unit_id}, organization_id=unit["organization_id"],
+                    department_id=self._department_id(unit), reason=write.reason,
+                )
+            return self._update(
+                connection, "directory_unit", unit_id, {"updated_by": principal.email}
+            )
+
+        return self._mutate(principal, f"add-members:{unit_id}", write.model_dump(), add)
 
     def update_person(
         self,
@@ -794,7 +939,7 @@ class DirectoryService:
             before = self._person(connection, person_id)
             principal.require("directory.edit_people", before["department_id"])
             self._revision(before, write)
-            department = self._entity(connection, "unit", before["department_id"])
+            department = {"organization_id": before["organization_id"]}
             self._teams(connection, person_id, department, write.team_ids)
             self._update(connection, "directory_person", person_id, {"updated_by": principal.email})
             result = self._person(connection, person_id)
@@ -923,7 +1068,13 @@ class DirectoryService:
                 row["app_user_id"] for row in candidates
                 if row["status"] == "active" and row["account_enabled"]
                 and not row["manual_disabled"] and not row["source_disabled"]
-                and row["department_id"] in active_departments
+                and (
+                    scope_kind != "department"
+                    or (
+                        row["department_id"] == scope_id
+                        and row["department_id"] in active_departments
+                    )
+                )
             }
             wanted = set(write.account_ids)
             if not wanted.issubset(valid):

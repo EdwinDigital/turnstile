@@ -12,14 +12,12 @@ from turnstile_core.domain.directory import (
     DirectoryError,
     DirectoryPage,
     DirectoryPrincipal,
-    ObservationResolveWrite,
+    OrganizationPersonCreate,
     OrganizationWrite,
-    PersonCreate,
     PersonStatusWrite,
     PersonWrite,
     TeamsWrite,
-    TransferCancelWrite,
-    TransferWrite,
+    UnitMembersWrite,
     UnitWrite,
 )
 from turnstile_core.services.directory_catalog import directory_store
@@ -172,6 +170,7 @@ def people(
     status: Literal["active", "inactive", "archived"] | None = None,
     cursor: Annotated[str | None, Query(pattern=r"^\d{1,9}$")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    available_unit_id: Annotated[str | None, Query(max_length=255)] = None,
 ) -> DirectoryPage:
     return service.people(
         principal,
@@ -182,6 +181,7 @@ def people(
         organization_id=organization_id,
         offset=int(cursor or 0),
         limit=limit,
+        available_unit_id=available_unit_id,
     )
 
 
@@ -199,12 +199,19 @@ def person(
 
 @router.post("/people", status_code=201)
 def create_person(
-    write: PersonCreate,
+    write: OrganizationPersonCreate,
     service: Service,
     principal: Principal,
     key: IdempotencyKey = None,
 ) -> dict[str, Any]:
-    return service.create_person(principal, write, key)
+    return service.create_organization_person(principal, write, key)
+
+
+@router.post("/units/{unit_id}/members")
+def add_unit_members(
+    unit_id: str, write: UnitMembersWrite, service: Service, principal: Principal,
+) -> dict[str, Any]:
+    return service.add_unit_members(principal, unit_id, write)
 
 
 @router.patch("/people/{person_id}")
@@ -308,33 +315,6 @@ def set_status(
     return service.set_status(principal, person_id, write)
 
 
-@router.post("/people/{person_id}/transfer-preview")
-def transfer_preview(
-    person_id: UUID,
-    write: TransferWrite,
-    service: Service,
-    principal: Principal,
-) -> dict[str, Any]:
-    return service.transfer_preview(principal, person_id, write)
-
-
-@router.post("/people/{person_id}/transfers", status_code=201)
-def schedule_transfer(
-    person_id: UUID,
-    write: TransferWrite,
-    service: Service,
-    principal: Principal,
-    key: IdempotencyKey = None,
-) -> dict[str, Any]:
-    if key is None:
-        raise HTTPException(status_code=422, detail="Idempotency-Key is required")
-    if write.preview_digest is None:
-        raise HTTPException(
-            status_code=422, detail="An approved transfer preview digest is required"
-        )
-    return service.schedule_transfer(principal, person_id, write, key)
-
-
 @router.get("/audit")
 def audit(
     service: Service,
@@ -343,42 +323,3 @@ def audit(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[dict[str, Any]]:
     return service.audit(principal, department_id=department_id, limit=limit)
-
-
-@router.get("/transfers")
-def transfers(
-    service: Service,
-    principal: Principal,
-    person_id: UUID | None = None,
-) -> list[dict[str, Any]]:
-    return service.transfers(principal, person_id=person_id)
-
-
-@router.post("/transfers/{transfer_id}/cancel")
-def cancel_transfer(
-    transfer_id: UUID,
-    write: TransferCancelWrite,
-    service: Service,
-    principal: Principal,
-) -> dict[str, Any]:
-    return service.cancel_transfer(principal, transfer_id, write)
-
-
-@router.get("/identity-conflicts")
-def identity_conflicts(
-    service: Service,
-    principal: Principal,
-    query: Annotated[str, Query(max_length=200)] = "",
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-) -> list[dict[str, Any]]:
-    return service.identity_conflicts(principal, query=query, limit=limit)
-
-
-@router.post("/identity-conflicts/{candidate_id}/resolve")
-def resolve_observation(
-    candidate_id: UUID,
-    write: ObservationResolveWrite,
-    service: Service,
-    principal: Principal,
-) -> dict[str, Any]:
-    return service.resolve_observation(principal, candidate_id, write)

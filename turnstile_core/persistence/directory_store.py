@@ -320,6 +320,7 @@ class DirectoryStore:
         organization_id: str | None = None,
         query: str = "",
         status: str | None = None,
+        available_unit_id: str | None = None,
         offset: int = 0,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
@@ -329,9 +330,8 @@ class DirectoryStore:
         for clause, value in (
             ("p.id=%s", person_id),
             ("l.app_user_id=%s", account_id),
-            ("membership.unit_id=%s", department_id),
             ("p.status=%s", status),
-            ("u.organization_id=%s", organization_id),
+            ("COALESCE(u.organization_id,p.organization_id)=%s", organization_id),
         ):
             if value is not None:
                 clauses.append(clause)
@@ -339,9 +339,31 @@ class DirectoryStore:
         if department_ids is not None:
             clauses.append("membership.unit_id=ANY(%s)")
             parameters.append(list(department_ids))
+        if department_id is not None:
+            clauses.append(
+                "EXISTS(SELECT 1 FROM directory_membership department_member "
+                "WHERE department_member.person_id=p.id AND department_member.unit_id=%s "
+                "AND department_member.membership_kind IN ('primary_department','department') "
+                "AND department_member.valid_from<=%s "
+                "AND (department_member.valid_to IS NULL OR department_member.valid_to>%s))"
+            )
+            parameters.extend([department_id, moment, moment])
         if account_ids is not None:
             clauses.append("l.app_user_id=ANY(%s)")
             parameters.append(list(account_ids))
+        if available_unit_id is not None:
+            clauses.extend([
+                "NOT p.manual_disabled",
+                "NOT EXISTS(SELECT 1 FROM directory_external_binding e "
+                "WHERE e.person_id=p.id AND e.source_disabled)",
+            ])
+            clauses.append(
+                "NOT EXISTS(SELECT 1 FROM directory_membership available "
+                "WHERE available.person_id=p.id AND available.unit_id=%s "
+                "AND available.valid_from<=%s "
+                "AND (available.valid_to IS NULL OR available.valid_to>%s))"
+            )
+            parameters.extend([available_unit_id, moment, moment])
         if team_id is not None:
             clauses.append(
                 "EXISTS(SELECT 1 FROM directory_membership team_member "
@@ -367,7 +389,8 @@ class DirectoryStore:
             for row in connection.execute(
                 f"""SELECT p.*, count(*) OVER() AS _total_count,
                           membership.unit_id AS department_id,
-                          u.name AS department_name, u.organization_id,
+                          u.name AS department_name,
+                          COALESCE(u.organization_id,p.organization_id) AS organization_id,
                           l.app_user_id, a.email AS account_email, a.enabled AS account_enabled,
                           COALESCE(teams.ids, ARRAY[]::TEXT[]) AS team_ids,
                           COALESCE(teams.manual_ids, ARRAY[]::TEXT[]) AS manual_team_ids,

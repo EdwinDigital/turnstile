@@ -658,116 +658,6 @@ paths:
         create retries use Idempotency-Key. No-store responses and safe errors never
         expose credentials or cursors. Sync does not grant login roles, model access
         or tenant-wide consent.
-  /api/v1/organization-management/identity-conflicts:
-    get:
-      tags:
-      - Organization Management
-      summary: Identity Conflicts
-      operationId: identity_conflicts_api_v1_organization_management_identity_conflicts_get
-      parameters:
-      - name: query
-        in: query
-        required: false
-        schema:
-          type: string
-          maxLength: 200
-          default: ''
-          title: Query
-      - name: limit
-        in: query
-        required: false
-        schema:
-          type: integer
-          maximum: 200
-          minimum: 1
-          default: 50
-          title: Limit
-      responses:
-        '200':
-          description: Successful Response
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  type: object
-                  additionalProperties: true
-                title: Response Identity Conflicts Api V1 Organization Management
-                  Identity Conflicts Get
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-      security:
-      - sessionCookie: []
-      description: Persistent APIM organization directory. Owner manages organizations,
-        account links, connections and reviewed sync jobs. A delegated Member is restricted
-        to explicitly granted departments and capabilities. Writes enforce revisions;
-        create retries use Idempotency-Key. No-store responses and safe errors never
-        expose credentials or cursors. Sync does not grant login roles, model access
-        or tenant-wide consent.
-  /api/v1/organization-management/identity-conflicts/{candidate_id}/resolve:
-    post:
-      tags:
-      - Organization Management
-      summary: Resolve Observation
-      operationId: resolve_observation_api_v1_organization_management_identity_conflicts__candidate_id__resolve_post
-      parameters:
-      - name: candidate_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: uuid
-          title: Candidate Id
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/ObservationResolveWrite
-      responses:
-        '200':
-          description: Successful Response
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-                title: Response Resolve Observation Api V1 Organization Management
-                  Identity Conflicts  Candidate Id  Resolve Post
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-      security:
-      - sessionCookie: []
-      description: Persistent APIM organization directory. Owner manages organizations,
-        account links, connections and reviewed sync jobs. A delegated Member is restricted
-        to explicitly granted departments and capabilities. Writes enforce revisions;
-        create retries use Idempotency-Key. No-store responses and safe errors never
-        expose credentials or cursors. Sync does not grant login roles, model access
-        or tenant-wide consent.
   /api/v1/organization-management/menu-administrators/{scope_kind}/{scope_id}:
     get:
       tags:
@@ -1251,6 +1141,15 @@ paths:
           minimum: 1
           default: 50
           title: Limit
+      - name: available_unit_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 255
+          - type: 'null'
+          title: Available Unit Id
       responses:
         '200':
           description: Successful Response
@@ -1300,7 +1199,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: ../../openapi.yaml#/components/schemas/PersonCreate
+              $ref: ../../openapi.yaml#/components/schemas/OrganizationPersonCreate
       responses:
         '201':
           description: Successful Response
@@ -1632,119 +1531,6 @@ paths:
         create retries use Idempotency-Key. No-store responses and safe errors never
         expose credentials or cursors. Sync does not grant login roles, model access
         or tenant-wide consent.
-  /api/v1/organization-management/people/{person_id}/transfer-preview:
-    post:
-      tags:
-      - Organization Management
-      summary: Transfer Preview
-      operationId: transfer_preview_api_v1_organization_management_people__person_id__transfer_preview_post
-      parameters:
-      - name: person_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: uuid
-          title: Person Id
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/TransferWrite
-      responses:
-        '200':
-          description: Successful Response
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-                title: Response Transfer Preview Api V1 Organization Management People  Person
-                  Id  Transfer Preview Post
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-      security:
-      - sessionCookie: []
-      description: Persistent APIM organization directory. Owner manages organizations,
-        account links, connections and reviewed sync jobs. A delegated Member is restricted
-        to explicitly granted departments and capabilities. Writes enforce revisions;
-        create retries use Idempotency-Key. No-store responses and safe errors never
-        expose credentials or cursors. Sync does not grant login roles, model access
-        or tenant-wide consent.
-  /api/v1/organization-management/people/{person_id}/transfers:
-    post:
-      tags:
-      - Organization Management
-      summary: Schedule Transfer
-      operationId: schedule_transfer_api_v1_organization_management_people__person_id__transfers_post
-      parameters:
-      - name: person_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: uuid
-          title: Person Id
-      - name: Idempotency-Key
-        in: header
-        required: false
-        schema:
-          anyOf:
-          - type: string
-            maxLength: 128
-          - type: 'null'
-          title: Idempotency-Key
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/TransferWrite
-      responses:
-        '201':
-          description: Successful Response
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-                title: Response Schedule Transfer Api V1 Organization Management People  Person
-                  Id  Transfers Post
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-      security:
-      - sessionCookie: []
-      description: Persistent APIM organization directory. Owner manages organizations,
-        account links, connections and reviewed sync jobs. A delegated Member is restricted
-        to explicitly granted departments and capabilities. Writes enforce revisions;
-        create retries use Idempotency-Key. No-store responses and safe errors never
-        expose credentials or cursors. Sync does not grant login roles, model access
-        or tenant-wide consent.
   /api/v1/organization-management/sync-jobs:
     get:
       tags:
@@ -2002,108 +1788,6 @@ paths:
         create retries use Idempotency-Key. No-store responses and safe errors never
         expose credentials or cursors. Sync does not grant login roles, model access
         or tenant-wide consent.
-  /api/v1/organization-management/transfers:
-    get:
-      tags:
-      - Organization Management
-      summary: Transfers
-      operationId: transfers_api_v1_organization_management_transfers_get
-      parameters:
-      - name: person_id
-        in: query
-        required: false
-        schema:
-          anyOf:
-          - type: string
-            format: uuid
-          - type: 'null'
-          title: Person Id
-      responses:
-        '200':
-          description: Successful Response
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  type: object
-                  additionalProperties: true
-                title: Response Transfers Api V1 Organization Management Transfers
-                  Get
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-      security:
-      - sessionCookie: []
-      description: Persistent APIM organization directory. Owner manages organizations,
-        account links, connections and reviewed sync jobs. A delegated Member is restricted
-        to explicitly granted departments and capabilities. Writes enforce revisions;
-        create retries use Idempotency-Key. No-store responses and safe errors never
-        expose credentials or cursors. Sync does not grant login roles, model access
-        or tenant-wide consent.
-  /api/v1/organization-management/transfers/{transfer_id}/cancel:
-    post:
-      tags:
-      - Organization Management
-      summary: Cancel Transfer
-      operationId: cancel_transfer_api_v1_organization_management_transfers__transfer_id__cancel_post
-      parameters:
-      - name: transfer_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: uuid
-          title: Transfer Id
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/TransferCancelWrite
-      responses:
-        '200':
-          description: Successful Response
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-                title: Response Cancel Transfer Api V1 Organization Management Transfers  Transfer
-                  Id  Cancel Post
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-      security:
-      - sessionCookie: []
-      description: Persistent APIM organization directory. Owner manages organizations,
-        account links, connections and reviewed sync jobs. A delegated Member is restricted
-        to explicitly granted departments and capabilities. Writes enforce revisions;
-        create retries use Idempotency-Key. No-store responses and safe errors never
-        expose credentials or cursors. Sync does not grant login roles, model access
-        or tenant-wide consent.
   /api/v1/organization-management/units/{unit_id}:
     patch:
       tags:
@@ -2133,6 +1817,57 @@ paths:
                 additionalProperties: true
                 title: Response Update Unit Api V1 Organization Management Units  Unit
                   Id  Patch
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '422':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Persistent APIM organization directory. Owner manages organizations,
+        account links, connections and reviewed sync jobs. A delegated Member is restricted
+        to explicitly granted departments and capabilities. Writes enforce revisions;
+        create retries use Idempotency-Key. No-store responses and safe errors never
+        expose credentials or cursors. Sync does not grant login roles, model access
+        or tenant-wide consent.
+  /api/v1/organization-management/units/{unit_id}/members:
+    post:
+      tags:
+      - Organization Management
+      summary: Add Unit Members
+      operationId: add_unit_members_api_v1_organization_management_units__unit_id__members_post
+      parameters:
+      - name: unit_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Unit Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/UnitMembersWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Add Unit Members Api V1 Organization Management Units  Unit
+                  Id  Members Post
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':

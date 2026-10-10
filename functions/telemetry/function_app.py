@@ -144,15 +144,6 @@ def sync_budget_ledger(timer: func.TimerRequest) -> None:
             rolled["period_start"],
             rolled["source_period_start"],
         )
-    if settings.directory_source == "database" and settings.database_url:
-        from turnstile_core.persistence.directory_store import directory_store
-        from turnstile_core.services.directory_transfers import DirectoryTransferWorker
-
-        transfer_result = DirectoryTransferWorker(directory_store(settings.database_url)).run(
-            period_start_for(datetime.now(UTC)),
-        )
-        if any(transfer_result.values()):
-            logger.info("Monthly directory transfers: %s", transfer_result)
     application_rolled = repository.roll_forward_gateway_application_budgets(
         period_start_for(datetime.now(UTC)), ROLL_FORWARD_ACTOR
     )

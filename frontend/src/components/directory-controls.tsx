@@ -24,12 +24,12 @@ export function useDirectoryLeaveGuard(dirty: boolean) {
   }, [dirty])
 }
 
-export function DirectorySelect({ label, value, items, onChange, disabled = false }: {
+export function DirectorySelect({ label, value, items, onChange, disabled = false, required = false }: {
   label: string; value: string; items: Array<{ value: string; label: string }>
-  onChange: (value: string) => void; disabled?: boolean
+  onChange: (value: string) => void; disabled?: boolean; required?: boolean
 }) {
-  return <Select items={items} value={value} onValueChange={(next) => next && onChange(next)} disabled={disabled}>
-    <SelectTrigger aria-label={label}><SelectValue>{items.find((item) => item.value === value)?.label ?? label}</SelectValue></SelectTrigger>
+  return <Select items={items} value={value} onValueChange={(next) => next && onChange(next)} disabled={disabled} required={required}>
+    <SelectTrigger aria-label={label} aria-required={required || undefined}><SelectValue>{items.find((item) => item.value === value)?.label ?? label}</SelectValue></SelectTrigger>
     <SelectContent alignItemWithTrigger={false}><SelectGroup>
       {items.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
     </SelectGroup></SelectContent>

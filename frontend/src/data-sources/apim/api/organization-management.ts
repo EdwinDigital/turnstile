@@ -83,18 +83,6 @@ export type DirectorySyncChange = {
   object_id: string; decision: string; conflict_code: string | null
   payload: { profile?: { displayName?: string; mail?: string; userPrincipalName?: string }; department_id?: string; person_id?: string }
 }
-export type DirectoryTransfer = {
-  id: string; person_id: string; display_name: string; governance_user_id: string
-  source_department_name: string; target_department_name: string; effective_month: string
-  source_department_id: string; target_department_id: string
-  source_organization_id: string; target_organization_id: string
-  status: "scheduled" | "completed" | "conflicted" | "cancelled"; conflict_code: string | null
-}
-export type DirectoryCandidate = {
-  id: string; original_user_id: string; organization_id: string | null
-  department_id: string | null; source: string; status: string; last_seen_at: string
-}
-
 async function directoryRequest<T>(
   path: string, method = "GET", body?: unknown, idempotencyKey?: string,
 ): Promise<T> {
@@ -132,12 +120,14 @@ export const directoryApi = {
     directoryRequest<DirectoryUnit>(`organizations/${encodeURIComponent(organizationId)}/units`, "POST", value, key),
   updateUnit: (id: string, value: unknown) =>
     directoryRequest<DirectoryUnit>(`units/${encodeURIComponent(id)}`, "PATCH", value),
-  people: (values: { organization_id?: string; department_id?: string; team_id?: string; query?: string; status?: DirectoryStatus; cursor?: string }) =>
+  people: (values: { organization_id?: string; department_id?: string; team_id?: string; available_unit_id?: string; query?: string; status?: DirectoryStatus; cursor?: string }) =>
     directoryRequest<DirectoryPeoplePage>(`people?${new URLSearchParams(
       Object.entries(values).filter(([, value]) => Boolean(value)),
     )}`),
   createPerson: (value: unknown, key: string) =>
     directoryRequest<DirectoryPerson>("people", "POST", value, key),
+  addMembers: (id: string, value: unknown) =>
+    directoryRequest<DirectoryUnit>(`units/${encodeURIComponent(id)}/members`, "POST", value),
   updatePerson: (id: string, value: unknown) =>
     directoryRequest<DirectoryPerson>(`people/${encodeURIComponent(id)}`, "PATCH", value),
   setTeams: (id: string, value: unknown) =>
@@ -160,15 +150,6 @@ export const directoryApi = {
     directoryRequest<{ person: DirectoryPerson; budgets: Array<{ period_start: string; token_limit: number }> }>(`people/${encodeURIComponent(id)}/status-preview`, "POST"),
   setStatus: (id: string, value: unknown) =>
     directoryRequest<DirectoryPerson>(`people/${encodeURIComponent(id)}/status-changes`, "POST", value),
-  transferPreview: (id: string, value: unknown) =>
-    directoryRequest<{ future_budgets: unknown[]; effective_month: string; preview_digest: string }>(`people/${encodeURIComponent(id)}/transfer-preview`, "POST", value),
-  transfer: (id: string, value: unknown, key: string) =>
-    directoryRequest<Record<string, unknown>>(`people/${encodeURIComponent(id)}/transfers`, "POST", value, key),
-  transfers: () => directoryRequest<DirectoryTransfer[]>("transfers"),
-  cancelTransfer: (id: string) => directoryRequest<Record<string, unknown>>(`transfers/${id}/cancel`, "POST", { reason: "" }),
-  identityConflicts: (query: string) => directoryRequest<DirectoryCandidate[]>(`identity-conflicts?${new URLSearchParams({ query })}`),
-  resolveIdentityConflict: (id: string, value: unknown) =>
-    directoryRequest<Record<string, unknown>>(`identity-conflicts/${id}/resolve`, "POST", value),
   connections: () => directoryRequest<DirectoryConnection[]>("connections"),
   createConnection: (value: unknown, key: string) =>
     directoryRequest<DirectoryConnection>("connections", "POST", value, key),

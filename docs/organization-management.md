@@ -11,7 +11,7 @@ The GitHub Copilot workspace hides this menu and search entry. Its enterprise te
 features retain their own data source. Switching workspaces does not delete directory data or
 stop background jobs.
 
-Readiness requires schemas 012-015, the configured directory authority and compatible packages.
+Readiness requires schemas 012-017, the configured directory authority and compatible packages.
 An HTTP health response alone does not prove directory, Graph or gateway readiness.
 
 `/api/v1/enterprise/entities` remains the active assignment/invocation projection.
@@ -66,11 +66,35 @@ Apply 015 after backups and isolated verification; preserve 012-014 checksums an
 business records. This compatibility import changes application navigation, not APIM admission.
 No live Entra consent or model permissions are granted.
 
+### Create People And Add Members
+
+Only the organization node creates people. Name, email, login password (12-256 characters)
+and primary department are required. The department selector contains enabled departments in
+that organization and has no automatic default. Owner creation atomically stores the person,
+Member password account, explicit account link and primary membership. An existing email is a
+conflict, never a password reset or an implicit account merge. Password hashing uses the same
+scrypt format as login; raw passwords never enter audit, responses or idempotency records.
+
+Department and team nodes use **Add Members**, selecting enabled existing people in their
+organization who are not already in that node. Search and pagination stay server-scoped.
+Additional department/team membership never changes the unique primary department used by
+budgets, model invocation and gateway identity. Non-Owner candidates require permission to
+maintain the target unit; this bounded selector does not grant organization-wide personnel
+editing or cross-department budget access. Teams have a department parent and cannot contain
+nested teams; only a department node exposes Create Team.
+
+`016_organization_members` preserves current organization ownership and cancels pending legacy
+transfer plans. `017_department_memberships` stores additional non-billing department edges.
+Transfer plans, historical-identity editing, their HTTP routes and monthly transfer execution
+are retired. Historical query entities and billing attribution remain intact. Existing records
+are not deleted. Apply additive migrations and compatible runtimes before using this workflow;
+do not alter already applied migrations, reactivate the legacy directory or rerun backfill.
+
 ### Upgrade From The Active Directory
 
 Back up the current database, packages and full settings before a maintenance update.
 Apply additive `013_menu_permission_groups`, `014_multiple_menu_permission_groups`
-and `015_scoped_menu_administrators`
+`015_scoped_menu_administrators`, `016_organization_members` and `017_department_memberships`
 through `backend.migrate` before starting the new
 runtime trio. Fresh installations use the same migration chain. Unassigned existing people
 default to Ordinary User; Owner keeps its independent menus.
@@ -297,19 +321,11 @@ timer. Failed refresh cannot preserve an enabled mapping indefinitely. The direc
 the employee budget partition and reservation timestamp to `requestStarted`, including calls
 whose metadata lookup crosses a UTC month boundary.
 
-Owner-scheduled transfers take effect at a future UTC month boundary, after budget inheritance
-and before ledger projection. Activation revalidates revisions, active target units, target
-allowances and the absence of current-period admission. A late or conflicting transfer is
-recorded as conflicted rather than rewriting existing billing evidence. Previous months retain
-their original budget parents and requests retain admission-time attribution.
-Transfer previews include a digest of the personnel/target revisions and future budgets;
-HTTP scheduling requires that digest. Future budgets created or changed after approval cause
-activation conflicts. Owners can inspect plans and cancel scheduled/conflicted transfers;
-cancellation preserves the current assignment and budgets.
-
-Historical identity candidates are visible to Owners. Ignore is explicit and audited.
-Linking requires the same stable governance ID; merging different historical IDs remains
-a separately reviewed identity migration, not a contact-email edit.
+The former transfer and historical-identity editing workflows are retired. Migration 016
+cancels pending plans; old tables and admission guards are retained for compatibility and
+historical evidence, but no UI, HTTP scheduling route or monthly executor remains.
+Previous months retain original budget parents and requests retain admission-time attribution.
+Merging different historical IDs remains a separately reviewed identity migration.
 
 Stop new writers and independent sync/projection workers before rollback. Keep additive tables,
 staging, audit and migration ledger. After new IDs are used, do not switch back to a seed-only

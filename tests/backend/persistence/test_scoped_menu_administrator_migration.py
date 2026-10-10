@@ -82,6 +82,12 @@ def test_legacy_department_appointment_is_recovered_without_inventing_team_or_ow
             assert db.execute(
                 "SELECT scope_kind,unit_id FROM directory_menu_administrator"
             ).fetchall() == [{"scope_kind": "department", "unit_id": "dept-a"}]
+        assert migration_runner.migrate() == []
+        shutil.copy2(
+            REPOSITORY_ROOT / "migrations" / "016_organization_members.up.sql",
+            migrations / "016_organization_members.up.sql",
+        )
+        migration_runner.migrate()
         principal = store.principal(account["id"], "legacy@example.com", "owner")
         assert principal.menu_permission_groups == ("department_admin",)
         assert principal.owner

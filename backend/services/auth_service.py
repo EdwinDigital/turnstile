@@ -23,9 +23,7 @@ fallback path that skips it.
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import hmac
 import json
 import secrets
 from dataclasses import dataclass
@@ -37,16 +35,13 @@ import httpx
 import jwt
 from jwt import PyJWKClient
 
-SCRYPT_N = 2**15
-SCRYPT_R = 8
-SCRYPT_P = 1
-# OpenSSL refuses scrypt above 32 MiB by default, and these parameters need
-# `128 * n * r` = 33.5 MiB -- so the call fails outright rather than running weakly. The
-# ceiling is raised rather than the cost lowered: n is what makes the hash expensive to
-# attack, and trimming it to fit a default is paying for security with the wrong currency.
-SCRYPT_MAXMEM = 64 * 1024 * 1024
-SCRYPT_SALT_BYTES = 16
-SCRYPT_KEY_BYTES = 32
+from turnstile_core.services.passwords import (
+    hash_password as _hash_password,
+)
+from turnstile_core.services.passwords import (
+    verify_password as verify_password,
+)
+
 SESSION_TOKEN_BYTES = 32
 
 
@@ -84,15 +79,6 @@ class SessionIdentity:
         ).hexdigest()
 
 
-def _b64(raw: bytes) -> str:
-    """Padless base64url, so the `$`-delimited hash string stays free of `=`."""
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
-def _unb64(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-
-
 def hash_password(password: str) -> str:
     """`scrypt$<n>$<r>$<p>$<salt>$<key>`, all base64url.
 
@@ -101,48 +87,7 @@ def hash_password(password: str) -> str:
     """
     if not password:
         raise AuthError("密码不能为空。")
-    salt = secrets.token_bytes(SCRYPT_SALT_BYTES)
-    key = hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt,
-        n=SCRYPT_N,
-        r=SCRYPT_R,
-        p=SCRYPT_P,
-        maxmem=SCRYPT_MAXMEM,
-        dklen=SCRYPT_KEY_BYTES,
-    )
-    encode = _b64
-    return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${encode(salt)}${encode(key)}"
-
-
-def verify_password(password: str, stored: str | None) -> bool:
-    """Constant-time check. A missing hash is a false, never an exception.
-
-    `stored` is None for accounts that exist only in Microsoft. Returning False rather than
-    raising keeps the caller from having to distinguish "wrong password" from "this person
-    has no password", which is a distinction an attacker would happily enumerate.
-    """
-    if not stored or not password:
-        return False
-    try:
-        scheme, n, r, p, salt_b64, key_b64 = stored.split("$")
-        if scheme != "scrypt":
-            return False
-        pad = _unb64
-        salt = pad(salt_b64)
-        expected = pad(key_b64)
-        candidate = hashlib.scrypt(
-            password.encode("utf-8"),
-            salt=salt,
-            n=int(n),
-            r=int(r),
-            p=int(p),
-            maxmem=SCRYPT_MAXMEM,
-            dklen=len(expected),
-        )
-    except (ValueError, TypeError):
-        return False
-    return hmac.compare_digest(candidate, expected)
+    return _hash_password(password)
 
 
 def new_session_token() -> tuple[str, str]:

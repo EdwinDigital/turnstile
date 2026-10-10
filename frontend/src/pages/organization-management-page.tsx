@@ -22,7 +22,6 @@ import {
 } from "../components/ui/dialog"
 import { confirmDirectoryLeave, DirectorySelect as MenuSelect, useDirectoryLeaveGuard } from "../components/directory-controls"
 import { DirectorySyncPanel } from "./directory-sync-panel"
-import { DirectoryCandidatesPanel } from "./directory-candidates-panel"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger,
 } from "../components/ui/dropdown-menu"
@@ -70,12 +69,12 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
   const [email, setEmail] = useState(person?.contact_email ?? (
     entity && "contact_email" in entity ? entity.contact_email ?? "" : ""
   ))
-  const [identity, setIdentity] = useState(person?.governance_user_id ?? "")
+  const [password, setPassword] = useState("")
+  const [primaryDepartmentId, setPrimaryDepartmentId] = useState("")
   const [employee, setEmployee] = useState(person?.employee_number ?? "")
   const menuGroups = person?.menu_permission_groups ?? [person?.menu_permission_group ?? "user"]
   const [description, setDescription] = useState(entity?.description ?? "")
   const [status, setStatus] = useState<DirectoryStatus>(entity?.status ?? "active")
-  const [teamIds, setTeamIds] = useState(person?.team_ids ?? [])
   const [dirty, setDirty] = useState(false)
   useDirectoryLeaveGuard(dirty)
   const key = useMemo(() => crypto.randomUUID(), [])
@@ -88,9 +87,9 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
           expected_revision: person.revision,
         })
         return directoryApi.createPerson({
-          display_name: name, governance_user_id: identity, contact_email: email || identity,
-          employee_number: employee || null, department_id: departmentId,
-          team_ids: teamIds,
+          organization_id: organizationId, display_name: name, email, password,
+          department_id: primaryDepartmentId,
+          employee_number: employee || null,
         }, key)
       }
       const value = { code, name, description, status, expected_revision: entity?.revision }
@@ -115,7 +114,6 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
     if (!mutation.isPending && (!dirty || window.confirm("放弃未保存的更改？"))) onClose()
   }
   const submit = (event: FormEvent) => { event.preventDefault(); mutation.mutate() }
-  const teams = units.filter((unit) => unit.kind === "team" && unit.parent_unit_id === departmentId && unit.status === "active")
   return <Dialog open onOpenChange={(open) => { if (!open) close() }}>
     <DialogContent className="directory-dialog">
       <DialogHeader><DialogTitle>{entity || person ? "编辑" : "新增"}{label}</DialogTitle>
@@ -131,28 +129,26 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
             <Input id="directory-code" value={code} required maxLength={64} pattern={"[a-zA-Z0-9][a-zA-Z0-9_\\-]*"}
               onChange={(event) => change(setCode)(event.target.value)} />
           </FormInput>}
-          {editor.kind === "person" && !person && <FormInput id="directory-identity" label="人员标识">
-            <Input id="directory-identity" type="email" value={identity} required maxLength={255}
-              onChange={(event) => change(setIdentity)(event.target.value)} />
-          </FormInput>}
-          {(editor.kind === "person" || editor.kind === "organization") && <FormInput id="directory-email" label="联系邮箱">
-            <Input id="directory-email" type="email" value={email} maxLength={320}
+          {(editor.kind === "person" || editor.kind === "organization") && <FormInput id="directory-email" label={editor.kind === "person" && !person ? "邮箱" : "联系邮箱"}>
+            <Input id="directory-email" type="email" value={email} required={editor.kind === "person" && !person} maxLength={255}
               disabled={person?.externally_managed} onChange={(event) => change(setEmail)(event.target.value)} />
           </FormInput>}
+          {editor.kind === "person" && !person && <FormInput id="directory-password" label="登录密码">
+            <Input id="directory-password" type="password" autoComplete="new-password" value={password}
+              required minLength={12} maxLength={256} onChange={(event) => change(setPassword)(event.target.value)} />
+          </FormInput>}
+          {editor.kind === "person" && !person && <Field><FieldLabel>归属部门</FieldLabel>
+            <MenuSelect label="归属部门" value={primaryDepartmentId} required
+              items={units.filter((unit) => unit.kind === "department" && unit.organization_id === organizationId && unit.status === "active")
+                .map((unit) => ({ value: unit.id, label: unit.name }))}
+              onChange={(value) => { setPrimaryDepartmentId(value); setDirty(true) }} />
+          </Field>}
           {editor.kind === "person" ? <>
             <FormInput id="directory-employee" label="员工号"><Input id="directory-employee" value={employee}
               maxLength={64} onChange={(event) => change(setEmployee)(event.target.value)} /></FormInput>
             <Field><FieldLabel>菜单权限组</FieldLabel>
               <MenuGroupTags groups={menuGroups} />
             </Field>
-            {!person && teams.length > 0 && <FieldSet><FieldLegend>团队</FieldLegend>
-              <div className="directory-checkboxes">{teams.map((team) => <label key={team.id}>
-                <Checkbox checked={teamIds.includes(team.id)} onCheckedChange={(checked) => {
-                  setTeamIds((current) => checked ? [...current, team.id] : current.filter((id) => id !== team.id))
-                  setDirty(true)
-                }} />{team.name}
-              </label>)}</div>
-            </FieldSet>}
           </> : <>
             <FormInput id="directory-description" label="描述"><Textarea id="directory-description"
               value={description} maxLength={2000} onChange={(event) => change(setDescription)(event.target.value)} /></FormInput>
@@ -163,7 +159,8 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
         </FieldGroup>
         {mutation.error && <Alert><AlertDescription>{mutation.error.message}</AlertDescription></Alert>}
         <DialogFooter><Button type="button" variant="outline" onClick={close} disabled={mutation.isPending}>取消</Button>
-          <Button type="submit" disabled={mutation.isPending || (Boolean(row) && !dirty)}>
+          <Button type="submit" disabled={mutation.isPending || (Boolean(row) && !dirty)
+            || (editor.kind === "person" && !person && !primaryDepartmentId)}>
             {mutation.isPending ? <RefreshCw className="spin" data-icon="inline-start" /> : <Save data-icon="inline-start" />}保存
           </Button>
         </DialogFooter>
@@ -173,7 +170,7 @@ function DirectoryEditor({ editor, organizationId, departmentId, units, onClose,
 }
 
 function PersonActionDialog({ person, action, units, onClose, onSaved }: {
-  person: DirectoryPerson; action: "link" | "teams" | "status" | "transfer"
+  person: DirectoryPerson; action: "link" | "teams" | "status"
   units: DirectoryUnit[]; onClose: () => void; onSaved: () => void
 }) {
   const [accountId, setAccountId] = useState(person.app_user_id ?? "")
@@ -181,18 +178,10 @@ function PersonActionDialog({ person, action, units, onClose, onSaved }: {
   const manualTeams = person.manual_team_ids ?? (person.externally_managed ? [] : person.team_ids)
   const sourceTeams = person.source_team_ids ?? (person.externally_managed ? person.team_ids : [])
   const [teamIds, setTeamIds] = useState(manualTeams)
-  const [target, setTarget] = useState("")
-  const [targetOrganization, setTargetOrganization] = useState(person.organization_id ?? "")
-  const [month, setMonth] = useState(() => {
-    const now = new Date()
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString().slice(0, 7)
-  })
   const [disableAccount, setDisableAccount] = useState(false)
   const [reason, setReason] = useState("")
-  const [previewed, setPreviewed] = useState(false)
-  useDirectoryLeaveGuard(Boolean(reason || target || disableAccount || accountId !== (person.app_user_id ?? "")
+  useDirectoryLeaveGuard(Boolean(reason || disableAccount || accountId !== (person.app_user_id ?? "")
     || [...teamIds].sort().join() !== [...manualTeams].sort().join()))
-  const key = useMemo(() => crypto.randomUUID(), [])
   const accounts = useQuery({
     queryKey: ["directory", "accounts", accountQuery],
     queryFn: () => directoryApi.accounts(accountQuery), enabled: action === "link",
@@ -200,19 +189,6 @@ function PersonActionDialog({ person, action, units, onClose, onSaved }: {
   const statusPreview = useQuery({
     queryKey: ["directory", "status-preview", person.id], queryFn: () => directoryApi.statusPreview(person.id),
     enabled: action === "status",
-  })
-  const organizations = useQuery({
-    queryKey: ["directory", "transfer-organizations"], queryFn: directoryApi.organizations,
-    enabled: action === "transfer",
-  })
-  const targetUnits = useQuery({
-    queryKey: ["directory", "transfer-units", targetOrganization],
-    queryFn: () => directoryApi.units(targetOrganization), enabled: action === "transfer" && Boolean(targetOrganization),
-  })
-  const transferValue = { target_department_id: target, effective_month: `${month}-01`, expected_revision: person.revision, reason }
-  const preview = useMutation({
-    mutationFn: () => directoryApi.transferPreview(person.id, transferValue),
-    onSuccess: () => setPreviewed(true),
   })
   const save = useMutation({
     mutationFn: async () => {
@@ -222,16 +198,13 @@ function PersonActionDialog({ person, action, units, onClose, onSaved }: {
       if (action === "status") return directoryApi.setStatus(person.id, {
         ...common, status: person.status === "active" ? "inactive" : "active", disable_account: disableAccount,
       })
-      return directoryApi.transfer(person.id, { ...transferValue, preview_digest: preview.data?.preview_digest }, key)
     },
     onSuccess: onSaved,
   })
-  const label = { link: "关联账号", teams: "团队成员", status: "人员状态", transfer: "计划调岗" }[action]
-  const teams = units.filter((unit) => unit.kind === "team" && unit.parent_unit_id === person.department_id && unit.status === "active")
-  const departments = (targetUnits.data ?? units).filter((unit) => unit.kind === "department"
-    && unit.id !== person.department_id && unit.status === "active")
+  const label = { link: "关联账号", teams: "团队成员", status: "人员状态" }[action]
+  const teams = units.filter((unit) => unit.kind === "team" && unit.organization_id === person.organization_id && unit.status === "active")
   const allowed = action === "link" ? Boolean(accountId)
-    : action === "transfer" ? previewed : action === "status" ? Boolean(statusPreview.data) : true
+    : action === "status" ? Boolean(statusPreview.data) : true
   return <Dialog open onOpenChange={(open) => { if (!open && !save.isPending) onClose() }}>
     <DialogContent className="directory-dialog">
       <DialogHeader><DialogTitle>{label}</DialogTitle><DialogDescription data-no-localize>{person.display_name}</DialogDescription></DialogHeader>
@@ -261,30 +234,61 @@ function PersonActionDialog({ person, action, units, onClose, onSaved }: {
             <Checkbox checked={disableAccount} onCheckedChange={(checked) => setDisableAccount(Boolean(checked))} />同时停用登录账号
           </label>}
         </>}
-        {action === "transfer" && <>
-          <Field><FieldLabel>目标组织</FieldLabel><MenuSelect label="目标组织" value={targetOrganization}
-            items={(organizations.data ?? []).filter((org) => org.status === "active").map((org) => ({ value: org.id, label: org.name }))}
-            onChange={(value) => { setTargetOrganization(value); setTarget(""); setPreviewed(false) }} /></Field>
-          <Field><FieldLabel>目标部门</FieldLabel><MenuSelect label="目标部门" value={target}
-            items={departments.map((unit) => ({ value: unit.id, label: unit.name }))}
-            onChange={(value) => { setTarget(value); setPreviewed(false) }} /></Field>
-          <FormInput id="directory-transfer-month" label="生效月份"><Input id="directory-transfer-month" type="month"
-            value={month} onChange={(event) => { setMonth(event.target.value); setPreviewed(false) }} /></FormInput>
-          <Button variant="outline" disabled={!target || !month || preview.isPending} onClick={() => preview.mutate()}>
-            <RefreshCw data-icon="inline-start" />检查影响
-          </Button>
-          {preview.data && <div className="directory-facts"><span>未来预算</span><span>{preview.data.future_budgets.length}</span>
-            <span>生效日期</span><span>{preview.data.effective_month}</span>
-          </div>}
-        </>}
         <FormInput id="directory-action-reason" label="变更原因"><Textarea id="directory-action-reason" value={reason}
-          maxLength={2000} onChange={(event) => { setReason(event.target.value); setPreviewed(false) }} /></FormInput>
+          maxLength={2000} onChange={(event) => setReason(event.target.value)} /></FormInput>
       </FieldGroup>
-      {(save.error || preview.error || accounts.error || statusPreview.error) && <Alert><AlertDescription>
-        {(save.error || preview.error || accounts.error || statusPreview.error)?.message}
+      {(save.error || accounts.error || statusPreview.error) && <Alert><AlertDescription>
+        {(save.error || accounts.error || statusPreview.error)?.message}
       </AlertDescription></Alert>}
       <DialogFooter><DialogClose render={<Button variant="outline" disabled={save.isPending} />}>取消</DialogClose>
         <Button disabled={!allowed || save.isPending} onClick={() => save.mutate()}><Save data-icon="inline-start" />确认</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+}
+
+function AddMembersDialog({ unit, scopeKey, onClose, onSaved }: {
+  unit: DirectoryUnit; scopeKey: string; onClose: () => void; onSaved: () => void
+}) {
+  const [query, setQuery] = useState("")
+  const [cursor, setCursor] = useState("")
+  const [previous, setPrevious] = useState<string[]>([])
+  const [selection, setSelection] = useState<string[]>([])
+  useDirectoryLeaveGuard(selection.length > 0)
+  const people = useQuery({
+    queryKey: ["directory", "member-candidates", unit.id, query, cursor, scopeKey],
+    queryFn: () => directoryApi.people({ available_unit_id: unit.id, query, cursor }),
+  })
+  const save = useMutation({
+    mutationFn: () => directoryApi.addMembers(unit.id, {
+      person_ids: selection, expected_revision: unit.revision,
+    }),
+    onSuccess: onSaved,
+  })
+  return <Dialog open onOpenChange={(open) => { if (!open && !save.isPending) onClose() }}>
+    <DialogContent className="directory-dialog">
+      <DialogHeader><DialogTitle>添加成员</DialogTitle><DialogDescription data-no-localize>{unit.name}</DialogDescription></DialogHeader>
+      <Input aria-label="搜索可添加人员" placeholder="搜索人员" value={query}
+        onChange={(event) => { setQuery(event.target.value); setCursor(""); setPrevious([]) }} />
+      <FieldSet><FieldLegend>组织成员</FieldLegend><div className="directory-checkboxes">
+        {(people.data?.items ?? []).map((person) => <label key={person.id}>
+          <Checkbox checked={selection.includes(person.id)} disabled={save.isPending}
+            onCheckedChange={(checked) => setSelection((current) => checked
+              ? [...current, person.id] : current.filter((id) => id !== person.id))} />
+          <span data-no-localize>{person.display_name}</span><small data-no-localize>{person.contact_email ?? person.governance_user_id}</small>
+        </label>)}
+      </div></FieldSet>
+      {people.isPending ? <Empty><EmptyTitle>正在加载</EmptyTitle></Empty>
+        : people.data?.total === 0 && <Empty><EmptyTitle>暂无可添加人员</EmptyTitle></Empty>}
+      {(people.error || save.error) && <Alert><AlertDescription>{(people.error || save.error)?.message}</AlertDescription></Alert>}
+      <div className="directory-pagination">
+        <Button variant="outline" size="icon-sm" aria-label="上一页" title="上一页" disabled={!previous.length}
+          onClick={() => { setCursor(previous.at(-1) ?? ""); setPrevious((values) => values.slice(0, -1)) }}><ChevronLeft /></Button>
+        <Button variant="outline" size="icon-sm" aria-label="下一页" title="下一页" disabled={!people.data?.next_cursor}
+          onClick={() => { setPrevious((values) => [...values, cursor]); setCursor(people.data?.next_cursor ?? "") }}><ChevronRight /></Button>
+      </div>
+      <DialogFooter><Button variant="outline" disabled={save.isPending} onClick={onClose}>取消</Button>
+        <Button disabled={!selection.length || save.isPending} onClick={() => save.mutate()}><Plus data-icon="inline-start" />添加</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
@@ -308,7 +312,7 @@ function ScopeAdministrators({ scope, kind, owner, scopeKey, onSaved }: {
   const people = useQuery({
     queryKey: ["directory", "administrator-candidates", kind, scope.id, query, cursor, scopeKey],
     queryFn: () => directoryApi.people({
-      organization_id: organizationId, ...(departmentId ? { department_id: departmentId } : {}),
+      organization_id: organizationId, ...(kind === "department" && departmentId ? { department_id: departmentId } : {}),
       ...(kind === "team" ? { team_id: scope.id } : {}), status: "active", query, cursor,
     }),
   })
@@ -370,7 +374,8 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
   const [cursor, setCursor] = useState("")
   const [previousCursors, setPreviousCursors] = useState<string[]>([])
   const [editor, setEditor] = useState<Editor | null>(null)
-  const [action, setAction] = useState<{ person: DirectoryPerson; action: "link" | "teams" | "status" | "transfer" } | null>(null)
+  const [action, setAction] = useState<{ person: DirectoryPerson; action: "link" | "teams" | "status" } | null>(null)
+  const [addingMembers, setAddingMembers] = useState(false)
   const [tab, setTab] = useState("people")
   const canRead = capabilities?.can_read === true
   const owner = capabilities?.can_manage_organizations === true
@@ -393,7 +398,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
     queryKey: ["directory", "people", effectiveOrgId, departmentId, teamId, debouncedQuery, status, cursor, ...scope],
     queryFn: () => directoryApi.people({
       organization_id: effectiveOrgId,
-      ...(departmentId ? { department_id: departmentId } : {}),
+      ...(!teamId && departmentId ? { department_id: departmentId } : {}),
       ...(teamId ? { team_id: teamId } : {}), query: debouncedQuery,
       ...(status !== "all" ? { status } : {}), ...(cursor ? { cursor } : {}),
     }),
@@ -403,14 +408,6 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
     queryKey: ["directory", "audit", departmentId, ...scope],
     queryFn: () => directoryApi.audit(departmentId || undefined),
     enabled: canRead && tab === "audit",
-  })
-  const transfers = useQuery({
-    queryKey: ["directory", "transfers", ...scope], queryFn: directoryApi.transfers,
-    enabled: canRead && owner && tab === "transfers",
-  })
-  const cancelTransfer = useMutation({
-    mutationFn: directoryApi.cancelTransfer,
-    onSuccess: () => changed(),
   })
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedQuery(query), 250)
@@ -425,7 +422,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
     window.dispatchEvent(new Event(FINOPS_NAVIGATE_EVENT))
   }, [organizationId, unitId])
   const changed = async () => {
-    setEditor(null); setAction(null)
+    setEditor(null); setAction(null); setAddingMembers(false)
     await refreshProfile()
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["directory"] }),
@@ -483,7 +480,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                 kind: selectedUnit?.kind ?? "organization", row: selectedUnit ?? organization,
               })}><Pencil data-icon="inline-start" />编辑</Button>}
               {owner && !selectedUnit && <Button variant="outline" size="sm" onClick={() => setEditor({ kind: "department" })}><Plus data-icon="inline-start" />新增部门</Button>}
-              {department && (owner || capabilities?.capabilities.includes("directory.edit_teams")) &&
+              {selectedUnit?.kind === "department" && (owner || capabilities?.capabilities.includes("directory.edit_teams")) &&
                 <Button variant="outline" size="sm" onClick={() => setEditor({ kind: "team" })}><Plus data-icon="inline-start" />新增团队</Button>}
             </div></div>
             <Tabs value={tab} onValueChange={(value) => { if (confirmDirectoryLeave()) setTab(String(value)) }}>
@@ -491,8 +488,6 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                 {owner && <TabsTrigger value="administrators">管理员</TabsTrigger>}
                 <TabsTrigger value="audit">变更记录</TabsTrigger>
                 {owner && <TabsTrigger value="sync">Entra ID</TabsTrigger>}
-                {owner && <TabsTrigger value="transfers">调岗计划</TabsTrigger>}
-                {owner && <TabsTrigger value="candidates">历史身份</TabsTrigger>}
               </TabsList>
               <TabsContent value="people">
                 <div className="directory-toolbar"><Input aria-label="搜索人员" placeholder="搜索人员" value={query}
@@ -501,7 +496,8 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                     ...Object.entries(statusNames).map(([value, label]) => ({ value, label }))]}
                     onChange={(value) => setStatus(value as DirectoryStatus | "all")} />
                   <span className="directory-count">{people.data?.total ?? "--"} 人</span>
-                  {department && editPeople && <Button size="sm" onClick={() => setEditor({ kind: "person" })}><Plus data-icon="inline-start" />新增人员</Button>}
+                  {!selectedUnit && owner && <Button size="sm" onClick={() => setEditor({ kind: "person" })}><Plus data-icon="inline-start" />新增人员</Button>}
+                  {selectedUnit && editPeople && <Button size="sm" onClick={() => setAddingMembers(true)}><Plus data-icon="inline-start" />添加成员</Button>}
                 </div>
                 <div className="directory-table-scroll"><ResizableTable className="directory-table directory-people-table" minWidths={peopleColumnMinWidths}>
                   <caption className="sr-only">组织人员</caption><thead><tr>
@@ -524,8 +520,6 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
                         <DropdownMenuItem onClick={() => setAction({ person, action: "teams" })}><Users />团队成员</DropdownMenuItem>
                         {owner && <>
                           <DropdownMenuItem onClick={() => setAction({ person, action: "link" })}><Link2 />关联账号</DropdownMenuItem>
-                          <DropdownMenuItem disabled={!capabilities.can_schedule_transfers}
-                            onClick={() => setAction({ person, action: "transfer" })}><FolderTree />计划调岗</DropdownMenuItem>
                           <DropdownMenuItem onClick={() => setAction({ person, action: "status" })}><Shield />人员状态</DropdownMenuItem>
                         </>}
                       </DropdownMenuGroup></DropdownMenuContent>
@@ -547,30 +541,6 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
               {owner && tab === "sync" && <TabsContent value="sync"><DirectorySyncPanel
                 key={effectiveOrgId} organization={organization} units={units.data ?? []}
                 capabilities={capabilities} onSaved={changed} /></TabsContent>}
-              {owner && tab === "transfers" && <TabsContent value="transfers">
-                {(transfers.error || cancelTransfer.error) && <Alert><AlertDescription>
-                  {(transfers.error || cancelTransfer.error)?.message}</AlertDescription></Alert>}
-                <div className="directory-table-scroll"><ResizableTable className="directory-table">
-                  <thead><tr><th><span>人员</span></th><th><span>原部门</span></th><th><span>目标部门</span></th>
-                    <th><span>生效月份</span></th><th><span>状态</span></th><th><span>操作</span></th></tr></thead>
-                  <tbody>{(transfers.data ?? []).filter((item) => departmentId
-                    ? item.source_department_id === departmentId || item.target_department_id === departmentId
-                    : item.source_organization_id === effectiveOrgId || item.target_organization_id === effectiveOrgId
-                  ).map((item) => <tr key={item.id}>
-                    <td data-no-localize>{item.display_name}<small>{item.governance_user_id}</small></td>
-                    <td data-no-localize>{item.source_department_name}</td><td data-no-localize>{item.target_department_name}</td>
-                    <td data-no-localize>{item.effective_month}</td>
-                    <td><Badge>{({ scheduled: "已预约", completed: "已完成", conflicted: "冲突", cancelled: "已取消" })[item.status]}</Badge>
-                      {item.conflict_code && <small data-no-localize>{item.conflict_code}</small>}</td>
-                    <td>{["scheduled", "conflicted"].includes(item.status) && <Button variant="outline" size="sm"
-                      disabled={cancelTransfer.isPending} onClick={() => cancelTransfer.mutate(item.id)}>取消</Button>}</td>
-                  </tr>)}</tbody>
-                </ResizableTable></div>
-                {transfers.data?.length === 0 && <Empty><EmptyTitle>暂无调岗计划</EmptyTitle></Empty>}
-              </TabsContent>}
-              {owner && tab === "candidates" && <TabsContent value="candidates">
-                <DirectoryCandidatesPanel onSaved={changed} />
-              </TabsContent>}
               <TabsContent value="audit"><div className="directory-audit-list">{(audit.data ?? []).map((event) => <div key={event.id}>
                 <span>{actionNames[event.action] ?? event.action}</span><time data-no-localize>{new Intl.DateTimeFormat(getIntlLocale(), {
                   dateStyle: "medium", timeStyle: "short", timeZone: timezone,
@@ -590,5 +560,7 @@ export function OrganizationManagementPage({ onToggleSidebar, capabilities }: {
       }} />}
     {action && <PersonActionDialog key={`${action.person.id}-${action.action}`} {...action}
       units={units.data ?? []} onClose={() => setAction(null)} onSaved={() => void changed()} />}
+    {addingMembers && selectedUnit && <AddMembersDialog key={selectedUnit.id} unit={selectedUnit}
+      scopeKey={scope.join(":")} onClose={() => setAddingMembers(false)} onSaved={() => void changed()} />}
   </div>
 }

@@ -241,26 +241,59 @@ schemas:
     additionalProperties: false
     type: object
     title: GroupMappingsWrite
-  ObservationResolveWrite:
+  OrganizationPersonCreate:
     properties:
-      person_id:
+      expected_revision:
         anyOf:
-        - type: string
-          format: uuid
+        - type: integer
+          minimum: 1.0
         - type: 'null'
-        title: Person Id
-      ignore:
-        type: boolean
-        title: Ignore
-        default: false
+        title: Expected Revision
       reason:
         type: string
         maxLength: 2000
         title: Reason
         default: ''
+      organization_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Organization Id
+      department_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Department Id
+      display_name:
+        type: string
+        maxLength: 160
+        minLength: 1
+        title: Display Name
+      email:
+        type: string
+        maxLength: 255
+        minLength: 3
+        title: Email
+      password:
+        type: string
+        format: password
+        title: Password
+        writeOnly: true
+      employee_number:
+        anyOf:
+        - type: string
+          maxLength: 64
+        - type: 'null'
+        title: Employee Number
     additionalProperties: false
     type: object
-    title: ObservationResolveWrite
+    required:
+    - organization_id
+    - department_id
+    - display_name
+    - email
+    - password
+    title: OrganizationPersonCreate
   OrganizationWrite:
     properties:
       expected_revision:
@@ -309,87 +342,6 @@ schemas:
     - code
     - name
     title: OrganizationWrite
-  PersonCreate:
-    properties:
-      expected_revision:
-        anyOf:
-        - type: integer
-          minimum: 1.0
-        - type: 'null'
-        title: Expected Revision
-      reason:
-        type: string
-        maxLength: 2000
-        title: Reason
-        default: ''
-      display_name:
-        type: string
-        maxLength: 160
-        minLength: 1
-        title: Display Name
-      contact_email:
-        anyOf:
-        - type: string
-          maxLength: 320
-        - type: 'null'
-        title: Contact Email
-      employee_number:
-        anyOf:
-        - type: string
-          maxLength: 64
-        - type: 'null'
-        title: Employee Number
-      job_title:
-        type: string
-        maxLength: 160
-        title: Job Title
-        default: ''
-      menu_permission_group:
-        anyOf:
-        - type: string
-          enum:
-          - user
-          - organization_admin
-          - department_admin
-          - team_admin
-        - type: 'null'
-        title: Menu Permission Group
-      menu_permission_groups:
-        anyOf:
-        - items:
-            type: string
-            enum:
-            - user
-            - organization_admin
-            - department_admin
-            - team_admin
-          type: array
-          maxItems: 3
-        - type: 'null'
-        title: Menu Permission Groups
-      governance_user_id:
-        type: string
-        maxLength: 255
-        minLength: 3
-        title: Governance User Id
-      department_id:
-        type: string
-        maxLength: 255
-        minLength: 1
-        title: Department Id
-      team_ids:
-        items:
-          type: string
-        type: array
-        maxItems: 200
-        title: Team Ids
-    additionalProperties: false
-    type: object
-    required:
-    - display_name
-    - governance_user_id
-    - department_id
-    title: PersonCreate
   PersonStatusWrite:
     properties:
       expected_revision:
@@ -535,17 +487,7 @@ schemas:
     additionalProperties: false
     type: object
     title: TeamsWrite
-  TransferCancelWrite:
-    properties:
-      reason:
-        type: string
-        maxLength: 2000
-        title: Reason
-        default: ''
-    additionalProperties: false
-    type: object
-    title: TransferCancelWrite
-  TransferWrite:
+  UnitMembersWrite:
     properties:
       expected_revision:
         anyOf:
@@ -558,27 +500,19 @@ schemas:
         maxLength: 2000
         title: Reason
         default: ''
-      target_department_id:
-        type: string
-        maxLength: 255
-        minLength: 1
-        title: Target Department Id
-      effective_month:
-        type: string
-        format: date
-        title: Effective Month
-      preview_digest:
-        anyOf:
-        - type: string
-          pattern: ^[a-f0-9]{64}$
-        - type: 'null'
-        title: Preview Digest
+      person_ids:
+        items:
+          type: string
+          format: uuid
+        type: array
+        maxItems: 100
+        minItems: 1
+        title: Person Ids
     additionalProperties: false
     type: object
     required:
-    - target_department_id
-    - effective_month
-    title: TransferWrite
+    - person_ids
+    title: UnitMembersWrite
   UnitWrite:
     properties:
       expected_revision:

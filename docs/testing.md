@@ -57,6 +57,21 @@ deduplication, rerun safety, real team-member validation, organization configura
 Owner/Member protection and consistent personnel/profile labels. Department appointments keep the
 existing department-scope contract through the legacy grant projection; there is no second UI.
 
+Migration `016_organization_members` backfills explicit organization ownership from current
+primary departments, retains all historical memberships and retires pending transfer plans.
+Migration `017_department_memberships` adds non-billing department membership. Verify the
+unchanged 001-016 ledger, rerun safety, same-organization constraints, one primary department
+and preservation of budget/usage/model facts. New personnel creation is Owner-only and requires
+name, email, login password and a primary department in the selected organization. Personnel,
+Member login account, account link and primary membership must commit together; conflicts must
+not overwrite an existing password or leave an orphan account. Passwords use the shared scrypt
+implementation and must never appear in responses, audit or idempotency evidence. Check required
+department validation, duplicate/cross-organization member selection, atomic batch rejection,
+linked password login, retired transfer/identity endpoints and desktop/mobile workflows.
+Department/team Add Members selects existing organization people only, without changing their
+primary budget department. Transfer scheduling and the historical-identity editor are retired;
+historical query catalogs, billing records and immutable audit data remain available.
+
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
 For an existing installation, run the same migration command to apply only pending upgrades. Verify that the initial migration checksum and existing usage rows are unchanged. Migration `002` replaces the unique caller-request index with a non-unique `(request_id, ts DESC)` index; it does not rewrite historical usage. Apply it before running the updated telemetry consumer, and drain older telemetry consumers before enabling the new version. Do not overlap consumers that use the old and new identity rules. Index replacement takes a table lock, so schedule the upgrade for an appropriate maintenance window. Migration `007` only adds nullable columns and defaults every existing model to `price_source = 'manual'`, so rates already in the registry are left exactly as they were and the price sync skips those rows until someone opts a model in.

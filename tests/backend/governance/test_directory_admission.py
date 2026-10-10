@@ -224,7 +224,7 @@ def test_transfer_admission_configuration_requires_current_evidence(
             upgrade.configure_admission(proof, approved=True, actor=owner.email)
         proof["employee_token_enabled"] = False
         upgrade.configure_admission(proof, approved=True, actor=owner.email)
-        assert service.capabilities(owner)["can_schedule_transfers"]
+        assert not service.capabilities(owner)["can_schedule_transfers"]
         assert service.store.state()["person_admission_mode"] == "bff_only"
     finally:
         repository.close()
