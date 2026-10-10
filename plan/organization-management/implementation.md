@@ -31,6 +31,8 @@ P2 同步、身份绑定、投影和独立 APIM 升级代码已提交并部署�
 | `ba65619` | 打包实测发现 Python 3.10 pip 回退错误，要求现有 Python 3.11+ 解释器 |
 | `5db629d` | 真实 ARM 响应验证发现 raw XML/UTF-8 BOM，补 APIM 策略读取兼容及回归 |
 | `0de0394` | 真实APIM候选编译修复、集合查询失效分类、独立计划恢复及发布说明 |
+| `a830e44` | database目录普通发布前digest门禁、真实兼容回滚记录及验收清单 |
+| `24f05c3` | Group映射独立Field与标签修复、范围Member及本地完整同步页面验收 |
 
 尚未推送或创建 PR。新迁移已应用真实部署，不再修改 `012` 内容；后续 schema 修改须追加编号。
 
@@ -147,12 +149,21 @@ P2 同步、身份绑定、投影和独立 APIM 升级代码已提交并部署�
 桌面1440x1000和移动390x844截图、控件ID唯一及完整链路重跑通过。
 真实Graph权限、分页和员工token仍未验证。
 
+`24f05c3`前端修复已发布：新旧API实际包和完整settings备份，core digest与两个Functions
+保持一致，因此仅更新API包，没有schema或基础设施变更。首次健康先于新资源切换，
+资源检查拒绝并自动回滚；独立重试等待实际新资源后，包SHA-256及settings全值读回通过。
+线上真实页面验证Group输入/两个选择器的独立标签、无重复ID、桌面/移动布局、
+关闭开关时全量/增量按钮禁用。仅保存明确标记的停用QA连接，无Group映射、
+无Graph验证或同步调用；未将部署租户当成已批准业务源。保留停用连接作为UI审计。
+全部5个临时范围账号独立DB核对为disabled，关联人员archived/manual_disabled，
+有效部门授权为0。原预算/模型/用量19表及APIM完整snapshot仍保留。
+
 未将静态员工归因说成动态目录已生效。Graph/identity projection始终关闭，
 person_admission_mode仍为unverified，因此线上不开放未经验证的调岗预约。
 
 ## 未验收与外部前置
 
-- 目标控制台Entra client ID/允许域目前为空；没有已批准目录连接、目标Groups、
+- 目标控制台Entra client ID/允许域目前为空；没有已批准并验证的业务目录连接、目标Groups、
   应用Graph权限/consent或供网关测试的员工access-token客户端。
 - 不以部署租户猜业务同步租户，不授tenant-wide Graph权限，不使用头像User.Read或CLI用户
   token冒充同步服务/员工探针。真实源配置必须由部署方明确。
