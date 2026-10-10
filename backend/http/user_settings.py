@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.types import ASGIApp
 
 from turnstile_core.persistence.auth_store import (
     AccountSessionInvalid,
@@ -28,6 +28,7 @@ from ..services.user_settings_models import (
 from ..services.user_settings_service import UserSettingsService
 from .authentication import Profile, whoami
 from .dependencies import Repository
+from .private_routes import PrivateRouteBodyLimit
 from .session import (
     Config,
     CurrentSession,
@@ -37,35 +38,13 @@ from .session import (
 )
 
 
-class UserSettingsBodyLimit:
+class UserSettingsBodyLimit(PrivateRouteBodyLimit):
     def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not scope["path"].startswith("/api/v1/user-settings/"):
-            await self.app(scope, receive, send)
-            return
-        received = 0
-
-        async def bounded_receive() -> Message:
-            nonlocal received
-            message = await receive()
-            received += len(message.get("body", b""))
-            if received > AVATAR_MAX_BODY_BYTES:
-                raise HTTPException(status_code=413, detail="请求内容过大。")
-            return message
-
-        async def private_send(message: Message) -> None:
-            if message["type"] == "http.response.start":
-                headers = [
-                    (key, value)
-                    for key, value in message.get("headers", [])
-                    if key.lower() != b"cache-control"
-                ]
-                message["headers"] = [*headers, (b"cache-control", b"no-store")]
-            await send(message)
-
-        await self.app(scope, bounded_receive, private_send)
+        super().__init__(
+            app,
+            path_prefix="/api/v1/user-settings/",
+            max_body_bytes=AVATAR_MAX_BODY_BYTES,
+        )
 
 
 def private_response(response: Response) -> None:

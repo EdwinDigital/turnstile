@@ -14,6 +14,7 @@ from turnstile_core.domain.enterprise import (
 )
 from turnstile_core.domain.models import EnterpriseEntity
 from turnstile_core.persistence.repository import QueryRepository
+from turnstile_core.services.directory_catalog import catalog_for
 
 from .auth_service import SessionIdentity
 from .budget_service import TokenBudgetService, period_bounds
@@ -52,12 +53,22 @@ class UserSettingsService:
         self.settings = settings
 
     def account(self, identity: SessionIdentity) -> AccountInformation:
-        seed = enterprise_catalog()
-        observed = merge_observed_users(seed, self.repository.observed_users())
-        catalog = merge_application_owners(observed, self.repository.application_owners())
+        if self.settings.directory_source == "database":
+            catalog = catalog_for(self.repository, self.settings, include_inactive=True)
+            seed = catalog.model_copy(update={"users": []})
+            observed = seed
+        else:
+            seed = enterprise_catalog()
+            observed = merge_observed_users(seed, self.repository.observed_users())
+            catalog = merge_application_owners(observed, self.repository.application_owners())
         person = next(
-            (row for row in catalog.users if row.id.casefold() == identity.email.casefold()), None
+            (
+                row for row in catalog.users
+                if row.id.casefold() == identity.effective_user_id.casefold()
+            ), None
         )
+        if self.settings.directory_source == "database" and identity.governance_user_id is None:
+            person = None
         department = next(
             (row for row in catalog.departments if person and row.id == person.parent_id), None
         )
@@ -65,8 +76,10 @@ class UserSettingsService:
             (row for row in catalog.organizations if department and row.id == department.parent_id),
             None,
         )
-        source: Literal["catalog", "observed_usage", "owner_default", "unlinked"] = "unlinked"
-        if person:
+        source: Literal[
+            "catalog", "observed_usage", "owner_default", "unlinked", "directory"
+        ] = "unlinked"
+        if person and self.settings.directory_source != "database":
             source = (
                 "catalog"
                 if any(row.id == person.id for row in seed.users)
@@ -74,6 +87,8 @@ class UserSettingsService:
                 if any(row.id == person.id for row in observed.users)
                 else "owner_default"
             )
+        elif person:
+            source = "directory"
 
         def entity(row: EnterpriseEntity | None) -> AccountEntity | None:
             return AccountEntity(id=row.id, name=row.name) if row else None
@@ -95,7 +110,7 @@ class UserSettingsService:
 
     def budget(self, identity: SessionIdentity, period: str | None) -> PersonalBudget:
         value, start, end, minimum, maximum = personal_period(period)
-        person = identity.email.strip().lower()
+        person = identity.effective_user_id.strip().lower()
         rows = self.repository.list_token_budgets(start, user_id=person)
         allocation = next(
             (row for row in rows if row["scope_type"] == "user" and row["scope_id"] == person), None
@@ -160,7 +175,7 @@ class UserSettingsService:
         )
 
     def models(self, identity: SessionIdentity) -> PersonalModelList:
-        person = identity.email.strip().lower()
+        person = identity.effective_user_id.strip().lower()
         policy = next(
             (
                 row
@@ -240,7 +255,7 @@ class UserSettingsService:
         from_ = datetime.combine(start, time.min, UTC)
         to = datetime.combine(end, time.min, UTC)
         payload: dict[str, Any] = self.repository.personal_usage(
-            identity.email.strip().lower(), from_, to, interval, timezone
+            identity.effective_user_id.strip().lower(), from_, to, interval, timezone
         )
         return PersonalUsage.model_validate(
             {

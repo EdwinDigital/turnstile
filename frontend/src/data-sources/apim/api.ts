@@ -206,6 +206,8 @@ export const dataSource = {
   mode: "api" as const,
   defaultFilters: () => usageWindow(30),
   entities: () => request<EnterpriseEntityCatalog>("/api/v1/enterprise/entities").then(normalizeEnterpriseUsers),
+  queryEntities: (filters: UsageFilters) =>
+    request<EnterpriseEntityCatalog>(`/api/v1/enterprise/query-entities?${params(filters)}`),
   executiveOverview: (filters: UsageFilters) => request<ExecutiveOverview>(
     `/api/v1/observability/executive-overview?${params(filters)}`,
   ),

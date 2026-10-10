@@ -26,10 +26,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
+from uuid import UUID
 
 import httpx
 import jwt
@@ -61,6 +63,22 @@ class SessionIdentity:
     method: Literal["password", "entra"]
     session_expires_at: datetime
     avatar_url: str | None = None
+    directory_department_ids: tuple[str, ...] | None = None
+    directory_permission_revision: int = 0
+    governance_user_id: str | None = None
+    directory_person_active: bool | None = None
+
+    @property
+    def effective_user_id(self) -> str:
+        return self.governance_user_id or self.email
+
+    @property
+    def directory_scope_key(self) -> str:
+        if self.directory_department_ids is None:
+            return "global"
+        return hashlib.sha256(
+            json.dumps(sorted(self.directory_department_ids)).encode()
+        ).hexdigest()
 
 
 def _b64(raw: bytes) -> str:
@@ -82,8 +100,13 @@ def hash_password(password: str) -> str:
         raise AuthError("密码不能为空。")
     salt = secrets.token_bytes(SCRYPT_SALT_BYTES)
     key = hashlib.scrypt(
-        password.encode("utf-8"), salt=salt, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P,
-        maxmem=SCRYPT_MAXMEM, dklen=SCRYPT_KEY_BYTES,
+        password.encode("utf-8"),
+        salt=salt,
+        n=SCRYPT_N,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+        maxmem=SCRYPT_MAXMEM,
+        dklen=SCRYPT_KEY_BYTES,
     )
     encode = _b64
     return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${encode(salt)}${encode(key)}"
@@ -106,8 +129,13 @@ def verify_password(password: str, stored: str | None) -> bool:
         salt = pad(salt_b64)
         expected = pad(key_b64)
         candidate = hashlib.scrypt(
-            password.encode("utf-8"), salt=salt, n=int(n), r=int(r), p=int(p),
-            maxmem=SCRYPT_MAXMEM, dklen=len(expected),
+            password.encode("utf-8"),
+            salt=salt,
+            n=int(n),
+            r=int(r),
+            p=int(p),
+            maxmem=SCRYPT_MAXMEM,
+            dklen=len(expected),
         )
     except (ValueError, TypeError):
         return False
@@ -134,6 +162,7 @@ class EntraIdentity:
     # indistinguishable from a real name.
     display_name: str | None
     tenant_id: str
+    object_id: str | None = None
 
 
 class EntraTokenVerifier:
@@ -161,9 +190,18 @@ class EntraTokenVerifier:
     implementation, which admits `attacker@microsoft.com.example.net`.
     """
 
-    def __init__(self, client_id: str, allowed_email_domains: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        client_id: str,
+        allowed_email_domains: tuple[str, ...],
+        *,
+        require_object_id: bool = False,
+        allowed_tenant_ids: tuple[str, ...] = (),
+    ) -> None:
         self._client_id = client_id
         self._allowed_email_domains = tuple(d.lower().lstrip("@") for d in allowed_email_domains)
+        self._require_object_id = require_object_id
+        self._allowed_tenant_ids = {str(UUID(value)) for value in allowed_tenant_ids}
         # The `common` key set covers every tenant, which is what a multi-tenant app needs;
         # PyJWKClient caches it and refetches on an unknown `kid`, so Microsoft's key
         # rotation is a non-event rather than an outage.
@@ -186,18 +224,39 @@ class EntraTokenVerifier:
                 signing_key.key,
                 algorithms=["RS256"],
                 audience=self._client_id,
-                options={"require": ["exp", "iat", "aud", "iss", "tid"]},
+                options={
+                    "require": [
+                        "exp",
+                        "iat",
+                        "aud",
+                        "iss",
+                        "tid",
+                        *(["oid"] if self._require_object_id else []),
+                    ]
+                },
             )
         except (jwt.PyJWTError, httpx.HTTPError) as error:
             raise AuthError("Microsoft 登录未能完成，请重试。") from error
 
         tenant_id = str(claims.get("tid") or "")
-        if not tenant_id or claims.get("iss") != f"https://login.microsoftonline.com/{tenant_id}/v2.0":
+        if (
+            not tenant_id
+            or claims.get("iss") != f"https://login.microsoftonline.com/{tenant_id}/v2.0"
+        ):
             # Without this a token from one tenant could carry another tenant's `tid`, and
             # anything downstream that trusted `tid` would be reading an attacker's value.
             raise AuthError("该账户不属于此组织。")
 
         email = _claim_email(claims)
+        object_id = None
+        try:
+            UUID(tenant_id)
+            if claims.get("oid"):
+                object_id = str(UUID(str(claims["oid"])))
+        except ValueError as error:
+            raise AuthError("Microsoft 账户身份无效。") from error
+        if self._allowed_tenant_ids and tenant_id not in self._allowed_tenant_ids:
+            raise AuthError("该账户不属于允许登录的租户。")
         if not email:
             raise AuthError("该 Microsoft 账户没有可用的邮箱地址。")
         if not self._domain_allowed(email):
@@ -207,6 +266,7 @@ class EntraTokenVerifier:
             email=email,
             display_name=str(claims["name"]).strip() if claims.get("name") else None,
             tenant_id=tenant_id,
+            object_id=object_id,
         )
 
     def _domain_allowed(self, email: str) -> bool:

@@ -61,6 +61,7 @@ class UsageFilters:
     # be answerable without inventing a channel column the ingestion path does not produce.
     runtime: tuple[str, ...] | None = None
     status_code: int | None = None
+    allowed_department_ids: tuple[str, ...] | None = None
 
 
 CACHE_DIMENSION_FIELDS = {
@@ -76,6 +77,8 @@ CACHE_DIMENSION_FIELDS = {
 
 def cache_scope_for_filters(filters: UsageFilters) -> tuple[str, tuple[str, ...]] | None:
     """Use the bounded APIM metric only for an unfiltered global view."""
+    if filters.allowed_department_ids is not None:
+        return None
     if any(
         (
             filters.organization_id,

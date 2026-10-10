@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -40,11 +40,6 @@ from turnstile_core.domain.assistant_models import (
     PinnedReport,
     PinnedReportLayout,
 )
-from turnstile_core.domain.enterprise import (
-    enterprise_catalog,
-    merge_application_owners,
-    merge_observed_users,
-)
 from turnstile_core.domain.models import EnterpriseEntityCatalog
 from turnstile_core.domain.runtime_models import (
     ChatMessage,
@@ -61,6 +56,7 @@ from turnstile_core.integrations.gateway_protocol import (
     registry_model_route,
 )
 from turnstile_core.persistence.repository import QueryRepository
+from turnstile_core.services.directory_catalog import catalog_for
 
 from .assistant_shared import (
     ANSWER_LANGUAGE,
@@ -118,6 +114,7 @@ Rules:
 8. Write your answer in {language}.
 """
 
+
 # Only the answer language varies. Anything unlisted falls back to English rather than to
 # Chinese, so an unexpected locale degrades to a language the reader probably shares.
 def _frozen_range(chart: ChartSpec) -> ChartSpec:
@@ -158,19 +155,54 @@ class AssistantService:
         repository: QueryRepository,
         runtime: ModelRuntimeService,
         settings: Settings,
+        department_ids: tuple[str, ...] | None = None,
     ) -> None:
         self._repository = repository
         self._runtime = runtime
         self._settings = settings
-        self._tools = AssistantTools(repository, self._catalog_payload)
+        self._department_ids = department_ids
+        self._tools = AssistantTools(repository, self._catalog_payload, department_ids)
 
     # -- catalog ---------------------------------------------------------------
 
     def _catalog(self) -> EnterpriseEntityCatalog:
-        return merge_application_owners(
-            merge_observed_users(enterprise_catalog(), self._repository.observed_users()),
-            self._repository.application_owners(),
+        catalog = catalog_for(self._repository, self._settings)
+        if self._department_ids is None:
+            return catalog
+        allowed = set(self._department_ids)
+        departments = [row for row in catalog.departments if row.id in allowed]
+        organization_ids = {row.parent_id for row in departments}
+        projects = [row for row in catalog.projects if row.parent_id in allowed]
+        project_ids = {row.id for row in projects}
+        return catalog.model_copy(
+            update={
+                "organizations": [
+                    row for row in catalog.organizations if row.id in organization_ids
+                ],
+                "departments": departments,
+                "projects": projects,
+                "agents": [row for row in catalog.agents if row.parent_id in project_ids],
+                "users": [row for row in catalog.users if row.parent_id in allowed],
+            }
         )
+
+    def _scope_allows(self, row: Mapping[str, Any]) -> bool:
+        if self._department_ids is None:
+            return True
+        recorded = row.get("directory_scope")
+        return (
+            isinstance(recorded, list)
+            and bool(recorded)
+            and set(recorded).issubset(set(self._department_ids))
+        )
+
+    def _public_record(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        if not self._scope_allows(row):
+            raise HTTPException(status_code=404, detail="Record not found in the current scope")
+        return {key: value for key, value in row.items() if key != "directory_scope"}
+
+    def _report(self, row: Mapping[str, Any]) -> PinnedReport:
+        return PinnedReport.model_validate(self._public_record(row))
 
     def _catalog_payload(self) -> dict[str, Any]:
         catalog = self._catalog()
@@ -212,13 +244,15 @@ class AssistantService:
 
     @staticmethod
     def _resolve_selection(
-        candidates: list[tuple[ManagedModel, dict[str, Any]]], stored: dict[str, Any],
+        candidates: list[tuple[ManagedModel, dict[str, Any]]],
+        stored: dict[str, Any],
     ) -> tuple[ManagedModel | None, dict[str, Any] | None, bool]:
         requested = InvocationApiFormat(stored["api_format"]) if stored.get("api_format") else None
         configured = stored.get("model_id")
         pinned = next((item for item in candidates if item[0].id == configured), None)
         compatible = [
-            item for item in candidates
+            item
+            for item in candidates
             if requested is None or requested in invocation_api_paths(item[1])
         ]
         fallback = compatible or candidates
@@ -228,18 +262,23 @@ class AssistantService:
         model, route = effective
         api_available = requested is None or requested in invocation_api_paths(route)
         resolved = model_protocol_route(
-            route, requested if api_available else None, tools=True,
+            route,
+            requested if api_available else None,
+            tools=True,
         )
         return model, resolved, api_available
 
     def _select_invocation(self) -> tuple[UUID, UUID, str, InvocationApiFormat]:
         model, route, _ = self._resolve_selection(
-            self._eligible_model_routes(), self._repository.assistant_settings(),
+            self._eligible_model_routes(),
+            self._repository.assistant_settings(),
         )
         if model is None or route is None:
             raise HTTPException(status_code=409, detail="No enabled model can carry tool calls")
         return (
-            model.runtime_id, model.id, model.model_key,
+            model.runtime_id,
+            model.id,
+            model.model_key,
             InvocationApiFormat(route["runtime_config"]["api_format"]),
         )
 
@@ -323,8 +362,10 @@ class AssistantService:
                 detail="The selected API protocol cannot carry tool calls on this model route",
             )
         self._repository.save_assistant_settings(
-            model_id=write.model_id, auto_title=write.auto_title,
-            api_format=requested.value if requested else None, updated_by=updated_by,
+            model_id=write.model_id,
+            auto_title=write.auto_title,
+            api_format=requested.value if requested else None,
+            updated_by=updated_by,
         )
         return self.settings()
 
@@ -336,7 +377,10 @@ class AssistantService:
         *,
         user_id: str,
         user_name: str,
+        billing_user_id: str | None = None,
     ) -> AssistantReply:
+        if self._department_ids == ():
+            raise HTTPException(status_code=403, detail="No analysis scope is granted")
         started = time.monotonic()
         conversation_id = self._resolve_conversation(request.conversation_id, user_id)
         runtime_id, model_id, model_key, api_format = self._select_invocation()
@@ -359,7 +403,7 @@ class AssistantService:
             response = self._runtime.invoke(
                 ModelInvocationRequest(
                     metadata=self._metadata(
-                        user_id=user_id,
+                        user_id=billing_user_id or user_id,
                         user_name=user_name,
                         model_id=str(model_id),
                         model=model_key,
@@ -437,7 +481,8 @@ class AssistantService:
             candidate = UUID(requested)
         except ValueError:
             return str(uuid4())
-        if self._repository.get_conversation(candidate, owner_id) is None:
+        row = self._repository.get_conversation(candidate, owner_id)
+        if row is None or not self._scope_allows(row):
             return str(uuid4())
         return str(candidate)
 
@@ -460,14 +505,18 @@ class AssistantService:
                 title=question.strip()[:TITLE_LENGTH] or "Untitled",
                 question=question,
                 reply=reply.model_dump(mode="json"),
+                directory_scope=(
+                    list(self._department_ids) if self._department_ids is not None else None
+                ),
             )
         except Exception:  # noqa: BLE001 - telemetry must not break the reply
             logger.exception("Failed to record assistant conversation turn")
 
     def list_conversations(self, owner_id: str) -> list[ConversationSummary]:
         return [
-            ConversationSummary.model_validate(row)
+            ConversationSummary.model_validate(self._public_record(row))
             for row in self._repository.list_conversations(owner_id, HISTORY_LIMIT)
+            if self._scope_allows(row)
         ]
 
     def get_conversation(self, conversation_id: UUID, owner_id: str) -> Conversation:
@@ -476,20 +525,27 @@ class AssistantService:
             raise HTTPException(status_code=404, detail="Conversation not found")
         turns = row.get("turns", [])
         return Conversation.model_validate(
-            {k: v for k, v in row.items() if k != "turns"}
+            {k: v for k, v in self._public_record(row).items() if k != "turns"}
             | {"exchanges": [dict(turn) for turn in turns]}
         )
 
     def rename_conversation(
         self, conversation_id: UUID, owner_id: str, title: str
     ) -> ConversationSummary:
+        if self._department_ids is not None:
+            self.get_conversation(conversation_id, owner_id)
         row = self._repository.rename_conversation(conversation_id, owner_id, title)
         if row is None:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        return ConversationSummary.model_validate(row)
+        return ConversationSummary.model_validate(self._public_record(row))
 
     def title_conversation(
-        self, conversation_id: UUID, owner_id: str, locale: str
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        locale: str,
+        *,
+        billing_user_id: str | None = None,
     ) -> ConversationSummary:
         """Replace the placeholder title with one the model wrote.
 
@@ -516,24 +572,20 @@ class AssistantService:
                 conversation.model_dump(exclude={"exchanges"})
             )
 
-        title = self._summarise_title(conversation, owner_id, locale)
+        title = self._summarise_title(conversation, billing_user_id or owner_id, locale)
         if title is None:
             return ConversationSummary.model_validate(
                 conversation.model_dump(exclude={"exchanges"})
             )
-        row = self._repository.summarise_conversation_title(
-            conversation_id, owner_id, title
-        )
+        row = self._repository.summarise_conversation_title(conversation_id, owner_id, title)
         if row is None:
             # Renamed between the read and the write. The person's name wins.
             return self.list_one(conversation_id, owner_id)
-        return ConversationSummary.model_validate(row)
+        return ConversationSummary.model_validate(self._public_record(row))
 
     def list_one(self, conversation_id: UUID, owner_id: str) -> ConversationSummary:
         conversation = self.get_conversation(conversation_id, owner_id)
-        return ConversationSummary.model_validate(
-            conversation.model_dump(exclude={"exchanges"})
-        )
+        return ConversationSummary.model_validate(conversation.model_dump(exclude={"exchanges"}))
 
     def _summarise_title(
         self, conversation: Conversation, owner_id: str, locale: str
@@ -592,8 +644,11 @@ class AssistantService:
         return clean_title(response.content)
 
     def delete_conversation(self, conversation_id: UUID, owner_id: str) -> None:
+        if self._department_ids is not None:
+            self.get_conversation(conversation_id, owner_id)
         if not self._repository.delete_conversation(conversation_id, owner_id):
             raise HTTPException(status_code=404, detail="Conversation not found")
+
     def _run_tool(
         self, call: ToolCall, timezone: str, locale: str, sequence: int
     ) -> tuple[Any | None, AssistantStep]:
@@ -653,14 +708,34 @@ class AssistantService:
             (item for item in catalog.departments if item.id == (user.parent_id if user else None)),
             None,
         )
-        organization = catalog.organizations[0]
+        organization = next(
+            (
+                item
+                for item in catalog.organizations
+                if department is not None and item.id == department.parent_id
+            ),
+            catalog.organizations[0] if catalog.organizations else None,
+        )
+        if organization is None or (
+            self._settings.directory_source == "database" and (user is None or department is None)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Link an active person before model analysis",
+            )
         return InvocationMetadata(
             organization_id=organization.id,
             organization=organization.name,
             department_id=department.id if department else "unattributed",
             department=department.name if department else "unattributed",
-            project_id="project-finops",
-            project="Model FinOps",
+            project_id=(
+                "unattributed"
+                if self._settings.directory_source == "database"
+                else "project-finops"
+            ),
+            project=(
+                "unattributed" if self._settings.directory_source == "database" else "Model FinOps"
+            ),
             agent_id=ASSISTANT_AGENT_ID,
             agent=ASSISTANT_AGENT_NAME,
             user_id=user_id,
@@ -678,8 +753,9 @@ class AssistantService:
 
     def list_pinned(self, owner_id: str) -> list[PinnedReport]:
         return [
-            PinnedReport.model_validate(row)
+            self._report(row)
             for row in self._repository.list_pinned_reports(owner_id)
+            if self._scope_allows(row)
         ]
 
     def pin(self, write: PinnedChartWrite, owner_id: str) -> PinnedReport:
@@ -707,14 +783,17 @@ class AssistantService:
             description=write.description,
             original_question=write.original_question,
             chart=write.chart.model_dump(mode="json"),
+            directory_scope=(
+                list(self._department_ids) if self._department_ids is not None else None
+            ),
         )
-        return PinnedReport.model_validate(row)
+        return self._report(row)
 
     def get_pinned(self, report_id: UUID, owner_id: str) -> PinnedReport:
         row = self._repository.get_pinned_report(report_id, owner_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Pinned report not found")
-        return PinnedReport.model_validate(row)
+        return self._report(row)
 
     def _managed_pinned(self, report_id: UUID, owner_id: str) -> PinnedReport:
         report = self.get_pinned(report_id, owner_id)
@@ -729,18 +808,16 @@ class AssistantService:
         row = self._repository.update_pinned_report(report_id, owner_id, title, description)
         if row is None:
             raise HTTPException(status_code=404, detail="Pinned report not found")
-        return PinnedReport.model_validate(row)
+        return self._report(row)
 
     def set_pinned_visibility(
         self, report_id: UUID, owner_id: str, visibility: str
     ) -> PinnedReport:
         self._managed_pinned(report_id, owner_id)
-        row = self._repository.update_pinned_report_visibility(
-            report_id, owner_id, visibility
-        )
+        row = self._repository.update_pinned_report_visibility(report_id, owner_id, visibility)
         if row is None:
             raise HTTPException(status_code=404, detail="Pinned report not found")
-        return PinnedReport.model_validate(row)
+        return self._report(row)
 
     def set_pinned_layout(
         self, report_id: UUID, owner_id: str, layout: PinnedReportLayout
@@ -760,7 +837,7 @@ class AssistantService:
         )
         if row is None:
             raise HTTPException(status_code=404, detail="Pinned report not found")
-        return PinnedReport.model_validate(row)
+        return self._report(row)
 
     def unpin(self, report_id: UUID, owner_id: str) -> None:
         self._managed_pinned(report_id, owner_id)

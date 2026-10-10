@@ -75,6 +75,7 @@ from turnstile_core.pricing.catalog import (
 )
 from turnstile_core.pricing.sync import ModelPriceUpdate, plan_price_sync
 from turnstile_core.security import CredentialCipher, credential_hint
+from turnstile_core.services.directory_catalog import catalog_for, directory_store
 
 from .model_pricing import ModelPricingService
 
@@ -121,11 +122,7 @@ class ModelRuntimeService:
         authorization: str | None,
     ) -> None:
         current = next(
-            (
-                model
-                for model in self._repository.registry()["models"]
-                if model["id"] == item_id
-            ),
+            (model for model in self._repository.registry()["models"] if model["id"] == item_id),
             None,
         )
         if current is None:
@@ -138,7 +135,11 @@ class ModelRuntimeService:
         self.authorize(role, authorization, manage=changes_routing_identity)
 
     def price_catalog_models(
-        self, query: str, *, limit: int = 60, source: PriceSource | None = None,
+        self,
+        query: str,
+        *,
+        limit: int = 60,
+        source: PriceSource | None = None,
     ) -> PriceCatalogModelsResponse:
         """The models a person can point a registry model at, one row each.
 
@@ -203,15 +204,57 @@ class ModelRuntimeService:
         )
 
     def price_preview(
-        self, request: PricePreviewRequest, *, user_id: str,
+        self,
+        request: PricePreviewRequest,
+        *,
+        user_id: str,
     ) -> PricePreviewResponse:
+        user_id = self._pricing_identity(user_id)
         return ModelPricingService(
-            self.registry(), self._price_catalog, self.invoke, user_id=user_id,
+            self.registry(),
+            self._price_catalog,
+            self.invoke,
+            user_id=user_id,
+            enterprise_directory=lambda: catalog_for(self._repository, self._settings),
+            require_directory_identity=self._settings.directory_source == "database",
         ).preview(request)
 
+    def _pricing_identity(self, user_id: str) -> str:
+        if self._settings.directory_source != "database":
+            return user_id
+        assert self._settings.database_url is not None
+        store = directory_store(self._settings.database_url)
+        store.require_ready()
+        with store.connection() as connection:
+            account = connection.execute(
+                "SELECT id FROM app_user WHERE lower(email)=lower(%s)",
+                (user_id,),
+            ).fetchone()
+            row = connection.execute(
+                """SELECT p.governance_user_id FROM directory_person p
+                   JOIN directory_account_link l ON l.person_id=p.id
+                   JOIN app_user a ON a.id=l.app_user_id AND a.enabled
+                   WHERE p.status='active' AND NOT p.manual_disabled
+                     AND NOT EXISTS(SELECT 1 FROM directory_external_binding e
+                       WHERE e.person_id=p.id AND e.source_disabled)
+                     AND ((%s::uuid IS NOT NULL AND a.id=%s)
+                       OR (%s::uuid IS NULL AND p.governance_user_id=%s))""",
+                (
+                    account["id"] if account else None,
+                    account["id"] if account else None,
+                    account["id"] if account else None,
+                    user_id,
+                ),
+            ).fetchone()
+        return str(row["governance_user_id"]) if row else "unattributed"
+
     def sync_prices(
-        self, only: Sequence[UUID] | None = None, *, refresh: bool = False,
-        dry_run: bool = False, user_id: str = "system",
+        self,
+        only: Sequence[UUID] | None = None,
+        *,
+        refresh: bool = False,
+        dry_run: bool = False,
+        user_id: str = "system",
     ) -> PriceSyncResponse:
         token = CATALOG_DEADLINE.set(time.monotonic() + 55)
         try:
@@ -220,29 +263,45 @@ class ModelRuntimeService:
             CATALOG_DEADLINE.reset(token)
 
     def _sync_prices(
-        self, only: Sequence[UUID] | None = None, *, refresh: bool,
-        dry_run: bool, user_id: str,
+        self,
+        only: Sequence[UUID] | None = None,
+        *,
+        refresh: bool,
+        dry_run: bool,
+        user_id: str,
     ) -> PriceSyncResponse:
         registry = self.registry()
+        user_id = self._pricing_identity(user_id)
         deadline = time.monotonic() + 55
         selected = [model for model in registry.models if only is None or model.id in only]
         if only and set(only) - {model.id for model in selected}:
             raise HTTPException(status_code=404, detail="Unknown model in price sync")
-        sources: set[PriceSource] = {model.price_source for model in selected
-                                    if model.price_source is not PriceSource.MANUAL}
+        sources: set[PriceSource] = {
+            model.price_source for model in selected if model.price_source is not PriceSource.MANUAL
+        }
         failures = self._price_catalog.refresh(sources) if refresh else {}
         pricing = ModelPricingService(
-            registry, self._price_catalog, self.invoke, user_id=user_id, allow_ai=not dry_run,
+            registry,
+            self._price_catalog,
+            self.invoke,
+            user_id=user_id,
+            allow_ai=not dry_run,
+            enterprise_directory=lambda: catalog_for(self._repository, self._settings),
+            require_directory_identity=self._settings.directory_source == "database",
         )
         updates: list[ModelPriceUpdate] = []
         details: list[PriceSyncDetail] = []
         partial_fields = 0
         for model in selected:
             if model.price_source is PriceSource.MANUAL:
-                details.append(PriceSyncDetail(
-                    model_id=model.id, model_key=model.model_key, outcome="skipped_manual",
-                    price_source=model.price_source,
-                ))
+                details.append(
+                    PriceSyncDetail(
+                        model_id=model.id,
+                        model_key=model.model_key,
+                        outcome="skipped_manual",
+                        price_source=model.price_source,
+                    )
+                )
                 continue
             error = failures.get(model.price_source)
             status = PriceSyncStatus.STALE
@@ -251,11 +310,16 @@ class ModelRuntimeService:
             if time.monotonic() >= deadline:
                 error, status = "同步执行时间预算已耗尽，请重试", PriceSyncStatus.DEFERRED
             elif model.price_source is PriceSource.MODELS_DEV and not error:
-                pricing.timeout_ms = max(1000, min(15000, int((deadline-time.monotonic()) * 1000)))
-                preview = pricing.preview(PricePreviewRequest(
-                    model_id=model.id, price_reference=model.price_reference,
-                    price_discount_percent=model.price_discount_percent,
-                ))
+                pricing.timeout_ms = max(
+                    1000, min(15000, int((deadline - time.monotonic()) * 1000))
+                )
+                preview = pricing.preview(
+                    PricePreviewRequest(
+                        model_id=model.id,
+                        price_reference=model.price_reference,
+                        price_discount_percent=model.price_discount_percent,
+                    )
+                )
                 if preview.status != "matched" or not preview.match:
                     error = "；".join(preview.warnings)
                     status = PriceSyncStatus(preview.status)
@@ -267,7 +331,10 @@ class ModelRuntimeService:
                         partial_fields += 1
             if error:
                 update = ModelPriceUpdate(
-                    model_id=model.id, model_key=model.model_key, status=status, message=error,
+                    model_id=model.id,
+                    model_key=model.model_key,
+                    status=status,
+                    message=error,
                     expected_source=model.price_source.value,
                     expected_reference=model.price_reference,
                     expected_discount_percent=model.effective_discount_percent,
@@ -278,31 +345,42 @@ class ModelRuntimeService:
             else:
                 resolved_entries = None
                 if preview and preview.list_prices and preview.match:
-                    resolved_entries = {candidate.id: CatalogEntry(
-                        reference=preview.match.reference, label=preview.match.name,
-                        source=PriceSource.MODELS_DEV,
-                        input_per_million=preview.list_prices.input,
-                        output_per_million=preview.list_prices.output,
-                        cached_per_million=preview.list_prices.cached,
-                        cache_write_per_million=preview.list_prices.cache_write,
-                        operation="image_generation"
-                        if "image_generation" in model.capabilities else "chat",
-                    )}
+                    resolved_entries = {
+                        candidate.id: CatalogEntry(
+                            reference=preview.match.reference,
+                            label=preview.match.name,
+                            source=PriceSource.MODELS_DEV,
+                            input_per_million=preview.list_prices.input,
+                            output_per_million=preview.list_prices.output,
+                            cached_per_million=preview.list_prices.cached,
+                            cache_write_per_million=preview.list_prices.cache_write,
+                            operation="image_generation"
+                            if "image_generation" in model.capabilities
+                            else "chat",
+                        )
+                    }
                 update = plan_price_sync(
-                    [candidate], self._price_catalog, resolved_entries=resolved_entries,
+                    [candidate],
+                    self._price_catalog,
+                    resolved_entries=resolved_entries,
                 ).updates[0]
                 update = replace(
-                    update, expected_reference=model.price_reference,
+                    update,
+                    expected_reference=model.price_reference,
                     match_metadata=preview.match.model_dump(mode="json")
-                    if preview and preview.match else model.match_metadata,
+                    if preview and preview.match
+                    else model.match_metadata,
                     source_snapshot={
-                        "version": 1, "entry_digest": preview.entry_digest,
+                        "version": 1,
+                        "entry_digest": preview.entry_digest,
                         "snapshot_id": preview.catalog_snapshot_id,
                         "fetched_at": (
                             preview.fetched_at.isoformat() if preview.fetched_at else None
                         ),
                         "source_updated_at": preview.source_updated_at,
-                    } if preview else model.source_snapshot,
+                    }
+                    if preview
+                    else model.source_snapshot,
                 )
             updates.append(update)
         if not dry_run:
@@ -314,7 +392,8 @@ class ModelRuntimeService:
             before = next(model for model in selected if model.id == update.model_id)
             after = by_id.get(update.model_id)
             accepted = dry_run or bool(
-                after and after.price_source == before.price_source
+                after
+                and after.price_source == before.price_source
                 and after.price_reference == update.price_reference
                 and after.price_sync_status == update.status
                 and after.updated_at >= before.updated_at
@@ -328,45 +407,63 @@ class ModelRuntimeService:
                     changed = any(
                         getattr(before, field) != getattr(update, field)
                         for field in (
-                            "input_cost_per_million", "output_cost_per_million",
-                            "cached_cost_per_million", "cache_write_cost_per_million",
+                            "input_cost_per_million",
+                            "output_cost_per_million",
+                            "cached_cost_per_million",
+                            "cache_write_cost_per_million",
                         )
                     )
                     outcome = "updated" if changed else "unchanged"
             elif not dry_run and (
-                after is None or after.price_source != before.price_source
+                after is None
+                or after.price_source != before.price_source
                 or after.price_reference != before.price_reference
                 or after.effective_discount_percent != before.effective_discount_percent
                 or after.updated_at != before.updated_at
             ):
                 outcome = "superseded"
             counts[outcome] = counts.get(outcome, 0) + 1
-            details.append(PriceSyncDetail(
-                model_id=update.model_id, model_key=update.model_key,
-                status=PriceSyncStatus.SUPERSEDED if outcome == "superseded" else update.status,
-                outcome=outcome, message=update.message, price_source=before.price_source,
-                price_reference=update.price_reference or before.price_reference,
-            ))
+            details.append(
+                PriceSyncDetail(
+                    model_id=update.model_id,
+                    model_key=update.model_key,
+                    status=PriceSyncStatus.SUPERSEDED if outcome == "superseded" else update.status,
+                    outcome=outcome,
+                    message=update.message,
+                    price_source=before.price_source,
+                    price_reference=update.price_reference or before.price_reference,
+                )
+            )
         return PriceSyncResponse(
-            total=len(selected), considered=len(updates), details=details, registry=refreshed,
-            skipped_manual=len(selected)-len(updates), partial_fields=partial_fields,
+            total=len(selected),
+            considered=len(updates),
+            details=details,
+            registry=refreshed,
+            skipped_manual=len(selected) - len(updates),
+            partial_fields=partial_fields,
             dry_run=dry_run,
-            **{key: counts.get(key, 0) for key in (
-                "updated", "unchanged", "unmapped", "review_needed", "stale",
-                "superseded", "ambiguous", "unsupported", "deferred",
-            )},
+            **{
+                key: counts.get(key, 0)
+                for key in (
+                    "updated",
+                    "unchanged",
+                    "unmapped",
+                    "review_needed",
+                    "stale",
+                    "superseded",
+                    "ambiguous",
+                    "unsupported",
+                    "deferred",
+                )
+            },
         )
 
     def registry(self) -> RegistryResponse:
         rows = self._repository.registry()
         github_provider_ids, copilot_runtime_ids = self._copilot_registry_ids(rows)
-        providers = [
-            row for row in rows["providers"] if row["id"] not in github_provider_ids
-        ]
+        providers = [row for row in rows["providers"] if row["id"] not in github_provider_ids]
         provider_ids = {row["id"] for row in providers}
-        runtimes = [
-            row for row in rows["runtimes"] if row["id"] not in copilot_runtime_ids
-        ]
+        runtimes = [row for row in rows["runtimes"] if row["id"] not in copilot_runtime_ids]
         runtime_ids = {row["id"] for row in runtimes}
         return RegistryResponse(
             backend_pool_session_affinity_supported=True,
@@ -425,10 +522,7 @@ class ModelRuntimeService:
                 status_code=409,
                 detail="Select another default gateway before deleting this one",
             )
-        if any(
-            runtime.get("gateway_profile_id") == gateway_id
-            for runtime in registry["runtimes"]
-        ):
+        if any(runtime.get("gateway_profile_id") == gateway_id for runtime in registry["runtimes"]):
             raise HTTPException(
                 status_code=409,
                 detail="Remove every connection from this gateway before deleting it",
@@ -445,9 +539,7 @@ class ModelRuntimeService:
             )
         return self.registry()
 
-    def save_provider(
-        self, write: ProviderWrite, item_id: UUID | None = None
-    ) -> RegistryResponse:
+    def save_provider(self, write: ProviderWrite, item_id: UUID | None = None) -> RegistryResponse:
         registry = self._repository.registry()
         github_provider_ids, _ = self._copilot_registry_ids(registry)
         if (
@@ -490,11 +582,7 @@ class ModelRuntimeService:
     def save_connection(self, write: ModelConnectionCreate) -> RegistryResponse:
         registry = self._repository.registry()
         gateway = next(
-            (
-                row
-                for row in registry["gateways"]
-                if row["id"] == write.gateway_profile_id
-            ),
+            (row for row in registry["gateways"] if row["id"] == write.gateway_profile_id),
             None,
         )
         if gateway is None or not gateway["enabled"] or gateway["implementation"] != "apim":
@@ -503,11 +591,7 @@ class ModelRuntimeService:
         openai_vendor = write.model_vendor or ModelVendorKey.GENERIC
         if write.provider.existing_id is not None:
             provider = next(
-                (
-                    row
-                    for row in registry["providers"]
-                    if row["id"] == write.provider.existing_id
-                ),
+                (row for row in registry["providers"] if row["id"] == write.provider.existing_id),
                 None,
             )
             if provider is None or not provider["enabled"]:
@@ -523,7 +607,8 @@ class ModelRuntimeService:
                     str((provider.get("config") or {}).get("model_vendor", "generic"))
                 )
                 if write.model_vendor is not None and configured_vendor not in {
-                    ModelVendorKey.GENERIC, write.model_vendor,
+                    ModelVendorKey.GENERIC,
+                    write.model_vendor,
                 }:
                     raise HTTPException(
                         status_code=409,
@@ -596,21 +681,19 @@ class ModelRuntimeService:
                 provider_id,
                 provider_values,
                 {
-                "gateway_profile_id": gateway["id"],
-                "enabled": True,
-                "is_default": False,
-                "brand_key": runtime_brand,
-                "allowed_roles": ["owner", "admin", "member"],
-                **values,
-            },
+                    "gateway_profile_id": gateway["id"],
+                    "enabled": True,
+                    "is_default": False,
+                    "brand_key": runtime_brand,
+                    "allowed_roles": ["owner", "admin", "member"],
+                    **values,
+                },
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return self.registry()
 
-    def update_connection(
-        self, runtime_id: UUID, write: ModelConnectionUpdate
-    ) -> RegistryResponse:
+    def update_connection(self, runtime_id: UUID, write: ModelConnectionUpdate) -> RegistryResponse:
         current = next(
             (
                 runtime
@@ -830,8 +913,7 @@ class ModelRuntimeService:
                 "backend_path": "/model/{upstream_model_id}/invoke",
                 "auth_strategy": "named_value_bearer",
                 "named_value_name": (
-                    "finops-bedrock-"
-                    + hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
+                    "finops-bedrock-" + hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
                 ),
                 "credential_kind": "api_key",
                 "credential_provisioned": False,
@@ -861,11 +943,13 @@ class ModelRuntimeService:
                     detail="Databricks OAuth M2M is not enabled in this environment",
                 )
             assert write.oauth_client_id is not None
-            oauth = OAuthClientCredentialsConfig.model_validate({
-                "provider_id": f"turnstile-oauth-{uuid4().hex}",
-                "client_id": write.oauth_client_id,
-                "token_url": f"{workspace}/oidc/v1/token",
-            })
+            oauth = OAuthClientCredentialsConfig.model_validate(
+                {
+                    "provider_id": f"turnstile-oauth-{uuid4().hex}",
+                    "client_id": write.oauth_client_id,
+                    "token_url": f"{workspace}/oidc/v1/token",
+                }
+            )
             config.update(
                 auth_strategy="oauth_client_credentials",
                 managed_identity_resource=None,
@@ -880,7 +964,10 @@ class ModelRuntimeService:
                 },
             )
         self._ensure_unique_connection(
-            runtimes, write.gateway_profile_id, "workspace_url", workspace,
+            runtimes,
+            write.gateway_profile_id,
+            "workspace_url",
+            workspace,
         )
         return {
             "name": databricks_runtime_name(workspace),
@@ -941,9 +1028,7 @@ class ModelRuntimeService:
         ):
             raise HTTPException(status_code=409, detail="This connection already exists")
 
-    def save_model(
-        self, write: ManagedModelWrite, item_id: UUID | None = None
-    ) -> RegistryResponse:
+    def save_model(self, write: ManagedModelWrite, item_id: UUID | None = None) -> RegistryResponse:
         if "image_generation" in write.capabilities:
             if item_id is None:
                 raise HTTPException(
@@ -987,9 +1072,14 @@ class ModelRuntimeService:
                 status_code=409, detail="Changing model operation requires a publication"
             )
         price_fields = (
-            "runtime_id", "price_source", "price_reference", "price_discount_percent",
-            "input_cost_per_million", "output_cost_per_million",
-            "cached_cost_per_million", "cache_write_cost_per_million",
+            "runtime_id",
+            "price_source",
+            "price_reference",
+            "price_discount_percent",
+            "input_cost_per_million",
+            "output_cost_per_million",
+            "cached_cost_per_million",
+            "cache_write_cost_per_million",
         )
         current_model = ManagedModel.model_validate(current) if current is not None else None
         source_explicit = "price_source" in write.model_fields_set
@@ -1000,21 +1090,37 @@ class ModelRuntimeService:
             values["price_source"] = current_model.price_source
             values["price_reference"] = current_model.price_reference
             values["price_discount_percent"] = current_model.price_discount_percent
-            write = write.model_copy(update={
-                field: values[field] for field in (
-                    "price_source", "price_reference", "price_discount_percent",
+            write = write.model_copy(
+                update={
+                    field: values[field]
+                    for field in (
+                        "price_source",
+                        "price_reference",
+                        "price_discount_percent",
+                    )
+                }
+            )
+        if (
+            write.price_source is not PriceSource.MANUAL
+            and write.price_reference
+            and (
+                current_model is None
+                or any(
+                    getattr(current_model, field) != getattr(write, field) for field in price_fields
                 )
-            })
-        if write.price_source is not PriceSource.MANUAL and write.price_reference and (
-            current_model is None
-            or any(getattr(current_model, field) != getattr(write, field) for field in price_fields)
-            or write.price_entry_digest is not None
+                or write.price_entry_digest is not None
+            )
         ):
-            preview = self.price_preview(PricePreviewRequest(
-                model_id=item_id, runtime_id=write.runtime_id,
-                price_source=write.price_source, price_reference=write.price_reference,
-                price_discount_percent=write.price_discount_percent,
-            ), user_id="system")
+            preview = self.price_preview(
+                PricePreviewRequest(
+                    model_id=item_id,
+                    runtime_id=write.runtime_id,
+                    price_source=write.price_source,
+                    price_reference=write.price_reference,
+                    price_discount_percent=write.price_discount_percent,
+                ),
+                user_id="system",
+            )
             if preview.status != "matched" or preview.effective_prices is None:
                 raise HTTPException(
                     status_code=503 if preview.status == "stale" else 409,
@@ -1027,8 +1133,12 @@ class ModelRuntimeService:
             values.update(self._accepted_price_values(preview))
             if current_model:
                 values["pricing_expected_updated_at"] = current_model.updated_at
-        elif write.price_source is PriceSource.MODELS_DEV and not write.price_reference \
-                and source_explicit and not write.allow_unpriced:
+        elif (
+            write.price_source is PriceSource.MODELS_DEV
+            and not write.price_reference
+            and source_explicit
+            and not write.allow_unpriced
+        ):
             raise HTTPException(status_code=422, detail="请同步定价或明确确认暂不计价")
         if not source_explicit and current_model and not current_model.price_source_configured:
             for field in ("price_source", "price_reference", "price_discount_percent"):
@@ -1041,15 +1151,18 @@ class ModelRuntimeService:
         assert preview.match and preview.effective_prices and preview.list_prices
         values: dict[str, Any] = {}
         for key, column in (
-            ("input", "input_cost_per_million"), ("output", "output_cost_per_million"),
-            ("cached", "cached_cost_per_million"), ("cache_write", "cache_write_cost_per_million"),
+            ("input", "input_cost_per_million"),
+            ("output", "output_cost_per_million"),
+            ("cached", "cached_cost_per_million"),
+            ("cache_write", "cache_write_cost_per_million"),
         ):
             values[column] = getattr(preview.effective_prices, key)
             if getattr(preview.list_prices, key) is not None:
                 values[f"list_{column}"] = getattr(preview.list_prices, key)
         values["match_metadata"] = preview.match.model_dump(mode="json")
         values["source_snapshot"] = {
-            "version": 1, "entry_digest": preview.entry_digest,
+            "version": 1,
+            "entry_digest": preview.entry_digest,
             "snapshot_id": preview.catalog_snapshot_id,
             "fetched_at": preview.fetched_at.isoformat() if preview.fetched_at else None,
             "source_updated_at": preview.source_updated_at,
@@ -1244,6 +1357,28 @@ class ModelRuntimeService:
             headers={"x-request-id": request_id},
         )
 
+    def _seal_directory_admission(
+        self,
+        request: ModelInvocationRequest | ImageInvocationRequest,
+        request_id: str,
+    ) -> None:
+        if self._settings.directory_source != "database":
+            return
+        if request.metadata.user_id == "system-runtime-health-check":
+            return
+        assert self._settings.database_url is not None
+        directory_store(self._settings.database_url).admit_invocation(
+            request_id=request_id,
+            governance_user_id=request.metadata.user_id,
+            organization_id=request.metadata.organization_id,
+            department_id=request.metadata.department_id,
+        )
+
+    def _finish_directory_admission(self, request_id: str) -> None:
+        if self._settings.directory_source == "database":
+            assert self._settings.database_url is not None
+            directory_store(self._settings.database_url).finish_invocation(request_id)
+
     def invoke(
         self,
         request: ModelInvocationRequest,
@@ -1270,8 +1405,10 @@ class ModelRuntimeService:
             route["gateway_base_url"] = self._settings.apim_gateway_url
         try:
             route = model_protocol_route(
-                route, request.api_format,
-                tools=bool(request.tools) or any(
+                route,
+                request.api_format,
+                tools=bool(request.tools)
+                or any(
                     message.tool_calls or message.role == "tool" for message in request.messages
                 ),
             )
@@ -1304,6 +1441,7 @@ class ModelRuntimeService:
             )
             route["runtime_config"] = runtime_config
         route["request_id"] = request_id
+        self._seal_directory_admission(request, request_id)
         started = time.monotonic()
         try:
             result = self._router.adapter(route).invoke(request, route)
@@ -1317,6 +1455,11 @@ class ModelRuntimeService:
             ) from error
 
         latency_ms = elapsed_ms(started)
+        if (
+            self._settings.directory_source == "database"
+            and request.metadata.user_id != "system-runtime-health-check"
+        ):
+            self._finish_directory_admission(request_id)
         correlation_id = result.correlation_id or request_id
         estimated_cost = self._estimated_cost(route, result.usage)
         response = ModelInvocationResponse(
@@ -1371,6 +1514,8 @@ class ModelRuntimeService:
             )
             route["gateway_auth_type"] = "api_key"
         now = datetime.now(UTC)
+        directory_admission_id = request_id
+        self._seal_directory_admission(request, request_id)
         try:
             attempt = self._repository.begin_billable_request(
                 BillableRequestPlan(
@@ -1393,6 +1538,7 @@ class ModelRuntimeService:
                 )
             )
         except BillableBudgetExceeded:
+            self._finish_directory_admission(directory_admission_id)
             self._deny(
                 request, route, "image_budget_insufficient", request_id, budget_admission="denied"
             )
@@ -1430,6 +1576,7 @@ class ModelRuntimeService:
             if result.usage is not None
             else None
         )
+        self._finish_directory_admission(directory_admission_id)
         self._repository.finish_billable_request(
             attempt.id,
             actual_tokens=actual,
@@ -1456,9 +1603,7 @@ class ModelRuntimeService:
         )
 
     @staticmethod
-    def _estimated_cost(
-        route: dict[str, Any], usage: InvocationUsage | None
-    ) -> float | None:
+    def _estimated_cost(route: dict[str, Any], usage: InvocationUsage | None) -> float | None:
         input_price = route.get("input_cost_per_million")
         output_price = route.get("output_cost_per_million")
         if usage is None or input_price is None or output_price is None:

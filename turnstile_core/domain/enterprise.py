@@ -9,6 +9,32 @@ ORGANIZATION_ID = "org-contoso-global"
 DEFAULT_APPLICATION_USER_DEPARTMENT_ID = "department-platform"
 
 
+def historical_entity_catalog(rows: Iterable[Mapping[str, Any]]) -> EnterpriseEntityCatalog:
+    collections: dict[str, dict[str, EnterpriseEntity]] = {
+        key: {} for key in ("organization", "department", "project", "agent", "user")
+    }
+    for row in rows:
+        group = collections[str(row["scope_type"])]
+        identity = str(row["scope_id"])
+        if identity not in group:
+            group[identity] = EnterpriseEntity(
+                id=identity,
+                name=str(row["scope_name"] or identity),
+                parent_id=row["parent_scope_id"],
+            )
+    values = {
+        key: sorted(group.values(), key=lambda entity: (entity.name.casefold(), entity.id))
+        for key, group in collections.items()
+    }
+    return EnterpriseEntityCatalog(
+        organizations=values["organization"],
+        departments=values["department"],
+        projects=values["project"],
+        agents=values["agent"],
+        users=values["user"],
+    )
+
+
 def configured_invocation_testers(
     catalog: EnterpriseEntityCatalog, tester_ids: Iterable[str]
 ) -> list[EnterpriseEntity]:

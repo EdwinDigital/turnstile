@@ -73,6 +73,7 @@ def staging_root(tmp_path: Path) -> Path:
         "functions/telemetry",
         "functions/control_plane",
         "infra/policies",
+        "scripts",
         "tests/platform",
     ):
         (root / relative).mkdir(parents=True, exist_ok=True)
@@ -81,6 +82,8 @@ def staging_root(tmp_path: Path) -> Path:
         "backend/migrate.py": "def migrate(): return []\n",
         "backend/bootstrap.py": "def main(): return 0\n",
         "backend/http/user_settings.py": "router = object()\n",
+        "scripts/__init__.py": "",
+        "scripts/directory_upgrade.py": "def main(): pass\n",
         "turnstile_core/config.py": "class Settings: pass\n",
         "frontend/dist/index.html": "<!doctype html>\n",
         "migrations/001_token_observability.up.sql": "SELECT 1;\n",
@@ -208,7 +211,7 @@ def test_function_staging_contains_runtime_contract(
 
 @pytest.mark.parametrize(
     ("target", "expected_functions"),
-    (("telemetry", 4), ("control-plane", 2)),
+    (("telemetry", 4), ("control-plane", 4)),
 )
 def test_staged_function_indexes_without_backend(
     tmp_path: Path,

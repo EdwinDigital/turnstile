@@ -39,6 +39,7 @@ schemas:
         - observed_usage
         - owner_default
         - unlinked
+        - directory
         title: Membership Source
       editable:
         $ref: ../../openapi.yaml#/components/schemas/EditableProfile

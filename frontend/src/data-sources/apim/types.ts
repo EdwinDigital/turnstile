@@ -248,6 +248,7 @@ export type UserModelAccessAuditEvent = {
 }
 
 export type TokenBudgetResponse = {
+  coverage?: "global" | "department"
   period: string
   period_start: string
   period_end: string

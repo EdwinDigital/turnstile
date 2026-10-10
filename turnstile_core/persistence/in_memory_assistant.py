@@ -62,6 +62,7 @@ class InMemoryAssistantRepositoryMixin:
         description: str,
         original_question: str,
         chart: Mapping[str, Any],
+        directory_scope: list[str] | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(UTC)
         owned = [item for item in self.pinned_reports if item["created_by"] == owner_id]
@@ -76,6 +77,7 @@ class InMemoryAssistantRepositoryMixin:
             "layout": {"version": 1, "spans": {}, "row_heights": {}},
             "created_at": now,
             "updated_at": now,
+            "directory_scope": directory_scope,
         }
         self.pinned_reports.append(report)
         self.pinned_charts.append(
@@ -242,6 +244,7 @@ class InMemoryAssistantRepositoryMixin:
         title: str,
         question: str,
         reply: Mapping[str, Any],
+        directory_scope: list[str] | None = None,
     ) -> None:
         now = datetime.now(UTC)
         existing = next(
@@ -266,6 +269,7 @@ class InMemoryAssistantRepositoryMixin:
                 "created_at": now,
                 "updated_at": now,
                 "turns": [],
+                "directory_scope": directory_scope,
             }
             self.conversations.append(existing)
         existing["updated_at"] = now

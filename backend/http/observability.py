@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -8,9 +8,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from turnstile_core.domain.enterprise import (
     configured_invocation_testers,
-    enterprise_catalog,
-    merge_application_owners,
-    merge_observed_users,
 )
 from turnstile_core.domain.models import (
     AuditFinding,
@@ -35,10 +32,12 @@ from turnstile_core.domain.models import (
     UsageRequestSummary,
 )
 from turnstile_core.persistence.repository import UsageFilters
+from turnstile_core.services.directory_catalog import catalog_for
 
 from .dependencies import Repository
 from .session import (
     Config,
+    CurrentSession,
     OwnerSession,
     require_allowed_write_origin,
     require_authenticated_session,
@@ -53,6 +52,7 @@ router = APIRouter(
 
 
 def usage_filters(
+    identity: CurrentSession,
     organization_id: str | None = None,
     department_id: str | None = None,
     project_id: str | None = None,
@@ -71,6 +71,7 @@ def usage_filters(
         user_id=user_id,
         runtime=tuple(runtime) if runtime else None,
         status_code=status_code,
+        allowed_department_ids=identity.directory_department_ids,
     )
 
 
@@ -79,12 +80,28 @@ UsageFilterSet = Annotated[UsageFilters, Depends(usage_filters)]
 
 @router.get("/api/v1/enterprise/entities", response_model=EnterpriseEntityCatalog)
 def get_enterprise_entities(
-    repository: Repository, settings: Config
+    repository: Repository,
+    settings: Config,
+    identity: CurrentSession,
 ) -> EnterpriseEntityCatalog:
-    catalog = merge_application_owners(
-        merge_observed_users(enterprise_catalog(), repository.observed_users()),
-        repository.application_owners(),
-    )
+    catalog = catalog_for(repository, settings)
+    if identity.directory_department_ids is not None:
+        allowed = set(identity.directory_department_ids)
+        departments = [row for row in catalog.departments if row.id in allowed]
+        organization_ids = {row.parent_id for row in departments}
+        projects = [row for row in catalog.projects if row.parent_id in allowed]
+        project_ids = {row.id for row in projects}
+        catalog = catalog.model_copy(
+            update={
+                "organizations": [
+                    row for row in catalog.organizations if row.id in organization_ids
+                ],
+                "departments": departments,
+                "projects": projects,
+                "agents": [row for row in catalog.agents if row.parent_id in project_ids],
+                "users": [row for row in catalog.users if row.parent_id in allowed],
+            }
+        )
     return catalog.model_copy(
         update={
             "invocation_testers": configured_invocation_testers(
@@ -92,6 +109,31 @@ def get_enterprise_entities(
             )
         }
     )
+
+
+@router.get("/api/v1/enterprise/query-entities", response_model=EnterpriseEntityCatalog)
+def get_query_entities(
+    repository: Repository,
+    settings: Config,
+    identity: CurrentSession,
+    filters: UsageFilterSet,
+    from_: Annotated[datetime, Query(alias="from")],
+    to: datetime,
+) -> EnterpriseEntityCatalog:
+    if from_.tzinfo is None or to.tzinfo is None or to <= from_ or to - from_ > timedelta(days=366):
+        raise HTTPException(
+            status_code=422, detail="Select an aware query window of at most 366 days"
+        )
+    current = get_enterprise_entities(repository, settings, identity)
+    historical = repository.historical_entities(from_, to, filters)
+    merged = {}
+    for key in ("organizations", "departments", "projects", "agents", "users"):
+        by_id = {row.id: row for row in getattr(current, key)}
+        by_id.update({row.id: row for row in getattr(historical, key)})
+        merged[key] = sorted(by_id.values(), key=lambda row: (row.name.casefold(), row.id))
+    # Query-only snapshots never become selectable invocation identities.
+    merged["invocation_testers"] = []
+    return EnterpriseEntityCatalog.model_validate(merged)
 
 
 @router.get(
@@ -121,9 +163,7 @@ def get_distribution(
         "organization", "department", "project", "agent", "model", "user", "runtime"
     ],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
-    split_by: Literal[
-        "organization", "department", "project", "agent", "model", "user", "runtime"
-    ]
+    split_by: Literal["organization", "department", "project", "agent", "model", "user", "runtime"]
     | None = None,
 ) -> DistributionResponse:
     return DistributionResponse.model_validate(
@@ -131,9 +171,7 @@ def get_distribution(
             "from": from_,
             "to": to,
             "dimension": dimension,
-            "items": repository.distribution(
-                from_, to, dimension, filters, limit, split_by
-            ),
+            "items": repository.distribution(from_, to, dimension, filters, limit, split_by),
         }
     )
 
@@ -156,9 +194,18 @@ def list_usage_requests(
 
 
 @router.get("/api/v1/observability/requests/{request_id}", response_model=UsageRequestDetail)
-def get_usage_request(request_id: str, repository: Repository) -> UsageRequestDetail:
+def get_usage_request(
+    request_id: str,
+    repository: Repository,
+    identity: CurrentSession,
+) -> UsageRequestDetail:
     row = repository.get_usage_request(request_id)
     if row is None:
+        raise HTTPException(status_code=404, detail="Usage request not found")
+    if (
+        identity.directory_department_ids is not None
+        and row["department_id"] not in identity.directory_department_ids
+    ):
         raise HTTPException(status_code=404, detail="Usage request not found")
     return UsageRequestDetail.model_validate(row)
 
@@ -180,7 +227,13 @@ def list_usage_anomalies(
 
 
 @router.get("/api/v1/observability/overview", response_model=OverviewResponse)
-def get_overview(repository: Repository, timezone: str = "UTC") -> dict[str, object]:
+def get_overview(
+    repository: Repository,
+    identity: CurrentSession,
+    timezone: str = "UTC",
+) -> dict[str, object]:
+    if identity.directory_department_ids is not None:
+        raise HTTPException(status_code=403, detail="Use scoped executive overview")
     return repository.overview(timezone)
 
 
@@ -211,10 +264,16 @@ def get_trends(
 @router.get("/api/v1/observability/runs", response_model=RunListResponse)
 def list_runs(
     repository: Repository,
+    identity: CurrentSession,
     from_: Annotated[datetime, Query(alias="from")],
     to: datetime,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> RunListResponse:
+    if identity.directory_department_ids is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Run collections are not available to scoped viewers",
+        )
     rows = repository.list_runs(from_, to, limit)
     summaries = [{key: value for key, value in row.items() if key != "turns"} for row in rows]
     return RunListResponse(
@@ -224,7 +283,16 @@ def list_runs(
 
 
 @router.get("/api/v1/observability/runs/{run_id}", response_model=RunDetail)
-def get_run(run_id: str, repository: Repository) -> RunDetail:
+def get_run(
+    run_id: str,
+    repository: Repository,
+    identity: CurrentSession,
+) -> RunDetail:
+    if identity.directory_department_ids is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Run collections are not available to scoped viewers",
+        )
     row = repository.get_run(run_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -234,10 +302,13 @@ def get_run(run_id: str, repository: Repository) -> RunDetail:
 @router.get("/api/v1/observability/audit-findings", response_model=AuditFindingListResponse)
 def list_findings(
     repository: Repository,
+    identity: CurrentSession,
     from_: Annotated[datetime, Query(alias="from")],
     to: datetime,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> AuditFindingListResponse:
+    if identity.directory_department_ids is not None:
+        raise HTTPException(status_code=403, detail="Use scoped anomaly queries")
     rows = repository.list_findings(from_, to, limit)
     return AuditFindingListResponse(
         items=[AuditFinding.model_validate(row) for row in rows], page=PageInfo(next_cursor=None)
@@ -262,8 +333,12 @@ def update_finding(
     response_model=OptimizationEventListResponse,
 )
 def list_optimizations(
-    repository: Repository, limit: Annotated[int, Query(ge=1, le=200)] = 50
+    repository: Repository,
+    identity: CurrentSession,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> OptimizationEventListResponse:
+    if identity.directory_department_ids is not None:
+        raise HTTPException(status_code=403, detail="Optimization history is Owner-scoped")
     rows = repository.list_optimizations(limit)
     return OptimizationEventListResponse(
         items=[OptimizationEvent.model_validate(row) for row in rows],

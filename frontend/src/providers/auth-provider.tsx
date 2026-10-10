@@ -326,10 +326,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const next = await authApi.profile()
     if (version !== identityVersion.current) return
     if (!next) { expireLocalSession(); return }
-    if (activeUser.current?.id !== next.id || activeUser.current.method !== next.method) {
+    const identityChanged = activeUser.current?.id !== next.id || activeUser.current.method !== next.method
+    if (
+      identityChanged ||
+      activeUser.current?.role !== next.role ||
+      (activeUser.current?.directory_scope_key ?? "global") !== (next.directory_scope_key ?? "global") ||
+      (activeUser.current?.directory_permission_revision ?? 0) !== (next.directory_permission_revision ?? 0) ||
+      activeUser.current?.governance_user_id !== next.governance_user_id
+    ) {
       queryClient.clear()
-      setPhoto(null)
-      identityVersion.current += 1
+      if (identityChanged) {
+        setPhoto(null)
+        identityVersion.current += 1
+      }
       activeUser.current = next
       identity = Promise.resolve(next)
       setUser(next)
@@ -337,6 +346,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     updateProfile(next)
   }, [expireLocalSession, queryClient, updateProfile])
+
+  useEffect(() => {
+    if (status !== "authenticated") return
+    const refresh = () => { void refreshProfile().catch(() => undefined) }
+    const timer = window.setInterval(refresh, 30_000)
+    window.addEventListener("focus", refresh)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener("focus", refresh)
+    }
+  }, [status, refreshProfile])
 
   const endSession = useCallback((notice?: string) => {
     expireLocalSession()

@@ -138,7 +138,7 @@ function BudgetKpis({ data }: { data: TokenBudgetResponse }) {
   )
   const kpis = [
     {
-      label: "组织总预算",
+      label: data.coverage === "department" ? "可见部门预算" : "组织总预算",
       value: allocatedBudget ? formatTokens(allocatedBudget) : "未分配",
       detail: `${organizations.filter((item) => item.token_limit != null).length} 个组织已配置`,
       icon: WalletCards,

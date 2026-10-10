@@ -33,9 +33,6 @@ from turnstile_core.domain.control_plane import (
 )
 from turnstile_core.domain.enterprise import (
     configured_invocation_tester,
-    enterprise_catalog,
-    merge_application_owners,
-    merge_observed_users,
 )
 from turnstile_core.domain.images import ImageInvocationRequest, ImageInvocationResponse
 from turnstile_core.domain.runtime_models import (
@@ -66,6 +63,7 @@ from turnstile_core.services.control_plane import (
     ControlPlaneNotFoundError,
     ControlPlaneUnavailableError,
 )
+from turnstile_core.services.directory_catalog import catalog_for
 
 from ..services.traffic import TrafficGenerator
 from .dependencies import Repository
@@ -85,6 +83,7 @@ from .session import (
 
 logger = logging.getLogger(__name__)
 InvocationRequest = TypeVar("InvocationRequest", ModelInvocationRequest, ImageInvocationRequest)
+
 
 class ModelPlatformRoute(APIRoute):
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
@@ -108,7 +107,7 @@ protected_router = APIRouter(
     dependencies=[
         Depends(require_authenticated_session),
         Depends(require_allowed_write_origin),
-    ]
+    ],
 )
 publication_router = APIRouter(route_class=ModelPlatformRoute)
 
@@ -246,7 +245,9 @@ def adopt_databricks_connection(
 ) -> GatewayPublicationRequestAccepted:
     try:
         publication = service.adopt_databricks_connection(
-            runtime_id, str(write.workspace_url), identity.email,
+            runtime_id,
+            str(write.workspace_url),
+            identity.email,
         )
     except ControlPlaneNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -472,23 +473,39 @@ def create_gateway_publication(
             "price_discount_percent": model.price_discount_percent,
         }
         if model.price_source is not PriceSource.MANUAL:
-            preview = pricing_service.price_preview(PricePreviewRequest(
-                runtime_id=write.runtime.existing_id,
-                price_source=model.price_source, price_reference=model.price_reference,
-                deployment_name=model.deployment_name, upstream_model_id=model.upstream_model_id,
-                display_name=model.display_name, model_key=model.model_key,
-                operation=model.operation, price_discount_percent=model.price_discount_percent,
-            ), user_id=owner_email)
+            preview = pricing_service.price_preview(
+                PricePreviewRequest(
+                    runtime_id=write.runtime.existing_id,
+                    price_source=model.price_source,
+                    price_reference=model.price_reference,
+                    deployment_name=model.deployment_name,
+                    upstream_model_id=model.upstream_model_id,
+                    display_name=model.display_name,
+                    model_key=model.model_key,
+                    operation=model.operation,
+                    price_discount_percent=model.price_discount_percent,
+                ),
+                user_id=owner_email,
+            )
             if preview.status == "matched" and preview.match:
                 if model.price_entry_digest and preview.entry_digest != model.price_entry_digest:
                     raise HTTPException(status_code=409, detail="目录价格已变化，请重新同步并确认")
                 accepted = pricing_service._accepted_price_values(preview)
-                write = write.model_copy(update={"model": model.model_copy(update={
-                    key: accepted[key] for key in (
-                        "input_cost_per_million", "output_cost_per_million",
-                        "cached_cost_per_million", "cache_write_cost_per_million",
-                    )
-                })})
+                write = write.model_copy(
+                    update={
+                        "model": model.model_copy(
+                            update={
+                                key: accepted[key]
+                                for key in (
+                                    "input_cost_per_million",
+                                    "output_cost_per_million",
+                                    "cached_cost_per_million",
+                                    "cache_write_cost_per_million",
+                                )
+                            }
+                        )
+                    }
+                )
                 pricing_values.update(accepted)
                 pricing_values["price_reference"] = preview.match.reference
             elif not model.allow_unpriced or model.operation == "image_generation":
@@ -886,16 +903,88 @@ def _bind_invocation_identity(
     repository: Repository,
     settings: Config,
 ) -> InvocationRequest:
+    if settings.directory_source == "database":
+        catalog = catalog_for(repository, settings)
+        requested = request.metadata.user_id.casefold()
+        self_ids = {identity.email.casefold(), identity.effective_user_id.casefold()}
+        if requested in self_ids:
+            if not identity.governance_user_id or identity.directory_person_active is not True:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Link an active person before model invocation",
+                )
+            effective = identity.governance_user_id
+        else:
+            if identity.role != "owner" and identity.directory_person_active is False:
+                raise HTTPException(status_code=403, detail="Person is inactive")
+            tester = configured_invocation_tester(
+                catalog,
+                settings.delegated_invocation_tester_ids,
+                requested,
+            )
+            if tester is None:
+                raise HTTPException(status_code=403, detail="Invocation identity is not allowed")
+            effective = tester.id
+        person = next(
+            (row for row in catalog.users if row.id.casefold() == effective.casefold()),
+            None,
+        )
+        if person is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Person must be linked to an active department",
+            )
+        department = next((row for row in catalog.departments if row.id == person.parent_id), None)
+        organization = next(
+            (
+                row
+                for row in catalog.organizations
+                if department is not None and row.id == department.parent_id
+            ),
+            None,
+        )
+        if department is None or organization is None:
+            raise HTTPException(status_code=409, detail="Person directory hierarchy is incomplete")
+        if (
+            identity.directory_department_ids is not None
+            and department.id not in identity.directory_department_ids
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Invocation is outside the allowed department",
+            )
+        project = next(
+            (row for row in catalog.projects if row.id == request.metadata.project_id),
+            None,
+        )
+        if request.metadata.project_id != "unattributed" and (
+            project is None or project.parent_id != department.id
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Project is outside the effective department",
+            )
+        return request.model_copy(
+            update={
+                "metadata": request.metadata.model_copy(
+                    update={
+                        "user_id": person.id,
+                        "user": person.name,
+                        "department_id": department.id,
+                        "department": department.name,
+                        "organization_id": organization.id,
+                        "organization": organization.name,
+                    }
+                )
+            }
+        )
     if identity.role != "owner":
         requested_user_id = request.metadata.user_id.casefold()
         if requested_user_id == identity.email.casefold():
             effective_user_id = identity.email
             effective_user_name = identity.name or identity.email
         else:
-            catalog = merge_application_owners(
-                merge_observed_users(enterprise_catalog(), repository.observed_users()),
-                repository.application_owners(),
-            )
+            catalog = catalog_for(repository, settings)
             tester = configured_invocation_tester(
                 catalog,
                 settings.delegated_invocation_tester_ids,

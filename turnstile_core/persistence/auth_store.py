@@ -25,6 +25,10 @@ class AccountSessionInvalid(ValueError):
     pass
 
 
+class ExternalIdentityConflict(ValueError):
+    pass
+
+
 class PasswordMismatch(ValueError):
     pass
 
@@ -111,6 +115,52 @@ class AuthStore:
                 """,
                 (email.strip().lower(), (display_name or "").strip() or None),
             ).fetchone()
+        return dict(row) if row else {}
+
+    def resolve_entra_identity(
+        self,
+        *,
+        cloud: str,
+        tenant_id: UUID,
+        object_id: UUID,
+        email: str,
+        display_name: str | None,
+    ) -> dict[str, Any]:
+        with self._connection() as connection, connection.transaction():
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (f"entra-login:{cloud}:{tenant_id}:{object_id}",),
+            )
+            existing = connection.execute(
+                """SELECT a.* FROM app_user_external_identity e
+                   JOIN app_user a ON a.id=e.app_user_id
+                   WHERE e.cloud=%s AND e.tenant_id=%s AND e.object_id=%s FOR UPDATE OF a""",
+                (cloud, tenant_id, object_id),
+            ).fetchone()
+            if existing is not None:
+                row = connection.execute(
+                    """UPDATE app_user SET display_name=CASE WHEN password_hash IS NULL
+                         THEN COALESCE(%s,display_name) ELSE display_name END
+                       WHERE id=%s RETURNING id,email,display_name,password_hash,role,enabled""",
+                    ((display_name or "").strip() or None, existing["id"]),
+                ).fetchone()
+            else:
+                # Email alone cannot adopt a password account or an existing Owner.
+                row = connection.execute(
+                    """INSERT INTO app_user(email,display_name) VALUES (%s,%s)
+                       ON CONFLICT(email) DO NOTHING
+                       RETURNING id,email,display_name,password_hash,role,enabled""",
+                    (email.strip().lower(), (display_name or "").strip() or None),
+                ).fetchone()
+                if row is None:
+                    raise ExternalIdentityConflict(
+                        "An administrator must explicitly bind this identity",
+                    )
+                connection.execute(
+                    """INSERT INTO app_user_external_identity(cloud,tenant_id,object_id,app_user_id)
+                       VALUES (%s,%s,%s,%s)""",
+                    (cloud, tenant_id, object_id, row["id"]),
+                )
         return dict(row) if row else {}
 
     def create_password_user(

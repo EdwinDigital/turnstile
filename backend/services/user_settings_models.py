@@ -68,7 +68,9 @@ class AccountInformation(StrictModel):
     permission_groups: list[PermissionGroup]
     organization: AccountEntity | None
     department: AccountEntity | None
-    membership_source: Literal["catalog", "observed_usage", "owner_default", "unlinked"]
+    membership_source: Literal[
+        "catalog", "observed_usage", "owner_default", "unlinked", "directory"
+    ]
     editable: EditableProfile
     generated_at: datetime
 

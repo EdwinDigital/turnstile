@@ -37,6 +37,7 @@ const apimPageIds = new Set([
   "models",
   "pinned-report",
   "settings",
+  "organization-management",
 ])
 
 export function normalizeApimPage(page: string) {

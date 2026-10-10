@@ -28,6 +28,12 @@ git diff --check
 
 For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_assistant_api_format`, `010_models_dev_pricing`, and `011_user_settings_profile`), then run the command again and verify that no migration is reapplied.
 
+Migration `012_organization_directory` adds empty organizational-directory and synchronization
+tables, versioned control state, audit guards and stored assistant/report scope metadata.
+It does not import customers, change login roles, rewrite budgets or activate directory mode.
+Run the isolated directory migration, service, synchronization and transfer suites before
+approving the separate business backfill and authority switch.
+
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
 For an existing installation, run the same migration command to apply only pending upgrades. Verify that the initial migration checksum and existing usage rows are unchanged. Migration `002` replaces the unique caller-request index with a non-unique `(request_id, ts DESC)` index; it does not rewrite historical usage. Apply it before running the updated telemetry consumer, and drain older telemetry consumers before enabling the new version. Do not overlap consumers that use the old and new identity rules. Index replacement takes a table lock, so schedule the upgrade for an appropriate maintenance window. Migration `007` only adds nullable columns and defaults every existing model to `price_source = 'manual'`, so rates already in the registry are left exactly as they were and the price sync skips those rows until someone opts a model in.

@@ -50,7 +50,7 @@ import {
   Zap, LogOut,} from "lucide-react";
 import { TurnstileMark } from "./components/turnstile-logo";
 import { ApimLogo, CopilotLogo } from "./components/brand-logos";
-import { FINOPS_NAVIGATE_EVENT } from "./lib/navigation";
+import { DIRECTORY_BEFORE_LEAVE_EVENT, FINOPS_NAVIGATE_EVENT } from "./lib/navigation";
 import { useAuth } from "./providers/auth-provider";
 import { dataSource, usageWindow } from "./data-sources/apim/api";
 import {
@@ -100,6 +100,8 @@ import { GatewayReleasesPage } from "./pages/gateway-releases-page";
 import { ApplicationsPage } from "./pages/applications-page";
 import { SettingsPage } from "./pages/settings-page";
 import { UserSettingsPage } from "./pages/user-settings-page";
+import { OrganizationManagementPage } from "./pages/organization-management-page";
+import { directoryApi } from "./data-sources/apim/api/organization-management";
 import type {
   AuditFinding,
   AuditStatus,
@@ -111,6 +113,7 @@ import type {
 
 type Page =
   | "settings"
+  | "organization-management"
   | "user-settings"
   | "models"
   | "apim-native-routes"
@@ -150,6 +153,7 @@ function dataSourceFromStorage(): DataSource {
 }
 const pageIds: Page[] = [
   "settings",
+  "organization-management",
   "user-settings",
   "models",
   "apim-native-routes",
@@ -846,15 +850,35 @@ function Loading() {
 
 export function App() {
   const queryClient = useQueryClient();
-  const { user, photo, signOut } = useAuth();
-  const assistantOwner = user?.email ?? null;
+  const { user, photo, signOut, refreshProfile } = useAuth();
   const [selectedDataSource, setSelectedDataSource] = useState<DataSource>(dataSourceFromStorage);
+  const directoryCapabilities = useQuery({
+    queryKey: ["directory", "capabilities", user?.id, user?.directory_scope_key],
+    queryFn: directoryApi.capabilities,
+    enabled: selectedDataSource === "apim" && Boolean(user),
+    refetchInterval: 30_000,
+  });
+  const acceptedUrl = useRef(window.location.href);
+  useEffect(() => {
+    if (
+      directoryCapabilities.data &&
+      directoryCapabilities.data.permission_revision !== (user?.directory_permission_revision ?? 0)
+    ) void refreshProfile();
+  }, [directoryCapabilities.data?.permission_revision, user?.directory_permission_revision, refreshProfile]);
+  const assistantOwner = user?.email ?? null;
   const [page, setPage] = useState<Page>(() =>
     normalizePageForSource(selectedDataSource, pageFromUrl()));
   const routedPage = normalizePageForSource(selectedDataSource, page);
 
   useEffect(() => {
-    const syncPageFromUrl = () => {
+    const syncPageFromUrl = (event: Event) => {
+      if (
+        event.type === "popstate" &&
+        !window.dispatchEvent(new CustomEvent(DIRECTORY_BEFORE_LEAVE_EVENT, { cancelable: true }))
+      ) {
+        window.history.pushState(null, "", acceptedUrl.current);
+        return;
+      }
       const nextSource = dataSourceFromStorage();
       const requestedPage = pageFromUrl();
       const nextPage = normalizePageForSource(nextSource, requestedPage);
@@ -865,6 +889,7 @@ export function App() {
         url.searchParams.set("page", nextPage);
         window.history.replaceState(null, "", url);
       }
+      acceptedUrl.current = window.location.href;
     };
     window.addEventListener("popstate", syncPageFromUrl);
     window.addEventListener(FINOPS_NAVIGATE_EVENT, syncPageFromUrl);
@@ -959,6 +984,9 @@ export function App() {
   };
 
   const selectDataSource = (next: DataSource) => {
+    if (next !== selectedDataSource && !window.dispatchEvent(
+      new CustomEvent(DIRECTORY_BEFORE_LEAVE_EVENT, { cancelable: true })
+    )) return;
     setSelectedDataSource(next);
     setAssistantConversationId(null);
     localStorage.setItem(DATA_SOURCE_STORAGE_KEY, next);
@@ -1066,6 +1094,9 @@ export function App() {
     sidebarDrag.current = null;
   };
   const navigatePage = (next: Page, requestId?: string) => {
+    if (next !== page && !window.dispatchEvent(
+      new CustomEvent(DIRECTORY_BEFORE_LEAVE_EVENT, { cancelable: true })
+    )) return;
     setPage(next);
     const url = new URL(window.location.href);
     url.searchParams.set("page", next);
@@ -1164,7 +1195,7 @@ export function App() {
   // must not add the 24px page padding the card-based routes need. Leaving the assistant
   // out of this put a 24px inset around its whole two-pane surface, which pushed the
   // thread rail's border away from the card wall it is supposed to sit against.
-  const workspacePage = finopsPage || page === "models" || page === "budgets" || page.startsWith("copilot-") || page === "pinned-report" || page === "assistant" || page === "user-settings";  type NavGroup = {
+  const workspacePage = finopsPage || page === "models" || page === "budgets" || page.startsWith("copilot-") || page === "pinned-report" || page === "assistant" || page === "user-settings" || page === "organization-management";  type NavGroup = {
     label: string;
     items: Array<{
       label: string;
@@ -1193,6 +1224,9 @@ export function App() {
     label: "系统管理",
     items: [
       { label: "设置", icon: Settings, page: "settings" },
+      ...(selectedDataSource === "apim" && directoryCapabilities.data?.can_read
+        ? [{ label: "组织管理", icon: Network, page: "organization-management" as Page }]
+        : []),
     ],
   });
   // The invocation console is deliberately absent from the sidebar: the header already
@@ -1509,6 +1543,8 @@ export function App() {
         >
           {page === "settings" && <SettingsPage key={selectedDataSource} dataSource={selectedDataSource} />}
           {page === "user-settings" && <UserSettingsPage onToggleSidebar={toggleSidebar} />}
+          {selectedDataSource === "apim" && page === "organization-management" && <OrganizationManagementPage
+            onToggleSidebar={toggleSidebar} capabilities={directoryCapabilities.data} />}
           {selectedDataSource === "apim" && page === "models" && <ModelManagementPage onToggleSidebar={toggleSidebar} />}
           {selectedDataSource === "apim" && page === "apim-native-routes" && <ApimNativeRoutesPage routeDrawerOpen={nativeRouteDrawerOpen} onRouteDrawerOpenChange={setNativeRouteDrawerOpen} addOpen={nativeRouteAddOpen} onAddOpenChange={setNativeRouteAddOpen} />}
           {selectedDataSource === "apim" && page === "gateway-releases" && <GatewayReleasesPage releaseDrawerOpen={gatewayReleaseDrawerOpen} onReleaseDrawerOpenChange={setGatewayReleaseDrawerOpen} />}

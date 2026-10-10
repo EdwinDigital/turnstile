@@ -345,6 +345,7 @@ class DepartmentEnforcementAuditEvent(StrictModel):
 
 
 class TokenBudgetResponse(StrictModel):
+    coverage: Literal["global", "department"] = "global"
     period: str
     period_start: date
     period_end: date

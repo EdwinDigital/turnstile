@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from turnstile_core.config import Settings, get_settings
-from turnstile_core.persistence.auth_store import AuthStore
+from turnstile_core.persistence.auth_store import AuthStore, ExternalIdentityConflict
+from turnstile_core.services.directory_catalog import directory_store
 
 from ..services.auth_service import (
     AuthError,
@@ -29,6 +33,8 @@ def get_entra_verifier() -> EntraTokenVerifier:
     return EntraTokenVerifier(
         client_id=settings.entra_client_id,
         allowed_email_domains=tuple(settings.entra_allowed_email_domains),
+        require_object_id=settings.directory_source == "database",
+        allowed_tenant_ids=tuple(settings.entra_allowed_tenant_ids),
     )
 
 
@@ -52,6 +58,9 @@ class Profile(BaseModel):
     method: Literal["password", "entra"]
     session_expires_at: datetime
     avatar_url: str | None = None
+    directory_scope_key: str = "global"
+    directory_permission_revision: int = 0
+    governance_user_id: str | None = None
 
 
 def _issue(
@@ -86,6 +95,19 @@ def _issue(
     )
     response.headers["Cache-Control"] = "no-store"
     owner = store.session_owner(digest)
+    scope_key = "global"
+    permission_revision = 0
+    governance_user_id = None
+    if settings.directory_source == "database" and settings.database_url:
+        directory = directory_store(settings.database_url)
+        principal = directory.principal(UUID(str(user["id"])), user["email"], user["role"])
+        if principal.department_ids is not None:
+            scope_key = hashlib.sha256(
+                json.dumps(sorted(principal.department_ids)).encode()
+            ).hexdigest()
+        permission_revision = principal.permission_revision
+        person = directory.linked_person(UUID(str(user["id"])))
+        governance_user_id = str(person["governance_user_id"]) if person else None
     return Profile(
         id=str(user["id"]),
         email=user["email"],
@@ -95,8 +117,12 @@ def _issue(
         session_expires_at=expires_at,
         avatar_url=(
             f"/api/v1/user-settings/me/avatar?v={owner['avatar_revision']}"
-            if method == "password" and owner and owner.get("avatar_revision") else None
+            if method == "password" and owner and owner.get("avatar_revision")
+            else None
         ),
+        directory_scope_key=scope_key,
+        directory_permission_revision=permission_revision,
+        governance_user_id=governance_user_id,
     )
 
 
@@ -124,7 +150,24 @@ def login_with_entra(
         identity = verifier.verify(body.id_token)
     except AuthError as error:
         raise HTTPException(status_code=401, detail=str(error)) from error
-    user = store.upsert_entra_user(identity.email, identity.display_name)
+    if settings.directory_source == "database":
+        if not identity.object_id:
+            raise HTTPException(status_code=401, detail="Microsoft 账户缺少可信对象身份。")
+        try:
+            user = store.resolve_entra_identity(
+                cloud="public",
+                tenant_id=UUID(identity.tenant_id),
+                object_id=UUID(identity.object_id),
+                email=identity.email,
+                display_name=identity.display_name,
+            )
+        except ExternalIdentityConflict as error:
+            raise HTTPException(
+                status_code=409,
+                detail="该邮箱已有账户，请由管理员明确关联 Entra 身份。",
+            ) from error
+    else:
+        user = store.upsert_entra_user(identity.email, identity.display_name)
     if not user.get("enabled", True):
         raise HTTPException(status_code=403, detail="该账户已被停用。")
     return _issue(response, store, user, "entra", settings)
@@ -141,6 +184,9 @@ def whoami(identity: CurrentSession, response: Response) -> Profile:
         method=identity.method,
         session_expires_at=identity.session_expires_at,
         avatar_url=identity.avatar_url,
+        directory_scope_key=identity.directory_scope_key,
+        directory_permission_revision=identity.directory_permission_revision,
+        governance_user_id=identity.governance_user_id,
     )
 
 

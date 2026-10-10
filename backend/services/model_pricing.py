@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 
 from turnstile_core.domain.enterprise import enterprise_catalog
+from turnstile_core.domain.models import EnterpriseEntityCatalog
 from turnstile_core.domain.runtime_models import (
     ChatMessage,
     InvocationMetadata,
@@ -83,6 +84,8 @@ class ModelPricingService:
         user_id: str,
         timeout_ms: int = 15000,
         allow_ai: bool = True,
+        enterprise_directory: Callable[[], EnterpriseEntityCatalog] = enterprise_catalog,
+        require_directory_identity: bool = False,
     ) -> None:
         self.registry = registry
         self.catalog = catalog
@@ -90,6 +93,8 @@ class ModelPricingService:
         self.user_id = user_id
         self.timeout_ms = timeout_ms
         self.allow_ai = allow_ai
+        self.enterprise_directory = enterprise_directory
+        self.require_directory_identity = require_directory_identity
         self.ai_calls = 0
         self._public_entries: tuple[CatalogEntry, ...] | None = None
         self._answers: dict[str, str] = {}
@@ -120,7 +125,7 @@ class ModelPricingService:
         )
         if model is None:
             raise ValueError("No enabled system default chat model")
-        catalog = enterprise_catalog()
+        catalog = self.enterprise_directory()
         user = next((user for user in catalog.users if user.id == self.user_id), None)
         department = next(
             (
@@ -130,7 +135,22 @@ class ModelPricingService:
             ),
             None,
         )
-        organization = catalog.organizations[0]
+        organization = next(
+            (
+                row
+                for row in catalog.organizations
+                if department is not None and row.id == department.parent_id
+            ),
+            None,
+        )
+        if self.require_directory_identity and (
+            user is None or department is None or organization is None
+        ):
+            raise ValueError("Link an active person before AI price matching")
+        if organization is None:
+            organization = next(iter(catalog.organizations), None)
+        if organization is None:
+            raise ValueError("No organization is available for AI price matching")
         self.ai_calls += 1
         self._judge_model_id = model.id
         try:
@@ -148,8 +168,12 @@ class ModelPricingService:
                         organization=organization.name,
                         department_id=department.id if department else "unattributed",
                         department=department.name if department else "unattributed",
-                        project_id="project-finops",
-                        project="Model FinOps",
+                        project_id="unattributed"
+                        if self.require_directory_identity
+                        else "project-finops",
+                        project="unattributed"
+                        if self.require_directory_identity
+                        else "Model FinOps",
                         agent_id="model-pricing-match",
                         agent="Model pricing matcher",
                         user_id=self.user_id,
@@ -203,7 +227,8 @@ class ModelPricingService:
             raise HTTPException(status_code=404, detail="Unknown provider")
         image_generation = (
             "image_generation" in model.capabilities
-            if model else request.operation == "image_generation"
+            if model
+            else request.operation == "image_generation"
         )
         operation: Literal["chat", "image_generation"] = (
             "image_generation" if image_generation else "chat"
@@ -215,8 +240,12 @@ class ModelPricingService:
             if failures:
                 return PricePreviewResponse(status="stale", warnings=list(failures.values()))
         reference = request.price_reference
-        if not reference and model and not request.rematch \
-                and model.price_source is request.price_source:
+        if (
+            not reference
+            and model
+            and not request.rematch
+            and model.price_source is request.price_source
+        ):
             reference = model.price_reference
         method = "stored" if model and reference == model.price_reference else "manual"
         basis = (
@@ -232,7 +261,8 @@ class ModelPricingService:
                     raise HTTPException(status_code=422, detail="Price reference source mismatch")
                 if request.price_source is PriceSource.MODELS_DEV:
                     entry = next(
-                        (entry for entry in self._entries() if entry.reference == reference), None,
+                        (entry for entry in self._entries() if entry.reference == reference),
+                        None,
                     )
                 else:
                     entry = self.catalog.lookup(reference)
@@ -262,8 +292,11 @@ class ModelPricingService:
                     return PricePreviewResponse(
                         status="deferred" if exhausted else cast(Any, matched.status),
                         candidates=[price_match(entry) for entry in matched.candidates],
-                        warnings=["默认模型调用预算已耗尽，请重试"] if exhausted
-                        else [matched.reason] if matched.reason else [],
+                        warnings=["默认模型调用预算已耗尽，请重试"]
+                        if exhausted
+                        else [matched.reason]
+                        if matched.reason
+                        else [],
                     )
                 entry = matched.entry
                 method, basis, reason = matched.method, matched.price_basis, matched.reason
@@ -282,7 +315,8 @@ class ModelPricingService:
             return PricePreviewResponse(status="unmapped", warnings=["保存的目录引用未找到"])
         if entry.operation != operation:
             return PricePreviewResponse(
-                status="unsupported", warnings=["目录价格用途与模型不一致，保留已有单价"],
+                status="unsupported",
+                warnings=["目录价格用途与模型不一致，保留已有单价"],
             )
         if entry.unsupported or not entry.priced or not entry.complete:
             return PricePreviewResponse(
@@ -306,7 +340,8 @@ class ModelPricingService:
             warnings.append("公开参考价，不代表当前部署实际报价")
         if image_generation and effective.cached is None:
             return PricePreviewResponse(
-                status="unmapped", warnings=["目录缺少缓存文字单价，请使用手动定价"],
+                status="unmapped",
+                warnings=["目录缺少缓存文字单价，请使用手动定价"],
             )
         return PricePreviewResponse(
             status="matched",

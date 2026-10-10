@@ -39,6 +39,8 @@ param entraAllowedEmailDomains array = []
 param bootstrapOwnerEmail string
 @secure()
 param bootstrapOwnerPasswordHash string
+param directoryEmptyInitializationAllowed bool = false
+param directoryExpectedCoreDigest string = ''
 
 var storageName = 'st${resourcePrefix}${take(suffix, 10)}'
 var ledgerStorageName = 'st${resourcePrefix}ledger${take(suffix, 4)}'
@@ -672,6 +674,12 @@ resource api 'Microsoft.Web/sites@2024-11-01' = {
         { name: 'BOOTSTRAP_OWNER_EMAIL', value: bootstrapOwnerEmail }
         { name: 'BOOTSTRAP_OWNER_PASSWORD_HASH', value: bootstrapOwnerPasswordHash }
         { name: 'PRODUCTION', value: 'true' }
+        { name: 'DIRECTORY_SOURCE', value: directoryEmptyInitializationAllowed ? 'database' : 'legacy' }
+        { name: 'DIRECTORY_EMPTY_INITIALIZATION_ALLOWED', value: string(directoryEmptyInitializationAllowed) }
+        { name: 'DIRECTORY_EXPECTED_CORE_DIGEST', value: directoryExpectedCoreDigest }
+        { name: 'ORGANIZATION_MANAGEMENT_ENABLED', value: string(directoryEmptyInitializationAllowed) }
+        { name: 'DIRECTORY_SYNC_ENABLED', value: 'false' }
+        { name: 'DIRECTORY_IDENTITY_PROJECTION_ENABLED', value: 'false' }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
         { name: 'TRAFFIC_GENERATION_BUDGET_USD', value: '20' }
         { name: 'WEB_DIST_DIR', value: 'frontend/dist' }
@@ -738,6 +746,10 @@ resource functionApp 'Microsoft.Web/sites@2024-11-01' = {
         { name: 'DATABASE_URL', value: postgresConnectionString }
         { name: 'DATA_BACKEND', value: 'postgresql' }
         { name: 'PRODUCTION', value: 'true' }
+        { name: 'DIRECTORY_SOURCE', value: directoryEmptyInitializationAllowed ? 'database' : 'legacy' }
+        { name: 'DIRECTORY_EXPECTED_CORE_DIGEST', value: directoryExpectedCoreDigest }
+        { name: 'DIRECTORY_SYNC_ENABLED', value: 'false' }
+        { name: 'DIRECTORY_IDENTITY_PROJECTION_ENABLED', value: 'false' }
         { name: 'LOG_ANALYTICS_WORKSPACE_ID', value: workspace.properties.customerId }
         { name: 'APIM_API_ID', value: apimApiId }
         { name: 'CACHE_READ_BACKFILL_HOURS', value: '720' }

@@ -239,6 +239,7 @@ See [Troubleshooting](docs/troubleshooting.md) for startup, authentication, data
 | [Documentation index](docs/README.md) | Entry point for operators and maintainers |
 | [Architecture](docs/architecture.md) | Runtime boundaries, ownership, and data flow |
 | [Configuration](docs/configuration.md) | Environment variables, authentication, and feature gates |
+| [Organization Management](docs/organization-management.md) | Persistent directory, department delegation, reviewed Entra synchronization, initialization and upgrade |
 | [Deployment](docs/deployment.md) | Azure provisioning, packaging, rollout, and verification |
 | [Testing](docs/testing.md) | Local, contract, infrastructure, and end-to-end validation |
 | [Security](docs/security.md) | Threat boundaries, secret handling, and deployment controls |

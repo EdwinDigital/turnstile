@@ -3,6 +3,7 @@ import { USER_SETTINGS_PHRASES } from "./ko/phrases-user-settings"
 import { KOREAN_COPILOT_PHRASES } from "./ko/phrases-copilot"
 import { KOREAN_AUTH_PHRASES } from "./ko/phrases-auth"
 import { IMAGE_GENERATION_PHRASES } from "./ko/phrases-image-generation"
+import { ORGANIZATION_PHRASES } from "./ko/phrases-organization"
 import { DYNAMIC_RULES } from "./ko/dynamic-rules"
 
 const KOREAN_PHRASES: Record<string, string> = {
@@ -11,6 +12,7 @@ const KOREAN_PHRASES: Record<string, string> = {
   ...KOREAN_COPILOT_PHRASES,
   ...KOREAN_AUTH_PHRASES,
   ...IMAGE_GENERATION_PHRASES,
+  ...ORGANIZATION_PHRASES,
 }
 
 const orderedPhrases = Object.entries(KOREAN_PHRASES).sort(([left], [right]) => right.length - left.length)

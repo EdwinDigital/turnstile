@@ -17,7 +17,7 @@ import { useAuth } from "../providers/auth-provider"
 import { useTimezone } from "../providers/timezone-provider"
 
 const labels = { healthy: "正常", warning: "预警", exceeded: "已超额", unallocated: "未分配" }
-const membershipSources = { catalog: "目录配置", observed_usage: "用量归属", owner_default: "平台默认归属", unlinked: "未关联" }
+const membershipSources = { catalog: "目录配置", observed_usage: "用量归属", owner_default: "平台默认归属", unlinked: "未关联", directory: "组织目录" }
 const tokens = (value: number | null) => value == null ? "--" : new Intl.NumberFormat(getIntlLocale()).format(value)
 const compact = (value: number | null) => value == null ? "--" : new Intl.NumberFormat(getIntlLocale(), { notation: "compact", maximumFractionDigits: 1 }).format(value)
 const cost = (value: number | null) => value == null ? "--" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 4 }).format(value)

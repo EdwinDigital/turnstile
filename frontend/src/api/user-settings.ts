@@ -7,7 +7,7 @@ export type AccountInformation = {
   permission_groups: Array<{ key: "owner" | "member"; name: string; source: "turnstile" }>
   organization: { id: string; name: string } | null
   department: { id: string; name: string } | null
-  membership_source: "catalog" | "observed_usage" | "owner_default" | "unlinked"
+  membership_source: "catalog" | "observed_usage" | "owner_default" | "unlinked" | "directory"
   editable: { avatar: boolean; display_name: boolean; password: boolean }
   generated_at: string
 }

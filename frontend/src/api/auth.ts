@@ -9,6 +9,9 @@ export type AuthUser = {
   role: "owner" | "member"
   method: SignInMethod
   avatar_url?: string | null
+  directory_scope_key?: string
+  directory_permission_revision?: number
+  governance_user_id?: string | null
   /** Absent only while a newly built frontend is talking to a pre-expiry-field API. */
   session_expires_at?: string
 }

@@ -61,3 +61,15 @@ schemas:
       avatar_url:
         type: [string, 'null']
         description: Private current-account avatar URL for password sessions; null for Microsoft sessions.
+      directory_scope_key:
+        type: string
+        default: global
+        description: Server-derived authorization-scope digest for private client cache invalidation.
+      directory_permission_revision:
+        type: integer
+        minimum: 0
+        default: 0
+      governance_user_id:
+        type: [string, 'null']
+        default: null
+        description: Stable governance identity from an explicit current-account person link.

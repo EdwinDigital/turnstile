@@ -42,6 +42,7 @@ from scripts.apim_upgrade import (
     validate_upgrade_what_if,
 )
 from scripts.stage_deployment import REPOSITORY_ROOT, stage_deployment, validate_source_snapshot
+from turnstile_core.config import core_runtime_digest
 
 JsonObject = dict[str, Any]
 PasswordReader = Callable[[str], str]
@@ -64,6 +65,8 @@ EXPECTED_FUNCTIONS = {
     "controlPlaneFunctionName": {
         "publish_gateway_changes",
         "process_gateway_release_operations",
+        "synchronize_directory",
+        "project_directory_identities",
     },
 }
 FIXED_ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
@@ -375,6 +378,13 @@ def deployment_parameters(
     resume_existing_environment: bool = False,
 ) -> JsonObject:
     values = dict(inputs.parameters)
+    initialize_directory = values.get("directoryEmptyInitializationAllowed", False)
+    if not isinstance(initialize_directory, bool):
+        raise DeploymentError("directoryEmptyInitializationAllowed must be a boolean")
+    if initialize_directory:
+        if resume_existing_environment:
+            raise DeploymentError("Existing installations require a reviewed directory upgrade")
+        values["directoryExpectedCoreDigest"] = core_runtime_digest()
     for name in OBSERVER_ORCHESTRATOR_PARAMETERS:
         values.pop(name, None)
     if existing_core is not None and not resume_existing_environment:

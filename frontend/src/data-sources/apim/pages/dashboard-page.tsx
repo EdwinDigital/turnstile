@@ -154,9 +154,11 @@ export function FinOpsDashboard({
   const tab = initialTab
   const header = pageHeaders[tab]
   const HeaderIcon = header.icon
-  const entityQuery = useQuery(finopsQueries.entities())
   const registryQuery = useQuery(finopsQueries.registry())
   const filters = useMemo<UsageFilters>(() => ({ ...usageWindow(days), ...scope }), [days, scope])
+  const activeEntities = useQuery({ ...finopsQueries.entities(), enabled: tab === "invoke" })
+  const historyEntities = useQuery({ ...finopsQueries.queryEntities(filters), enabled: tab !== "invoke" })
+  const entityQuery = tab === "invoke" ? activeEntities : historyEntities
   const entities = entityQuery.data
   const unpricedModels = registryQuery.data?.models.filter((model) => model.enabled && (model.input_cost_per_million == null || model.output_cost_per_million == null)) ?? []
   const costAvailable = registryQuery.data != null && unpricedModels.length === 0
@@ -170,6 +172,7 @@ export function FinOpsDashboard({
       await Promise.all([
         queryClient.refetchQueries({ queryKey: finopsKeys.all, type: "active" }),
         queryClient.refetchQueries({ queryKey: finopsKeys.entities, type: "active" }),
+        queryClient.refetchQueries({ queryKey: finopsKeys.queryEntities(filters), type: "active" }),
         queryClient.refetchQueries({ queryKey: finopsKeys.registry, type: "active" }),
       ])
     } finally {
