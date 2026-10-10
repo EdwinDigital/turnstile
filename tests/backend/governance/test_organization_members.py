@@ -183,7 +183,9 @@ def test_member_batch_rolls_back_and_membership_never_grants_department_authorit
     principal = service.store.principal(
         UUID(person["app_user_id"]), person["account_email"], "member"
     )
-    assert principal.capabilities == ()
+    assert principal.capabilities == ("directory.read",)
+    assert principal.data_scope is not None and principal.data_scope.department_ids == ()
+    assert principal.data_scope.user_ids == (person["governance_user_id"],)
     assert principal.menu_permission_groups == ("user",)
     with service.store.connection() as db:
         assert not db.execute(

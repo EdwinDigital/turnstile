@@ -90,6 +90,20 @@ local-key authentication or weaken networking merely to complete installation.
 
 ### User settings database upgrade
 
+For the permission-management upgrade, apply pending `018_permission_management` using
+the same `backend.migrate` entry point before the candidate API starts. Preserve 001-017
+checksums and business tables; 018 adds only policy/audit and the effective-appointment
+projection. Stage matching API/Telemetry/Control-plane core manifests. Record complete
+settings, package hashes and a restorable database backup; pause workers during deployment
+and restore their original states/settings after readback. Entra sync and gateway identity
+projection switches must retain their current values.
+
+Menu/row authorization is a security behavior change, including ordinary-user self scope.
+Do not expose Members through an older package that lacks this authorization after rollback.
+Retain additive 018 schema and audit, restore only a compatible secured runtime or hold
+the API in maintenance. Database restore is a separate recovery operation, not a package
+rollback. See [permission design](../plan/permission-management/design.md).
+
 The user-settings API requires `migrations/011_user_settings_profile.up.sql`. It adds
 `app_user_avatar` for private normalized avatars and `account_security_event` for account
 change auditing and password-verification throttling. It does not rewrite existing accounts,

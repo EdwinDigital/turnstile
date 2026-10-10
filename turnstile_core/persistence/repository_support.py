@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+from ..domain.data_access import DataAccessScope
+
 
 def _activation_runtime_config(binding: Mapping[str, Any]) -> dict[str, Any]:
     config = {
@@ -97,6 +99,7 @@ class UsageFilters:
     status_code: int | None = None
     allowed_department_ids: tuple[str, ...] | None = None
     directory_scope: UsageDirectoryScope | None = None
+    data_scope: DataAccessScope | None = None
 
 
 CACHE_DIMENSION_FIELDS = {
@@ -112,7 +115,7 @@ CACHE_DIMENSION_FIELDS = {
 
 def cache_scope_for_filters(filters: UsageFilters) -> tuple[str, tuple[str, ...]] | None:
     """Use the bounded APIM metric only for an unfiltered global view."""
-    if filters.allowed_department_ids is not None:
+    if filters.allowed_department_ids is not None or filters.data_scope is not None:
         return None
     if any(
         (

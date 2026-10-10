@@ -40,6 +40,7 @@ from turnstile_core.domain.assistant_models import (
     PinnedReport,
     PinnedReportLayout,
 )
+from turnstile_core.domain.data_access import DataAccessScope
 from turnstile_core.domain.models import EnterpriseEntityCatalog
 from turnstile_core.domain.runtime_models import (
     ChatMessage,
@@ -156,17 +157,21 @@ class AssistantService:
         runtime: ModelRuntimeService,
         settings: Settings,
         department_ids: tuple[str, ...] | None = None,
+        data_scope: DataAccessScope | None = None,
     ) -> None:
         self._repository = repository
         self._runtime = runtime
         self._settings = settings
         self._department_ids = department_ids
-        self._tools = AssistantTools(repository, self._catalog_payload, department_ids)
+        self._data_scope = data_scope
+        self._tools = AssistantTools(repository, self._catalog_payload, department_ids, data_scope)
 
     # -- catalog ---------------------------------------------------------------
 
     def _catalog(self) -> EnterpriseEntityCatalog:
         catalog = catalog_for(self._repository, self._settings)
+        if self._data_scope is not None:
+            return self._data_scope.filter_catalog(catalog)
         if self._department_ids is None:
             return catalog
         allowed = set(self._department_ids)
@@ -187,6 +192,8 @@ class AssistantService:
         )
 
     def _scope_allows(self, row: Mapping[str, Any]) -> bool:
+        if self._data_scope is not None:
+            return self._data_scope.covers(row.get("directory_scope"))
         if self._department_ids is None:
             return True
         recorded = row.get("directory_scope")
@@ -379,7 +386,9 @@ class AssistantService:
         user_name: str,
         billing_user_id: str | None = None,
     ) -> AssistantReply:
-        if self._department_ids == ():
+        if self._department_ids == () and (
+            self._data_scope is None or not self._data_scope.user_ids
+        ):
             raise HTTPException(status_code=403, detail="No analysis scope is granted")
         started = time.monotonic()
         conversation_id = self._resolve_conversation(request.conversation_id, user_id)
@@ -506,7 +515,8 @@ class AssistantService:
                 question=question,
                 reply=reply.model_dump(mode="json"),
                 directory_scope=(
-                    list(self._department_ids) if self._department_ids is not None else None
+                    self._data_scope.snapshot() if self._data_scope is not None
+                    else list(self._department_ids) if self._department_ids is not None else None
                 ),
             )
         except Exception:  # noqa: BLE001 - telemetry must not break the reply
@@ -784,7 +794,8 @@ class AssistantService:
             original_question=write.original_question,
             chart=write.chart.model_dump(mode="json"),
             directory_scope=(
-                list(self._department_ids) if self._department_ids is not None else None
+                self._data_scope.snapshot() if self._data_scope is not None
+                else list(self._department_ids) if self._department_ids is not None else None
             ),
         )
         return self._report(row)

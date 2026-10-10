@@ -323,9 +323,9 @@ def test_member_can_read_budget_and_anomaly_views_but_cannot_manage_them() -> No
     )
     rules = client.get("/api/v1/anomaly-rules")
 
-    assert budget_overview.status_code == 200
-    assert people.status_code == 200
-    assert rules.status_code == 200
+    assert budget_overview.status_code == 403
+    assert people.status_code == 403
+    assert rules.status_code == 403
 
     budget_write = client.put(
         "/api/v1/budgets/organization/org-contoso-global",

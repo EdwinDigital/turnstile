@@ -58,7 +58,10 @@ def test_menu_assignment_does_not_grant_data_scope_owner_or_gateway_policy(
     person, _, account_id = linked_member(service, owner)
     before = service.store.principal(account_id, "member@example.com", "member")
     assert before.menu_permission_group == "user"
-    assert before.department_ids is None and before.capabilities == ()
+    assert before.data_scope is not None
+    assert before.data_scope.department_ids == ()
+    assert before.data_scope.user_ids == ("member@example.com",)
+    assert before.capabilities == ("directory.read",)
     state = service.store.state()
     with service.store.connection() as connection:
         outbox_count = connection.execute(
@@ -216,7 +219,7 @@ def test_multiple_groups_union_menus_and_removing_one_preserves_other_assignment
     assert set(principal.menu_permissions) == {
         menu for group in groups for menu in MENU_GROUPS[group]
     }
-    assert not principal.owner and principal.capabilities == ()
+    assert not principal.owner and principal.capabilities == ("directory.read",)
     with pytest.raises(DirectoryError):
         service.update_person(
             principal,

@@ -99,7 +99,9 @@ def test_organization_department_and_legacy_groups_do_not_create_other_scope_rig
     assert principal.menu_permissions_for_scope(
         "organization", foreign["id"]
     ) == MENU_GROUPS["user"]
-    assert principal.department_ids == (department["id"],)
+    assert principal.department_ids == tuple(sorted(
+        row["id"] for row in service.units(owner, org["id"]) if row["kind"] == "department"
+    ))
     scoped = service.people(principal, department_id=department["id"]).items[0]
     assert scoped["scope_menu_permission_groups"] == ["department_admin"]
     assert all(
@@ -108,8 +110,7 @@ def test_organization_department_and_legacy_groups_do_not_create_other_scope_rig
     )
     with pytest.raises(DirectoryError):
         principal.require("directory.edit_people", other["id"])
-    with pytest.raises(DirectoryError):
-        service.people(principal, department_id=other["id"])
+    assert service.people(principal, department_id=other["id"]).total == 1
     person = service.people(owner).items[0]
     service.update_person(
         owner, UUID(person_id), PersonWrite(

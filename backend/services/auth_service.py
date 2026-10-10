@@ -35,6 +35,7 @@ import httpx
 import jwt
 from jwt import PyJWKClient
 
+from turnstile_core.domain.data_access import DataAccessScope
 from turnstile_core.domain.directory import MenuAdministratorScope
 from turnstile_core.services.passwords import (
     hash_password as _hash_password,
@@ -67,6 +68,7 @@ class SessionIdentity:
     menu_permission_groups: tuple[str, ...] = ("user",)
     menu_administrator_scopes: tuple[MenuAdministratorScope, ...] = ()
     menu_permissions: tuple[str, ...] = ()
+    data_scope: DataAccessScope | None = None
 
     @property
     def effective_user_id(self) -> str:
@@ -74,6 +76,10 @@ class SessionIdentity:
 
     @property
     def directory_scope_key(self) -> str:
+        if self.data_scope is not None:
+            return hashlib.sha256(
+                json.dumps(self.data_scope.__dict__, sort_keys=True).encode()
+            ).hexdigest()
         if self.directory_department_ids is None:
             return "global"
         return hashlib.sha256(

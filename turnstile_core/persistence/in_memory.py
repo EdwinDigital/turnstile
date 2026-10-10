@@ -615,6 +615,10 @@ class InMemoryRepository(
             return False
         if record.usage_domain != "apim":
             return False
+        if filters.data_scope is not None and not filters.data_scope.allows(
+            record.department_id, record.user_id,
+        ):
+            return False
         if filters.directory_scope is not None and filters.directory_scope.status(
             record.organization_id, record.department_id, record.user_id,
         ) not in filters.directory_scope.statuses:

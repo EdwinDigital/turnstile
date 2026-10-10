@@ -34,6 +34,7 @@ from .http.model_platform import (
 )
 from .http.observability import router as observability_router
 from .http.organization_management import router as organization_management_router
+from .http.permission_management import router as permission_management_router
 from .http.private_routes import PrivateRouteBodyLimit
 from .http.service_dependencies import (
     application_access_service as _application_access_service,
@@ -157,6 +158,10 @@ app.include_router(authentication_router)
 app.include_router(user_settings_router)
 app.include_router(organization_management_router)
 app.include_router(directory_sync_router)
+app.include_router(permission_management_router)
+app.add_middleware(
+    PrivateRouteBodyLimit, path_prefix="/api/v1/permission-management", max_body_bytes=65536,
+)
 
 
 # Registered after every real API route and before the single-page-application

@@ -19,9 +19,12 @@ Provider credentials are write-only through the API, encrypted before persistenc
   enforce the same department boundary; private client caches are invalidated on permission changes.
   The authenticated profile refreshes every 30 seconds in either workspace and on window focus.
   Global Application and GitHub Copilot views reject scoped Members until their own verified
-  department-query boundaries exist; ordinary Members retain the prior policy.
-- Ordinary Members retain the pre-existing read policy. This release does not introduce
-  complete tenant isolation or change `owner/member` into a three-role login model.
+  department-query boundaries exist.
+- In database-directory mode all Members have automatic row scopes. Ordinary users see
+  themselves; organization administrators see their organization, department administrators
+  their effective departments, and team administrators their effective teams' users.
+  Same-level cross-memberships are combined; a team's parent department is not a whole-
+  department grant. This does not change the `owner/member` login role model.
 - Managed identities receive narrowly scoped data-plane and management-plane roles.
 - APIM removes Turnstile-internal headers before forwarding requests to providers.
 
@@ -34,7 +37,10 @@ Directory sync and Microsoft login configuration are independent.
 ## Menu Permission Groups
 
 Local `user`, `organization_admin`, `department_admin` and `team_admin` groups control
-application navigation only. Administrator groups can coexist and menus are their union.
+application feature access independently of APIM admission. Administrator groups can coexist
+and menus are their union. Migration `018_permission_management` stores an Owner-configured
+four-group matrix, compare-and-swap revision and immutable audit. Permission Management,
+global settings and global gateway/subscription operations remain Owner-only.
 API `menu_permission_groups` is the effective appointment projection; singular/explicit old
 personnel fields are retained for compatibility, not a second administrator configuration UI.
 It is a navigation union, not a current-resource administrator check. Resource-context role
@@ -42,7 +48,8 @@ matching must compare effective `menu_administrator_scopes.scope_kind` and `.sco
 names, parent membership or a bare global role. Personnel labels use the selected-node
 `scope_menu_permission_groups`; organization/department/team appointments are not aliases.
 Login/profile expose exact appointments to support future scoped menu decisions; all business
-APIs still enforce their existing authorization. Department capabilities are matched per
+APIs enforce menu entitlements in addition to independent row and mutation authorization.
+Department capabilities are matched per
 department, so an edit grant in one scope cannot authorize edits in a read-only scope.
 Unassigned and unlinked accounts default to `user`; active
 linked people supply the local group. Disabled/source-disabled people lose its menus.
@@ -53,9 +60,11 @@ consent, model access, budget writes or APIM admission.
 
 The server publishes the menu whitelist in login/current-profile responses. The client applies
 it to navigation, search, direct routes, prefetching and assistant entry points, and refreshes
-it on focus/every 30 seconds. Hiding a menu is not business API authorization: existing Owner
-mutations, department-scoped reads, ordinary Member API read policy and APIM admission remain
-unchanged. API callers must continue to rely on those independent checks.
+it on focus/every 30 seconds. Existing sessions resolve the current policy and row scope on
+every request, so revoked API access does not wait for the client refresh. Ordinary users
+no longer inherit global directory-mode reads. Existing Owner mutations and APIM admission
+remain unchanged. Saved assistant/report scopes use versioned department/user tokens in
+the existing `directory_scope` column; scoped viewers cannot read old global snapshots.
 Entra profile imports, job titles and team membership never create administrator appointments.
 Migration 015 explicitly imports genuine active legacy department appointments. New department
 writes (including the legacy API) share one appointment service and its data-scope projection.

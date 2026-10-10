@@ -1,5 +1,11 @@
 # Testing
 
+`018_permission_management` adds the persisted four-role menu matrix and audit.
+Permission regression tests use real PostgreSQL and authenticated sessions: Owner-only policy
+configuration, CAS save conflicts, existing-session revocation, ordinary-user self scope,
+department membership unions, exact team membership unions, and denial of global snapshots.
+Menu configuration does not alter budget storage, gateway admission, or Owner-only writes.
+
 Usage directory filter changes require real PostgreSQL and API coverage for repeated IDs,
 same-field union/cross-field intersection, authenticated scope isolation, active/archived/
 historical/unattributed classification, current-name precedence and all historical parent edges.

@@ -14,6 +14,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+from ..domain.data_access import DataAccessScope
 from ..domain.directory import (
     DIRECTORY_PROTOCOL_VERSION,
     DirectoryError,
@@ -139,6 +140,13 @@ class DirectoryStore:
     ) -> DirectoryPrincipal:
         state = self.require_ready()
         with self.connection() as connection:
+            policy_exists = connection.execute(
+                "SELECT to_regclass('permission_policy') AS relation"
+            ).fetchone()
+            policy_row = connection.execute(
+                "SELECT groups FROM permission_policy WHERE singleton"
+            ).fetchone() if policy_exists and policy_exists["relation"] else None
+            policy = dict(policy_row["groups"]) if policy_row else None
             rows = self.people_rows(connection, account_id=account_id)
             person = next(
                 (p for p in rows if p["status"] == "active" and not p["manual_disabled"]
@@ -159,6 +167,7 @@ class DirectoryStore:
                         tuple(MenuAdministratorScope.model_validate(item)
                               for item in person["menu_administrator_scopes"]) if person else ()
                     ),
+                    permission_policy=policy,
                 )
             subject = connection.execute(
                 "SELECT 1 FROM directory_department_grant WHERE app_user_id = %s LIMIT 1",
@@ -182,7 +191,7 @@ class DirectoryStore:
                        WHERE e.person_id=p.id AND e.source_disabled)""",
                 (account_id,),
             ).fetchall()
-        return DirectoryPrincipal(
+        principal = DirectoryPrincipal(
             account_id=account_id,
             email=email,
             role="member",
@@ -210,6 +219,91 @@ class DirectoryStore:
                 tuple(MenuAdministratorScope.model_validate(item)
                       for item in person["menu_administrator_scopes"]) if person else ()
             ),
+            permission_policy=policy,
+        )
+        if policy is None:
+            raise DirectoryError(
+                "permission_policy_missing", "Apply permission migration before Member access", 503,
+            )
+        scope = self.data_access_scope(principal, person)
+        return principal.model_copy(update={
+            "data_scope": scope,
+            "department_ids": scope.visible_department_ids,
+            "capabilities": tuple(sorted(set(principal.capabilities) | {"directory.read"})),
+            "department_capabilities": {
+                identity: tuple(sorted(
+                    set((principal.department_capabilities or {}).get(identity, ()))
+                    | {"directory.read"}
+                ))
+                for identity in scope.visible_department_ids
+            },
+        })
+
+    def data_access_scope(
+        self, principal: DirectoryPrincipal, person: dict[str, Any] | None,
+    ) -> DataAccessScope:
+        if person is None:
+            return DataAccessScope(user_ids=(principal.email,))
+        with self.connection() as connection:
+            memberships = connection.execute(
+                """SELECT DISTINCT u.id,u.kind,u.organization_id,u.parent_unit_id
+                   FROM directory_membership m JOIN directory_unit u ON u.id=m.unit_id
+                   JOIN directory_organization o ON o.id=u.organization_id
+                   WHERE m.person_id=%s AND m.valid_from<=now()
+                     AND (m.valid_to IS NULL OR m.valid_to>now())
+                     AND u.status='active' AND o.status='active'
+                     AND (u.kind='department' OR EXISTS(
+                       SELECT 1 FROM directory_unit parent
+                       WHERE parent.id=u.parent_unit_id AND parent.status='active'))""",
+                (person["id"],),
+            ).fetchall()
+            scopes = principal.menu_administrator_scopes
+            orgs = {item.organization_id for item in scopes if item.scope_kind == "organization"}
+            departments = {item.scope_id for item in scopes if item.scope_kind == "department"}
+            teams = {item.scope_id for item in scopes if item.scope_kind == "team"}
+            if departments:
+                departments.update(row["id"] for row in memberships if row["kind"] == "department")
+            if teams:
+                teams.update(row["id"] for row in memberships if row["kind"] == "team")
+            if orgs:
+                departments.update(row["id"] for row in connection.execute(
+                    "SELECT id FROM directory_unit "
+                    "WHERE kind='department' AND organization_id=ANY(%s)",
+                    (sorted(orgs),),
+                ).fetchall())
+            visible = set(departments)
+            visible.update(row["parent_unit_id"] for row in memberships if row["id"] in teams)
+            users = {person["governance_user_id"]}
+            if departments or teams:
+                users.update(row["governance_user_id"] for row in connection.execute(
+                    """SELECT DISTINCT p.governance_user_id FROM directory_person p
+                       JOIN directory_membership m ON m.person_id=p.id
+                       WHERE m.unit_id=ANY(%s) AND m.valid_from<=now()
+                         AND (m.valid_to IS NULL OR m.valid_to>now())""",
+                    (sorted(departments | teams),),
+                ).fetchall())
+            if orgs:
+                users.update(row["governance_user_id"] for row in connection.execute(
+                    "SELECT governance_user_id FROM directory_person WHERE organization_id=ANY(%s)",
+                    (sorted(orgs),),
+                ).fetchall())
+            if users:
+                visible.update(row["unit_id"] for row in connection.execute(
+                    """SELECT DISTINCT m.unit_id FROM directory_membership m
+                       JOIN directory_person p ON p.id=m.person_id
+                       WHERE p.governance_user_id=ANY(%s)
+                         AND m.membership_kind IN ('primary_department','department')
+                         AND m.valid_from<=now() AND (m.valid_to IS NULL OR m.valid_to>now())""",
+                    (sorted(users),),
+                ).fetchall())
+            if not scopes:
+                visible.update(row["id"] if row["kind"] == "department" else row["parent_unit_id"]
+                               for row in memberships)
+            orgs.update(row["organization_id"] for row in memberships)
+        return DataAccessScope(
+            department_ids=tuple(sorted(departments)), user_ids=tuple(sorted(users)),
+            visible_department_ids=tuple(sorted(value for value in visible if value)),
+            organization_ids=tuple(sorted(orgs)), team_ids=tuple(sorted(teams)),
         )
 
     def linked_person(self, account_id: UUID) -> dict[str, Any] | None:
@@ -335,6 +429,7 @@ class DirectoryStore:
         account_id: UUID | None = None,
         account_ids: tuple[UUID, ...] | None = None,
         department_ids: tuple[str, ...] | None = None,
+        allowed_user_ids: tuple[str, ...] | None = None,
         department_id: str | None = None,
         team_id: str | None = None,
         organization_id: str | None = None,
@@ -363,6 +458,9 @@ class DirectoryStore:
         if department_ids is not None:
             clauses.append("membership.unit_id=ANY(%s)")
             parameters.append(list(department_ids))
+        if allowed_user_ids is not None:
+            clauses.append("p.governance_user_id=ANY(%s)")
+            parameters.append(list(allowed_user_ids))
         if department_id is not None:
             clauses.append(
                 "EXISTS(SELECT 1 FROM directory_membership department_member "

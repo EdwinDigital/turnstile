@@ -40,6 +40,7 @@ import {
   Search,
   Settings,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   SquarePen,
   UserRoundX,
@@ -99,6 +100,7 @@ import { ApplicationsPage } from "./pages/applications-page";
 import { SettingsPage } from "./pages/settings-page";
 import { UserSettingsPage } from "./pages/user-settings-page";
 import { OrganizationManagementPage } from "./pages/organization-management-page";
+import { PermissionManagementPage } from "./pages/permission-management-page";
 import { directoryApi } from "./data-sources/apim/api/organization-management";
 import type {
   AuditFinding,
@@ -112,6 +114,7 @@ import type {
 type Page =
   | "settings"
   | "organization-management"
+  | "permission-management"
   | "user-settings"
   | "models"
   | "apim-native-routes"
@@ -134,6 +137,7 @@ type DataSource = "apim" | "github-copilot";
 
 function normalizePageForSource(source: DataSource, page: Page): Page {
   if (page === "user-settings") return page;
+  if (page === "permission-management") return page;
   return (source === "github-copilot"
     ? normalizeGithubCopilotPage(page)
     : normalizeApimPage(page)) as Page;
@@ -158,6 +162,7 @@ function dataSourceFromStorage(): DataSource {
 const pageIds: Page[] = [
   "settings",
   "organization-management",
+  "permission-management",
   "user-settings",
   "models",
   "apim-native-routes",
@@ -1170,7 +1175,7 @@ export function App() {
   // must not add the 24px page padding the card-based routes need. Leaving the assistant
   // out of this put a 24px inset around its whole two-pane surface, which pushed the
   // thread rail's border away from the card wall it is supposed to sit against.
-  const workspacePage = finopsPage || page === "models" || page === "budgets" || page.startsWith("copilot-") || page === "pinned-report" || page === "assistant" || page === "user-settings" || page === "organization-management";  type NavGroup = {
+  const workspacePage = finopsPage || page === "models" || page === "budgets" || page.startsWith("copilot-") || page === "pinned-report" || page === "assistant" || page === "user-settings" || page === "organization-management" || page === "permission-management";  type NavGroup = {
     label: string;
     items: Array<{
       label: string;
@@ -1210,6 +1215,7 @@ export function App() {
       ...(selectedDataSource === "apim"
         ? [{ label: "组织管理", icon: Network, page: "organization-management" as Page }]
         : []),
+      { label: "权限管理", icon: ShieldCheck, page: "permission-management" },
       { label: "系统配置", icon: Settings, page: "settings" },
     ],
   });
@@ -1447,6 +1453,7 @@ export function App() {
         >
           {page === "settings" && <SettingsPage key={selectedDataSource} dataSource={selectedDataSource} onToggleSidebar={toggleSidebar} />}
           {page === "user-settings" && <UserSettingsPage onToggleSidebar={toggleSidebar} />}
+          {page === "permission-management" && <PermissionManagementPage onToggleSidebar={toggleSidebar} />}
           {selectedDataSource === "apim" && page === "organization-management" && <OrganizationManagementPage
             onToggleSidebar={toggleSidebar} capabilities={directoryCapabilities.data} />}
           {selectedDataSource === "apim" && page === "models" && <ModelManagementPage onToggleSidebar={toggleSidebar} />}

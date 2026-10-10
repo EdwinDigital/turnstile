@@ -35,6 +35,7 @@ from turnstile_core.domain.assistant_models import (
     UsageDimension,
     UsageMetric,
 )
+from turnstile_core.domain.data_access import DataAccessScope
 from turnstile_core.domain.runtime_models import ToolDefinition, ToolFunctionDefinition
 from turnstile_core.persistence.repository import QueryRepository, UsageFilters
 
@@ -360,13 +361,19 @@ class AssistantTools:
     def __init__(
         self, repository: QueryRepository, entity_catalog: Callable[[], Mapping[str, Any]],
         department_ids: tuple[str, ...] | None = None,
+        data_scope: DataAccessScope | None = None,
     ):
         self._repository = repository
         self._entity_catalog = entity_catalog
         self._department_ids = department_ids
+        self._data_scope = data_scope
 
     def _filters(self, arguments: TimeScopedArguments) -> UsageFilters:
-        return replace(_filters(arguments), allowed_department_ids=self._department_ids)
+        return replace(
+            _filters(arguments),
+            allowed_department_ids=None if self._data_scope is not None else self._department_ids,
+            data_scope=self._data_scope,
+        )
 
     # -- catalog ---------------------------------------------------------------
 

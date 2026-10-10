@@ -77,7 +77,7 @@ def usage_filters(
 ) -> UsageFilters:
     directory_scope = None
     if directory_status and set(directory_status) != set(USAGE_DIRECTORY_STATUSES):
-        allowed = identity.directory_department_ids
+        allowed = None if identity.data_scope is not None else identity.directory_department_ids
         current = scoped_usage_catalog(
             catalog_for(repository, settings, allowed_department_ids=allowed), allowed,
         )
@@ -94,8 +94,11 @@ def usage_filters(
         user_id=tuple(sorted(set(user_id))) if user_id else None,
         runtime=tuple(runtime) if runtime else None,
         status_code=status_code,
-        allowed_department_ids=identity.directory_department_ids,
+        allowed_department_ids=(
+            None if identity.data_scope is not None else identity.directory_department_ids
+        ),
         directory_scope=directory_scope,
+        data_scope=identity.data_scope,
     )
 
 
@@ -109,7 +112,7 @@ def get_enterprise_entities(
     identity: CurrentSession,
 ) -> EnterpriseEntityCatalog:
     catalog = catalog_for(repository, settings)
-    if identity.directory_department_ids is not None:
+    if identity.directory_department_ids is not None and identity.data_scope is None:
         allowed = set(identity.directory_department_ids)
         departments = [row for row in catalog.departments if row.id in allowed]
         organization_ids = {row.parent_id for row in departments}
@@ -126,6 +129,8 @@ def get_enterprise_entities(
                 "users": [row for row in catalog.users if row.parent_id in allowed],
             }
         )
+    if identity.data_scope is not None:
+        catalog = identity.data_scope.filter_catalog(catalog)
     return catalog.model_copy(
         update={
             "invocation_testers": configured_invocation_testers(
@@ -149,7 +154,7 @@ def get_query_entities(
         raise HTTPException(
             status_code=422, detail="Select an aware query window of at most 366 days"
         )
-    allowed = identity.directory_department_ids
+    allowed = None if identity.data_scope is not None else identity.directory_department_ids
     current = scoped_usage_catalog(
         catalog_for(repository, settings, allowed_department_ids=allowed), allowed,
     )
@@ -158,9 +163,12 @@ def get_query_entities(
     ), allowed)
     historical = repository.historical_entities(from_, to, filters)
     # Query-only snapshots never become selectable invocation identities.
-    return usage_query_catalog(
+    result = usage_query_catalog(
         current, complete, historical, tuple(directory_status or USAGE_DIRECTORY_STATUSES),
     )
+    if identity.data_scope is not None:
+        result = identity.data_scope.filter_catalog(result)
+    return result
 
 
 @router.get(
@@ -230,7 +238,10 @@ def get_usage_request(
     if row is None:
         raise HTTPException(status_code=404, detail="Usage request not found")
     if (
-        identity.directory_department_ids is not None
+        identity.data_scope is not None
+        and not identity.data_scope.allows(row["department_id"], row["user_id"])
+    ) or (
+        identity.data_scope is None and identity.directory_department_ids is not None
         and row["department_id"] not in identity.directory_department_ids
     ):
         raise HTTPException(status_code=404, detail="Usage request not found")

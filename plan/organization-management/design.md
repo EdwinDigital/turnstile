@@ -2,22 +2,28 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 日期 / 基线 | 2026-10-10 / `12dc1ee` |
-| 状态 | P1已实现、上线及验证；P2代码已部署、候选策略编译通过，真实源和员工身份验收未完成；详见[实施记录](implementation.md) |
+| 更新日期 / 基线 | 2026-10-11 / 当前源码 `ee27527`；原调查基线 `12dc1ee` |
+| 状态 | P1及成员/范围权限/用量兼容已上线；最新应用 `9cc17fa`；P2真实同步和动态员工网关未验收，开关关闭 |
 | 配套文档 | [需求分析](requirements.md) |
 | 规范核查 | [项目规范核查记录](review.md)，为设计审查，不是已通过运行验证 |
 | 分期 | P1 数据库目录与兼容适配；P2 Entra 同步与动态网关归因；P3 独立扩展 |
+
+当前方案以下文为准；013/014赋组及调岗相关说明只作为明确标注的历史演进记录。
+最新完整本地回归 1758 passed / 7 skipped、匹配三包和线上只读验证见[实施记录](implementation.md)。
 
 ## 1. 设计决策
 
 | 决策 | 采用方案 | 原因 |
 | --- | --- | --- |
-| 前端入口范围 | 仅 APIM 模式显示组织管理；GitHub Copilot 模式隐藏菜单和搜索入口 | GitHub Copilot 已有独立企业团队功能，本期不合并两类组织管理 |
+| 前端入口范围 | APIM 平台管理下组织管理位于系统配置上方；固定菜单按来源/菜单权限生成 | 不依赖异步目录能力，Copilot保留独立企业团队 |
 | 目录权威源 | PostgreSQL 主数据；观测信息进入候选队列 | 遥测不应自动修改任职，数据库故障不能回退示例数据 |
 | 身份 | 内部人员 UUID + 不变治理 ID + 外部对象键 + 登录账号绑定 | 保留旧预算/账本，并允许邮箱变化和未来连接器 |
 | 单位树 | 组织 -> 部门 -> 团队；单位存储预留父节点 | 不把团队强塞为现有预算 `department` 或遥测 `team` |
 | 计费层级 | 继续组织 -> 部门 -> 人员，每人唯一主计费部门 | 不重复预算，不改变三层额度及证据协议 |
 | 部门管理员 | 全局角色不变，另存部门范围授权 | 不让部门管理员获得全局模型/发布/配置权限 |
+| 人员创建与成员关系 | 组织层级创建普通Member；部门/团队添加已有同组织人员 | 必填名称/邮箱/密码/部门，不允许嵌套团队，不改变计费锚点 |
+| 菜单身份 | 当前kind/id的有效管理员任命投影为只读标签；全局菜单取并集 | 不编辑两套组，不推断父节点任命，不授APIM或Owner权限 |
+| 报表与筛选 | AI FinOps固定两入口，内部报表目录；用量多选默认active | 历史查询兼容保留，未知数据不成为可管理组织 |
 | 历史语义 | 当前任职、周期预算归属、请求发生时归属分别读取 | 调岗不能搬走旧账或重写历史请求 |
 | 外部同步 | 指定租户、显式 Group 映射、只读、预览与冲突审核 | Group 不是组织树，外部成员不是本地授权 |
 | 数据面 | P1 静态归因兼容并显示漂移；P2 版本化身份投影 | 页面保存不能假报 APIM 已更新，不逐请求访问 Graph |
@@ -47,17 +53,17 @@ Graph Connector (P2) -> staging -> 差异预览/审核 -> DirectoryService
 
 ### 2.1 代码落点
 
-| 层 | 拟议落点与责任 |
+| 层 | 当前落点与责任 |
 | --- | --- |
 | 域 | `turnstile_core/domain/directory.py`：组织、单位、人员、任职与来源；预算范围仍用现有模型 |
-| 仓储 | `turnstile_core/persistence/repository_directory.py`；扩展 `repository_contract.py`，数据库事务与索引 |
-| 共享服务 | `turnstile_core/services/directory_service.py`：目录不变量、CRUD、任职/调岗、兼容投影；API 与 worker 共同调用，不 import `backend` |
-| Web 服务 | `backend/services/directory_service.py`：已认证账号到核心 principal 的适配、本人信息和管理页聚合；不放 worker 必需的域逻辑 |
+| 仓储 | `turnstile_core/persistence/directory_store.py`；独立目录事务、principal和catalog，旧用量仍由原repository读取 |
+| 共享服务 | `turnstile_core/services/directory_service.py`：CRUD、账号/成员/任命与状态；`directory_catalog.py`统一目录，`usage_directory.py`只读查询分类 |
+| Web 服务 | `backend/http/organization_management.py`适配会话principal；`backend/services/user_settings_service.py`聚合本人信息；无独立Web目录服务副本 |
 | 权限 | `backend/http/session.py` 获取会话上下文；核心 `DirectoryAccessPolicy` 采用独立 principal/能力模型，不依赖 FastAPI 或 `SessionIdentity` |
 | HTTP | `backend/http/organization_management.py`；在 `backend/api.py` 注册；保留现有查询路径 |
 | UI | `frontend/src/pages/organization-management-page.tsx`、`frontend/src/data-sources/apim/api/organization-management.ts` 与 query/组件；API 客户端沿用项目 APIM 来源边界，不 import React provider |
 | 同步 P2 | `turnstile_core/integrations/` Graph 适配、`turnstile_core/services/` 独立任务 worker，接入现有 Control-plane Function 组合根而非新增未规划宿主 |
-| 初始化/升级 | 现有 `backend.migrate/bootstrap/api` 入口保留；拟新增 `scripts/directory_upgrade.py` 运维 CLI，详见第 11 节 |
+| 初始化/升级 | 现有 `backend.migrate/bootstrap/api` 入口与 `scripts/directory_upgrade.py`；001-017、并发锁和三包门禁已实现 |
 | 契约 | `contracts/openapi/paths/organization-management.yaml` 与对应 schemas，由既有 OpenAPI 测试验证 |
 | 测试 | 域与服务单元测试、真实 PostgreSQL 迁移/并发、API范围权限、浏览器及授权环境网关/Graph 验证 |
 
@@ -77,7 +83,8 @@ P1 的合理抽象是一个共享目录服务与范围策略，不先构建通�
 
 ## 3. 数据模型
 
-以下为逻辑 schema。P1 迁移 `012` 及菜单权限追加 `013/014` 已应用生产；
+以下为逻辑 schema。生产迁移链为001-017；012目录、013/014兼容组、
+015范围任命、016组织成员与旧工作流退役、017附加部门成员已应用；
 实际落点与验证情况见实施记录。
 本地目录表与外部同步能力分期开启，不改已应用迁移。
 
@@ -87,10 +94,11 @@ P1 的合理抽象是一个共享目录服务与范围策略，不先构建通�
 | --- | --- | --- |
 | `directory_organization` | `id TEXT`、`code`、`name`、`description`、`status`、`revision`、时间/操作者 | ID 不变，规范化 code 全局唯一；管理状态 `active/archived`，读取兼容旧 `inactive` |
 | `directory_unit` | `id TEXT`、`organization_id`、`parent_unit_id`、`kind`、`code`、`name`、`status`、`revision` | 组织内 code 唯一；`kind=department/team`；P1 部门无单位父节点、团队父节点为同组织部门 |
-| `directory_person` | `id UUID`、`governance_user_id TEXT UNIQUE`、`display_name`、`contact_email`、`employee_number`、兼容 `job_title`、兼容单组（013）、`menu_permission_groups TEXT[]`（014）、`status`、`manual_disabled`、`revision` | 内部稳定人员 ID；可同时指派多个菜单组；独立于数据/APIM 权限；不存密码 |
-| `directory_membership` | `id UUID`、`person_id`、`unit_id`、`organization_id`、`membership_kind`、`valid_from/to`、`source_binding_id`、`revision` | `primary_department/team`；半开有效区间 `[from,to)`；一人有效主部门唯一；团队成员必须在该主部门下 |
+| `directory_person` | `id UUID`、`organization_id`（016）、稳定治理ID、资料、兼容job_title/013/014组字段、status/revision | 密码只存账号哈希；有效组来自范围任命与旧组兼容投影，资料表单不能改任命 |
+| `directory_membership` | UUID、person/unit/organization、membership_kind、valid_from/to、source/revision | `primary_department/department/team`；唯一主计费部门；同组织可附加跨部门/团队协作，不改变预算父级 |
 | `directory_account_link` | `person_id`、`app_user_id`、`verified_by/at`、`status` | P1 一对一有效绑定，UUID 外键；账号 enabled/role 仍由账号域管理 |
 | `directory_department_grant` | `id`、`app_user_id`、`department_id`、`capabilities`、`valid_from/to`、授予者 | 权限白名单、有效任职与有效账号；不是第三种 `app_user.role` |
+| `directory_menu_administrator` | 账号、组织、scope_kind、可选unit、有效时间、来源 | 015新增，组织/部门/团队精确任命；部门配置同步兼容grant，组织/团队不自动扩大部门数据范围 |
 | `directory_change_audit` | `id`、`entity_type/id`、`action`、`actor_account_id`、`actor_person_id`、`actor_label`、来源、`before/after`、原因、时间、`request_id/job_id` | 追加写；同步 actor 可为空账号并记录服务身份；不序列化秘密 |
 | `directory_outbox` | `id`、`entity_id`、`directory_version`、事件、状态、重试信息 | 与主数据事务提交；按版本投影、可重试，不把投影失败伪装为主数据保存失败 |
 
@@ -180,9 +188,9 @@ P1 的合理抽象是一个共享目录服务与范围策略，不先构建通�
 
 ## 5. 权限设计
 
-### 5.0 独立菜单权限组（2026-10-10）
+### 5.0 独立菜单权限组演进（013/014历史方案，当前以5.0.1为准）
 
-本补充以最新需求为准：不把组织管理发展为正式人事系统；前端“岗位”替换为
+013/014阶段按当时需求实现：不把组织管理发展为正式人事系统；前端“岗位”替换为
 “菜单权限组”。新增 `013_menu_permission_groups`，只向 `directory_person` 追加
 `menu_permission_group TEXT NOT NULL DEFAULT 'user'`，数据库约束四个枚举：
 `user`、`organization_admin`、`department_admin`、`team_admin`。
@@ -219,7 +227,7 @@ GitHub Copilot 继续隐藏组织管理，保留独立企业团队入口。
 菜单控制**不是数据安全边界**。APIM 模型调用、预算限额、限流、订阅、已有 Owner 写入、
 部门数据范围 SQL 均不读取本字段。后台接口继续由原授权体系控制，
 菜单访问不自动扩张业务 API 权限，也不表示新增多租户隔离。
-原“管理员”页签改称“数据授权”，显式区别旧部门能力与本地菜单组。
+当时曾将管理员页签改称数据授权；015之后已取消重复入口，当前各节点统一“管理员”页签。
 
 人员新增/编辑表单只以多个只读标签显示当前组，列表也逐组显示标签。
 表单不保存组选择状态，不提供复选框或下拉编辑，提交资料时省略新旧菜单组字段，
@@ -390,42 +398,32 @@ BudgetStatus 仍表示额度风险，不能用目录状态覆盖；KPI/风险/�
 
 历史 use/confirmed tokens 仍由现有有效证据读取。新增目录不能把 `budget_evidence_selected` 或恢复量替换为纯日志求和。
 
-### 6.3 默认下月调岗
+### 6.3 已退役的调岗工作流
 
-新增 `directory_transfer` 逻辑记录或沿用目录任务表的独立 transfer 类型，保存 person、源/目标部门、生效月、目录/预算版本、申请/批准者、状态及影响快照。
+016保留内部历史记录并取消未执行旧计划；人员调岗菜单、transfer-preview/transfers端点、
+历史身份编辑及Telemetry月度调岗执行均已移除。`can_schedule_transfers=false`，
+旧内部服务存在不表示外部可用，不将本流程列为未完成P1验收。
 
-1. `transfer-preview` 读取当前与未来预算、有效任职、团队、管理员授权及引用；拒绝身份冲突或跨组织同月方案。
-2. Owner 批准生成待执行计划，不立即替换有效 membership；Graph 主部门变化也走该计划。
-3. 当月预算、pending reservation、confirmed usage 与模型策略保持不变；新团队可以作为协作关系，但不能提前修改计费归属。
-4. 目标月启用前与 `roll_forward_budgets` 协调：先完成当月继承，再锁人员/源目标父预算，校验目标预算存在及剩余额度；把已继承该人员当月预算父级改为目标部门并记录专门归属审计。没有人员预算时可仅生效任职。
-5. 原实现继承不会按目录重验，必须扩展其调度契约；未经协调上线会把旧部门预算再次复制到新月，不能只写 membership。
-6. 全部约束通过后一次提交新任职、关闭旧任职、更新目标月预算及撤销旧管理员授权；失败保持原有效任职并置 `conflicted`，不得出现“目录调岗成功、预算没迁移”。
-7. 投影新主部门/周期 budget，读取回执后标记网关 ready。多人批量转移按整体计划校验目标额度，不能各自预览后相互挤占额度。
+### 6.4 未来计费归属转移边界
 
-若组织允许预分配未来预算，preview/apply 同时检查所有受影响未来周期；没有事先批准的周期不能被顺手改写。
-
-### 6.4 同月例外
-
-P1 默认拒绝自动同月转移，有业务需要才实现 Owner 特批的同组织流程：限制新 admission、排空或固定未决请求的旧归属、锁源目标预算、移动剩余额度责任并记录生效时间、发布版本化映射、确认后放开 admission。个人已用量和 user/月账本不能清零。
-
-发生时的旧部门用量仍留在旧部门，新请求归新部门；目标部门额度预览要区分该人整月限额与仅迁移后费用责任。简单把全部 user budget 迁过去会导致额度分配与部门消耗不一致，未实现分段责任前应返回 `same_period_transfer_not_supported`。
-
-跨组织同月转移不在 P1/P2，需独立账务设计。
+当前通用资料PATCH、添加成员或Graph更新均不得改变既有主计费部门。
+未来需要转移时另行审批，先设计周期预算父级、预留请求、历史归属与授权撤销的原子语义；
+不能通过只改membership或搬移整月预算实现。跨组织转移与团队原生预算不在本期。
 
 ## 7. 各功能兼容性矩阵
 
 | 功能与源码 | 影响 / 必须适配 |
 | --- | --- |
 | `budget_service.py` | 注入统一目录；按周期归属构造列表与父子校验； inactive/历史预算仍展示且不可新分配 |
-| `repository_budgets.py` | 调岗事务、并发成员/预算锁、继承协调；保留预算证据、月度边界及 retired budget 投影语义 |
+| `repository_budgets.py` | 原预算控制、存储、继承及证据保持不变；附加成员不改周期父级，无新增调岗写入 |
 | `observability.py`、`repository.py` 及趋势仓储 | 范围授权进入 SQL；历史维度包含未知/归档；从 ID+名称分组迁到 ID 唯一分组 |
-| `dashboard-page.tsx` | 部门按选定组织过滤，历史人员不能仅按当前 `parent_id` 裁掉；筛选状态不静默落回第一部门 |
+| `dashboard-page.tsx` | 五页面共用多选与archive筛选；范围级联、parent_ids及选择重算；默认active，清空其他字段不解除状态约束 |
 | `user_settings_service.py` | 账号 UUID -> 已验证 person -> 稳定治理键；本人预算/模型/用量不再直接用可变登录邮箱；兼容旧 membership_source 并版本化新来源 |
 | `auth_service.py`、`authentication.py`、`auth_store.py` | 保留既有密码/Microsoft 流程；P2 保存验证后的 cloud/tid/oid 并保护账号绑定，不因同步放宽登录门槛 |
 | `model_platform._bind_invocation_identity()`、`dashboard-invocation.tsx` | 从可信目录确定组织和主部门；不默认首个组织；Owner 代调用仍显式授权与审计，未映射用户不伪造归属 |
 | `assistant.py`、`assistant_tools.py` | 同一可见目录/授权 facade，工具与存储图表重新校验；防止自然语言绕过范围 |
 | `anomaly-rule-management.tsx`、`anomaly_rule` | 原 scope ID 保留；归档范围可读不可新选；规则编辑按授权，未知 scope 不因目录迁移变全局 |
-| 固定报表、图表、共享与导出 | 原保存 ID 继续解析；缓存/共享不成为部门隔离旁路，重算按当前授权与原历史口径 |
+| 报表中心、图表、共享与导出 | `pinned-report`权限/旧chart链接保留，目录移入中心；快照/原查询和can_manage保留，不成为部门隔离旁路 |
 | `user_model_policy/access`、runtime.allowed_roles | 不改 owner/member；停用仍显式拒绝，缺失策略与空策略不同；组同步不自动授模型 |
 | `ledger.py` 与 APIM policy | governance ID及预留协议不变；identity outbox 独立版本；禁用覆盖无预算用户；目录/网关漂移可观测 |
 | `gateway_application.department_id/owner_id`、`application_access` | 保留应用域预算/模型/订阅，不把人等同应用；部门归档保留引用，不清空应用，历史归因不重写 |
@@ -435,11 +433,18 @@ P1 默认拒绝自动同月转移，有业务需要才实现 Owner 特批的同�
 | `InMemoryRepository`、demo factory | 仅显式 demo/单元 fixture；生产不回退种子，内存实现也应遵守新约束；不作为持久化验收证据 |
 | GitHub Copilot service/teams/cost centers | 保持 `usage_domain` 与外部 ID 空间及独立企业团队功能；该模式隐藏组织管理菜单/搜索，不接入本地目录 CRUD；将来通过显式 provider binding 连接 |
 | 前端目录与个人/预算 query cache | 目录保存后同时失效 reference、finops、user-settings、application 引用；授权/用户切换时清理旧缓存，不能只 invalidate `["finops"]` |
-| `app.tsx` 与各 source normalizer | 仅在 APIM 页面白名单增加组织管理，不加入跨源 platform page 特例；菜单/搜索/渲染按来源及能力判断；GitHub Copilot 归一化到现有 `finops-overview` |
+| `app.tsx` 与各 source normalizer | 固定菜单按来源/白名单生成，不等待目录capabilities或报表；目录能力只约束页面操作，Copilot保持归一化 |
 
 ### 7.1 历史筛选与名称
 
-拟新增时间范围查询目录：范围内出现的原始 ID与已授权活跃/归档主数据合并，不自动创建实体。未知值显示“未映射 / 原名称 / 原 ID”，`unattributed` 是明确特殊维度，不是可管理部门。
+已实现 `/enterprise/query-entities` 时间范围目录，返回独立 `UsageQueryEntityCatalog`，
+含 `source/directory_status/parent_ids`；当前名称优先，多历史父边保留，不自动创建目录实体。
+后端仍支持active/archived/historical/unattributed及无状态全量兼容；新UI只提供
+全部/启用/已归档，默认active，全部显式发送active+archived，不再暴露兼容分类。
+同字段多个ID取并集，跨字段及服务端授权范围取交集，候选与实际SQL使用一致状态口径。
+归档子范围可保留启用祖先供级联导航，不能据此扩大实际查询。姓名中含“测试”不构成脏数据判据。
+代码落点为 `usage_directory.py`、`repository_support.py`、`observability.py`、
+`usage-filter-scope.ts`；本次不写原用量、预算或计费表，无新迁移。
 
 聚合 SQL 以稳定原始 ID分组；展示名可用当前目录名称，找不到时选择范围内最近原始名称并稳定排序。详情保留原始名称。原先同 ID/多个名称的行合并后，tokens/count/cost 求和、延迟/成功率按原始请求重算，**不能把旧聚合百分比和 p95 平均**。排名变化不应改变整体总量。
 
@@ -447,7 +452,9 @@ P1 不将不同旧 ID自动 alias 合并为一个统计实体；该合并会改�
 
 ## 8. API 设计
 
-所有以下新增路径为拟议接口，统一 `/api/v1`、现有 cookie 会话及写来源校验。列表用 cursor（默认 50、最大 200），管理 schema 含 revision；写请求含 `expected_revision`，创建/应用任务支持 `Idempotency-Key`。
+以下按当前代码列出对外接口，统一 `/api/v1`、cookie会话及写来源校验。列表使用cursor，
+写请求含expected_revision；创建/任务的幂等与具体响应以现有OpenAPI为准。
+P2端点已部署不等于真实同步开启或验收。
 
 数据传输与工程约束：扩展 `backend/api.py` 的 CORS header 白名单以支持 `Idempotency-Key`，不能打开任意来源；同源生产与跨端口开发均要测试。人员/身份/同步错误不回显 Pydantic 原始 input、凭据引用内容或 Graph 原始响应，敏感响应 `Cache-Control: no-store`；普通目录只可进入当前账号范围内的前端缓存。组织请求沿用 `frontend/src/data-sources/apim/api/`，不得在页面里直接 fetch 或自报角色/人员身份 header。
 
@@ -457,28 +464,28 @@ P1 不将不同旧 ID自动 alias 合并为一个统计实体；该合并会改�
 | `GET/POST /organization-management/organizations` | 列表按范围；创建 Owner |
 | `GET/PATCH /organization-management/organizations/{id}` | 详情/修改；归档只检查并发同步，不要求清空成员或子节点，Owner |
 | `GET/POST /organization-management/organizations/{id}/units` | 部门/团队列表；Owner建部门，授权管理员建本部门团队 |
-| `GET/PATCH /organization-management/units/{id}` | 单位详情/资料/状态；按能力限制字段 |
-| `GET/POST /organization-management/people` | 范围搜索/创建，必传可管理主部门，不跨域枚举账号 |
+| `PATCH /organization-management/units/{id}` | 单位资料/状态；详情从组织units列表读取，按能力限制字段 |
+| `GET/POST /organization-management/people` | GET范围搜索；POST仅Owner组织层级创建，必填名称/邮箱/密码/启用部门 |
+| `POST /organization-management/units/{id}/members` | 添加同组织已有启用人员，目标revision及person_ids整体校验，不改计费主部门 |
 | `GET/PATCH /organization-management/people/{person_id}` | 业务资料编辑；治理 ID/主部门/账号不得通用 PATCH |
-| `PUT /organization-management/people/{id}/teams` | 明确替换本地团队成员关系，验证主部门及 source |
+| `PUT /organization-management/people/{id}/teams` | 明确替换本地团队关系，验证同组织/source及权限，不改变主部门 |
 | `POST /organization-management/people/{id}/account-link` | Owner验证绑定；不创建密码，不授 Owner |
-| `POST /organization-management/people/{id}/transfer-preview` | 影响预览，返回预算/目录版本与阻塞引用 |
-| `POST /organization-management/people/{id}/transfers` | Owner提交经批准生效月；幂等、受版本保护 |
 | `POST /organization-management/people/{id}/status-preview` | 停用/恢复影响及网关当前状态 |
 | `POST /organization-management/people/{id}/status-changes` | 显式选择人员状态、账号联动与网关撤销，Owner |
 | `GET/PUT /organization-management/departments/{id}/administrators` | Owner设置/撤销授权；管理员仅读自身可见信息 |
+| `GET/PUT /organization-management/menu-administrators/{kind}/{id}` | 当前组织/部门/团队范围任命，Owner写入；旧部门入口委托同一事务 |
 | `GET /organization-management/audit` | 范围过滤的目录审计，不泄漏其他部门前后值 |
-| `GET /enterprise/query-entities?from=...&to=...` | 历史筛选投影，按授权返回归档/未知原始维度 |
-| `GET /organization-management/identity-conflicts` | Owner候选与绑定冲突管理 |
+| `GET /enterprise/query-entities?from=...&to=...` | 多值ID/状态查询投影；无状态参数保持历史兼容，不供身份分配 |
 | `GET/POST/PATCH /organization-management/connections[/{id}]` | P2，Owner配置指定租户，只回传 credential 状态 |
-| `POST /organization-management/connections/{id}/validate` | P2，只读连接/权限校验，不启动同步或授予 consent |
+| `POST /organization-management/connections/{id}/validate` | P2，读取Graph检查权限并记录验证revision，不启动同步或授予consent |
 | `GET/PUT /organization-management/connections/{id}/group-mappings` | P2，显式 Group 映射和规则版本 |
 | `POST /organization-management/connections/{id}/sync-jobs` | P2，创建 preview/full/delta 任务，202 |
 | `GET /organization-management/sync-jobs/{id}` | P2，进度、差异、失败与删除保护报告 |
 | `POST /organization-management/sync-jobs/{id}/apply` | P2，Owner确认，版本过期先重新预览 |
 | `POST /organization-management/sync-jobs/{id}/cancel` | P2，停止未提交部分；已提交结果不假称回滚 |
 
-建议结构化错误：`code`、`message`、`request_id`、可见字段级 conflict。状态码为 401 未登录、403 无能力、404 不存在/范围外、409 版本/预算/身份冲突、422 非法字段/归属、202 异步任务。敏感依赖明细只返回当前授权范围。
+当前错误使用 `detail/code`，参数错误不回显敏感input；建议未来增加request_id与字段级冲突，
+不能把其列为已实现字段。状态码及完整响应以OpenAPI/HTTP为准。
 
 请求示例：人员业务 PATCH。
 
@@ -486,27 +493,17 @@ P1 不将不同旧 ID自动 alias 合并为一个统计实体；该合并会改�
 {
   "expected_revision": 7,
   "display_name": "Example Person",
-  "job_title": "Platform Engineer",
   "reason": "Approved profile correction"
 }
 ```
 
-响应示例：不把数据库保存与网关同步混为一谈。
-
-```json
-{
-  "id": "40000000-0000-4000-8000-000000000001",
-  "governance_user_id": "person@example.com",
-  "revision": 8,
-  "directory_state": "saved",
-  "gateway_projection_state": "pending",
-  "directory_version": 42
-}
-```
+主数据响应包含id/revision和资料；目录版本与 `gateway_projection_state` 由capabilities
+单独返回，不将旧草案的directory_state字段当作已发布契约。保存成功不等于网关已生效。
 
 ## 9. 前端交互
 
-- 页面 URL 为 `?source=apim&page=organization-management`。菜单条件为 `selectedDataSource === "apim"` 且具备目录读取/管理能力；搜索/命令面板复用同一条件，避免残留隐藏页面入口。
+- 页面URL不变；菜单/搜索条件为APIM来源及 `canAccessMenu(user,page)`，
+  不等capabilities响应。后端及页面操作再检查具体范围/能力，菜单访问不等于目录数据权限。
 - `organization-management` 只加入 APIM 的页面白名单；不加入 `normalizePageForSource` 中类似 `user-settings` 的跨源特例，也不加入 GitHub Copilot 的 `githubCopilotPageIds`。
 - 选定 GitHub Copilot 时，组织管理页面按已有 `normalizeGithubCopilotPage` 规则转为 `finops-overview`（使用指标），URL 同步归一化。直接 URL、刷新及浏览器历史恢复也检查来源，不只处理菜单点击。
 - 渲染和 query `enabled` 同时限制来源及能力；切离页面停止其前端预取/轮询，不返回或显示前次 APIM 页面数据。该限制不替代服务端授权，后台同步 worker 不受浏览器来源选择控制。
@@ -514,12 +511,13 @@ P1 不将不同旧 ID自动 alias 合并为一个统计实体；该合并会改�
 - 主工作区采用现有 FinOps header/toolbar/scroll 布局。左侧树固定受限宽度，右侧表格弹性区域；无权限树节点完全不返回。
 - 搜索分为当前单位人员和 Owner全域目录；结果显示主部门、团队、来源、人员/账号状态、同步状态，不用邮箱域猜组织。
 - 选节点后页签为人员、管理员、变更记录；Owner的同步页提供连接、Group映射、预览与任务记录。
-- 新增部门/团队和人员用现有 Dialog/form；归属转移、停用需要影响清单与明确确认。不要把预算编辑表单复制进目录页面。
-- 管理员选择搜索有效绑定账号/人员，显式勾选能力并显示范围；没有绑定账号时先处理绑定，不能给邮箱字符串直接授权。
+- 新增部门/团队和组织人员用既有Dialog；添加成员独立选择已有人员。只有组织创建表单有密码/必选部门，资料编辑不提交组字段。
+- 当前节点管理员搜索有效关联账号/人员，选择任命并保存；不额外提供能力编辑或两套授权界面。
+  当前节点标签不继承父范围管理员，长标签单项不换行，组合自然换行。
 - 外部资料只读显示同步来源；人工资料/覆盖独立编辑。成员来源为 Group的行不能伪装成可直接编辑成功的本地关系。
 - 目录 tree 与人员表分别分页/按需展开；页面选择写 URL 参数，恢复不存在节点时显示不存在/失效，不静默改为其他组织。
 - reference cache 以账号 UUID、permission_revision、目录版本和查询时间区分；目录变更失效 `finopsKeys.entities`，也失效相关预算、个人账号、规则和应用引用。
-- 旧选中人员调岗后，历史视图保留其查询值，实时分配视图提示归属已改变并要求重选。
+- 目录/用量/预算切范围按各自规则重算选择；无调岗入口，历史账务不随附加成员变化。
 - 静态网关未对齐时显示真实状态与版本。只有受信 projector/readback 确认后才显示 ready。
 
 ## 10. Entra ID 同步扩展
@@ -569,7 +567,8 @@ API 只保存 Key Vault/受管秘密引用；凭据管理不在人员字段、�
 3. 数据进入 staging，按稳定外部键幂等；一个对象多次出现合并更新/删除顺序，不能把“本页未出现”当删除。
 4. 检查分页完整性、hidden member权限、对象类型、人员身份与主部门冲突、预算影响；生成预览。
 5. 用 job/规则/目录版本批准。Apply前再次验证旧版本，陈旧预览返回409；Group变更需要新的预览。
-6. 同一事务或受控分批事务写外部资料、来源成员边、audit/outbox；主部门变化生成 transfer任务，不直接 PATCH 任职。
+6. 同一审核应用事务写外部资料、来源成员边和audit/outbox；既有主部门变化保留冲突待处理，
+   不创建已退役transfer任务，不直接PATCH计费归属。
 7. 新deltaLink只在该轮成功 apply/确认安全结果后推进；失败保留旧游标，重试不重复审计或预算分配。
 8. 429/503 按 `Retry-After` 与抖动退避；401重新取得 token，403报告缺权限，游标失效安全全量重建；不清空目录。
 9. 配置变化建立新checkpoint，旧范围“消失”不是用户离职；Group已删除与失去读取权限区分。
@@ -595,36 +594,40 @@ P2新增独立身份映射分区，键由受信 token的 `(cloud,tid,oid)` 唯�
 
 | 已有入口 | 当前行为 | 本功能需改造/保留 |
 | --- | --- | --- |
-| `backend.migrate` | 按文件名排序 `.up.sql`，记录 SHA-256，已应用文件 checksum 不同即失败；尚无全局迁移锁 | 单一 schema 入口不变；增加数据库执行锁、超时与真实并发回归，不另造 SQL runner |
+| `backend.migrate` | 按文件名排序.up.sql、记录SHA-256；已应用checksum漂移失败，数据库advisory lock等待上限120秒 | 已实现/并发验证；保持唯一入口和失败事务语义，不做业务回填 |
 | `backend.bootstrap` | 原子地仅在 `app_user` 为空时建立首个密码 Owner | 保留账号逻辑，不生成默认组织或重置账号；业务回填不挂到此处 |
 | `infra/modules/data-plane.bicep` | `migrate && bootstrap && uvicorn`，失败阻断后续启动 | 保持三条入口路径；目录轻量 readiness 检查在 API lifespan，禁止启动时做长回填/Graph 同步 |
 | `backend.api.lifespan` | 校验生产前端资源、repository 与加密配置 | 选择 database 目录时检查 schema/ready 状态与版本；legacy 显式模式不假读不存在新表 |
 | `scripts.stage_deployment` | API 包含 backend/core/migrations/frontend；Functions 只有 core 与各自入口 | API 包含新迁移与受控公共升级 CLI；Functions 不包含 backend、迁移 runner 或私有部署工具 |
 | `scripts.deploy` | 保留 state；新装构建三个包，重跑用 saved outputs 与 runtime-release，不重新 APIM bootstrap；验证固定 Functions 清单 | 配套目录配置/包版本/ready 验证，不自动回填客户数据、不改 state 密钥，不将新装 bootstrap 当升级 |
-| `functions/telemetry.sync_budget_ledger` | 月度继承在 ledger flag 判断之前执行 | 在数据库目录启用时调用 core 的继承/调岗协调步骤，之后才投影；不把 Graph 网络操作塞进计费 timer |
+| `functions/telemetry.sync_budget_ledger` | 原月度预算继承在ledger flag前执行 | 月度调岗调用已移除，继承/证据逻辑保持；不访问Graph |
 | `functions/control_plane` | 发布与 release 独立 timer，依赖 core | P2 加有独立门禁的 sync/projection timer，函数索引清单随包更新；不挂在 paid probe 流程 |
 
-`backend.migrate` 当前使用连接及 transaction 上下文，不能未经真实测试保证“每个文件已经单独持久提交”；新增执行锁必须保持已有失败回滚行为，并验证多个 pending 文件中途失败的 schema/账本一致性。锁在检查/创建 `schema_migration` 之前获取，使用数据库级固定命名空间、有限等待，连接关闭释放；不能只有本机文件锁。
+`backend.migrate`在检查/创建schema_migration之前取得数据库锁、连接关闭释放。
+保持既有连接/transaction上下文，真实多pending文件失败与并发测试已覆盖；
+不能把嵌套transaction误称每文件独立持久提交，或把迁移锁误称运行期健康/断线恢复机制。
 
 ### 11.2 Schema、业务回填与开关分离
 
-初始设计基线最高编号是 `011_user_settings_profile`，P1 已追加并应用
-`012_organization_directory`。本次菜单权限改造追加 `013_menu_permission_groups`
-和 `014_multiple_menu_permission_groups`；
+初始设计基线最高编号011，P1及后续改造已追加并应用012-017，
+包含目录、兼容组、范围任命、组织成员和附加部门成员；
 以后重新核对迁移链，从下一可用编号追加 `.up.sql`，不改已应用迁移的内容或
 checksum，不新增自动 down 脚本。
 
-新增 migration 只建目录表、约束、索引及平台升级控制记录。新增 `directory_control_state` 逻辑表：schema/protocol 版本、初始化类型、当前权威源、`active_version`、升级 phase、已确认计划摘要、验证摘要和时间。`directory_upgrade_run` 保存执行 lease/checkpoint；`directory_upgrade_stage` 按 `(run_id, entity_type, stable_key)` 保存候选字段、来源、预期版本和处理状态。它们不是现有已实现表。
+012已实现目录表、约束、索引及平台升级控制记录。`directory_control_state`记录协议、
+权威源/active_version/phase；`directory_upgrade_run`和`directory_upgrade_stage`
+记录批准计划、lease/checkpoint和物化结果，不是未实现的拟议表。
+后续015-017回填/旧任务退役严格按已审查迁移执行，例行发布不得重放这些数据操作。
 
 phase 建议为 `schema_only -> importing -> verified -> active`；全新空目录有独立 `fresh_empty_ready`，不能把它和未回填既有实例混为一谈。预览写独立staging，apply只在权威源仍为legacy且无已激活版本时首次物化目录表；重复批次不得克隆另一套同治理ID人员。旧读取继续用legacy，新表物化不等于切换。activate用数据库CAS设置active_version和权威源；所有目录服务检查相同版本，已激活后不允许初始化/升级工具重置人工维护数据，后续变更走正常版本化CRUD或独立评审迁移。
 
-拟议配置应在 `turnstile_core.config` 与公开 example 中声明并校验，运行值按环境传入：
+下列配置已在 `turnstile_core.config` 与公开example声明，实际运行值按环境传入：
 
-| 拟新增变量 | 默认 / 启用规则 |
+| 配置变量 | 默认 / 启用规则 |
 | --- | --- |
 | `DIRECTORY_SOURCE` | Python 兼容默认 `legacy`；`database` 必须匹配数据库 active/empty-ready 状态，不允许异常后自动回退 |
 | `DIRECTORY_EMPTY_INITIALIZATION_ALLOWED` | 默认 false；仅经确认的新装配置为 true，一次性初始化平台状态，不创建业务行 |
-| `ORGANIZATION_MANAGEMENT_ENABLED` | 默认 false；schema 与目录状态就绪才允许启用菜单/capability，前端还必须限定 APIM |
+| `ORGANIZATION_MANAGEMENT_ENABLED` | 默认false；schema/目录就绪后开启功能capability；前端固定入口独立按APIM及菜单权限生成，页面处理功能不可用 |
 | `DIRECTORY_SYNC_ENABLED` | P2，默认 false；schema、worker 包、连接、凭据/consent 验证后独立开启 |
 | `DIRECTORY_IDENTITY_PROJECTION_ENABLED` | P2，默认 false；原 ledger 目标、身份 writer RBAC、policy 契约与读回验证后独立开启 |
 
@@ -646,7 +649,8 @@ phase 建议为 `schema_only -> importing -> verified -> active`；全新空目�
 ### 11.4 业务回填 CLI 与幂等性
 
 `scripts/directory_upgrade.py` 已有候选实现，公共工具不包含具体部署目标/SCM 凭据，
-也不新增 `backend` 根入口；本地可执行，尚未完成生产升级验收。完整参数与三包证据约定见
+也不新增 `backend` 根入口；已完成P1生产plan/apply/verify/activate及兼容回滚验证。
+已激活实例例行更新不得重跑回填或activate；最新 `9cc17fa` 只验证两次空迁移。完整约定见
 [运维文档](../../docs/organization-management.md)：
 
 ```bash
@@ -672,9 +676,12 @@ uv run python -m scripts.directory_upgrade activate --run-id <upgrade-run-id>
 1. 记录原包与 SHA-256、mounted asset、运行/停止状态、migration checksum、预算/usage/模型授权基线、当前 APIM revision 和私有 state/outputs。确认备份可恢复；Burstable 不承诺可创建 on-demand backup，采用已有自动备份能力或授权环境 `pg_dump`，恢复测试另行批准。
 2. 保持现有权威目录及新写入口/worker关闭，排除管理员配置写入，安排维护窗口。旧消费/发布与新目录切换关系逐项确认，不为本功能任意丢弃 Event Hub checkpoint。
 3. 在授权 DB 环境先运行现有 `backend.migrate`，新增编号 chain 必须 additive；不直接执行 SQL，不改变001-011 checksum。schema_only 不代表可自动切换。
-4. 发布兼容过渡版 API、Telemetry、Control-plane 与 frontend，默认 `DIRECTORY_SOURCE=legacy`，新能力均未开启。检测包protocol/版本，不能混用不支持调岗协调的旧 Telemetry。
+4. 首次旧目录升级发布兼容过渡三包，保持明确legacy来源、新能力关闭；检测protocol/digest，
+   不混用核心不匹配的Telemetry。已激活实例按后述兼容更新，不再回到legacy流程。
 5. 运行 plan，批准来源和候选，apply/verify；在受控影子读取中对比目录、周期预算、个人页、模型策略、助手/历史报表。冲突未解不得 activate。
-6. 停止/排除三类应用的目录与治理写者及新调岗执行，在已有 settings 写入机制下配置三个运行包的 matching source/version，再 CAS 激活已验证active_version；按原运行状态恢复后检查共同版本和ready。过渡服务未active或本进程配置不匹配数据库权威源时拒绝目录相关读写，不能各自临时回退；直接APIM流量是否可继续须基于未决预留与policy兼容性单独确认。
+6. 首次切换时暂停三类目录/治理写者，合并匹配source/digest后CAS激活已验证版本，
+   恢复原状态并检查ready。未active/核心不匹配时拒绝目录读写；APIM兼容单独确认。
+   最新例行更新仅暂停触发器、发布匹配三包并读回，不重新激活或恢复退役调岗。
 7. 恢复记录的运行状态和写入，验证 API capability、真实登录/UI、原有查询/预算/模型、月度继承与新目录 CRUD；重新运行 migrate/CLI 应无重复副作用。
 8. P2 的 Graph 和 identity projection 另走独立可批准步骤：先部署 worker/RBAC/凭据，确认映射及增量 policy/readback，然后逐一开启开关。不得因 P1上线自动启动它们。
 
@@ -682,7 +689,7 @@ uv run python -m scripts.directory_upgrade activate --run-id <upgrade-run-id>
 
 ### 11.6 脚本、基础设施与打包改造清单
 
-| 文件 / 契约 | 拟议改造 |
+| 文件 / 契约 | 当前改造 / 保持的边界 |
 | --- | --- |
 | `backend/migrate.py` | 全局数据库迁移锁、有限等待、失败一致性；仍处理 `.up.sql` 与旧checksum，不进行业务回填 |
 | `backend/bootstrap.py` | 保持首个Owner幂等创建；测试证明组织升级/重启不能重置账号；不挂Graph或大批数据迁移 |
@@ -691,10 +698,10 @@ uv run python -m scripts.directory_upgrade activate --run-id <upgrade-run-id>
 | `scripts/stage_deployment.py` | API精确纳入公共CLI与必要schema文件，不复制整个私有运维目录；Functions带core服务，仍排除backend与SQL runner |
 | `scripts/deploy.py` | 新装空目录opt-in、既有升级前置状态门禁、三包匹配/capability验证；P2维护 `EXPECTED_FUNCTIONS`，保留state、原密码验证与无Delete规则 |
 | `infra/main.bicep`、data/control-plane modules、examples | 新装运行开关及必要身份设置，默认sync/projection关闭；不创建客户Entra或Foundry资源 |
-| `infra/runtime-release.bicep` | 既有API/Control-plane settings用当前值快照合并；新增值显式确认，不覆盖其他feature；Telemetry如需同步source要扩展对应精确settings契约 |
-| 既有环境目录配置升级模板（P2按需新增） | API/Telemetry/Control-plane/原Table/Key Vault的精确目标与最小RBAC；不重建ledger、不重新bootstrap；不复制其他环境outputs |
+| `infra/runtime-release.bicep` | 原例行发布受digest/目录权威源门禁，不能代替激活目录的三包维护流程 |
+| `infra/directory-settings-upgrade.bicep` | 已实现三appsettings精确快照合并、source/digest及独立开关；what-if仅允许授权配置，不重建ledger或bootstrap |
 | `scripts/apim_upgrade.py` 与版本化升级契约（P2） | 独立directory identity版本，不复用或改写images-v2成功日志；结构化转换、候选revision、完整readback、漂移拒绝与显式回滚 |
-| `functions/telemetry/function_app.py` | core继承/调岗协调，保持在ledger flag前；不访问Graph，账本恢复规则不变 |
+| `functions/telemetry/function_app.py` | 保留原继承与账本协议，月度调岗执行退役；不访问Graph，池生命周期优化另列待办 |
 | `functions/control_plane/function_app.py` | directory sync/projection独立timer与lease；host索引不得因没配Graph就失败，disabled时无网络副作用 |
 | config、API/core/Functions requirements与lockfiles | 仅需要的新依赖精确锁定，Linux x86-64/Python3.11三包一致；不依赖开发机临时库 |
 | 公共docs与OpenAPI | 配置、升级/回滚、威胁边界、真实验证与初始化路径同步更新，中英文README保持一致 |
@@ -708,17 +715,18 @@ uv run python -m scripts.directory_upgrade activate --run-id <upgrade-run-id>
 - mounted asset/hash、API/core版本、schema ledger、source/active_version、各worker索引/版本、数据基线共同判定ready；`/health` 200或OneDeploy成功不能代替这些结果。
 - 恢复记录的运行状态，不无条件启动原本停止的应用。lease/中断job/未决请求依旧可诊断；不能删除journal强行跳过冲突。
 - 恢复APIM旧revision前检查后续发布与禁用变化；不得重新开启已撤销身份，不移动证据cutoff、不清空pending reservation或confirmed量。
-- 备份、计划、真实资源IDs、readback证据与凭据均保留私有；公开文档只描述通用步骤，截图脱敏。本次未执行任何实际发布或回滚。
+- 备份、计划、真实资源IDs、readback证据与凭据均保留私有；P1发布及早期兼容回滚已验证，
+  `9cc17fa`本轮未重复回滚演练，生产数据库恢复未执行，不能与隔离恢复混同。
 
 ## 12. 验证计划
 
 | 层 | 必须覆盖的场景 | 不能据此声称 |
 | --- | --- | --- |
-| 域/服务单元 | 树约束、稳定键、多人多团队去重、主部门唯一、字段权威、调岗/归档依赖、授权撤销 | 真实DB锁与网关已更新 |
-| 真实PostgreSQL | 从011升级、重跑、旧迁移checksum、旧用量/证据不变、membership重叠拒绝、并发分配/转移、死锁重试 | Graph授权与最终一致性 |
+| 域/服务单元 | 树约束、稳定键、成员去重、唯一主部门、归档/授权撤销和退役工作流拒绝 | 真实DB锁与网关已更新 |
+| 真实PostgreSQL | 从011升级至017、重跑、旧checksum/账务保持、membership约束、成员/授权并发与旧计划退役 | Graph授权与最终一致性 |
 | API权限 | Owner/授权部门Member/普通Member、篡改ID、bulk、detail、total、history、个人页、助手及固定报表范围；admin/service不得被当作第三类登录角色 | 浏览器布局正确 |
 | 契约/前端 | 旧enterprise/budget契约；APIM 菜单/搜索可见、GitHub Copilot 隐藏；来源切换/直达/历史恢复归一化、停止页面预取/轮询、企业团队回归、cache清理、长文本、多语言、键盘、移动端 | 已完成生产目录迁移 |
-| 历史回归 | 归档/未知部门筛选、ID改名合并且总量不变、原明细名称、跨月调岗与旧预算父级、无模型策略/空策略 | 所有旧别名已正确合并 |
+| 历史回归 | UI管理状态与旧API历史兼容、ID改名总量/原名称保持、旧周期父级、无策略/空策略；不验收退役调岗 | 所有旧别名已正确合并 |
 | Graph mock | next/delta link、重复页、multi-group冲突、Guest、无mail、hidden、403/429/失效游标、删除阈值 | 目标租户consent已授予 |
 | Graph授权环境 | 指定租户、选定Groups、应用权限/字段、跨租户隔离、改名/移组/禁用、全量/增量收敛 | APIM映射自动生效 |
 | 网关授权环境 | 可信tid/oid映射、header伪造、旧/新邮箱同一账本、缓存TTL、禁用无预算人员、版本回放、未决请求归属不变 | 本地测试足以证明计费 |
@@ -731,7 +739,15 @@ uv run python -m scripts.directory_upgrade activate --run-id <upgrade-run-id>
 
 实施时运行根README完整命令集：ruff、mypy、pytest、frontend build、Bicep build、APIM XML、OpenAPI lint、diff检查；frontend typecheck额外补充。新模板/Function入口须追加编译和索引验证，不能仅测试原main。E2E按同候选完成新装与升级两条路径、桌面和390px移动端、真实Owner/部门Member会话。每项记录 passed/failed/blocked/not exercised；单元mock与源码检查不替代真实数据库/Azure/浏览器。文档阶段不执行云同步、付费探针或上线迁移。
 
-## 13. 未决设计与退出条件
+## 13. 当前实现状态与退出条件
+
+| 能力 | 实现/部署 | 验证边界 |
+| --- | --- | --- |
+| 数据库目录、组织人员与成员、精确范围任命 | 已上线，001-017 | 新装/升级及真实API/浏览器通过；不提供正式HR调岗流程 |
+| 目录状态排序、人员弹窗、预算层级与团队筛选 | 已上线 `1d82983`，`9cc17fa`复验 | 原预算控制/存储/模型授权不变 |
+| 用量多选与查询目录、AI FinOps报表中心 | 已上线 `9cc17fa` | 1758 passed / 7 skipped及线上只读复验；兼容未知数据未删除 |
+| 同步、身份绑定/投影、独立APIM工具 | 代码已部署，真实开关关闭 | 仅Graph夹具/数据库、候选Azure编译与读回通过，真实租户/员工调用未验收 |
+| 停启后就绪、连接池恢复与静态资源优化 | 尚未实现改造 | 运行事件与设计缺口见[运行恢复边界](../ai-finops/design.md#availability-and-recovery-2026-10-11) |
 
 - 确认是否需要部门管理员预算/模型可选授权；默认关闭，启用前必须完成全部服务端范围路径。
 - 确认目录人员停用是否要求同时禁用登录账号；分别存状态，但Owner可批准联动。
@@ -740,6 +756,8 @@ uv run python -m scripts.directory_upgrade activate --run-id <upgrade-run-id>
 - Graph云、Guest、隐藏Group、嵌套展开及资料保留策略需目标租户验证。
 - P1上线退出条件：空目录新装与既有数据升级分别验证；迁移串行化/幂等、三包/状态门禁、兼容回滚通过；APIM入口与GitHub模式隐藏/归一化、独立企业团队回归通过；共享目录切换、旧治理键、历史查询/权限、静态网关对齐与生产映射均有对应证据。
 - P2退出条件：可信外部身份/账号绑定、Graph任务安全性、动态网关映射及停用传播全部在授权环境验证；不能仅以同步任务返回200作为交付。
+- 持续可用性不能沿用单次发布验收结论；数据库外部自动关停、重连耗时与health依赖缺口需独立处理，
+  未经授权不得停启真实服务做故障测试或自行豁免治理策略。
 
 ## 14. 官方参考
 
@@ -755,3 +773,11 @@ uv run python -m scripts.directory_upgrade activate --run-id <upgrade-run-id>
 - [Microsoft Graph：Paging](https://learn.microsoft.com/en-us/graph/paging) / [Throttling](https://learn.microsoft.com/en-us/graph/throttling) / [Delta overview](https://learn.microsoft.com/en-us/graph/delta-query-overview)。
 
 当前源码事实及可点击文件依据见[需求分析第9节](requirements.md#9-源码依据)。
+
+## 权限管理后续实现说明
+
+2026-10-11新增[权限管理设计](../permission-management/design.md)：
+菜单配置从固定四组矩阵扩展为Owner持久化配置；目录模式Member读取由有效管理员任命/
+同级成员关系自动派生人员范围，普通用户仅本人。本文早期“普通Member保留全域读取”
+或“组只控制导航”的描述仅为018以前的基线，不再作为新版本权限规范。
+管理员指派继续留在组织管理，权限管理不重复提供指派/数据范围配置。

@@ -207,7 +207,7 @@ def test_menu_group_profile_and_password_login_do_not_change_data_authorization(
     assert set(after["menu_permission_groups"]) == {
         "organization_admin", "team_admin", "department_admin"
     }
-    assert "settings" in after["menu_permissions"]
+    assert "settings" not in after["menu_permissions"]
     assert after["role"] == before["role"] == "member"
     assert after["directory_scope_key"] == before["directory_scope_key"]
     assert after["directory_permission_revision"] > before["directory_permission_revision"]
@@ -253,9 +253,10 @@ def test_revoked_department_admin_does_not_recover_legacy_global_read(
     profile = client.get("/api/v1/auth/me").json()
     assert profile["directory_permission_revision"] > prior["directory_permission_revision"]
     assert profile["directory_scope_key"] != prior["directory_scope_key"]
-    assert not client.get("/api/v1/organization-management/capabilities").json()["can_read"]
+    assert client.get("/api/v1/organization-management/capabilities").status_code == 403
     assert client.get("/api/v1/organization-management/people").status_code == 403
-    assert client.get("/api/v1/enterprise/entities").json()["departments"] == []
+    own_catalog = client.get("/api/v1/enterprise/entities").json()
+    assert [row["id"] for row in own_catalog["users"]] == [data["person"]["governance_user_id"]]
     assert client.get("/api/v1/application-access/applications").status_code == 403
 
 

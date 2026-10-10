@@ -76,8 +76,8 @@ def test_appointments_share_labels_profile_and_do_not_alias_department_and_team(
     )
     principal = service.store.principal(account_id, "member@example.com", "member")
     assert set(principal.menu_permission_groups) == {"department_admin", "organization_admin"}
-    assert "settings" in principal.menu_permissions and not principal.owner
-    assert principal.department_ids == (dept["id"],)
+    assert "settings" not in principal.menu_permissions and not principal.owner
+    assert dept["id"] in (principal.department_ids or ())
     assert service.store.state()["active_version"] == state["active_version"]
     with service.store.connection() as db:
         assert db.execute(
@@ -92,7 +92,7 @@ def test_appointments_share_labels_profile_and_do_not_alias_department_and_team(
     assert service.menu_administrators(owner, "department", dept["id"]) == []
     assert service.store.principal(
         account_id, "member@example.com", "member"
-    ).department_ids == ()
+    ).data_scope is not None
 
 
 def test_team_requires_real_membership_and_owner_and_stale_saves_are_rejected(

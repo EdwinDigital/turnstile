@@ -323,6 +323,12 @@ class DirectoryService:
             if not principal.owner:
                 scope = list(principal.department_ids or ())
                 parameters.extend([scope, scope])
+                if principal.data_scope is not None:
+                    clause = " AND (id=ANY(%s) OR parent_unit_id=ANY(%s) OR id=ANY(%s))"
+                    parameters = [
+                        organization_id, scope, list(principal.data_scope.department_ids),
+                        list(principal.data_scope.team_ids),
+                    ]
             rows = connection.execute(
                 f"""SELECT * FROM directory_unit WHERE organization_id=%s{clause}
                     ORDER BY kind, name, id""",
@@ -344,7 +350,7 @@ class DirectoryService:
         limit: int = 50,
     ) -> DirectoryPage:
         self.store.require_ready()
-        if not principal.owner and not principal.department_ids:
+        if not principal.owner and not principal.department_ids and principal.data_scope is None:
             raise DirectoryError("directory_forbidden", "Directory access is not granted", 403)
         if department_id:
             principal.require("directory.read", department_id)
@@ -362,8 +368,12 @@ class DirectoryService:
             rows = self.store.people_rows(
                 connection,
                 department_ids=(
-                    None if principal.owner or available_unit_id or team_id or department_id
+                    None if principal.data_scope is not None or principal.owner
+                    or available_unit_id or team_id or department_id
                     else principal.department_ids
+                ),
+                allowed_user_ids=(
+                    principal.data_scope.user_ids if principal.data_scope is not None else None
                 ),
                 department_id=department_id,
                 team_id=team_id,
@@ -379,8 +389,12 @@ class DirectoryService:
                 first = self.store.people_rows(
                     connection,
                     department_ids=(
-                        None if principal.owner or available_unit_id or team_id or department_id
+                        None if principal.data_scope is not None or principal.owner
+                        or available_unit_id or team_id or department_id
                         else principal.department_ids
+                    ),
+                    allowed_user_ids=(
+                        principal.data_scope.user_ids if principal.data_scope is not None else None
                     ),
                     department_id=department_id,
                     team_id=team_id,
@@ -862,6 +876,10 @@ class DirectoryService:
     ) -> dict[str, Any]:
         def update(connection: DirectoryConnection) -> dict[str, Any]:
             before = self._person(connection, person_id)
+            if principal.data_scope is not None and (
+                before["governance_user_id"] not in principal.data_scope.user_ids
+            ):
+                raise DirectoryError("person_not_found", "Person not found", 404)
             principal.require("directory.edit_people", before["department_id"])
             self._revision(before, write)
             if (
@@ -938,6 +956,10 @@ class DirectoryService:
     ) -> dict[str, Any]:
         def update(connection: DirectoryConnection) -> dict[str, Any]:
             before = self._person(connection, person_id)
+            if principal.data_scope is not None and (
+                before["governance_user_id"] not in principal.data_scope.user_ids
+            ):
+                raise DirectoryError("person_not_found", "Person not found", 404)
             principal.require("directory.edit_people", before["department_id"])
             self._revision(before, write)
             department = {"organization_id": before["organization_id"]}
@@ -1072,8 +1094,7 @@ class DirectoryService:
                 and (
                     scope_kind != "department"
                     or (
-                        row["department_id"] == scope_id
-                        and row["department_id"] in active_departments
+                        scope_id in active_departments
                     )
                 )
             }
@@ -1466,12 +1487,17 @@ class DirectoryService:
             principal.require("directory.read", department_id)
         if not principal.owner and not principal.department_ids:
             raise DirectoryError("directory_forbidden", "Directory access is not granted", 403)
+        if principal.data_scope is not None and not principal.data_scope.department_ids:
+            return []
         with self.store.connection() as connection:
             clauses: list[str] = []
             values: list[Any] = []
             if not principal.owner:
                 clauses.append("department_id=ANY(%s)")
-                values.append(list(principal.department_ids or ()))
+                values.append(list(
+                    principal.data_scope.department_ids if principal.data_scope is not None
+                    else principal.department_ids or ()
+                ))
             if department_id:
                 clauses.append("department_id=%s")
                 values.append(department_id)

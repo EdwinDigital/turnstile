@@ -43,6 +43,7 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "015_scoped_menu_administrators.up.sql",
         "016_organization_members.up.sql",
         "017_department_memberships.up.sql",
+        "018_permission_management.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
 

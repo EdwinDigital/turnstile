@@ -44,6 +44,7 @@ def get_token_budgets(
         period,
         include_users=include_users,
         allowed_department_ids=identity.directory_department_ids,
+        data_scope=identity.data_scope,
     )
 
 
@@ -64,7 +65,9 @@ def get_people_budgets(
     ):
         raise HTTPException(status_code=404, detail="Department budget scope not found")
     try:
-        return service.people(period, department_id, query, status, offset, limit)
+        return service.people(
+            period, department_id, query, status, offset, limit, data_scope=identity.data_scope,
+        )
     except BudgetNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 

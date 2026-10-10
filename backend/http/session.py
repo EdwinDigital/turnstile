@@ -15,6 +15,7 @@ from turnstile_core.services.directory_catalog import directory_store
 
 from ..services.auth_service import SessionIdentity as SessionIdentity
 from ..services.auth_service import hash_session_token
+from .menu_access import require_menu_access
 
 
 @lru_cache
@@ -52,6 +53,7 @@ def require_authenticated_session(
     menu_groups: tuple[str, ...] = ("user",)
     menu_scopes: tuple[MenuAdministratorScope, ...] = ()
     menus = menu_permissions(owner=role == "owner")
+    data_scope = None
     if settings.directory_source == "legacy" and settings.database_url:
         state = directory_store(settings.database_url).state_if_present()
         if state is not None and state["source"] != "legacy":
@@ -69,6 +71,7 @@ def require_authenticated_session(
         menu_groups = principal.menu_permission_groups
         menu_scopes = principal.menu_administrator_scopes
         menus = principal.menu_permissions
+        data_scope = principal.data_scope
         person = directory.linked_person(UUID(str(owner["id"])))
         if person:
             directory_person_active = (
@@ -77,7 +80,7 @@ def require_authenticated_session(
                 and not person["source_disabled"]
             )
             governance_user_id = str(person["governance_user_id"])
-    return SessionIdentity(
+    identity = SessionIdentity(
         id=str(owner["id"]),
         email=str(owner["email"]),
         name=owner.get("display_name"),
@@ -97,7 +100,10 @@ def require_authenticated_session(
         menu_permission_groups=menu_groups,
         menu_administrator_scopes=menu_scopes,
         menu_permissions=menus,
+        data_scope=data_scope,
     )
+    require_menu_access(request, identity)
+    return identity
 
 
 CurrentSession = Annotated[SessionIdentity, Depends(require_authenticated_session)]

@@ -161,6 +161,7 @@ def assistant_service(repository: Repository, identity: CurrentSession) -> Assis
     return AssistantService(
         repository, ModelRuntimeService(repository, settings), settings,
         department_ids=identity.directory_department_ids,
+        data_scope=identity.data_scope,
     )
 
 

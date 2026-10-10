@@ -111,7 +111,11 @@ def _issue(
     if settings.directory_source == "database" and settings.database_url:
         directory = directory_store(settings.database_url)
         principal = directory.principal(UUID(str(user["id"])), user["email"], user["role"])
-        if principal.department_ids is not None:
+        if principal.data_scope is not None:
+            scope_key = hashlib.sha256(
+                json.dumps(principal.data_scope.__dict__, sort_keys=True).encode()
+            ).hexdigest()
+        elif principal.department_ids is not None:
             scope_key = hashlib.sha256(
                 json.dumps(sorted(principal.department_ids)).encode()
             ).hexdigest()

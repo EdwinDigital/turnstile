@@ -9,6 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
+from .data_access import DataAccessScope
 from .menu_permissions import MenuPermissionGroup, menu_permissions
 
 DirectoryStatus = Literal["active", "inactive", "archived"]
@@ -37,6 +38,7 @@ class MenuAdministratorScope(DirectoryModel):
 
 
 class DirectoryPrincipal(DirectoryModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     account_id: UUID | None = None
     email: str
     role: Literal["owner", "member", "system"] = "member"
@@ -47,6 +49,8 @@ class DirectoryPrincipal(DirectoryModel):
     menu_permission_group: MenuPermissionGroup = "user"
     menu_permission_groups: tuple[MenuPermissionGroup, ...] = ("user",)
     menu_administrator_scopes: tuple[MenuAdministratorScope, ...] = ()
+    data_scope: DataAccessScope | None = None
+    permission_policy: dict[str, list[str]] | None = None
 
     def is_menu_administrator(self, scope_kind: AdministratorScopeKind, scope_id: str) -> bool:
         return any(
@@ -65,11 +69,13 @@ class DirectoryPrincipal(DirectoryModel):
             (scope_groups[scope_kind],)
             if self.is_menu_administrator(scope_kind, scope_id) else ("user",)
         )
-        return menu_permissions(groups, owner=self.owner)
+        return menu_permissions(groups, owner=self.owner, policy=self.permission_policy)
 
     @property
     def menu_permissions(self) -> tuple[str, ...]:
-        return menu_permissions(self.menu_permission_groups, owner=self.owner)
+        return menu_permissions(
+            self.menu_permission_groups, owner=self.owner, policy=self.permission_policy,
+        )
 
     @property
     def owner(self) -> bool:

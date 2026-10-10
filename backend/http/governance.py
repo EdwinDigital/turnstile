@@ -34,6 +34,15 @@ def get_anomaly_rules(
     settings: Config,
 ) -> AnomalyRuleListResponse:
     result = service.list()
+    if identity.data_scope is not None:
+        data_scope = identity.data_scope
+        catalog = data_scope.filter_catalog(catalog_for(repository, settings))
+        people = {person.id for person in catalog.users}
+        return result.model_copy(update={"items": [
+            rule for rule in result.items
+            if (rule.scope_type == "department" and rule.scope_id in data_scope.department_ids)
+            or (rule.scope_type == "user" and rule.scope_id in people)
+        ]})
     if identity.directory_department_ids is None:
         return result
     scope = identity.directory_department_ids

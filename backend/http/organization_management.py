@@ -193,7 +193,13 @@ def person(
 ) -> dict[str, Any]:
     with service.store.connection() as connection:
         row = service._person(connection, person_id)
-    principal.require("directory.read", row["department_id"])
+    if (
+        principal.data_scope is not None
+        and row["governance_user_id"] not in principal.data_scope.user_ids
+    ):
+        raise HTTPException(status_code=404, detail="Person not found")
+    if principal.data_scope is None:
+        principal.require("directory.read", row["department_id"])
     return json_value(row)
 
 

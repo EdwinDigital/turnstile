@@ -750,6 +750,11 @@ class PostgreSqlOpsDbProxy(
         if filters.allowed_department_ids is not None:
             clauses.append(f"{alias}.department_id = ANY(%s)")
             parameters.append(list(filters.allowed_department_ids))
+        if filters.data_scope is not None:
+            clauses.append(f"({alias}.department_id=ANY(%s) OR {alias}.user_id=ANY(%s))")
+            parameters.extend([
+                list(filters.data_scope.department_ids), list(filters.data_scope.user_ids),
+            ])
         if filters.directory_scope is not None:
             scope = filters.directory_scope
             clauses.append(

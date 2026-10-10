@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time
 from typing import Any, TypedDict, cast
 
+from turnstile_core.domain.data_access import DataAccessScope
 from turnstile_core.domain.models import (
     BudgetScopeType,
     DepartmentEnforcementWrite,
@@ -182,7 +183,65 @@ class TokenBudgetService:
         *,
         include_users: bool = False,
         allowed_department_ids: tuple[str, ...] | None = None,
+        data_scope: DataAccessScope | None = None,
     ) -> TokenBudgetResponse:
+        if data_scope is not None:
+            complete = self.overview(period, include_users=True)
+            visible = [
+                item for item in complete.items
+                if item.scope_type == "user"
+                and data_scope.allows(item.parent_scope_id or "", item.scope_id)
+                or item.scope_type == "department"
+                and item.scope_id in data_scope.department_ids
+            ]
+            for kind in ("department", "organization"):
+                for parent in (item for item in complete.items if item.scope_type == kind):
+                    children = [item for item in visible if item.parent_scope_id == parent.scope_id]
+                    if not children or (kind, parent.scope_id) in {
+                        (item.scope_type, item.scope_id) for item in visible
+                    }:
+                        continue
+                    used = sum(item.used_tokens for item in children)
+                    limit = sum(item.token_limit or 0 for item in children) or None
+                    forecast = sum(item.forecast_tokens for item in children)
+                    usage_percent = round(used / limit * 100, 1) if limit else None
+                    forecast_percent = round(forecast / limit * 100, 1) if limit else None
+                    status = (
+                        "unallocated" if limit is None else "exceeded" if used >= limit
+                        else "warning" if max(usage_percent or 0, forecast_percent or 0)
+                        >= parent.warning_threshold_percent else "healthy"
+                    )
+                    visible.append(parent.model_copy(update={
+                        "token_limit": limit, "used_tokens": used,
+                        "remaining_tokens": limit - used if limit is not None else None,
+                        "usage_percent": usage_percent,
+                        "forecast_tokens": forecast,
+                        "forecast_percent": forecast_percent,
+                        "status": status,
+                        "updated_at": None, "updated_by": None,
+                    }))
+            keys = {(item.scope_type, item.scope_id) for item in visible}
+            risks = [
+                {"scope_type": item.scope_type, "scope_id": item.scope_id,
+                 "scope_name": item.scope_name, "status": item.status,
+                 "usage_percent": item.usage_percent, "forecast_percent": item.forecast_percent}
+                for item in visible if item.status in {"warning", "exceeded"}
+            ]
+            scoped_history = [
+                row for row in complete.history
+                if (row.model_dump().get("scope_type"), row.model_dump().get("scope_id")) in keys
+                or row.event_type == "model_access"
+                and row.model_dump().get("user_id") in data_scope.user_ids
+                or row.event_type == "enforcement"
+                and row.model_dump().get("department_id") in data_scope.department_ids
+            ]
+            return TokenBudgetResponse.model_validate({**complete.model_dump(),
+                "coverage": "department",
+                "items": [item for item in visible if include_users or item.scope_type != "user"],
+                "risk_items": risks[:25], "risk_count": len(risks), "history": scoped_history,
+                "enforcement": [item for item in complete.enforcement
+                                if item.department_id in data_scope.department_ids],
+            })
         period_start, period_end = period_bounds(period)
         scope_options: ScopeOptions = (
             {"allowed_department_ids": allowed_department_ids}
@@ -411,6 +470,7 @@ class TokenBudgetService:
         status: PeopleBudgetFilter,
         offset: int,
         limit: int,
+        data_scope: DataAccessScope | None = None,
     ) -> TokenBudgetPeopleResponse:
         period_start, _ = period_bounds(period)
         department = next(
@@ -429,7 +489,8 @@ class TokenBudgetService:
         overview = self.overview(
             period,
             include_users=True,
-            allowed_department_ids=(department_id,),
+            allowed_department_ids=None if data_scope is not None else (department_id,),
+            data_scope=data_scope,
         )
         department_budget = next(
             (

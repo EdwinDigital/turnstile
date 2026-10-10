@@ -51,7 +51,11 @@ tags:
   description: Private current-account self service.
 - name: Organization Management
   description: Persistent APIM directory, department delegation and reviewed read-only Entra synchronization.
+- name: Permission Management
+  description: Owner-only revisioned four-role menu configuration; automatic row scopes are not editable.
 paths:
+  /api/v1/permission-management:
+    $ref: ./openapi/paths/permission-management.yaml#/paths/~1api~1v1~1permission-management
   /api/v1/model-gateway/images/generations:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-gateway~1images~1generations
   /api/v1/application-access/applications:
