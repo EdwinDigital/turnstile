@@ -9,7 +9,7 @@ main本地与线上验收通过，结果见实施记录；上游CI待维护者�
 
 | 功能 | 需求分析 | 设计文档 | 状态 | 已提交 PR |
 | --- | --- | --- | --- | --- |
-| AIGateway-Proxy 客户端 | [requirements.md](aigateway-proxy-client/requirements.md) | [design.md](aigateway-proxy-client/design.md) | 设计已完成，开发与验收进行中 | 未提交 |
+| AIGateway-Proxy 客户端 | [requirements.md](aigateway-proxy-client/requirements.md) | [design.md](aigateway-proxy-client/design.md) | 核心功能已上线；cc-switch 下载、magpie 导入及5模型连通验收通过，精细权限延期，见[实施记录](aigateway-proxy-client/implementation.md) | 未提交上游 PR |
 | 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已实现、已上线；010不可变，后续共享包保留；原验收边界见验证记录 | [xuleihive/turnstile#31](https://github.com/xuleihive/turnstile/pull/31)，Open，待合并 |
 | 用户设置 | [requirements.md](user-settings/requirements.md) | [design.md](user-settings/design.md) | 已实现、已上线；当前目录集成及本人只读接口已随 `9cc17fa` 复验；真实 Microsoft OAuth/Graph 未重新验收 | [xuleihive/turnstile#32](https://github.com/xuleihive/turnstile/pull/32)，Open，待合并 |
 | 组织管理 | [requirements.md](organization-management/requirements.md) | [design.md](organization-management/design.md) | P1 已上线；001-018 已应用，成员/权限/预算与用量兼容已复验；P2 代码已部署，真实 Entra 与动态网关未验收且开关关闭 | [xuleihive/turnstile#34](https://github.com/xuleihive/turnstile/pull/34)，Open，待上游审查 |

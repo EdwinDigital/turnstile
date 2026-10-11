@@ -28,8 +28,16 @@
 - requirements.txt 和完整 uv.lock 与现有生产包逐字节相同，因此复用该已部署 Linux .python_packages 依赖树；源代码和静态页面从当前提交重新构建，不复用旧业务代码。
 - 使用 git archive、现有 stage_deployment 和 deterministic_zip 生成 API 包，校验 ZIP、模板、core digest 和 frontend hash。发布前重查生产挂载包，变更则停止，不能覆盖未纳入的并行发布。
 
-## 待完成
+## 生产发布与核心验收
 
-- 实际生产 API/frontend 发布、线上页面和下载验证、从线上包再次导入并调用真实 magpie 网关。
+- 已发布代码提交 625c01f，生产挂载包 20261011104724.zip，SHA-256 621442742f45c1cbf6d64dcbf8672269d88124ebf1b327191074175d2819b473，SCM 发布 HTTP 200，挂载 ZIP hash 与构建包一致。
+- 真实 /health、密码登录、options、POST magpie 下载均 HTTP 200；下载 Content-Type application/zip、Cache-Control no-store。未登录 401，错配网关 404。当前生产接口实际读取生效发布及数据库，并非本地模拟。
+- 线上静态资源 index-D_2J5BMT.js 与 index-hFpvtLnS.css 逐字节匹配新发布包。刚重启时旧进程短暂仍提供旧静态页面，待新进程加载后重新读取和验证通过，未重复部署。
+- 真实 Edge 用户菜单 -> 下载客户端 -> 选择 cc-switch -> 勾选密钥警告 -> 下载插件，页面显示下载成功。控制台 error/warn 空，桌面及 390x844 手机视口验证通过，scrollWidth=390，无横向溢出；视口测试后恢复。
+- 从生产 POST 下载的 ZIP 再导入隔离 magpie，5 models，登录成功。真实模型 provider test：GPT Sol Responses 1761ms、Claude Anthropic 1814ms、Kimi Responses 2343ms、GPT Astra Responses 4939ms、Grok Responses 2655ms，全部通过。
+- 模拟外部 Agent 使用隔离 magpie /v1/chat/completions -> 插件 -> 线上 APIM 的完整路径：HTTP 200 text/event-stream，5 SSE data 事件，验证客户端格式转换与流式转发。
+- 测试产生少量真实模型用量，按 cc-switch 归因；未改预算、模型授权、APIM 配置、数据库结构或其他登录。私密包、备份及证据保存在 Git 外；不上传包含订阅密钥的包到公共仓库。
+
+## 当前范围限制
 - 普通用户的应用订阅授权、真实第三方 Agent 文件改写、图像生成不在当前核心验证范围。
 - 本地直连生产 PostgreSQL 因网络不可达失败；未开放防火墙。生产业务验证通过平台真实 API，而不是把本地快照当作生产数据库验证。
