@@ -27,7 +27,7 @@ loader 从当前账号 getAuth 读取密钥，设置 APIM Ocp-Apim-Subscription-
 
 复用 gateway_protocol.invocation_api_paths 决定支持的协议；如支持 Responses 优先 Responses，不凭显示名猜测。模型逐项 npm 映射：openai_responses -> @ai-sdk/openai；anthropic_messages -> @ai-sdk/anthropic；其他受支持 chat -> @ai-sdk/openai-compatible。Anthropic SDK 的 /messages 重写为平台 /v1/messages；模型发现使用平台 /v1/models。不凭显示名推断协议。模型 context 取平台注册值；未知 context 使用保守客户端默认，output 使用客户端 8192 上限（不是厂商最大输出声明）。
 
-provider.models 调用配置网关 /models，取线上与快照交集；401/403 标记登录需要重新验证，网络/其他失败保留快照。网关实时 admission 才是最终授权，不宣称快照等于持续权限。
+provider.models 调用配置网关 /v1/models，取线上与快照交集；401/403 标记登录需要重新验证，网络/其他失败保留快照。网关实时 admission 才是最终授权，不宣称快照等于持续权限。
 
 ## 页面
 
