@@ -41,3 +41,13 @@
 ## 当前范围限制
 - 普通用户的应用订阅授权、真实第三方 Agent 文件改写、图像生成不在当前核心验证范围。
 - 本地直连生产 PostgreSQL 因网络不可达失败；未开放防火墙。生产业务验证通过平台真实 API，而不是把本地快照当作生产数据库验证。
+
+## WorkBuddy 真实 Agent 验证（2026-10-11）
+
+- 按用户指定使用本机 WorkBuddy 5.8.0，不改 Codex 或其他 Agent 的连接。读取 magpie 本地 workbuddy.go 核对 models.json 接口，只临时追加一个自定义模型到 WorkBuddy，保留已有 11 项。
+- 临时模型指向隔离 magpie 127.0.0.1:3499，模型 ID 为 aigateway-92bb81023bc454acb9c60f50ea715b1e/gpt-6.1-sol-foundry-d8c6686a；APIM 密钥仍只存插件私密配置，不给 WorkBuddy。
+- WorkBuddy 新建「AIGateway-Proxy 联调测试」，明确要求不读文件、不用工具、不搜索，只回复测试标记。应用返回 AIGATEWAY_WORKBUDDY_OK_20261011 并显示已完成。
+- 隔离 magpie 实际记录：agent=workbuddy，provider 为 AIGateway 插件，model 为 GPT Sol 平台别名，status=200、stop=completed、ms=3394，输入 544/output 22 tokens。request ID ef3a6b64-1245-4e0d-838c-312293f85983。
+- 验证链路为真实 WorkBuddy app -> 隔离 magpie -> 生产下载插件 -> 线上 cc-switch APIM -> 模型；非模拟 HTTP 客户端。
+- 测试后 WorkBuddy models.json 与备份逐字节一致，Codex config.toml 和日常 magpie providers.json hash 不变。恢复 WorkBuddy 原 GPT-6.1 Sol Copilot 选择和原未发送草稿，保留联调任务作为证据；停止本次启动的隔离 magpie 服务。
+- 此次验收覆盖真实 Agent 文本/流式请求；WorkBuddy 文件编辑、多轮工具调用及其他模型在 WorkBuddy 中的使用尚未验证。原 5 模型 magpie 连通验收仍独立成立。
