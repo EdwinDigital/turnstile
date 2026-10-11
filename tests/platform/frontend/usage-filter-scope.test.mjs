@@ -15,16 +15,16 @@ const catalog = {
 }
 const filters = scope => ({ from: "a", to: "b", ...scope })
 
-test("archive UI exposes only managed states and all means active plus archived", () => {
+test("archive UI exposes managed states while enabled requests retain unattributed calls", () => {
   assert.deepEqual(usageArchiveSelection(undefined), ["active"])
-  assert.deepEqual(usageArchiveFilter(undefined), ["active"])
+  assert.deepEqual(usageArchiveFilter(undefined), ["active", "unattributed"])
   assert.deepEqual(usageArchiveSelection([]), [])
-  assert.deepEqual(usageArchiveFilter([]), ["active", "archived"])
+  assert.deepEqual(usageArchiveFilter([]), ["active", "archived", "unattributed"])
   assert.deepEqual(usageArchiveFilter(["archived"]), ["archived"])
-  assert.deepEqual(usageArchiveFilter(["active", "historical", "unattributed"]), ["active"])
-  assert.deepEqual(usageArchiveFilter(["historical", "unattributed"]), ["active"])
+  assert.deepEqual(usageArchiveFilter(["active", "historical", "unattributed"]), ["active", "unattributed"])
+  assert.deepEqual(usageArchiveFilter(["historical", "unattributed"]), ["active", "unattributed"])
   const previous = Object.freeze(["archived", "active", "archived"])
-  assert.deepEqual(usageArchiveFilter(previous), ["active", "archived"])
+  assert.deepEqual(usageArchiveFilter(previous), ["active", "archived", "unattributed"])
   assert.deepEqual(previous, ["archived", "active", "archived"])
 })
 

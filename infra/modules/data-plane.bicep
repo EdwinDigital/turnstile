@@ -57,7 +57,6 @@ var apiName = 'api-${resourcePrefix}-${suffix}'
 var functionName = 'func-${resourcePrefix}-telemetry-${suffix}'
 var virtualNetworkName = 'vnet-${resourcePrefix}-${suffix}'
 var telemetryFunctionSubnetName = 'snet-flex-telemetry'
-var controlFunctionSubnetName = 'snet-flex-control'
 var privateEndpointSubnetName = 'snet-private-endpoints'
 var apiSubnetName = 'snet-api'
 var telemetryDeploymentContainerName = 'deploy-telemetry'
@@ -305,85 +304,23 @@ resource ledgerTable 'Microsoft.Storage/storageAccounts/tableServices/tables@202
 
 var ledgerTableEndpoint = ledgerStorage.properties.primaryEndpoints.table
 
-resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' = {
+resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' existing = {
   name: virtualNetworkName
-  location: location
-  properties: {
-    addressSpace: {
-      addressPrefixes: [
-        '10.42.0.0/16'
-      ]
-    }
-  }
 }
 
-resource telemetryFunctionSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = {
+resource telemetryFunctionSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
   parent: virtualNetwork
   name: telemetryFunctionSubnetName
-  properties: {
-    addressPrefix: '10.42.3.0/27'
-    delegations: [
-      {
-        name: 'flex-consumption-delegation'
-        properties: {
-          serviceName: 'Microsoft.App/environments'
-        }
-      }
-    ]
-  }
-  dependsOn: [
-    virtualNetwork
-  ]
 }
 
-resource controlFunctionSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = {
-  parent: virtualNetwork
-  name: controlFunctionSubnetName
-  properties: {
-    addressPrefix: '10.42.3.32/27'
-    delegations: [
-      {
-        name: 'flex-consumption-delegation'
-        properties: {
-          serviceName: 'Microsoft.App/environments'
-        }
-      }
-    ]
-  }
-  dependsOn: [
-    telemetryFunctionSubnet
-  ]
-}
-
-resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = {
+resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
   parent: virtualNetwork
   name: privateEndpointSubnetName
-  properties: {
-    addressPrefix: '10.42.2.0/24'
-    privateEndpointNetworkPolicies: 'Disabled'
-  }
-  dependsOn: [
-    controlFunctionSubnet
-  ]
 }
 
-resource apiSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = {
+resource apiSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
   parent: virtualNetwork
   name: apiSubnetName
-  properties: {
-    addressPrefix: '10.42.3.64/27'
-    delegations: [
-      {
-        name: 'app-service-delegation'
-        properties: {
-          serviceName: 'Microsoft.Web/serverFarms'
-        }
-      }
-    ]
-  }
-  dependsOn: [
-    privateEndpointSubnet
-  ]
 }
 
 resource blobPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = {

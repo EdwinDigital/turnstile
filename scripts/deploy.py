@@ -127,6 +127,13 @@ class DeploymentInputs:
             raise DeploymentError(
                 "Keep secure parameters out of the public parameter file: " + ", ".join(leaked)
             )
+        if _string_parameter(parameters, "apimSkuName", "StandardV2") not in {
+            "Developer", "StandardV2",
+        }:
+            raise DeploymentError(
+                "Private-ledger bootstrap supports Developer or StandardV2; "
+                "BasicV2 cannot reach the private ledger"
+            )
         resource_prefix = _required_string(parameters, "resourcePrefix")
         location = _required_string(parameters, "location")
         postgres_location = _string_parameter(parameters, "postgresLocation", location)

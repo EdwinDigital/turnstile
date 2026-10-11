@@ -10,7 +10,9 @@ export function usageArchiveSelection(statuses: UsageDirectoryStatus[] | undefin
 
 export function usageArchiveFilter(statuses: UsageDirectoryStatus[] | undefined): UsageDirectoryStatus[] {
   const selected = usageArchiveSelection(statuses)
-  return selected.length ? selected : ["active", "archived"]
+  const managed = selected.length ? selected : ["active", "archived"] as UsageDirectoryStatus[]
+  // Subscription callers need not belong to the managed directory. They are not archived.
+  return managed.includes("active") ? [...managed, "unattributed"] : managed
 }
 
 export function usageSelection(value: string | string[] | undefined): string[] {

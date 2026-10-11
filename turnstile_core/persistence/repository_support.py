@@ -66,14 +66,14 @@ class UsageDirectoryScope:
     def status(
         self, organization_id: str, department_id: str, user_id: str,
     ) -> UsageDirectoryStatus:
-        if organization_id == "unattributed" or department_id == "unattributed":
-            return "unattributed"
         if (
             organization_id in self.archived_organizations
             or department_id in self.archived_departments
             or user_id in self.archived_users
         ):
             return "archived"
+        if organization_id == "unattributed" or department_id == "unattributed":
+            return "unattributed"
         if (
             organization_id in self.active_organizations
             and self.active_departments.get(department_id) == organization_id

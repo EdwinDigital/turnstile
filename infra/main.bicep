@@ -45,7 +45,6 @@ param apimPublisherName string = 'Turnstile'
 
 @allowed([
   'Developer'
-  'BasicV2'
   'StandardV2'
 ])
 param apimSkuName string = 'StandardV2'
@@ -237,6 +236,17 @@ resource platformResourceGroup 'Microsoft.Resources/resourceGroups@2024-11-01' =
 
 var effectiveApimResourceGroupName = provisionApimService ? platformResourceGroup.name : existingApimResourceGroupName
 
+module platformNetwork 'modules/platform-network.bicep' = if (provisionApimService) {
+  name: 'turnstile-platform-network'
+  scope: platformResourceGroup
+  params: {
+    location: location
+    virtualNetworkName: 'vnet-${resourcePrefix}-${suffix}'
+    apimSkuName: apimSkuName
+    apimNetworkSecurityGroupName: 'nsg-${resourcePrefix}-apim-${suffix}'
+  }
+}
+
 module apim 'modules/apim-service.bicep' = if (provisionApimService) {
   name: 'turnstile-apim'
   scope: platformResourceGroup
@@ -247,6 +257,7 @@ module apim 'modules/apim-service.bicep' = if (provisionApimService) {
     publisherName: apimPublisherName
     skuName: apimSkuName
     capacity: apimCapacity
+    ledgerSubnetResourceId: platformNetwork!.outputs.apimSubnetId
   }
 }
 

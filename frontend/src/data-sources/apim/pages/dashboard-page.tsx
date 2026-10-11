@@ -1167,12 +1167,13 @@ function RequestTrace({
   const [selected, setSelected] = useState<string | null>(initialRequestId);
   const [searchText, setSearchText] = useState(initialRequestId ?? "");
   const [statusFilter, setStatusFilter] = useState<"all" | "success" | "error">("all");
-  const query = useQuery(finopsQueries.requests(filters))
+  const liveRefresh = { refetchInterval: 10_000, refetchIntervalInBackground: false, staleTime: 0 } as const
+  const query = useQuery({ ...finopsQueries.requests(filters), ...liveRefresh })
   // The header describes the whole window, so it reads the server aggregate. The list below
   // is a page of recent requests and legitimately uses the rows.
-  const overview = useQuery(finopsQueries.executiveOverview(filters))
-  const volumeTrend = useQuery(finopsQueries.trends(filters, "none", "day"))
-  const detail = useQuery(finopsQueries.requestDetail(selected ?? ""))
+  const overview = useQuery({ ...finopsQueries.executiveOverview(filters), ...liveRefresh })
+  const volumeTrend = useQuery({ ...finopsQueries.trends(filters, "none", "day"), ...liveRefresh })
+  const detail = useQuery({ ...finopsQueries.requestDetail(selected ?? ""), ...liveRefresh })
   const firstRequestId = query.data?.[0]?.correlation_id ?? null
   const selectedCorrelationId = detail.data?.correlation_id ?? selected
   useEffect(() => {
@@ -1213,6 +1214,7 @@ function RequestTrace({
       item.model_name,
       item.user_name,
       item.project_name,
+      item.request_source,
     ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch));
     return matchesStatus && matchesSearch;
   });
@@ -1248,7 +1250,7 @@ function RequestTrace({
       </section>
       <div className="trace-layout span-3">
         <section className="finops-panel trace-list">
-          <PanelTitle title="请求记录" meta={`${visibleRows.length} / ${requestRows.length} 条`} />
+          <PanelTitle title="请求记录" meta={`${visibleRows.length} / ${requestRows.length} 条 · 近实时，10秒刷新`} />
           <div className="trace-list-tools">
             <label>
               <Search size={14} />
@@ -1256,7 +1258,7 @@ function RequestTrace({
                 type="search"
                 value={searchText}
                 onChange={(event) => setSearchText(event.target.value)}
-                placeholder="搜索 ID、智能体、模型或人员"
+                placeholder="搜索 ID、应用、智能体、模型或人员"
                 aria-label="搜索请求"
               />
             </label>

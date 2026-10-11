@@ -57,6 +57,7 @@ def test_directory_facets_and_all_aggregates_share_multiselect_status_and_permis
         ("one", organization_id, data["first"]["id"], data["person"]["governance_user_id"]),
         ("two", organization_id, data["second"]["id"], data["outsider"]["governance_user_id"]),
         ("archive", data["organization"]["id"], archived["id"], "old@example.com"),
+        ("archive_missing_org", "unattributed", archived["id"], "unattributed"),
         ("probe", "system-gateway-publication", "system-gateway-publication", "publisher"),
         ("missing", data["organization"]["id"], "unattributed", "unattributed"),
     ):
@@ -78,12 +79,13 @@ def test_directory_facets_and_all_aggregates_share_multiselect_status_and_permis
     assert all_catalog["invocation_testers"] == []
     for statuses, expected in (
         (["active"], {"one", "two"}),
-        (["archived"], {"archive"}),
+        (["archived"], {"archive", "archive_missing_org"}),
+        (["active", "unattributed"], {"one", "two", "missing"}),
         (["historical"], {"probe"}),
         (["unattributed"], {"missing"}),
-        (["active", "archived"], {"one", "two", "archive"}),
+        (["active", "archived"], {"one", "two", "archive", "archive_missing_org"}),
         (["active", "archived", "historical", "unattributed"],
-         {"one", "two", "archive", "probe", "missing"}),
+         {"one", "two", "archive", "archive_missing_org", "probe", "missing"}),
     ):
         params = [*window.items(), *(("directory_status", value) for value in statuses)]
         response = client.get("/api/v1/observability/requests", params=params)

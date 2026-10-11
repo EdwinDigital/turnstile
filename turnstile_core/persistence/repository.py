@@ -759,10 +759,10 @@ class PostgreSqlOpsDbProxy(
             scope = filters.directory_scope
             clauses.append(
                 f"""(CASE
-                  WHEN {alias}.organization_id='unattributed'
-                    OR {alias}.department_id='unattributed' THEN 'unattributed'
                   WHEN {alias}.organization_id=ANY(%s) OR {alias}.department_id=ANY(%s)
                     OR {alias}.user_id=ANY(%s) THEN 'archived'
+                  WHEN {alias}.organization_id='unattributed'
+                    OR {alias}.department_id='unattributed' THEN 'unattributed'
                   WHEN {alias}.organization_id=ANY(%s)
                     AND (%s::jsonb ->> {alias}.department_id)={alias}.organization_id
                     THEN 'active'
