@@ -749,6 +749,7 @@ class InMemoryApplicationRepositoryMixin:
                     "tokens_per_minute": budget["tokens_per_minute"],
                     "enforce": budget["enforce"],
                     "confirmed_tokens": usage.get(application_id, {}).get("total_tokens", 0),
+                    "quota_updated_at": budget["updated_at"],
                 }
             )
         return rows
@@ -770,6 +771,7 @@ class InMemoryApplicationRepositoryMixin:
                     "token_limit": budget["token_limit"],
                     "tokens_per_minute": budget["tokens_per_minute"],
                     "enforce": budget["enforce"],
+                    "quota_updated_at": budget["updated_at"],
                 }
             )
         return sorted(rows, key=lambda item: str(item["application_id"]))

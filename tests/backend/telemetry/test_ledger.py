@@ -968,6 +968,9 @@ def test_application_ledger_projects_q_c_m_and_settles_exact_reservation() -> No
         "Limit": 100_000,
         "TokensPerMinute": 100_000,
         "Enforce": True,
+        "ConfigurationUpdatedAt": repository.gateway_application_budgets[
+            (date(2026, 7, 1), application_id)
+        ]["updated_at"].isoformat(timespec="microseconds"),
     }
     assert store.entities[(partition, "C")] == {"ConfirmedUsed": 400}
     assert (partition, reservation) not in store.entities

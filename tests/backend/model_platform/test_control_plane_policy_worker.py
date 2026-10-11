@@ -150,7 +150,7 @@ def test_parent_policy_hooks_are_idempotent_and_preserve_inference_invariants() 
     )
     assert 'token-quota="__MONTHLY_TOKEN_QUOTA__"' not in patched
     assert patched.index('name="applicationMapPartition"') < patched.index(
-        'tokens-per-minute="__TOKENS_PER_MINUTE__"'
+        'name="effectiveApplicationTpm"'
     )
 
 def test_parent_policy_rejects_publication_without_compact_admission() -> None:

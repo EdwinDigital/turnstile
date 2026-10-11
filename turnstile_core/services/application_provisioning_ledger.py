@@ -13,6 +13,7 @@ from ..integrations.ledger import (
     TableStorageLedger,
     application_map_partition_key,
     application_partition_key,
+    application_quota_entity,
     model_access_value,
 )
 from ..persistence.repository import QueryRepository
@@ -26,12 +27,17 @@ def prepare_application_ledger(
 ) -> None:
     now = datetime.now(UTC)
     service = LedgerSyncService(repository, store)
-    snapshot = next((
-        item for item in service.application_snapshot(now)
-        if item.application_id == str(application_id)
-    ), None)
+    snapshot = next(
+        (
+            item
+            for item in service.application_snapshot(now)
+            if item.application_id == str(application_id)
+        ),
+        None,
+    )
     mappings = [
-        item for item in repository.gateway_application_ledger_mappings()
+        item
+        for item in repository.gateway_application_ledger_mappings()
         if str(item["application_id"]) == str(application_id)
         and str(item["gateway_profile_id"]) == str(gateway_id)
     ]
@@ -46,19 +52,19 @@ def prepare_application_ledger(
         or not mapping["scope_exists"]
     ):
         raise PolicyCompilationError("Application was disabled or its subscription scope changed")
-    policy = next((
-        item for item in service.application_model_access()
-        if item.application_id == str(application_id)
-    ), None)
+    policy = next(
+        (
+            item
+            for item in service.application_model_access()
+            if item.application_id == str(application_id)
+        ),
+        None,
+    )
     identifiers = model_access_value(policy.identifiers) if policy else ""
     if len(identifiers) > MODEL_PROPERTY_LIMIT:
         raise PolicyCompilationError("Application model access exceeds the ledger property limit")
     partition = application_partition_key(application_id, now.strftime("%Y-%m"))
-    quota = {
-        "Limit": snapshot.token_limit,
-        "TokensPerMinute": snapshot.tokens_per_minute,
-        "Enforce": snapshot.enforce,
-    }
+    quota = application_quota_entity(snapshot)
     access = {"Configured": policy is not None, "Models": identifiers}
     identity = {
         "ApplicationId": str(application_id),

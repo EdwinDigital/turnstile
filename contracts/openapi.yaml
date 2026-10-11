@@ -343,6 +343,8 @@ components:
     ErrorResponse:
       $ref: ./openapi/components/common.yaml#/responses/ErrorResponse
   schemas:
+    GatewayApplicationBudgetProjection:
+      $ref: ./openapi/schemas/application-access.yaml#/schemas/GatewayApplicationBudgetProjection
     ClientDownloadOptions:
       $ref: ./openapi/schemas/client-downloads.yaml#/schemas/ClientDownloadOptions
     ClientDownloadRequest:

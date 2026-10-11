@@ -120,7 +120,7 @@ class GatewayApplicationLedgerState(StrictModel):
 
 class GatewayApplicationBudgetUpdate(StrictModel):
     token_limit: int = Field(gt=0)
-    tokens_per_minute: int = Field(gt=0)
+    tokens_per_minute: int = Field(gt=0, le=2**31 - 1)
     enforce: bool
     warning_threshold_percent: int = Field(ge=1, le=100)
 
@@ -245,6 +245,12 @@ class GatewayApplicationSummary(StrictModel):
     updated_at: datetime
 
 
+class GatewayApplicationBudgetProjection(StrictModel):
+    status: Literal["projected", "pending", "unavailable"]
+    tokens_per_minute: int | None = None
+    configuration_updated_at: datetime | None = None
+
+
 class GatewayApplicationDetail(GatewayApplicationSummary):
     subscriptions: list[GatewayApplicationSubscription]
     users: list[GatewayApplicationUserUsage]
@@ -252,6 +258,7 @@ class GatewayApplicationDetail(GatewayApplicationSummary):
     audit: list[GatewayApplicationAuditEvent]
     key_management_available: bool
     key_management_unavailable_reason: str | None = None
+    budget_projection: GatewayApplicationBudgetProjection | None = None
 
 
 class GatewayApplicationProvisioningDefaults(StrictModel):

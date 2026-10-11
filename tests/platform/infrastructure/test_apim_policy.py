@@ -410,7 +410,7 @@ def test_application_output_clamp_uses_monthly_budget_not_tpm() -> None:
     limits = root.findall(".//llm-token-limit")
     assert len(limits) == 2
     assert {limit.attrib["tokens-per-minute"] for limit in limits} == {
-        "__TOKENS_PER_MINUTE__", "__EMPLOYEE_TOKENS_PER_MINUTE__",
+        '@((int)context.Variables["effectiveApplicationTpm"])', "__EMPLOYEE_TOKENS_PER_MINUTE__",
     }
     assert all(limit.attrib["estimate-prompt-tokens"] == "true" for limit in limits)
     assert all(limit.attrib["retry-after-header-name"] == "Retry-After" for limit in limits)
@@ -611,7 +611,8 @@ def test_apim_token_limits_use_product_subscription_identity() -> None:
     assert "finops:subscription:" in policy
     assert 'token-quota="__MONTHLY_TOKEN_QUOTA__"' not in policy
     assert 'token-quota-period="Monthly"' not in policy
-    assert 'tokens-per-minute="__TOKENS_PER_MINUTE__"' in policy
+    assert 'name="effectiveApplicationTpm"' in policy
+    assert 'var fallback = (long)__TOKENS_PER_MINUTE__;' in policy
     assert "finops:user:" not in policy
     assert "Microsoft.ApiManagement/service/products@" in module
     assert "Microsoft.ApiManagement/service/products/apis@" in module

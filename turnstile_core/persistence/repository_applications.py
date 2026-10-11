@@ -482,7 +482,8 @@ class PostgreSqlApplicationRepositoryMixin:
                        enforce = EXCLUDED.enforce,
                        warning_threshold_percent = EXCLUDED.warning_threshold_percent,
                        updated_by = EXCLUDED.updated_by,
-                       updated_at = now()
+                       updated_at = GREATEST(clock_timestamp(),
+                           gateway_application_budget.updated_at + interval '1 microsecond')
                    RETURNING *""",
                 (
                     period_start,
@@ -866,7 +867,7 @@ class PostgreSqlApplicationRepositoryMixin:
                    SELECT application.id AS application_id,
                           application.status,
                           budget.token_limit, budget.tokens_per_minute,
-                          budget.enforce,
+                          budget.enforce, budget.updated_at AS quota_updated_at,
                                                     budget_scope_confirmed_tokens(
                                                         'application', application.id::TEXT, %s, %s
                                                     ) AS confirmed_tokens
@@ -888,7 +889,7 @@ class PostgreSqlApplicationRepositoryMixin:
                 """SELECT application.id AS application_id,
                           application.status,
                           budget.token_limit, budget.tokens_per_minute,
-                          budget.enforce
+                          budget.enforce, budget.updated_at AS quota_updated_at
                    FROM gateway_application_budget budget
                    JOIN gateway_application application
                      ON application.id = budget.application_id

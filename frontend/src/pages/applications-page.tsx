@@ -314,6 +314,7 @@ function ApplicationBudgetDialog({ application, open, writeAvailable, onOpenChan
   const valid = Number(tokenLimit) > 0
     && Number.isInteger(Number(tokenLimit))
     && Number(tokensPerMinute) > 0
+    && Number(tokensPerMinute) <= 2147483647
     && Number.isInteger(Number(tokensPerMinute))
     && Number(warningThreshold) >= 1
     && Number(warningThreshold) <= 100
@@ -540,6 +541,10 @@ function ApplicationDetailView({
               <div><span>待处理请求</span><b>{budget.pending_reservation_count == null ? "—" : formatFullCount(budget.pending_reservation_count)}</b></div>
             </div>
             <div className="application-ledger-snapshot"><span>账本快照</span><time dateTime={budget.ledger_snapshot_at ?? undefined}>{budget.ledger_snapshot_at ? formatTimestamp(budget.ledger_snapshot_at, timezone) : "未同步"}</time></div>
+            {application.budget_projection && <div className="application-ledger-snapshot" role="status" aria-live="polite">
+              <span>{application.budget_projection.status === "projected" ? "额度配置已同步至网关账本" : application.budget_projection.status === "pending" ? "额度已保存，等待网关账本同步" : "无法确认网关账本同步状态"}</span>
+              <b>{application.budget_projection.tokens_per_minute == null ? "—" : `${formatFullCount(application.budget_projection.tokens_per_minute)} TPM`}</b>
+            </div>}
             {budget.stale_reservation_count != null && budget.stale_reservation_count > 0 && <div className="application-ledger-snapshot"><span>延迟结算</span><b>{formatFullCount(budget.stale_reservation_count)}</b></div>}
           </div> : <div className="application-card-empty"><WalletCards size={18} />未配置本月额度</div>}
         </section>
@@ -696,13 +701,13 @@ export function ApplicationsPage() {
 
   return <div className="smh-workspace applications-workspace">
     {user?.role === "owner" && mobileActionsTarget && createPortal(<div className="subscriptions-mobile-topbar-actions">
-      <Button type="button" variant="ghost" size="icon-sm" disabled={!gatewayId || !applications.data?.sync_available || busy} onClick={() => gatewayId && syncMutation.mutate(gatewayId)} aria-label="同步 APIM" title={applications.data?.sync_available ? "从 APIM 刷新订阅库存" : applications.data?.sync_unavailable_reason ?? "发布工作进程未部署"}>{busy ? <RefreshCw className="spin" size={15} /> : <RefreshCw size={15} />}</Button>
+      <Button type="button" variant="ghost" size="icon-sm" disabled={!gatewayId || !applications.data?.sync_available || busy} onClick={() => gatewayId && syncMutation.mutate(gatewayId)} aria-label="刷新 APIM 订阅" title={applications.data?.sync_available ? "从 APIM 刷新订阅库存" : applications.data?.sync_unavailable_reason ?? "发布工作进程未部署"}>{busy ? <RefreshCw className="spin" size={15} /> : <RefreshCw size={15} />}</Button>
       <Button type="button" variant="ghost" size="icon-sm" disabled={busy} onClick={() => setCreateOpen(true)} aria-label={`添加${consumer}`} title={`添加${consumer}`}><Plus size={16} /></Button>
     </div>, mobileActionsTarget)}
     <header className="smh-page-header applications-header">
       <div><span className="smh-header-icon"><KeyRound size={17} /></span><h1>订阅管理</h1><span>{applications.isLoading ? "—" : items.length}</span></div>
       <div className="smh-header-actions">
-        {user?.role === "owner" ? <><Button variant="outline" disabled={!gatewayId || !applications.data?.sync_available || busy} onClick={() => gatewayId && syncMutation.mutate(gatewayId)} title={applications.data?.sync_available ? "从 APIM 刷新订阅库存" : applications.data?.sync_unavailable_reason ?? "发布工作进程未部署"}>{busy ? <RefreshCw className="spin" size={13} /> : <RefreshCw size={13} />}同步 APIM</Button><Button disabled={busy} onClick={() => setCreateOpen(true)} title={`添加${consumer}`}><Plus size={14} />添加{consumer}</Button></> : <span className="applications-readonly"><ShieldAlert size={13} />只读</span>}
+        {user?.role === "owner" ? <><Button variant="outline" disabled={!gatewayId || !applications.data?.sync_available || busy} onClick={() => gatewayId && syncMutation.mutate(gatewayId)} title={applications.data?.sync_available ? "从 APIM 刷新订阅库存" : applications.data?.sync_unavailable_reason ?? "发布工作进程未部署"}>{busy ? <RefreshCw className="spin" size={13} /> : <RefreshCw size={13} />}刷新 APIM 订阅</Button><Button disabled={busy} onClick={() => setCreateOpen(true)} title={`添加${consumer}`}><Plus size={14} />添加{consumer}</Button></> : <span className="applications-readonly"><ShieldAlert size={13} />只读</span>}
       </div>
     </header>
     {syncMutation.error && <div className="application-error-band" role="alert"><AlertTriangle size={14} /><span>{String(syncMutation.error)}</span></div>}

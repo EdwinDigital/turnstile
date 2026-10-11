@@ -361,6 +361,7 @@ def validate_parent_policy(
     canonical_parent: str,
     profiles: Sequence[ImageGenerationProfile] = (),
 ) -> str:
+    from .apim_application_tpm import compose_application_tpm_policy
     from .apim_directory_policy import strip_validated_directory_identity_policy
 
     def without_slots(value: str) -> str:
@@ -369,8 +370,12 @@ def validate_parent_policy(
         )
 
     root, template = (
-        parse_policy(without_slots(strip_validated_directory_identity_policy(source))),
-        parse_policy(without_slots(strip_validated_directory_identity_policy(canonical_parent))),
+        parse_policy(compose_application_tpm_policy(
+            without_slots(strip_validated_directory_identity_policy(source))
+        )),
+        parse_policy(compose_application_tpm_policy(
+            without_slots(strip_validated_directory_identity_policy(canonical_parent))
+        )),
     )
     for policy in (root, template):
         if policy.tag != "policies" or [

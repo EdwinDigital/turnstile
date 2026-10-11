@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import logging
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Literal, Never
 from uuid import UUID, uuid4
@@ -12,6 +13,7 @@ from ..domain.application_access import (
     GatewayApplicationAvatar,
     GatewayApplicationAvatarUpdate,
     GatewayApplicationBudget,
+    GatewayApplicationBudgetProjection,
     GatewayApplicationBudgetUpdate,
     GatewayApplicationDetail,
     GatewayApplicationDiscovery,
@@ -40,6 +42,8 @@ from .control_plane import (
     ControlPlaneNotFoundError,
     ControlPlaneUnavailableError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _period_bounds(moment: datetime | None = None) -> tuple[date, date]:
@@ -73,6 +77,11 @@ class ApplicationAccessService:
         key_client: ApimSubscriptionKeyClient | None = None,
         default_token_limit: int = 100_000,
         default_tokens_per_minute: int = 100_000,
+        budget_projector: Callable[[UUID], None] | None = None,
+        budget_projection_reader: Callable[
+            [UUID, GatewayApplicationBudget], GatewayApplicationBudgetProjection
+        ]
+        | None = None,
     ) -> None:
         self._repository = repository
         self._sync_available = sync_available
@@ -84,6 +93,8 @@ class ApplicationAccessService:
         self._key_client = key_client
         self._default_token_limit = default_token_limit
         self._default_tokens_per_minute = default_tokens_per_minute
+        self._budget_projector = budget_projector
+        self._budget_projection_reader = budget_projection_reader
 
     def sync_discovery(
         self, discovery: GatewayApplicationDiscovery, actor: str
@@ -200,7 +211,23 @@ class ApplicationAccessService:
             key_management_unavailable_reason=(
                 None if self._key_management_available else self._key_management_unavailable_reason
             ),
+            budget_projection=self._budget_projection(application_id, summary.budget),
         )
+
+    def _budget_projection(
+        self,
+        application_id: UUID,
+        budget: GatewayApplicationBudget | None,
+    ) -> GatewayApplicationBudgetProjection:
+        if self._budget_projection_reader is None or budget is None:
+            return GatewayApplicationBudgetProjection(status="unavailable")
+        try:
+            return self._budget_projection_reader(application_id, budget)
+        except Exception:
+            logger.warning(
+                "Application budget projection readback unavailable for %s", application_id
+            )
+            return GatewayApplicationBudgetProjection(status="unavailable")
 
     def application_avatar(self, application_id: UUID) -> tuple[str, bytes]:
         row = self._repository.get_gateway_application_avatar(application_id)
@@ -357,6 +384,14 @@ class ApplicationAccessService:
         )
         if row is None:
             raise ControlPlaneNotFoundError("Application not found")
+        if self._budget_projector is not None:
+            try:
+                self._budget_projector(application_id)
+            except Exception:
+                # The database committed; projection failure is not a failed save.
+                logger.warning(
+                    "Application budget saved; ledger projection pending for %s", application_id
+                )
         return self.application(application_id)
 
     def update_application_model_access(

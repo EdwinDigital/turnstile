@@ -2020,4 +2020,8 @@ export const ENGLISH_CORE_PHRASES: Record<string, string> = {
   "批量调用、微调、预留吞吐等，不是普通对话调用的单价，因此不作为选项。": "Batch calls, fine-tuning, reserved throughput and the like are not the rate a normal chat request is billed at, so they are not offered.",
   "未能识别的计量表": "Meters not recognised",
   "计的是别的东西的计量表": "Meters that price something else",
+  "刷新 APIM 订阅": "Refresh APIM subscriptions",
+  "额度配置已同步至网关账本": "Quota settings projected to gateway ledger",
+  "额度已保存，等待网关账本同步": "Quota saved; gateway ledger sync pending",
+  "无法确认网关账本同步状态": "Gateway ledger synchronization unavailable",
 }

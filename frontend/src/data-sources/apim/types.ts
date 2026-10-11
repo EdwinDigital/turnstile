@@ -1141,6 +1141,11 @@ export type GatewayApplicationAuditEvent = {
 }
 
 export type GatewayApplicationDetail = GatewayApplicationSummary & {
+  budget_projection?: {
+    status: "projected" | "pending" | "unavailable"
+    tokens_per_minute: number | null
+    configuration_updated_at: string | null
+  } | null
   subscriptions: GatewayApplicationSubscription[]
   users: GatewayApplicationUserUsage[]
   user_count: number
