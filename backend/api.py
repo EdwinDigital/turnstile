@@ -23,6 +23,7 @@ from .http.assistant import title_router as assistant_title_router
 from .http.authentication import get_entra_verifier as _get_entra_verifier
 from .http.authentication import router as authentication_router
 from .http.budgets import router as budgets_router
+from .http.client_downloads import router as client_downloads_router
 from .http.dependencies import get_repository
 from .http.directory_sync import router as directory_sync_router
 from .http.governance import router as governance_router
@@ -99,6 +100,7 @@ async def private_validation_errors(request: Request, error: RequestValidationEr
             "/api/v1/user-settings/",
             "/api/v1/auth/",
             "/api/v1/organization-management/",
+            "/api/v1/client-downloads/",
         )
     ):
         return JSONResponse(
@@ -156,6 +158,10 @@ app.include_router(model_platform_publication_router)
 app.include_router(github_copilot_router)
 app.include_router(authentication_router)
 app.include_router(user_settings_router)
+app.include_router(client_downloads_router)
+app.add_middleware(
+    PrivateRouteBodyLimit, path_prefix="/api/v1/client-downloads", max_body_bytes=8192,
+)
 app.include_router(organization_management_router)
 app.include_router(directory_sync_router)
 app.include_router(permission_management_router)

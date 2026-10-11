@@ -27,6 +27,7 @@ import {
   ChevronRight,
   CircleDollarSign,
   Cpu,
+  Download,
   FileSpreadsheet,
   History,
   KeyRound,
@@ -99,6 +100,7 @@ import { GatewayReleasesPage } from "./pages/gateway-releases-page";
 import { ApplicationsPage } from "./pages/applications-page";
 import { SettingsPage } from "./pages/settings-page";
 import { UserSettingsPage } from "./pages/user-settings-page";
+import { ClientDownloadsPage } from "./pages/client-downloads-page";
 import { OrganizationManagementPage } from "./pages/organization-management-page";
 import { PermissionManagementPage } from "./pages/permission-management-page";
 import { directoryApi } from "./data-sources/apim/api/organization-management";
@@ -116,6 +118,7 @@ type Page =
   | "organization-management"
   | "permission-management"
   | "user-settings"
+  | "client-downloads"
   | "models"
   | "apim-native-routes"
   | "gateway-releases"
@@ -137,6 +140,7 @@ type DataSource = "apim" | "github-copilot";
 
 function normalizePageForSource(source: DataSource, page: Page): Page {
   if (page === "user-settings") return page;
+  if (page === "client-downloads") return page;
   if (page === "permission-management") return page;
   return (source === "github-copilot"
     ? normalizeGithubCopilotPage(page)
@@ -164,6 +168,7 @@ const pageIds: Page[] = [
   "organization-management",
   "permission-management",
   "user-settings",
+  "client-downloads",
   "models",
   "apim-native-routes",
   "gateway-releases",
@@ -957,6 +962,7 @@ export function App() {
   const prefetchNavigation = (nextPage: Page) => {
     if (!canAccessMenu(user, nextPage)) return;
     if (nextPage === "user-settings") return;
+    if (nextPage === "client-downloads") return;
     if (selectedDataSource === "github-copilot") {
       prefetchGithubCopilotPage(queryClient, nextPage);
       return;
@@ -1175,7 +1181,7 @@ export function App() {
   // must not add the 24px page padding the card-based routes need. Leaving the assistant
   // out of this put a 24px inset around its whole two-pane surface, which pushed the
   // thread rail's border away from the card wall it is supposed to sit against.
-  const workspacePage = finopsPage || page === "models" || page === "budgets" || page.startsWith("copilot-") || page === "pinned-report" || page === "assistant" || page === "user-settings" || page === "organization-management" || page === "permission-management";  type NavGroup = {
+  const workspacePage = page === "client-downloads" || finopsPage || page === "models" || page === "budgets" || page.startsWith("copilot-") || page === "pinned-report" || page === "assistant" || page === "user-settings" || page === "organization-management" || page === "permission-management";  type NavGroup = {
     label: string;
     items: Array<{
       label: string;
@@ -1228,6 +1234,7 @@ export function App() {
   // that still exists unsearchable -- a silent loss the de-duplication never asked for.
   const searchablePages = [
     { id: "user-settings" as Page, label: "用户设置", icon: Settings },
+    { id: "client-downloads" as Page, label: "下载客户端", icon: Download },
     ...visibleNavGroups.flatMap((group) => group.items.map((item) => ({ id: item.page, label: item.label, icon: item.icon }))),
     ...(selectedDataSource === "apim"
       ? [{ id: "finops-invoke" as Page, label: "调用测试", icon: Zap }]
@@ -1392,6 +1399,10 @@ export function App() {
                       <Settings size={16} />
                       <span>用户设置</span>
                     </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => { navigatePage("client-downloads"); setSidebarOpenMobile(false); }}>
+                      <Download size={16} />
+                      <span>下载客户端</span>
+                    </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => void signOut()}>
                       <LogOut size={16} />
                       <span>退出登录</span>
@@ -1453,6 +1464,7 @@ export function App() {
         >
           {page === "settings" && <SettingsPage key={selectedDataSource} dataSource={selectedDataSource} onToggleSidebar={toggleSidebar} />}
           {page === "user-settings" && <UserSettingsPage onToggleSidebar={toggleSidebar} />}
+          {page === "client-downloads" && <ClientDownloadsPage key={user?.id} onToggleSidebar={toggleSidebar} />}
           {page === "permission-management" && <PermissionManagementPage onToggleSidebar={toggleSidebar} />}
           {selectedDataSource === "apim" && page === "organization-management" && <OrganizationManagementPage
             onToggleSidebar={toggleSidebar} capabilities={directoryCapabilities.data} />}

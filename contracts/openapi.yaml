@@ -54,6 +54,10 @@ tags:
 - name: Permission Management
   description: Owner-only revisioned four-role menu configuration; automatic row scopes are not editable.
 paths:
+  /api/v1/client-downloads/options:
+    $ref: ./openapi/paths/client-downloads.yaml#/paths/~1api~1v1~1client-downloads~1options
+  /api/v1/client-downloads/magpie:
+    $ref: ./openapi/paths/client-downloads.yaml#/paths/~1api~1v1~1client-downloads~1magpie
   /api/v1/permission-management:
     $ref: ./openapi/paths/permission-management.yaml#/paths/~1api~1v1~1permission-management
   /api/v1/model-gateway/images/generations:
@@ -339,6 +343,14 @@ components:
     ErrorResponse:
       $ref: ./openapi/components/common.yaml#/responses/ErrorResponse
   schemas:
+    ClientDownloadOptions:
+      $ref: ./openapi/schemas/client-downloads.yaml#/schemas/ClientDownloadOptions
+    ClientDownloadRequest:
+      $ref: ./openapi/schemas/client-downloads.yaml#/schemas/ClientDownloadRequest
+    ClientSubscription:
+      $ref: ./openapi/schemas/client-downloads.yaml#/schemas/ClientSubscription
+    ClientModel:
+      $ref: ./openapi/schemas/client-downloads.yaml#/schemas/ClientModel
     AccountLinkWrite:
       $ref: ./openapi/schemas/organization-management.yaml#/schemas/AccountLinkWrite
     AdministratorsWrite:
