@@ -10,6 +10,22 @@ from .apim_control_plane_contract import PolicyCompilationError
 TPM_EXPRESSION = '@((int)context.Variables["effectiveApplicationTpm"])'
 
 
+def _tpm_variable(fallback: str) -> str:
+    value = """@{
+          var fallback = (long)FALLBACK;
+          var state = context.Variables.GetValueOrDefault<JObject>("applicationLedgerState", null);
+          var mapping = context.Variables.GetValueOrDefault<JObject>("applicationMapState", null);
+          var mapped = mapping != null && (string)mapping["status"] == "ok";
+          var configured = state != null && ((bool?)state["available"] ?? false);
+          var requested = configured ? ((long?)state["tokensPerMinute"] ?? fallback) : fallback;
+          return (int)(mapped && configured && requested > 0 && requested <= int.MaxValue
+            ? requested : fallback);
+        }""".replace("FALLBACK", fallback)
+    return '<set-variable name="effectiveApplicationTpm" value="' + escape(
+        value, {'"': "&quot;"},
+    ) + '" />'
+
+
 def compose_application_tpm_policy(source: str) -> str:
     # Azure's primary table endpoint ends in '/'; older bootstrap policies appended another.
     # Normalize only the known ledger origin, preserving policy sections and customer targets.
@@ -20,6 +36,26 @@ def compose_application_tpm_policy(source: str) -> str:
     if endpoint:
         source = source.replace(endpoint.group() + "//", endpoint.group() + "/")
     if 'name="effectiveApplicationTpm"' in source:
+        # Upgrade the reviewed early candidate, not arbitrary customer expressions.
+        from .apim_policy_components import expression_tokens, parse_policy
+
+        node = re.search(r'<set-variable name="effectiveApplicationTpm".*?/>', source, re.DOTALL)
+        assert node is not None
+        old_value = parse_policy(node.group()).attrib["value"]
+        fallback_match = re.search(
+            r"var fallback = \(long\)([0-9]+|__TOKENS_PER_MINUTE__);", old_value,
+        )
+        if fallback_match:
+            variable = _tpm_variable(fallback_match[1])
+            previous = parse_policy(variable).attrib["value"].replace(
+                'var mapping = context.Variables.GetValueOrDefault<JObject>('
+                '"applicationMapState", null);\n'
+                '          var mapped = mapping != null && (string)mapping["status"] == "ok";',
+                'var admission = context.Variables.GetValueOrDefault<string>('
+                '"applicationAdmission", "");',
+            ).replace('mapped && configured', 'admission == "ok" && configured')
+            if expression_tokens(old_value) == expression_tokens(previous):
+                source = source[:node.start()] + variable + source[node.end():]
         return source
     text = re.compile(r"<llm-token-limit\b[^>]*finops:subscription:[^>]*?/>", re.DOTALL)
     matches = list(text.finditer(source))
@@ -56,21 +92,5 @@ def compose_application_tpm_policy(source: str) -> str:
     anchor = re.search(r'<set-variable name="consumerId"[^>]*?/>', source)
     if anchor is None:
         raise PolicyCompilationError("Application TPM upgrade has no subscription boundary")
-    value = """@{
-          var fallback = (long)FALLBACK;
-          var state = context.Variables.GetValueOrDefault<JObject>("applicationLedgerState", null);
-          var admission = context.Variables.GetValueOrDefault<string>("applicationAdmission", "");
-          var configured = state != null && ((bool?)state["available"] ?? false);
-          var requested = configured ? ((long?)state["tokensPerMinute"] ?? fallback) : fallback;
-          return (int)(admission == "ok" && configured && requested > 0 && requested <= int.MaxValue
-            ? requested : fallback);
-        }""".replace("FALLBACK", fallback)
-    variable = (
-        '\n        <set-variable name="effectiveApplicationTpm" value="'
-        + escape(
-            value,
-            {'"': "&quot;"},
-        )
-        + '" />'
-    )
+    variable = '\n        ' + _tpm_variable(fallback)
     return source[: anchor.end()] + variable + source[anchor.end() :]

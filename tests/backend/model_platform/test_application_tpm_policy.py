@@ -17,7 +17,9 @@ def test_application_tpm_is_used_by_text_and_image_branches() -> None:
     assert value is not None
     expression = value.attrib["value"]
     assert 'state["tokensPerMinute"]' in expression
-    assert 'admission == "ok"' in expression
+    assert 'mapping["status"] == "ok"' in expression
+    assert 'applicationAdmission' not in expression
+    assert 'modelStatus' not in expression
     assert 'state["available"]' in expression
     assert "int.MaxValue" in expression
     assert 'state["enforce"]' not in expression
@@ -64,3 +66,22 @@ def test_upgrade_normalizes_only_ledger_origin_trailing_slash() -> None:
         "__LEDGER_TABLE_NAME__", "TurnstileLedger"
     )
     assert compose_application_tpm_policy(upgraded) == upgraded
+
+
+def test_early_candidate_upgrade_separates_model_admission_from_tpm() -> None:
+    source = (REPOSITORY_ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    previous = source.replace(
+        'var mapping = context.Variables.GetValueOrDefault&lt;JObject&gt;('
+        '&quot;applicationMapState&quot;, null);\n'
+        '          var mapped = mapping != null &amp;&amp; '
+        '(string)mapping[&quot;status&quot;] == &quot;ok&quot;;',
+        'var admission = context.Variables.GetValueOrDefault&lt;string&gt;('
+        '&quot;applicationAdmission&quot;, &quot;&quot;);',
+    ).replace('mapped &amp;&amp; configured', 'admission == &quot;ok&quot; &amp;&amp; configured')
+    assert previous != source
+    assert compose_application_tpm_policy(previous) == source
+    assert validate_parent_policy(previous, source)
+    assert compose_application_tpm_policy(source) == source
+    custom = previous.replace('admission == &quot;ok&quot; &amp;&amp; configured', 'configured')
+    with pytest.raises(PolicyCompilationError):
+        validate_parent_policy(custom, source)
