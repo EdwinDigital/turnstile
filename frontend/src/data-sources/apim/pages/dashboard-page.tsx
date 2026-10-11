@@ -89,6 +89,7 @@ import {
 } from "../../../components/ui/dropdown-menu"
 import { usageWindow } from "../api"
 import { getIntlLocale, useLocale, type LocalePreference } from "../../../locales/index"
+import { useTimezone } from "../../../providers/timezone-provider"
 import { priceRequests } from "../../../lib/pricing"
 import { finopsKeys, finopsQueries, trendDimensionForFilters } from "../queries"
 import type {
@@ -1163,6 +1164,7 @@ function RequestTrace({
   costAvailable: boolean;
   models: ManagedModel[];
 }) {
+  const { timezone } = useTimezone()
   const initialRequestId = new URLSearchParams(window.location.search).get("request")
   const [selected, setSelected] = useState<string | null>(initialRequestId);
   const [searchText, setSearchText] = useState(initialRequestId ?? "");
@@ -1172,7 +1174,7 @@ function RequestTrace({
   // The header describes the whole window, so it reads the server aggregate. The list below
   // is a page of recent requests and legitimately uses the rows.
   const overview = useQuery({ ...finopsQueries.executiveOverview(filters), ...liveRefresh })
-  const volumeTrend = useQuery({ ...finopsQueries.trends(filters, "none", "day"), ...liveRefresh })
+  const volumeTrend = useQuery({ ...finopsQueries.usageActivity(filters, "day", timezone), ...liveRefresh })
   const detail = useQuery({ ...finopsQueries.requestDetail(selected ?? ""), ...liveRefresh })
   const firstRequestId = query.data?.[0]?.correlation_id ?? null
   const selectedCorrelationId = detail.data?.correlation_id ?? selected
@@ -1226,7 +1228,9 @@ function RequestTrace({
   const slowRequests = totals?.latency_over_5s ?? 0;
   const slowRequestPercent = windowRequests ? (slowRequests / windowRequests) * 100 : 0;
   const volumeRows = (volumeTrend.data?.points ?? []).map((point) => ({
-    day: formatTrendBucket(point.bucket_start, "day"),
+    day: new Date(point.bucket_start).toLocaleDateString(getIntlLocale(), {
+      month: "2-digit", day: "2-digit", timeZone: timezone,
+    }),
     calls: point.totals.calls,
   }));
   const pricedDetail = detail.data
@@ -1241,7 +1245,7 @@ function RequestTrace({
         <Kpi label="≥5 秒请求" value={slowRequests.toLocaleString(getIntlLocale())} change={null} note={`${decimal.format(slowRequestPercent)}%`} icon={AlertTriangle} />
       </section>
       <section className="finops-panel trace-insight-panel span-2">
-        <PanelTitle title="调用趋势" meta="每日" />
+        <PanelTitle title="调用趋势" meta={`每日 · ${timezone}`} />
         <RequestVolumeTrendChart rows={volumeRows} />
       </section>
       <section className="finops-panel trace-insight-panel">
@@ -1358,6 +1362,7 @@ function RequestTraceDetail({
   request: UsageRequestDetail;
   costAvailable: boolean;
 }) {
+  const { timezone } = useTimezone()
   const errorMessage = request.ingest_source === "policy"
     ? request.error_message === "API policy denied: Model is not assigned to this user"
       ? "该人员无权使用此模型"
@@ -1410,7 +1415,7 @@ function RequestTraceDetail({
   return <div className="trace-detail-content">
     <div className="trace-detail-hero">
       <span className={request.status_code >= 400 ? "failed" : "success"}>{request.status_code}</span>
-      <div><b>{request.model_name}</b><small>{new Date(request.timestamp).toLocaleString(getIntlLocale())}</small></div>
+      <div><b>{request.model_name}</b><small>{new Date(request.timestamp).toLocaleString(getIntlLocale(), { timeZone: timezone })}</small></div>
       <strong>{formatLatency(request.latency_ms)}</strong>
     </div>
     {errorMessage && <div className="trace-error"><CircleAlert size={15} /><div><b>{request.ingest_source === "policy" ? "策略拒绝" : "请求失败"}</b><span>{errorMessage}</span></div></div>}

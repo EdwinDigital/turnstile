@@ -12,6 +12,8 @@ def test_request_monitor_polls_list_totals_trend_and_reconciled_detail_when_visi
     assert "refetchIntervalInBackground: false" in trace
     assert trace.count("...liveRefresh") == 4
     assert "近实时，10秒刷新" in trace
+    assert 'finopsQueries.usageActivity(filters, "day", timezone)' in trace
+    assert "timeZone: timezone" in trace
 
 
 def test_enabled_directory_filter_keeps_unattributed_subscription_calls() -> None:
