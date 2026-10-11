@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, copyFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, copyFile, readFile, stat, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -17,6 +17,7 @@ test("private provider import, bounded dispatch and live model intersection", as
     }));
     const { default: plugin } = await import(pathToFileURL(join(dir, "index.mjs")));
     const hooks = await plugin();
+    assert.deepEqual(hooks.auth.methods.map((method) => method.label), ["导入配置", "更新API Key"]);
     const config = {};
     await hooks.config(config);
     assert.deepEqual(Object.keys(config.provider["aigateway-test"].models), ["a", "b"]);
@@ -63,4 +64,69 @@ test("private provider import, bounded dispatch and live model intersection", as
     globalThis.fetch = nativeFetch;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("magpie automatically imports once, preserves accounts and respects logout", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aigateway-auto-import-"));
+  try {
+    await copyFile(new URL("../../../backend/services/client_plugin/index.mjs", import.meta.url), join(dir, "index.mjs"));
+    const config = {
+      version: 1, providerId: "aigateway-test", name: "Test", baseURL: "https://gateway.example.com/llm",
+      subscriptionKey: "bundled-key", accountId: "Subscription", modelsPath: "/v1/models", models: {},
+    };
+    await writeFile(join(dir, "aigateway.config.json"), JSON.stringify(config));
+    const { default: plugin } = await import(pathToFileURL(join(dir, "index.mjs")));
+    const home = await mkdtemp(join(dir, "home-"));
+    const input = { directory: home, project: { id: "magpie" } };
+    const authPath = join(home, "plugin-auth.json");
+    const original = JSON.stringify({ copilot: { type: "api", key: "existing-other-provider" } });
+    await writeFile(authPath, original);
+    await Promise.all([plugin(input), plugin(input)]);
+    let auth = JSON.parse(await readFile(authPath, "utf8"));
+    assert.equal(auth.copilot.key, "existing-other-provider");
+    assert.equal(auth[config.providerId].key, "bundled-key");
+    assert.equal(auth[config.providerId].accountId, "Subscription");
+    assert.equal((await stat(authPath)).mode & 0o777, 0o600);
+    assert.equal(await readFile(authPath + ".bak", "utf8"), original);
+    const marker = join(home, "aigateway-proxy-imports", config.providerId + ".json");
+    assert.equal((await stat(marker)).mode & 0o777, 0o600);
+    assert.equal((await readFile(marker, "utf8")).includes("bundled-key"), false);
+    auth[config.providerId].key = "rotated-key";
+    await writeFile(authPath, JSON.stringify(auth));
+    await plugin(input);
+    assert.equal(JSON.parse(await readFile(authPath, "utf8"))[config.providerId].key, "rotated-key");
+    delete auth[config.providerId];
+    await writeFile(authPath, JSON.stringify(auth));
+    await plugin(input);
+    assert.equal(JSON.parse(await readFile(authPath, "utf8"))[config.providerId], undefined);
+    for (const suffix of ["", "#other"]) {
+      const existing = await mkdtemp(join(dir, "existing-"));
+      const data = JSON.stringify({ [config.providerId + suffix]: { type: "api", key: "keep-key" } });
+      await writeFile(join(existing, "plugin-auth.json"), data);
+      await plugin({ directory: existing, project: { id: "magpie" } });
+      assert.equal(await readFile(join(existing, "plugin-auth.json"), "utf8"), data);
+    }
+    const corrupt = await mkdtemp(join(dir, "corrupt-"));
+    await writeFile(join(corrupt, "plugin-auth.json"), "invalid-auth");
+    const hooks = await plugin({ directory: corrupt, project: { id: "magpie" } });
+    assert.equal(await readFile(join(corrupt, "plugin-auth.json"), "utf8"), "invalid-auth");
+    assert.equal((await (await hooks.auth.methods[0].authorize()).callback()).key, "bundled-key");
+    const otherHost = await mkdtemp(join(dir, "opencode-"));
+    await plugin({ directory: otherHost, project: { id: "opencode" } });
+    await assert.rejects(readFile(join(otherHost, "plugin-auth.json")), { code: "ENOENT" });
+    const empty = await mkdtemp(join(dir, "new-"));
+    await plugin({ directory: empty, project: { id: "magpie" } });
+    assert.equal(JSON.parse(await readFile(join(empty, "plugin-auth.json"), "utf8"))[config.providerId].key, "bundled-key");
+    const locked = await mkdtemp(join(dir, "locked-"));
+    await writeFile(join(locked, "plugin-auth.json.lock"), "keep-lock");
+    await plugin({ directory: locked, project: { id: "magpie" } });
+    assert.equal(await readFile(join(locked, "plugin-auth.json.lock"), "utf8"), "keep-lock");
+    await assert.rejects(readFile(join(locked, "plugin-auth.json")), { code: "ENOENT" });
+    const failedWrite = await mkdtemp(join(dir, "write-failure-"));
+    await writeFile(join(failedWrite, "plugin-auth.json"), original);
+    await writeFile(join(failedWrite, "aigateway-proxy-imports"), "not-a-directory");
+    await plugin({ directory: failedWrite, project: { id: "magpie" } });
+    assert.equal(await readFile(join(failedWrite, "plugin-auth.json"), "utf8"), original);
+    await assert.rejects(readFile(join(failedWrite, "plugin-auth.json.lock")), { code: "ENOENT" });
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

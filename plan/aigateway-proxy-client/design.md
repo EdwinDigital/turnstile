@@ -21,7 +21,7 @@
 
 配置 version=1，包含 application/subscription/gateway 的 ID 与显示名、稳定 providerId、baseURL、subscriptionKey 和模型映射；JSON 序列化而非向 JavaScript 插值。UUID 文件名不包含用户输入。插件供应商 ID 包含订阅 UUID，避免不同订阅覆盖。
 
-模块只导出一个 async 插件函数。config 钩子用 ??= 声明供应商和模型；auth 使用「导入下载配置」的本地 OAuth auto callback 返回 {type: success, key, accountId}，不启动外部 OAuth、不自动覆写已有登录。另提供标准 API key 登录，便于密钥轮换后的手动更新。用户显式导入才把密钥写入 magpie 权限 0600 的 plugin-auth.json。
+模块只导出一个 async 插件函数。config 钩子用 ??= 声明供应商和模型；auth 使用「导入配置」的本地 OAuth auto callback 返回 {type: success, key, accountId}，不启动外部 OAuth、不自动覆写已有登录。另提供「更新API Key」标准 API key 登录，便于密钥轮换后的手动更新。首次加载且没有该供应商任何账号时，在 magpie 提供的 directory 内用共享 plugin-auth.json.lock 锁读取最新账号文件，保留旧文件备份并原子写入权限 0600 的 plugin-auth.json。非敏感一次性标记存于 aigateway-proxy-imports/<providerId>.json，安装重载、密钥手动更新及主动退出后不覆盖或重新导入；读取/锁/写入失败时保留手动导入入口。OpenCode 不自动导入。
 
 loader 从当前账号 getAuth 读取密钥，设置 APIM Ocp-Apim-Subscription-Key，移除 Agent 原来的 Authorization/x-api-key/x-goog-api-key，不加入员工身份头。请求只允许选定网关路径中的模型协议端点，重定向设 manual，不消费/缓存响应体，保留 init.signal。
 

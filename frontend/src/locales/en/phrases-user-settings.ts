@@ -79,4 +79,5 @@ export const USER_SETTINGS_PHRASES: Record<string, string> = {
   "密钥轮换或模型授权更新后，请重新下载。图像生成模型不包含在此对话插件中。": "Download again after key rotation or model access changes. Image-generation models are not included.",
   "查看 magpie 插件文档": "Read the magpie plugin documentation",
   "当前核心验证阶段仅支持 Owner 下载。": "Core validation currently supports Owner downloads only.",
+  "首次安装自动导入配置；如未登录，选择「导入配置」。": "Configuration imports automatically on first install; choose Import configuration if not signed in.",
 }

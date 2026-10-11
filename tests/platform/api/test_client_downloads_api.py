@@ -93,7 +93,8 @@ def test_download_is_private_complete_zip(service: ClientDownloadService) -> Non
         assert config["subscriptionKey"] == "secondary-secret"
         assert config["subscriptionId"] == str(selected.subscription_id)
         assert config["providerId"].endswith(selected.subscription_id.hex)
-        assert "secret" not in archive.read("aigateway-proxy/index.mjs").decode()
+        template = archive.read("aigateway-proxy/index.mjs").decode()
+        assert "primary-secret" not in template and "secondary-secret" not in template
         assert all((item.external_attr >> 16) & 0o777 == 0o600 for item in archive.infolist())
 
 

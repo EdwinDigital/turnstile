@@ -51,7 +51,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     <div className="finops-scroll-region"><div className="client-downloads-content">
       <header><h1>AIGateway-Proxy</h1><p>将平台订阅导入 magpie，供其他 Agent 使用。</p></header>
       <section className="client-downloads-card">
-        <div className="client-downloads-heading"><Download size={22} /><div><h2>magpie 供应商插件</h2><p>插件和订阅配置一起下载，无需手动填写网关地址。</p></div><span data-no-localize>v{query.data?.plugin_version ?? "0.1.0"}</span></div>
+        <div className="client-downloads-heading"><Download size={22} /><div><h2>magpie 供应商插件</h2><p>插件和订阅配置一起下载，无需手动填写网关地址。</p></div><span data-no-localize>v{query.data?.plugin_version ?? "0.1.1"}</span></div>
         {user?.role !== "owner" ? <p role="status">当前核心验证阶段仅支持 Owner 下载。</p> : query.isPending ? <p role="status">正在加载</p> : query.isError ? <div role="alert"><p>{query.error.message}</p><Button variant="outline" onClick={() => void query.refetch()}><RefreshCw size={16} />重试</Button></div>
           : !items.length ? <p role="status">没有可下载的应用订阅。请联系管理员配置本人应用订阅。</p>
           : <form action="/api/v1/client-downloads/magpie" method="post" onSubmit={(event) => void download(event)}>
@@ -75,7 +75,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
             <Button type="submit" disabled={busy || !query.data?.key_management_available || !selected?.models.length}><Download size={16} />{busy ? "正在生成安装包" : "下载插件安装包"}</Button>
           </form>}
       </section>
-      <section className="client-downloads-card client-downloads-guide"><h2>导入 magpie</h2><ol><li>解压安装包，将插件文件夹保存在长期目录。</li><li>在 magpie 插件页面添加本地文件夹。</li><li>选择「导入下载配置」登录供应商。</li><li>在 Agent 页面选择该供应商的模型。</li></ol><p>密钥轮换或模型授权更新后，请重新下载。图像生成模型不包含在此对话插件中。</p><a href="https://usemagpie.ai/docs/zh/plugins" target="_blank" rel="noreferrer">查看 magpie 插件文档</a></section>
+      <section className="client-downloads-card client-downloads-guide"><h2>导入 magpie</h2><ol><li>解压安装包，将插件文件夹保存在长期目录。</li><li>在 magpie 插件页面添加本地文件夹。</li><li>首次安装自动导入配置；如未登录，选择「导入配置」。</li><li>在 Agent 页面选择该供应商的模型。</li></ol><p>密钥轮换或模型授权更新后，请重新下载。图像生成模型不包含在此对话插件中。</p><a href="https://usemagpie.ai/docs/zh/plugins" target="_blank" rel="noreferrer">查看 magpie 插件文档</a></section>
     </div></div>
   </div>
 }

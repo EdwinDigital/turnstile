@@ -21,7 +21,7 @@ from turnstile_core.services.application_access import ApplicationAccessService
 
 from .auth_service import SessionIdentity
 
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.1"
 RESERVED = {"master", "turnstile-dashboard", "turnstile-publisher-probe"}
 SDK = {
     "openai_chat": "@ai-sdk/openai-compatible",

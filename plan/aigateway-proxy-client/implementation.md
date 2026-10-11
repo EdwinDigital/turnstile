@@ -51,3 +51,14 @@
 - 验证链路为真实 WorkBuddy app -> 隔离 magpie -> 生产下载插件 -> 线上 cc-switch APIM -> 模型；非模拟 HTTP 客户端。
 - 测试后 WorkBuddy models.json 与备份逐字节一致，Codex config.toml 和日常 magpie providers.json hash 不变。恢复 WorkBuddy 原 GPT-6.1 Sol Copilot 选择和原未发送草稿，保留联调任务作为证据；停止本次启动的隔离 magpie 服务。
 - 此次验收覆盖真实 Agent 文本/流式请求；WorkBuddy 文件编辑、多轮工具调用及其他模型在 WorkBuddy 中的使用尚未验证。原 5 模型 magpie 连通验收仍独立成立。
+
+## 插件 0.1.1：名称和首次自动导入
+
+- 两个手动登录入口改为「导入配置」「更新API Key」。版本提升至 0.1.1，下载页和 README 同步更新。
+- magpie 未提供读取登录信息的 client.auth.get，因此自动导入仅在明确 project.id=magpie 的宿主内，使用其提供的 directory 及现有 plugin-auth.json.lock 互斥协议；不改 magpie 源码，不在 OpenCode 环境自动写入。
+- 首次无该供应商账号时自动写入包内 Key，保留其他供应商账号及此前 auth 备份，原子替换权限 0600 的 auth 文件。一次性非敏感标记防止重载、主动退出和下载旧包后重新覆盖；已经有任意该供应商账号时仅记录已处理，不写 auth。
+- 读文件失败、损坏 JSON、被占用的锁和写入失败时不修改现有登录、不删除他人的锁、不打印密钥，保留手动导入入口。跨宿主并发导入、手动轮换 Key、主动退出、已有副账号及权限 0600 均有自动测试覆盖。
+- 真实隔离 magpie plugin add 后直接显示 signed in as cc-switch / cc-switch，无 plugin login 操作。退出后再运行 plugin 仍未登录；手动「导入配置」可重新登录。
+- 模型复验：GPT Sol Responses 2408 ms、Claude Anthropic 1584 ms 通过。此前一次 GPT 测试遇到线上 429，未改限流，稍后复测成功。
+- 本机 /Users/edwin/Downloads/aigateway-proxy 已原地更新模板、README 和 package.json 到 0.1.1；订阅配置未变，已有 plugin-auth.json 逐字节未变。仅执行插件 off/on 重载，不改 Codex、WorkBuddy 或日常 magpie providers.json，三者 hash 相同。
+- Node 插件测试通过（含并发/损坏/锁定/写入失败）；聚焦 API/前端/契约 28 项通过。Ruff、Mypy 268 源文件及 frontend 构建通过。最终完整回归和线上新包验收进行中。
