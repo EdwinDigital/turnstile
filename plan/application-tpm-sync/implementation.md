@@ -9,3 +9,5 @@
 - 三包兼容更新 what-if 只修改三个现有 appsettings，无删除。此时没有待处理控制平面 operation/publication。
 - Function 包备份需临时部署容器级 Blob Data Reader：只读、两容器、独立 role ID，两项临时权限已移除并读回404。未放宽存储网络，未启用共享密钥。
 - 线上发布、候选真实验证、接口/页面及限流测试待完成；不将本地通过冒称线上已生效。
+
+候选真实验证补充：APIM 能执行动态表达式，但应用账本读取返回 application_map_unavailable。只在自有非当前候选暂加诊断头并恢复后，确认 bootstrap 将带尾斜杠的 Table endpoint 再拼接斜杠，导致 //TurnstileLedger。追加修复：新建基础设施先规范化 endpoint，已有策略窄转换只规范化已知 ledger origin；不改其他 URL。旧候选不 promote，重新生成候选与兼容包后验证。

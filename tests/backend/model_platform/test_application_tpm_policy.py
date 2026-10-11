@@ -52,3 +52,15 @@ def test_legacy_policy_upgrade_preserves_other_policy_components() -> None:
         assert ET.tostring(left) == ET.tostring(right)
     with pytest.raises(PolicyCompilationError):
         compose_application_tpm_policy(legacy.replace("finops:subscription:", "unexpected:"))
+
+
+def test_upgrade_normalizes_only_ledger_origin_trailing_slash() -> None:
+    source = (REPOSITORY_ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
+    source = source.replace("__LEDGER_TABLE_ENDPOINT__", "https://ledger.table.core.windows.net/")
+    assert "https://ledger.table.core.windows.net//" in source
+    upgraded = compose_application_tpm_policy(source)
+    assert "https://ledger.table.core.windows.net//" not in upgraded
+    assert "https://ledger.table.core.windows.net/TurnstileLedger" in upgraded.replace(
+        "__LEDGER_TABLE_NAME__", "TurnstileLedger"
+    )
+    assert compose_application_tpm_policy(upgraded) == upgraded

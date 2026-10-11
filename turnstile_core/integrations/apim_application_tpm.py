@@ -11,6 +11,14 @@ TPM_EXPRESSION = '@((int)context.Variables["effectiveApplicationTpm"])'
 
 
 def compose_application_tpm_policy(source: str) -> str:
+    # Azure's primary table endpoint ends in '/'; older bootstrap policies appended another.
+    # Normalize only the known ledger origin, preserving policy sections and customer targets.
+    mapping = re.search(r'<set-variable name="applicationMapUrl".*?/>', source, re.DOTALL)
+    if mapping is None:
+        raise PolicyCompilationError("Application TPM upgrade has no ledger mapping URL")
+    endpoint = re.search(r'https://[^/\s&"<>]+\.table\.[^/\s&"<>]+', mapping.group())
+    if endpoint:
+        source = source.replace(endpoint.group() + "//", endpoint.group() + "/")
     if 'name="effectiveApplicationTpm"' in source:
         return source
     text = re.compile(r"<llm-token-limit\b[^>]*finops:subscription:[^>]*?/>", re.DOTALL)
