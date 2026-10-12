@@ -1,6 +1,6 @@
 # AIGateway-Proxy 用户登录版设计
 
-日期：2026-10-12。状态：implemented / deployed；当前用户版 0.2.1，验证范围见 implementation.md。
+日期：2026-10-12。状态：implemented / deployed；当前用户版 0.3.1，新流程以第 14 节为准，验证范围见 implementation.md。
 
 本文最初作为 V2 设计基线；用户批准后已实施平台与插件代码、追加授权迁移和发布。V1 0.1.1 指定订阅版继续使用 design.md 的既有流程。未修改 magpie 应用源码或用户日常 Agent 配置；实际宿主测试使用独立 HOME/XDG 与端口。
 
@@ -312,7 +312,7 @@ ACTIVE -> EXPIRED / REVOKED -> 需要重新登录，不恢复旧 Key
 
 ## 14. 0.3.0 流程修订：预授权下载、固定绑定、刷新模型
 
-本节为 2026-10-12 新用户要求，优先于旧章节的无凭据引导包和交互式订阅选择设计。状态：implemented / validation in progress；不得将此状态当作上线证明。
+本节为 2026-10-12 新用户要求，优先于旧章节的无凭据引导包和交互式订阅选择设计。状态：implemented / deployed / native validated（0.3.1）；高并发、长周期及 WorkBuddy 专门会话仍未验收。
 
 ### 14.1 默认订阅解析
 
