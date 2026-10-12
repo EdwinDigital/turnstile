@@ -157,7 +157,7 @@ export default async function AIGatewayUserPlugin(input) {
     try { owned = JSON.parse(await readFile(ownership, "utf8")).providerId === imageId; } catch { /* Only our own manifest can grant replacement. */ }
     if (present && !owned) throw new Error("The picture provider ID is already owned by another configuration");
     if (!images.length) {
-      if (owned) await fetch(magpie + "/api/provider/remove", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: imageId }) });
+      if (owned) await fetch(magpie + "/api/provider/remove", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: imageId }), signal: AbortSignal.timeout(2000) }).catch(() => {});
       await unlink(statePath).catch(() => {});
       return;
     }

@@ -50,6 +50,12 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
     assert.equal(discovered.new.capabilities.reasoning, true);
     assert.equal(discovered.new.capabilities.input.image, true);
     current = {};
+    await writeFile(join(folder, "aigateway-proxy-user/aigateway-user-platform-user/images-owned.json"), JSON.stringify({ providerId: "aigateway-user-platform-user-images" }));
+    const catalogFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith("/api/provider/remove")) throw new Error("Desktop mutation API unavailable");
+      return catalogFetch(url, init);
+    };
     assert.deepEqual(await plugin.provider.models({ models: { old: {} } }, { auth }), {});
     const data = await plugin.auth.usage(async () => auth);
     assert.equal(data.windows[0].aside, true);

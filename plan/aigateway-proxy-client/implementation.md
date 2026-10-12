@@ -74,11 +74,11 @@
 | D0 | 更新双版本需求、认证/授权、订阅选择、目录替换、图片和额度设计 | designed；宿主限制及配套图片登记要求已记录 |
 | P0 | 隔离 magpie 验证 OAuth auto callback、同账号替换、动态目录、图片选择器/桥接 | implemented / isolated validated；本地 fixture 验证，不等于生产验收 |
 | P1 | 追加迁移、设备授权、令牌轮换/撤销、本人订阅目录与授权策略 | implemented / locally validated；019 已部署，旧数据计数及迁移 checksum 保持不变 |
-| P2 | 独立名称/包名/目录/供应商 ID 的用户版模板、平台验证/订阅选择页、导入准备/激活、双下载页面 | implemented / locally validated；尚未生产发布及浏览器验收 |
-| P3 | 用户调用代理与 APIM 可信上下文、动态模型和别名适配 | implemented；非当前 APIM 修订真实调用及归因通过，当前流量未切换 |
-| P4 | 个人/共享额度窗口、缓存和负载验证 | implemented / unit validated；真实额度展示及负载验收未完成 |
-| P5 | 文生图兼容性主路线或受控配套图片桥接 | implemented / fixture validated；需一次配套登记，真实图片模型及计量未验收 |
-| P6 | 新用户包真实 magpie / WorkBuddy 端到端验证及发布 | not deployed / not validated；完成前置阶段后单独执行 |
+| P2 | 独立名称/包名/目录/供应商 ID 的用户版模板、平台验证/订阅选择页、导入准备/激活、双下载页面 | implemented / deployed；双下载页面及真实 CLI 认证/替换通过 |
+| P3 | 用户调用代理与 APIM 可信上下文、动态模型和别名适配 | implemented / deployed / validated；GPT、Claude 和工具往返通过，旧认证分支保持不变 |
+| P4 | 个人/共享额度窗口、缓存和负载验证 | implemented / deployed；原生额度读取及真实 520 Token 增量核对通过，高并发未验收 |
+| P5 | 文生图兼容性主路线或受控配套图片桥接 | implemented / deployed / MCP validated；真实 flare 图片通过，原生选择器仍需手动登记 |
+| P6 | 新用户包真实 magpie / WorkBuddy 端到端验证及发布 | deployed / partially validated；隔离真实 magpie 通过，WorkBuddy 新用户版与全模型矩阵未单独验收 |
 
 ### 已核对的宿主能力与限制
 
@@ -109,3 +109,16 @@
 - 首轮完整回归 1815 passed / 7 skipped / 4 failed；迁移链清单、文档、32 个 locale 短语及 APIM 单测位置断言已修复。修复后的聚焦测试与类型/构建继续核对，不能把首轮失败当作完整回归通过。
 - 最终完整 Python 回归 1819 passed / 7 skipped / 1 warning，通过。随后补充授权请求体限制、私密响应缓存头、失效 Refresh Token 提示及池关闭；相关 API/服务/持久化回归 212 passed。前端/契约回归 129 passed，Node 插件测试 2 passed，全仓 Ruff、新增模块 Mypy 和前端构建通过。
 - 已备份生产实际挂载包、AppSettings 和 APIM 原策略到 Git 外；用户版尚未在当前生产 API 启用。正式发布与真实浏览器/Agent/图片模型验收另记录结果。
+
+## 用户版发布与真实验收（2026-10-12）
+
+- 平台后端、双下载前端、用户代理与 APIM 可信签名分支已发布；只新增 CLIENT_USER_ENABLED / CLIENT_PLATFORM_ORIGIN。既有员工/订阅分支、共享应用 admission 与核心运行时保持原样，未发布 Function 包或改其设置。
+- 发布包逐文件核对挂载内容、实际入口/静态资源和认证业务读取；0.2.1 安装包的 index.mjs 与发布源文件核对。源代码提交依次为 13ec7e7（主体）、ee41687（动态 SDK 格式）和 10fb56f（Anthropic message_start 别名）；后续文档及无图片清理修补另提交。
+- HTTP 真实验证：用户绑定 ZIP 无 APIM/访问/刷新令牌；首次登录、选择 cc-switch、取消保留旧选择、重新登录要求新平台会话、刷新幂等、旧 generation 撤销、原 0.1.1 ZIP 与新 provider ID 不同。
+- 实际 magpie 0.1.1194 CLI 验证登录、导入和重新登录的 auto callback 与保存/合并；cc-switch -> Edwin-Agent -> cc-switch 的文本目录为 5 -> 2 -> 5、图片目录为 3 -> 0 -> 3，用户账号槽位始终为 1。订阅版账号和无关供应商配置不变。
+- 测试配置使用私有 HOME/XDG/CODEX_HOME/CLAUDE_CONFIG_DIR 与随机推理端口。MAGPIE_NO_ACCOUNTS=1 会同时隐藏插件账号，真实文本联调不能使用该开关；隔离目录开启发现后，只出现测试供应商与宿主生成的聚合组，未切换日常 Agent 路由。
+- GPT 普通/流式 HTTP 200，29 + 29 Tokens，客户端约 7.79 / 3.56 秒；Claude 流式 60 Tokens；GPT 工具调用与回填 80 + 105 Tokens，call_id 保持一致。别名只改已知上游名称，真实不同模型仍保留。
+- 真实 gpt-image-2.5-flare MCP 调用约 24.67 秒，生成 1024x1024 PNG，平台记录 217 Tokens、估算 $0.005985。退出后配套服务停止；并非将图片自动加入日常 magpie 选择器。
+- 六次调用总计 520 Tokens，均为本人而非 unattributed。个人窗口 21729 -> 22249，cc-switch 共享窗口 1452189 -> 1452709；原生 magpie quota 接口已读到两组窗口。首次额度快照因摄取尚未包含最后 105 Tokens，下一次缓存到期后对齐；缓存为 60 秒，预算拦截不依赖该展示刷新。
+- 实际桌面模型回归发现并修复 Config.Model / Model.Info 形状差异；无图片订阅切换时，本机缺少配置写 API 不再阻断文本目录替换。
+- 仍未验收：WorkBuddy 新用户版专门会话、所有 Foundry 模型及参数、多轮长上下文/取消/高并发/长期续签、生产图片专属订阅与普通用户目录矩阵。不得把隔离 CLI、HTTP/MCP 或 fixture 验证写成这些场景已全部通过。

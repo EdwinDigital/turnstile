@@ -1,8 +1,16 @@
 # AIGateway-Proxy 用户登录版设计
 
-日期：2026-10-12。状态：designed / not implemented / not deployed / not validated。
+日期：2026-10-12。状态：implemented / deployed；当前用户版 0.2.1，验证范围见 implementation.md。
 
-本轮交付是需求与设计文档，不执行代码开发、数据库迁移、magpie 配置修改或上线。本文是 requirements.md 中 V2 的详细方案；V1 0.1.1 指定订阅版继续使用 design.md 的既有流程。
+本文最初作为 V2 设计基线；用户批准后已实施平台与插件代码、追加授权迁移和发布。V1 0.1.1 指定订阅版继续使用 design.md 的既有流程。未修改 magpie 应用源码或用户日常 Agent 配置；实际宿主测试使用独立 HOME/XDG 与端口。
+
+### 实施确认与限制
+
+- magpie 的 config hook 接受 Config.Model，而动态 provider.models hook 必须返回 Model.Info；用户版将平台目录转换为 api.id/url/npm、limit 和 capabilities，不能直接返回配置对象丢失 SDK 协议。
+- 真实 magpie CLI 的自动回调、稳定用户账号合并、cc-switch -> Edwin-Agent -> cc-switch 替换及重新登录通过；文本模型目录依次为 5 -> 2 -> 5，用户版账号始终只有一个，订阅版和其他配置不变。
+- 普通/流式 GPT、Claude 流式别名、工具调用往返及真实图片 MCP 调用通过。原生图片配置仍需用户登记生成文件，不宣称自动注册桌面图片选择器。
+- 原生额度接口已读到个人与应用窗口；六次真实调用合计 520 Tokens，两组额度最终均增加 520。额度缓存 60 秒，应用确认用量另依赖 Event Hub 摄取，不是逐 Token 实时显示。
+- WorkBuddy 新用户版界面、所有模型、长期运行/高并发和图片专属订阅的真实生产场景尚未单独验收，详见实施记录。
 
 ## 1. 目标、边界与关键取舍
 
