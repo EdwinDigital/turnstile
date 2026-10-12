@@ -18,6 +18,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
   const [subscription, setSubscription] = useState("")
   const [keyKind, setKeyKind] = useState<"primary" | "secondary">("primary")
   const [acknowledged, setAcknowledged] = useState(false)
+  const [userAcknowledged, setUserAcknowledged] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
@@ -26,7 +27,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
   const items = query.data?.items ?? []
   const selected = items.find((item) => item.subscription_id === subscription) ?? items[0]
   async function downloadUser() {
-    if (activeDownload.current) return
+    if (activeDownload.current || !userAcknowledged) return
     const controller = new AbortController()
     activeDownload.current = controller
     setBusy(true); setError(""); setNotice("")
@@ -38,7 +39,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
       link.href = url; link.download = `aigateway-proxy-user-${user?.id}.zip`
       document.body.append(link); link.click(); link.remove()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-      setNotice("用户版已下载。请导入 aigateway-proxy-user 文件夹，再登录平台并选择订阅。")
+      setNotice("用户版已下载。安装后自动导入授权和默认订阅；需要更新模型时点击「刷新模型」。")
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "下载失败，请重试。")
     } finally {
@@ -76,14 +77,18 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     <div className="finops-scroll-region"><div className="client-downloads-content">
       <header><h1>AIGateway-Proxy</h1><p>将平台订阅导入 magpie，供其他 Agent 使用。</p></header>
       <section className="client-downloads-card">
-        <div className="client-downloads-heading"><ShieldCheck size={22} /><div><h2>AIGateway-Proxy 用户版</h2><p>指定用户下载 · 登录平台后选择本人订阅，动态导入模型和读取额度。</p></div><span data-no-localize>v{personal.data?.plugin_version ?? "0.2.0"}</span></div>
+        <div className="client-downloads-heading"><ShieldCheck size={22} /><div><h2>AIGateway-Proxy 用户版</h2><p>指定用户下载 · 已授权并绑定平台默认订阅，安装后即可使用。</p></div><span data-no-localize>v{personal.data?.plugin_version ?? "0.3.0"}</span></div>
         <p>当前用户：<span data-no-localize>{personal.data?.user_name ?? user?.email}</span></p>
-        <p>安装目录为 <code data-no-localize>aigateway-proxy-user</code>，与下方订阅版独立，可同时安装。引导包不包含订阅密钥或登录令牌。</p>
-        <ol className="client-user-steps"><li>在 magpie 插件页面添加用户版文件夹。</li><li>点击「登录平台」，在浏览器确认设备和账号。</li><li>点击「导入模型配置」，在平台选择订阅与网关。</li><li>需要更新可用订阅时，点击「重新登录」。</li></ol>
+        <p>安装目录为 <code data-no-localize>aigateway-proxy-user</code>，与下方订阅版独立，可同时安装。</p>
+        {personal.data?.default_subscription && <p>默认订阅：<strong data-no-localize>{personal.data.default_subscription.application_name} / {personal.data.default_subscription.subscription_name}</strong></p>}
+        <ol className="client-user-steps"><li>在 magpie 插件页面添加用户版文件夹。</li><li>首次安装自动导入授权、默认订阅和模型，无需再次选择订阅。</li><li>点击「刷新模型」，从平台获取当前绑定订阅的最新模型并替换本插件目录。</li><li>点击「重新登录」，重新验证用户并更新本地授权与默认订阅配置。</li></ol>
         <p>文生图通过配套 MCP 工具使用；首次需登记插件生成的 images-mcp.json，不会自动改写 Agent 配置。</p>
         {personal.isError && <p role="alert">{personal.error.message}</p>}
         {personal.data && !personal.data.enabled && <p role="status">当前平台暂未启用用户版。</p>}
-        <Button type="button" onClick={() => void downloadUser()} disabled={busy || !personal.data?.enabled}><Download size={16} />{busy ? "正在生成安装包" : "下载用户版插件"}</Button>
+        {personal.data?.unavailable_reason && <p role="alert">{personal.data.unavailable_reason}</p>}
+        <div className="client-downloads-warning" id="client-user-secret-warning"><ShieldCheck size={18} /><p>用户版下载包包含个人登录凭据，不包含 APIM 密钥。请勿分享、上传或提交到仓库。</p></div>
+        <label className="client-downloads-consent"><input type="checkbox" checked={userAcknowledged} disabled={busy} aria-describedby="client-user-secret-warning" onChange={event => setUserAcknowledged(event.target.checked)} />我已了解用户版下载包包含个人登录凭据</label>
+        <Button type="button" onClick={() => void downloadUser()} disabled={busy || !personal.data?.enabled || !userAcknowledged}><Download size={16} />{busy ? "正在生成安装包" : "下载用户版插件"}</Button>
         {error && <p role="alert" className="client-downloads-error">{error}</p>}
         <p role="status">{notice}</p>
       </section>

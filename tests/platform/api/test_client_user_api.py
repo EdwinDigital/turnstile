@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from typing import Any, cast
 from uuid import uuid4
+from zipfile import ZipFile
 
 import pytest
 from cryptography.fernet import Fernet
 from pydantic import SecretStr
 
 from backend.api import app
-from backend.http.client_user import client_user_service
+from backend.http.client_user import attributed_body, client_user_service
 from backend.services.client_user import ClientUserService
 from backend.services.client_user_store import ClientUserStore
 from tests.backend.model_platform.test_application_access import _discovery
@@ -69,6 +71,10 @@ def desktop(desktop_postgres: ClientUserStore) -> Any:
     app.dependency_overrides[client_user_service] = lambda: svc
     yield svc
     app.dependency_overrides.pop(client_user_service, None)
+    with desktop_postgres._connection() as c:
+        c.execute("DELETE FROM client_user_installation WHERE user_id=%s", (USER,))
+        c.execute("DELETE FROM client_user_grant WHERE user_id=%s", (USER,))
+        c.execute("DELETE FROM client_device_authorization WHERE user_id=%s", (USER,))
 
 
 def begin(service: ClientUserService, purpose: str = "import") -> dict[str, Any]:
@@ -93,7 +99,7 @@ def test_browser_approval_and_native_catalog(desktop: ClientUserService) -> None
     uri = "/api/v1/client-auth/verification?user_code=" + device["user_code"]
     response = client.get(uri)
     assert response.status_code == 200, response.text
-    chosen = response.json()["subscriptions"][0]
+    chosen = response.json()["subscription"]
     fields = {k: chosen[k] for k in ("application_id", "subscription_id", "gateway_id")}
     approved = client.post(
         "/api/v1/client-auth/decision",
@@ -195,3 +201,52 @@ def test_user_binding_session_and_sensitive_validation(desktop: ClientUserServic
         assert client.get("/api/v1/client-runtime/catalog").status_code == 401
     finally:
         client.cookies.set("turnstile_session", OWNER_SESSION)
+
+
+def test_download_is_authorized_and_refresh_keeps_binding(desktop: ClientUserService) -> None:
+    assert client.post("/api/v1/client-downloads/magpie-user", json={}).status_code == 422
+    assert (
+        client.post(
+            "/api/v1/client-downloads/magpie-user", json={"acknowledged": False}
+        ).status_code
+        == 422
+    )
+    response = client.post("/api/v1/client-downloads/magpie-user", json={"acknowledged": True})
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    with ZipFile(BytesIO(response.content)) as archive:
+        cfg = json.loads(archive.read("aigateway-proxy-user/aigateway-user.config.json"))
+    auth = {"Authorization": "Bearer " + cfg["authorization"]["access"]}
+    initial = client.get("/api/v1/client-runtime/catalog", headers=auth)
+    assert initial.status_code == 200 and initial.json()["models"]
+    refreshed = client.post("/api/v1/client-runtime/refresh-models", headers=auth)
+    assert refreshed.status_code == 200
+    assert refreshed.json()["selection"] == initial.json()["selection"]
+    repository = cast(InMemoryRepository, desktop.repository)
+    repository.models.clear()
+    refreshed = client.post("/api/v1/client-runtime/refresh-models", headers=auth)
+    assert refreshed.status_code == 200 and refreshed.json()["models"] == {}
+    assert refreshed.json()["selection"]["subscription_id"] == cfg["selection"]["subscription_id"]
+    client.post("/api/v1/client-auth/revoke", headers=auth)
+    assert client.post("/api/v1/client-runtime/refresh-models", headers=auth).status_code == 401
+
+
+@pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "openai_images"])
+def test_openai_user_is_verified_not_agent_supplied(protocol: str) -> None:
+    original = {"model": "test", "user": "forged", "input": "hello"}
+    forwarded = json.loads(attributed_body(original, "verified-user", protocol))
+    assert forwarded["user"] == "verified-user"
+    assert forwarded["input"] == "hello"
+    assert original["user"] == "forged"
+
+
+def test_anthropic_user_id_is_verified_without_unsupported_user_field() -> None:
+    forwarded = json.loads(
+        attributed_body(
+            {"model": "test", "user": "forged", "metadata": {"user_id": "forged"}},
+            "verified-user",
+            "anthropic_messages",
+        )
+    )
+    assert "user" not in forwarded
+    assert forwarded["metadata"]["user_id"] == "verified-user"

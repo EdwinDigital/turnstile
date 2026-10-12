@@ -9,11 +9,11 @@ export type ClientDownloadOptions = {
   items: ClientSubscription[]; key_management_available: boolean; unavailable_reason: string | null; plugin_version: string
 }
 export const clientDownloadsApi = {
-  userOptions: (signal?: AbortSignal) => request<{ enabled: boolean; plugin_version: string; user_name: string }>("/api/v1/client-downloads/user-options", { signal }),
+  userOptions: (signal?: AbortSignal) => request<{ enabled: boolean; plugin_version: string; user_name: string; default_subscription?: ClientSubscription; unavailable_reason?: string }>("/api/v1/client-downloads/user-options", { signal }),
   async downloadUser(signal?: AbortSignal): Promise<Blob> {
     const response = await fetch(apiUrl("/api/v1/client-downloads/magpie-user"), {
       method: "POST", credentials: "include", cache: "no-store", signal,
-      headers: { "Content-Type": "application/json" }, body: "{}",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledged: true }),
     })
     if (response.status === 401) window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
     if (!response.ok) {

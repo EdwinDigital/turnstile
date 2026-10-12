@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, copyFile, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, copyFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { adaptModelResponse } from "../../../backend/services/client_user_plugin/index.mjs";
+import { adaptModelResponse, importBootstrap } from "../../../backend/services/client_user_plugin/index.mjs";
 
 test("SSE aliases preserve split UTF-8, tools, usage and real model differences", async () => {
   const original = 'event: response.created\ndata: {"response":{"model":"gpt-6-astra","id":"r","text":"中文"}}\n\nevent: message_start\ndata: {"message":{"model":"gpt-6-astra","id":"msg"}}\n\ndata: {"model":"other","call_id":"c","usage":{"output_tokens":2}}\n\ndata: [DONE]\n\n';
@@ -29,18 +29,19 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
     await copyFile(new URL("../../../backend/services/client_user_plugin/images.mjs", import.meta.url), join(folder, "images.mjs"));
     await writeFile(join(folder, "aigateway-user.config.json"), JSON.stringify({ version: 2, platformOrigin: "https://platform.example", providerId: "aigateway-user-platform-user", userId: "uid", binding: "b", name: "User" }));
     const factory = (await import(pathToFileURL(join(folder, "index.mjs")).href)).default;
-    const plugin = await factory({ directory: folder });
-    assert.deepEqual(plugin.auth.methods.map((x) => x.label), ["登录平台", "导入模型配置", "重新登录"]);
+    const plugin = await factory({ directory: folder, project: { id: "magpie" } });
+    assert.deepEqual(plugin.auth.methods.map((x) => x.label), ["刷新模型", "重新登录"]);
     assert.ok(plugin.auth.methods.every((x) => x.type === "oauth"));
     let current = { new: { id: "new", provider: { npm: "@ai-sdk/openai", api: "https://platform.example/api/v1/client-runtime" }, tool_call: true, reasoning: true, modalities: { input: ["text", "image"] } } };
     let last;
     globalThis.fetch = async (url, init) => {
       last = { url: String(url), init };
-      if (String(url).endsWith("/catalog")) return Response.json({ models: current, aliases: { new: "upstream" }, images: [] });
+      if (String(url).endsWith("/catalog") || String(url).endsWith("/refresh-models")) return Response.json({ models: current, aliases: { new: "upstream" }, images: [] });
       if (String(url).endsWith("/usage")) return Response.json({ windows: [{ name: "audit", used: 100, aside: true }] });
       return Response.json({ model: "upstream", id: "response" });
     };
-    const auth = { type: "oauth", access: "private-user-token" };
+    const auth = { type: "oauth", access: "private-user-token", refresh: "refresh", expires: Date.now() + 900_000, uid: "uid" };
+    await writeFile(join(folder, "plugin-auth.json"), JSON.stringify({ "aigateway-user-platform-user": auth }));
     const discovered = await plugin.provider.models({ models: { old: {} } }, { auth });
     assert.deepEqual(Object.keys(discovered), ["new"]);
     assert.equal(discovered.new.api.npm, "@ai-sdk/openai");
@@ -50,6 +51,13 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
     assert.equal(discovered.new.capabilities.reasoning, true);
     assert.equal(discovered.new.capabilities.input.image, true);
     current = {};
+    assert.deepEqual(Object.keys(await plugin.provider.models({}, { auth })), ["new"]);
+    const refresh = await plugin.auth.methods[0].authorize();
+    assert.equal(refresh.url, "");
+    const refreshed = await refresh.callback();
+    assert.equal(refreshed.access, auth.access);
+    assert.ok(last.url.endsWith("/refresh-models"));
+    assert.equal(last.init.headers.Authorization, "Bearer private-user-token");
     await writeFile(join(folder, "aigateway-proxy-user/aigateway-user-platform-user/images-owned.json"), JSON.stringify({ providerId: "aigateway-user-platform-user-images" }));
     const catalogFetch = globalThis.fetch;
     globalThis.fetch = async (url, init) => {
@@ -74,4 +82,42 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
     assert.ok(!cached.includes("private-user-token"));
     assert.deepEqual(await plugin.provider.models({}, {}), {});
   } finally { globalThis.fetch = previous; await rm(folder, { recursive: true, force: true }); }
+});
+
+test("downloaded OAuth imports once, preserves other accounts and cannot resurrect logout", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ts-user-bootstrap-"));
+  try {
+    const cfg = { providerId: "aigateway-user-platform-user", userId: "user", installationId: "install",
+      authorization: { type: "oauth", access: "tsca_test", refresh: "tscr_test", expires: Date.now() + 900_000,
+        uid: "user", accountId: "user", installationId: "install" } };
+    const input = { project: { id: "magpie" }, directory };
+    const other = { unrelated: { type: "api", key: "other" }, "aigateway-old": { type: "api", key: "legacy" } };
+    const path = join(directory, "plugin-auth.json");
+    await writeFile(path, JSON.stringify(other));
+    assert.equal(await importBootstrap({ directory }, cfg), false);
+    assert.equal(await importBootstrap(input, cfg), true);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { ...other, [cfg.providerId]: cfg.authorization });
+    await writeFile(path, JSON.stringify(other));
+    assert.equal(await importBootstrap(input, cfg), false);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), other);
+    assert.deepEqual(JSON.parse(await readFile(path + ".bak", "utf8")), other);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("first authorized import replaces stale unauthenticated installation and catalog state", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "ts-user-stale-bootstrap-"));
+  try {
+    const providerId = "aigateway-user-platform-user";
+    for (const name of ["index.mjs", "images.mjs"]) await copyFile(new URL(`../../../backend/services/client_user_plugin/${name}`, import.meta.url), join(folder, name));
+    const state = join(folder, "aigateway-proxy-user", providerId);
+    await mkdir(state, { recursive: true });
+    await writeFile(join(state, "installation.json"), JSON.stringify({ id: "old-install" }));
+    await writeFile(join(state, "catalog.json"), JSON.stringify({ models: { stale: {} }, images: [] }));
+    const authorization = { type: "oauth", access: "tsca_new", refresh: "tscr_new", expires: Date.now() + 900_000, uid: "user", accountId: "user", installationId: "new-install" };
+    await writeFile(join(folder, "aigateway-user.config.json"), JSON.stringify({ version: 3, platformOrigin: "https://platform.example", providerId, userId: "user", name: "User", installationId: "new-install", authorization, catalog: { models: { bundled: { id: "bundled" } }, images: [], aliases: {} } }));
+    const factory = (await import(pathToFileURL(join(folder, "index.mjs")).href)).default;
+    const plugin = await factory({ project: { id: "magpie" }, directory: folder });
+    assert.equal(JSON.parse(await readFile(join(state, "installation.json"), "utf8")).id, "new-install");
+    assert.deepEqual(Object.keys(await plugin.provider.models({}, { auth: authorization })), ["bundled"]);
+  } finally { await rm(folder, { recursive: true, force: true }); }
 });

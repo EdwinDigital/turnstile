@@ -12,6 +12,49 @@ async function privateJSON(path, value) {
   } finally { await unlink(temporary).catch(() => {}); }
 }
 
+export async function importBootstrap(input, cfg) {
+  if (input.project?.id !== "magpie" || !input.directory || !cfg.authorization) return false;
+  const auth = cfg.authorization;
+  if (auth.type !== "oauth" || auth.uid !== cfg.userId || auth.accountId !== cfg.userId
+      || !auth.access?.startsWith("tsca_") || !auth.refresh?.startsWith("tscr_")
+      || !Number.isFinite(auth.expires) || auth.installationId !== cfg.installationId)
+    throw new Error("Invalid downloaded authorization");
+  const path = join(input.directory, "plugin-auth.json");
+  const marker = join(input.directory, "aigateway-proxy-user", cfg.providerId, "bootstrap-imported.json");
+  let lock;
+  try {
+    try { await readFile(marker); return false; }
+    catch (error) { if (error.code !== "ENOENT") return false; }
+    const deadline = Date.now() + 2000;
+    while (!lock) {
+      try { lock = await open(path + ".lock", "wx", 0o600); }
+      catch (error) {
+        if (error.code !== "EEXIST" || Date.now() >= deadline) return false;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    }
+    let previous;
+    try { previous = await readFile(path, "utf8"); }
+    catch (error) { if (error.code !== "ENOENT") return false; }
+    const accounts = previous === undefined ? {} : JSON.parse(previous);
+    if (!accounts || typeof accounts !== "object" || Array.isArray(accounts)) return false;
+    await mkdir(join(input.directory, "aigateway-proxy-user", cfg.providerId), { recursive: true, mode: 0o700 });
+    // Mark before writing so logout and old downloads cannot resurrect an account.
+    const mark = await open(marker, "wx", 0o600).catch(error => {
+      if (error.code === "EEXIST") return null;
+      throw error;
+    });
+    if (!mark) return false;
+    try { await mark.writeFile("{}"); await mark.sync(); } finally { await mark.close(); }
+    if (Object.keys(accounts).some(id => id === cfg.providerId || id.startsWith(cfg.providerId + "#"))) return false;
+    accounts[cfg.providerId] = auth;
+    if (previous !== undefined) await privateJSON(path + ".bak", JSON.parse(previous));
+    await privateJSON(path, accounts);
+    return true;
+  } catch { return false; }
+  finally { if (lock) { await lock.close(); await unlink(path + ".lock").catch(() => {}); } }
+}
+
 export function adaptModelResponse(response, alias, expected) {
   if (!alias || !expected || !response.ok || !response.body) return response;
   const replace = (value) => {
@@ -76,18 +119,20 @@ export default async function AIGatewayUserPlugin(input) {
   const cfg = JSON.parse(await readFile(new URL("./aigateway-user.config.json", import.meta.url), "utf8"));
   const origin = new URL(cfg.platformOrigin);
   const local = origin.protocol === "http:" && ["localhost", "127.0.0.1"].includes(origin.hostname);
-  if (cfg.version !== 2 || (origin.protocol !== "https:" && !local) || origin.username || origin.password
+  if (![2, 3].includes(cfg.version) || (origin.protocol !== "https:" && !local) || origin.username || origin.password
       || origin.search || origin.hash || origin.pathname !== "/" || !/^aigateway-user-[a-z0-9-]+$/.test(cfg.providerId))
     throw new Error("Invalid user plugin bootstrap");
   const base = origin.origin;
   const directory = join(input.directory ?? fileURLToPath(new URL(".", import.meta.url)), "aigateway-proxy-user", cfg.providerId);
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  const bootstrapped = await importBootstrap(input, cfg);
   const installPath = join(directory, "installation.json");
+  if (bootstrapped) await privateJSON(installPath, { id: cfg.installationId });
   let installation;
   try { installation = JSON.parse(await readFile(installPath, "utf8")).id; }
   catch (error) {
     if (error.code !== "ENOENT") throw new Error("User plugin installation state cannot be read");
-    installation = randomUUID();
+    installation = bootstrapped ? cfg.installationId : randomUUID();
     try {
       const f = await open(installPath, "wx", 0o600);
       try { await f.writeFile(JSON.stringify({ id: installation })); } finally { await f.close(); }
@@ -97,9 +142,13 @@ export default async function AIGatewayUserPlugin(input) {
     }
   }
   const runtime = base + "/api/v1/client-runtime";
-  let cached = { models: {}, aliases: {}, images: [] };
+  let cached = (bootstrapped ? cfg.catalog : null) ?? { models: {}, aliases: {}, images: [] };
+  let hasCatalog = bootstrapped && Boolean(cfg.catalog);
   const cachePath = join(directory, "catalog.json");
-  try { cached = JSON.parse(await readFile(cachePath, "utf8")); } catch { /* Display cache is optional. */ }
+  if (!bootstrapped) {
+    try { cached = JSON.parse(await readFile(cachePath, "utf8")); hasCatalog = true; } catch { /* Display cache is optional. */ }
+  }
+  if (bootstrapped) await privateJSON(cachePath, cached);
   const expired = () => Object.assign(new Error("请重新登录 AIGateway 平台"), { signIn: "expired" });
   const call = async (path, body, access) => {
     const response = await fetch(base + path, {
@@ -130,8 +179,11 @@ export default async function AIGatewayUserPlugin(input) {
             await new Promise((resolve) => setTimeout(resolve, wait * 1000));
             try {
               const data = await call("/api/v1/client-auth/token", { grant_type: "device_code", device_code: device.device_code });
+              const latest = await updateCatalog(data.access_token, true);
+              await privateJSON(join(directory, "profile.json"), { userId: cfg.userId, selection: latest.selection });
               return { type: "success", access: data.access_token, refresh: data.refresh_token,
-                expires: Date.now() + data.expires_in * 1000, accountId: cfg.userId, uid: cfg.userId };
+                expires: Date.now() + data.expires_in * 1000, accountId: cfg.userId, uid: cfg.userId,
+                installationId: installation };
             } catch (error) {
               if (error.message === "authorization_pending") continue;
               if (error.message === "slow_down") { wait = Math.min(wait + 5, 30); continue; }
@@ -205,6 +257,44 @@ export default async function AIGatewayUserPlugin(input) {
       if (!saved.ok) throw new Error("The picture provider could not be registered");
     }
   };
+  const updateCatalog = async (access, fresh = false) => {
+    const data = await call(fresh ? "/api/v1/client-runtime/refresh-models" : "/api/v1/client-runtime/catalog", fresh ? {} : undefined, access);
+    const next = { models: data.models ?? {}, aliases: data.aliases ?? {}, images: data.images ?? [], selection: data.selection ?? null };
+    // Keep a usable previous catalog if fetching or persistence fails.
+    await privateJSON(cachePath, next);
+    cached = next;
+    hasCatalog = true;
+    await syncImages(cached.images, access).catch(() => {});
+    return data;
+  };
+  const refreshAuthorization = async (auth) => {
+    const hex = createHash("sha256").update(auth.refresh).digest("hex").slice(0, 32);
+    const requestId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    const data = await call("/api/v1/client-auth/token", { grant_type: "refresh_token", refresh_token: auth.refresh, request_id: requestId });
+    return { ...auth, access: data.access_token, refresh: data.refresh_token, expires: Date.now() + data.expires_in * 1000 };
+  };
+  const refreshModels = {
+    type: "oauth", label: "刷新模型",
+    async authorize() {
+      return { url: "", method: "auto", instructions: "从平台读取当前绑定订阅的最新模型，不重新登录或切换订阅。",
+        async callback() {
+          if (input.project?.id !== "magpie" || !input.directory) throw expired();
+          const accounts = JSON.parse(await readFile(join(input.directory, "plugin-auth.json"), "utf8"));
+          let auth = Object.entries(accounts).find(([id, value]) =>
+            (id === cfg.providerId || id.startsWith(cfg.providerId + "#")) && value.type === "oauth"
+            && (value.uid === cfg.userId || value.accountId === cfg.userId))?.[1];
+          if (!auth?.access || !auth.refresh) throw expired();
+          if (auth.expires <= Date.now() + 60_000) {
+            auth = await refreshAuthorization(auth);
+            // Commit rotation before a catalog failure can leave the host with an invalid token.
+            await input.client.auth.set({ path: { id: cfg.providerId }, body: auth });
+          }
+          await updateCatalog(auth.access, true);
+          return { ...auth, type: "success", accountId: cfg.userId, uid: cfg.userId };
+        },
+      };
+    },
+  };
   return {
     config: async (config) => {
       config.provider ??= {};
@@ -212,16 +302,14 @@ export default async function AIGatewayUserPlugin(input) {
     },
     auth: {
       provider: cfg.providerId,
-      methods: [method("登录平台", "login"), method("导入模型配置", "import"), method("重新登录", "reauth")],
+      methods: [refreshModels, method("重新登录", "reauth")],
       refreshLead: 60_000,
       async refresh(auth) {
-        const hex = createHash("sha256").update(auth.refresh).digest("hex").slice(0, 32);
-        const requestId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-        const data = await call("/api/v1/client-auth/token", { grant_type: "refresh_token", refresh_token: auth.refresh, request_id: requestId });
+        const next = await refreshAuthorization(auth);
         // Renew the image-only capability without ever sharing the main refresh token.
         // A local companion failure must not discard a successfully rotated OAuth token.
-        if (cached.images.length) await syncImages(cached.images, data.access_token).catch(() => {});
-        return { access: data.access_token, refresh: data.refresh_token, expires: Date.now() + data.expires_in * 1000 };
+        if (cached.images.length) await syncImages(cached.images, next.access).catch(() => {});
+        return { access: next.access, refresh: next.refresh, expires: next.expires };
       },
       async usage(getAuth) {
         const auth = await getAuth(); if (auth?.type !== "oauth" || !auth.access) throw expired();
@@ -251,9 +339,7 @@ export default async function AIGatewayUserPlugin(input) {
     },
     provider: { id: cfg.providerId, async models(provider, { auth } = {}) {
       if (auth?.type !== "oauth" || !auth.access) return {};
-      const data = await call("/api/v1/client-runtime/catalog", undefined, auth.access);
-      cached = { models: data.models ?? {}, aliases: data.aliases ?? {}, images: data.images ?? [] };
-      await privateJSON(cachePath, cached);
+      if (!hasCatalog) await updateCatalog(auth.access);
       await syncImages(cached.images, auth.access);
       // config uses Config.Model, but provider.models returns normalized Model.Info.
       return Object.fromEntries(Object.entries(cached.models).map(([id, model]) => [id, {

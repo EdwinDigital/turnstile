@@ -1,4 +1,12 @@
 schemas:
+  UserDownload:
+    type: object
+    additionalProperties: false
+    required: [acknowledged]
+    properties:
+      acknowledged:
+        type: boolean
+        const: true
   DeviceRequest:
     properties:
       user_id:

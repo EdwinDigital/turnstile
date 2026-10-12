@@ -309,3 +309,38 @@ ACTIVE -> EXPIRED / REVOKED -> 需要重新登录，不恢复旧 Key
 - [OAuth 2.0 Device Authorization Grant / RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)
 - magpie 本地源码：internal/plugin/host.js、internal/provider/pluginsignin.go、internal/provider/plugin_usage.go、internal/provider/plugins.go、internal/gateway/draw.go。
 - Turnstile 源码：backend/http/client_downloads.py、backend/services/client_downloads.py、backend/services/client_plugin/、backend/http/model_platform.py、turnstile_core/integrations/gateway_protocol.py、turnstile_core/domain/image_profiles.py、turnstile_core/domain/application_access.py、turnstile_core/persistence/directory_store.py。
+
+## 14. 0.3.0 流程修订：预授权下载、固定绑定、刷新模型
+
+本节为 2026-10-12 新用户要求，优先于旧章节的无凭据引导包和交互式订阅选择设计。状态：implemented / validation in progress；不得将此状态当作上线证明。
+
+### 14.1 默认订阅解析
+
+现有平台没有独立的用户默认订阅列，不将浏览器目录第一项或测试订阅视为已配置默认值。复用网关可扩展 config：
+
+```json
+{"client_user_default_subscriptions": {"<platform-user-id>": "<application-subscription-row-id>"}}
+```
+
+支持用户 UUID、治理用户标识和邮件键；仅接受通过当前授权目录验证的网关/订阅组合。显式绑定不可用时返回 409，不回退。未显式配置时按本人拥有、默认网关、应用名、订阅名及 ID 稳定选择。下载页只读展示结果。绑定保存在本次安装的服务端 grant.selection，刷新模型不会重新解析默认值；重新登录才解析最新配置。
+
+### 14.2 下载与首次安装
+
+- POST magpie-user 必须有浏览器 Session、既有跨站校验和 acknowledged=true；GET 不发凭据。
+- 独立 UUID installation + grant；服务端事务写入 Token 摘要、绑定和激活状态；每用户限制每分钟最多六次签发。每次下载不撤销其他安装。
+- ZIP config v3 含用户身份、安装 ID、固定绑定、初始目录及个人 OAuth。文件 0600；响应 no-store；禁止日志、公共仓库和共享下载缓存。Access 15 分钟、滚动 Refresh 7 天、Family 30 天；复用已有轮换/撤销机制和 019 表，无新迁移。
+- 自动导入仅 magpie project + 宿主提供的 directory。复用 plugin-auth.json.lock 互斥、原子 0600 写入和备份；保留所有其他账号，已有用户版账号不覆盖。一次性标记先于导入写入，注销、重载和导入旧包不能恢复登录。
+- 包本身成为敏感文件，而不是原设计的公开引导描述；下载页必须明确这一安全模型变更。其他供应商、V1 包和 Agent 配置均不自动迁移。
+
+### 14.3 刷新与重新登录
+
+- 刷新模型：原生 OAuth auto callback 的空 URL 方法；读取本插件现有账号，必要时续期，通过 Bearer POST client-runtime/refresh-models 强制重读目录。无设备码、浏览器或订阅选择；只更新本插件 catalog.json 和自有图片配套文件。
+- 目录完整替换，包括空清单；不从过期缓存复活被撤销的权限。服务端实际调用仍校验最新授权、发布、用户活跃状态，展示快照不决定预算拦截。
+- 重新登录：保留设备授权与平台新会话要求；页面只读显示服务端默认绑定。确认/拒绝均发送 application/json，解决之前浏览器按 text/plain 发送导致的 422。
+- 新 OAuth 使用固定 accountId/uid 合并同一用户；重新登录更新本地 profile.json 及模型目录。模型刷新不改变 profile 绑定。宿主周围「用哪种方式登录」文案仍由 magpie 控制，不为改标题修改应用源码。
+
+### 14.4 用量身份与验收
+
+- 浏览器/插件/Agent 提交的 user 或 metadata.user_id 不可信。服务端根据 OAuth 当前身份解析 effective_user_id，按实际模型协议覆盖请求体字段，同时发送现有签名的可信 APIM 上下文。
+- OpenAI Responses/Chat/Images 使用 user；Anthropic 使用 metadata.user_id 并去掉顶层 user；其他请求/工具参数不动。APIM 沿用已有个人/共享账本，不重新发布其策略、不修改历史 unattributed 数据。
+- 必须验证下载即有模型和额度、真实 magpie 无登录安装、刷新不发设备授权、目录替换/空清单、重新登录才变更绑定、注销不能复活、其他账号不变、伪造 user 覆盖及真实调用用量归因。测试令牌完成后撤销；WorkBuddy 和高负载结果不能由单测代替。

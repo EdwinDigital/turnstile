@@ -32,7 +32,7 @@ from .auth_service import SessionIdentity
 from .client_downloads import RESERVED, SDK
 from .client_user_store import ClientUserStore
 
-USER_PLUGIN_VERSION = "0.2.1"
+USER_PLUGIN_VERSION = "0.3.0"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
@@ -94,16 +94,37 @@ class ClientUserService:
 
     def package(self, identity: SessionIdentity) -> bytes:
         self.require_enabled()
+        selected = self.default_subscription(identity)
+        installation, grant_id = uuid4(), uuid4()
+        access = "tsca_" + secrets.token_urlsafe(32)
+        refresh = "tscr_" + secrets.token_urlsafe(32)
+        selection = {k: selected[k] for k in ("application_id", "subscription_id", "gateway_id")}
+        self.store.issue_download(
+            identity.id, installation, identity.method, selection, access, refresh, grant_id
+        )
+        catalog = self.catalog({"id": grant_id, "selection": selection}, identity)
         platform = hashlib.sha256(self.origin.encode()).hexdigest()[:12]
         uid = UUID(identity.id).hex
         cfg = {
-            "version": 2,
+            "version": 3,
             "platformOrigin": self.origin,
             "clientId": "magpie-user",
             "userId": identity.id,
             "binding": self._binding(identity.id),
             "providerId": f"aigateway-user-{platform}-{uid}",
             "name": f"AIGateway User · {identity.name or identity.email}",
+            "installationId": str(installation),
+            "selection": catalog["selection"],
+            "catalog": catalog,
+            "authorization": {
+                "type": "oauth",
+                "access": access,
+                "refresh": refresh,
+                "expires": int(time.time() * 1000) + 900_000,
+                "accountId": identity.id,
+                "uid": identity.id,
+                "installationId": str(installation),
+            },
         }
         root = Path(__file__).with_name("client_user_plugin")
         files = {
@@ -127,6 +148,51 @@ class ClientUserService:
                 info.external_attr = 0o100600 << 16
                 z.writestr(info, data, compress_type=ZIP_DEFLATED)
         return out.getvalue()
+
+    def default_subscription(self, identity: SessionIdentity) -> dict[str, Any]:
+        items = [x for x in self.subscriptions(identity, force=True) if x["models"]]
+        gateways = self.repository.registry()["gateways"]
+        identities = {identity.id, identity.email, identity.effective_user_id}
+        for gateway in sorted(gateways, key=lambda g: not g.get("is_default", False)):
+            configured = (gateway.get("config") or {}).get("client_user_default_subscriptions", {})
+            if not isinstance(configured, dict):
+                raise HTTPException(409, "The default subscription configuration is invalid")
+            target = next(
+                (
+                    configured[k]
+                    for k in (identity.id, identity.effective_user_id, identity.email)
+                    if k in configured
+                ),
+                None,
+            )
+            if target:
+                match = next(
+                    (
+                        x
+                        for x in items
+                        if x["subscription_id"] == str(target)
+                        and x["gateway_id"] == str(gateway["id"])
+                    ),
+                    None,
+                )
+                if not match:
+                    raise HTTPException(409, "The configured default subscription is unavailable")
+                return match
+        if not items:
+            raise HTTPException(409, "No authorized default subscription with models is available")
+        default_gateways = {str(g["id"]) for g in gateways if g.get("is_default")}
+
+        def rank(item: dict[str, Any]) -> tuple[Any, ...]:
+            app = self.repository.get_gateway_application(UUID(item["application_id"])) or {}
+            return (
+                app.get("owner_id") not in identities,
+                item["gateway_id"] not in default_gateways,
+                item["application_name"].casefold(),
+                item["subscription_name"].casefold(),
+                item["subscription_id"],
+            )
+
+        return min(items, key=rank)
 
     def create_device(
         self,
@@ -437,10 +503,12 @@ class ClientUserService:
             raise HTTPException(400, "invalid_grant")
         return cast(dict[str, Any], json.loads(self.cipher.decrypt(encrypted) or "{}"))
 
-    def catalog(self, grant: dict[str, Any], identity: SessionIdentity) -> dict[str, Any]:
+    def catalog(
+        self, grant: dict[str, Any], identity: SessionIdentity, *, fresh: bool = False
+    ) -> dict[str, Any]:
         if not grant["selection"]:
             return {"models": {}, "images": [], "selection": None}
-        selected = self.selected(identity, grant["selection"])
+        selected = self.selected(identity, grant["selection"], fresh=fresh)
         self.store.activate(grant["id"])
         models = {}
         images = []

@@ -1,4 +1,17 @@
 export const ENGLISH_CORE_PHRASES: Record<string, string> = {
+  "确认刷新模型": "Confirm model refresh",
+  "平台网关：": "Platform gateway:",
+  "默认订阅：": "Default subscription:",
+  "本次模型目录": "Current model catalog",
+  "指定用户下载 · 已授权并绑定平台默认订阅，安装后即可使用。": "Personal download · Authorized and bound to the platform default subscription, ready after installation.",
+  "用户版已下载。安装后自动导入授权和默认订阅；需要更新模型时点击「刷新模型」。": "User plugin downloaded. Installation imports authorization and the default subscription. Select Refresh models to update the catalog.",
+  "首次安装自动导入授权、默认订阅和模型，无需再次选择订阅。": "First installation imports authorization, the default subscription and models without another subscription selection.",
+  "点击「刷新模型」，从平台获取当前绑定订阅的最新模型并替换本插件目录。": "Select Refresh models to fetch the bound subscription’s latest models and replace this plugin’s catalog.",
+  "点击「重新登录」，重新验证用户并更新本地授权与默认订阅配置。": "Select Sign in again to reauthenticate and update local authorization and default subscription settings.",
+  "用户版下载包包含个人登录凭据，不包含 APIM 密钥。请勿分享、上传或提交到仓库。": "The user package contains personal sign-in credentials, not an APIM key. Do not share, upload or commit it.",
+  "我已了解用户版下载包包含个人登录凭据": "I understand the user package contains personal sign-in credentials",
+  "默认订阅由平台绑定，无需选择。确认后更新本插件配置，其他供应商不受影响。": "The platform binds the default subscription; no selection is needed. Confirmation updates only this plugin, not other providers.",
+
   "数据自动刷新": "Automatic data refresh",
   "数据自动刷新频率": "Data refresh frequency",
   "近实时（1分钟）": "Near real-time (1 minute)",

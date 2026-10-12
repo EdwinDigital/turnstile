@@ -49,7 +49,7 @@ function render(purpose, { fail = false } = {}) {
     }
     if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" }
     if (name === "@tanstack/react-query") return { useQuery: () => ({
-      data: { purpose, state: "pending", subscriptions: [selected] },
+      data: { purpose, state: "pending", subscription: selected },
     }) }
     if (name === "../api/client") return client
     if (name === "../providers/auth-provider") return { useAuth: () => ({ user: { id: "user-1" } }) }
@@ -89,11 +89,11 @@ for (const purpose of ["login", "import", "reauth"]) {
       assert.equal(init.signal.aborted, false)
       assert.deepEqual(JSON.parse(init.body), {
         user_code: "ABCD-EFGH", approve,
-        ...(approve && purpose === "import" ? { application_id: "app-1", subscription_id: "sub-1", gateway_id: "gateway-1" } : {}),
       })
-      assert.equal(view.states[1], false)
-      assert.notEqual(view.states[2], "")
-      assert.equal(view.states[3], "")
+      assert.equal(view.states[0], false)
+      assert.notEqual(view.states[1], "")
+      assert.equal(view.states[2], "")
+      assert.equal(view.nodes.filter(node => node.type === "select").length, 0)
       assert.deepEqual(view.removed, ["turnstile-client-authorization"])
     })
   }
@@ -103,8 +103,8 @@ test("a failed decision retains the pending authorization and reports an error",
   const view = render("login", { fail: true })
   view.nodes.find(node => node.type === "form").props.onSubmit({ preventDefault: () => {} })
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(view.states[1], false)
-  assert.equal(view.states[2], "")
-  assert.match(view.states[3], /API 422/)
+  assert.equal(view.states[0], false)
+  assert.equal(view.states[1], "")
+  assert.match(view.states[2], /API 422/)
   assert.deepEqual(view.removed, [])
 })

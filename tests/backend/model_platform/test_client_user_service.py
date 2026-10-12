@@ -23,6 +23,9 @@ from turnstile_core.services.application_access import ApplicationAccessService
 
 
 class DesktopStore:
+    def issue_download(self, *args: Any) -> None:
+        pass
+
     def activate(self, grant_id: Any) -> dict[str, Any]:
         return {"id": grant_id, "activated": True}
 
@@ -72,18 +75,23 @@ def client_service() -> tuple[ClientUserService, InMemoryRepository, SessionIden
     return service, repository, identity
 
 
-def test_personal_package_has_no_runtime_credentials_and_distinct_identity() -> None:
+def test_personal_package_has_bound_authorization_and_distinct_identity() -> None:
     service, _, identity = client_service()
     with ZipFile(BytesIO(service.package(identity))) as archive:
         assert all(name.startswith("aigateway-proxy-user/") for name in archive.namelist())
         config = json.loads(archive.read("aigateway-proxy-user/aigateway-user.config.json"))
         assert config["providerId"].startswith("aigateway-user-")
         assert config["userId"] == identity.id
-        assert not {"access", "refresh", "subscriptionKey", "password"}.intersection(config)
+        assert not {"subscriptionKey", "password"}.intersection(config)
+        assert config["authorization"]["access"].startswith("tsca_")
+        assert config["authorization"]["refresh"].startswith("tscr_")
+        assert config["authorization"]["installationId"] == config["installationId"]
+        assert config["selection"]["apim_subscription_id"] == "cc-switch"
+        assert config["catalog"]["models"]
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
         package = json.loads(archive.read("aigateway-proxy-user/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.2.1"
+        assert package["version"] == "0.3.0"
         assert all((f.external_attr >> 16) & 0o777 == 0o600 for f in archive.infolist())
 
 
@@ -129,3 +137,16 @@ def test_disabled_feature_cannot_export_a_user_package() -> None:
     with pytest.raises(HTTPException) as failure:
         service.package(owner)
     assert failure.value.status_code == 503
+
+
+def test_explicit_default_is_validated_and_never_falls_back_when_revoked() -> None:
+    service, repo, owner = client_service()
+    first = service.default_subscription(owner)
+    repo.gateways[0]["config"]["client_user_default_subscriptions"] = {
+        owner.id: first["subscription_id"],
+    }
+    assert service.default_subscription(owner)["subscription_id"] == first["subscription_id"]
+    repo.gateways[0]["config"]["client_user_default_subscriptions"][owner.id] = str(uuid4())
+    with pytest.raises(HTTPException) as failure:
+        service.default_subscription(owner)
+    assert failure.value.status_code == 409

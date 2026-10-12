@@ -18,6 +18,58 @@ def digest(value: str) -> str:
 
 
 class ClientUserStore(AuthStore):
+    def issue_download(
+        self,
+        user_id: str,
+        installation: UUID,
+        method: str,
+        selection: dict[str, Any],
+        access: str,
+        refresh: str,
+        grant_id: UUID,
+    ) -> None:
+        with self._connection() as c, c.transaction():
+            c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (user_id,))
+            user = c.execute(
+                "SELECT enabled FROM app_user WHERE id=%s FOR SHARE", (user_id,)
+            ).fetchone()
+            if not user or not user["enabled"]:
+                raise HTTPException(401, "Account is no longer enabled")
+            count = c.execute(
+                "SELECT count(*) AS n FROM client_user_grant WHERE user_id=%s "
+                "AND created_at>now()-interval '1 minute'",
+                (user_id,),
+            ).fetchone()["n"]
+            if count >= 6:
+                raise HTTPException(
+                    429, "Please wait before downloading another authorized package"
+                )
+            c.execute(
+                "INSERT INTO client_user_installation(user_id,installation_id) VALUES(%s,%s)",
+                (user_id, installation),
+            )
+            c.execute(
+                "INSERT INTO client_user_grant (id,user_id,installation_id,method,access_digest,"
+                "refresh_digest,access_expires_at,refresh_expires_at,expires_at,"
+                "selection,activated) "
+                "VALUES(%s,%s,%s,%s,%s,%s,now()+interval '15 minutes',"
+                "now()+interval '7 days',now()+interval '30 days',%s,TRUE)",
+                (
+                    grant_id,
+                    user_id,
+                    installation,
+                    method,
+                    digest(access),
+                    digest(refresh),
+                    Jsonb(selection),
+                ),
+            )
+            c.execute(
+                "UPDATE client_user_installation SET generation=1,active_grant=%s "
+                "WHERE user_id=%s AND installation_id=%s",
+                (grant_id, user_id, installation),
+            )
+
     def create_device(
         self,
         user_id: str,

@@ -83,6 +83,10 @@ class Decision(StrictModel):
     gateway_id: UUID | None = None
 
 
+class UserDownload(StrictModel):
+    acknowledged: Literal[True]
+
+
 def bearer(request: Request) -> str:
     value = request.headers.get("authorization", "")
     if not value.startswith("Bearer ") or not 20 <= len(value) <= 110:
@@ -100,19 +104,28 @@ def authorized(request: Request, service: ClientUserService) -> tuple[dict[str, 
 
 
 @router.get("/api/v1/client-downloads/user-options")
-def user_options(identity: CurrentSession, response: Response) -> dict[str, Any]:
+def user_options(identity: CurrentSession, response: Response, service: Service) -> dict[str, Any]:
     response.headers.update(PRIVATE)
-    return {
+    result: dict[str, Any] = {
         "enabled": os.getenv("CLIENT_USER_ENABLED", "false").lower() == "true"
         and bool(os.getenv("CLIENT_PLATFORM_ORIGIN", "")),
         "plugin_version": USER_PLUGIN_VERSION,
         "name": "AIGateway-Proxy 用户版",
         "user_name": identity.name or identity.email,
     }
+    if result["enabled"]:
+        try:
+            selected = service.default_subscription(identity)
+            result["default_subscription"] = {
+                k: v for k, v in selected.items() if k not in {"base_url", "apim_subscription_id"}
+            }
+        except HTTPException as error:
+            result.update(enabled=False, unavailable_reason=error.detail)
+    return result
 
 
 @router.post("/api/v1/client-downloads/magpie-user")
-def download(identity: CurrentSession, service: Service) -> Response:
+def download(body: UserDownload, identity: CurrentSession, service: Service) -> Response:
     return Response(
         service.package(identity),
         media_type="application/zip",
@@ -150,7 +163,7 @@ def verification(
             "expires_at": row["expires_at"].isoformat(),
             "reauth_required": row["purpose"] == "reauth"
             and (not owner or owner.get("created_at", row["created_at"]) < row["created_at"]),
-            "subscriptions": service.subscriptions(identity, force=True),
+            "subscription": service.default_subscription(identity),
         },
         headers=PRIVATE,
     )
@@ -161,16 +174,16 @@ def decision(
     body: Decision, identity: CurrentSession, service: Service, request: Request, store: Store
 ) -> JSONResponse:
     service.require_enabled()
-    row = service.store.device(body.user_code, identity.id)
+    service.store.device(body.user_code, identity.id)
     selection = None
-    if body.approve and row["purpose"] == "import":
-        selection = {
-            k: str(getattr(body, k) or "")
-            for k in ("application_id", "subscription_id", "gateway_id")
-        }
-        chosen = service.selected(identity, selection, fresh=True)
-        if not chosen["models"]:
-            raise HTTPException(409, "No authorized published models are available")
+    if body.approve:
+        chosen = service.default_subscription(identity)
+        selection = {k: chosen[k] for k in ("application_id", "subscription_id", "gateway_id")}
+        if any(
+            getattr(body, k) is not None and str(getattr(body, k)) != selection[k]
+            for k in selection
+        ):
+            raise HTTPException(409, "Subscription selection changed; reload the verification page")
     owner = store.session_owner(
         hash_session_token(request.cookies.get(service.settings.session_cookie_name, ""))
     )
@@ -213,6 +226,14 @@ def revoke(request: Request, service: Service) -> JSONResponse:
 def catalog(request: Request, service: Service) -> JSONResponse:
     grant, identity = authorized(request, service)
     return JSONResponse(service.catalog(grant, identity), headers=PRIVATE)
+
+
+@router.post("/api/v1/client-runtime/refresh-models")
+def refresh_models(request: Request, service: Service) -> JSONResponse:
+    grant, identity = authorized(request, service)
+    if not grant["selection"]:
+        raise HTTPException(409, "Reauthenticate to bind the platform default subscription")
+    return JSONResponse(service.catalog(grant, identity, fresh=True), headers=PRIVATE)
 
 
 @router.get("/api/v1/client-runtime/usage")
@@ -267,6 +288,20 @@ async def limited_body(request: Request) -> bytes:
     return bytes(parts)
 
 
+def attributed_body(body: dict[str, Any], user_id: str, protocol: str) -> bytes:
+    body = dict(body)
+    if protocol == "anthropic_messages":
+        metadata = body.get("metadata")
+        body["metadata"] = {
+            **(metadata if isinstance(metadata, dict) else {}),
+            "user_id": user_id,
+        }
+        body.pop("user", None)
+    else:
+        body["user"] = user_id
+    return json.dumps(body, ensure_ascii=False).encode()
+
+
 @router.post("/api/v1/client-runtime/{path:path}")
 async def proxy(path: str, request: Request, service: Service) -> Response:
     endpoints = {
@@ -287,7 +322,7 @@ async def proxy(path: str, request: Request, service: Service) -> Response:
     except (ValueError, TypeError) as error:
         raise HTTPException(400, "A JSON body with an authorized model is required") from error
 
-    def prepare() -> tuple[str, dict[str, str]]:
+    def prepare() -> tuple[str, dict[str, str], bytes]:
         service.require_enabled()
         credential = bearer(request)
         image_key = credential.startswith("tsci_")
@@ -311,16 +346,21 @@ async def proxy(path: str, request: Request, service: Service) -> Response:
         suffix = (
             "v1/messages" if endpoints[path] == "anthropic_messages" else path.removeprefix("v1/")
         )
-        return selected["base_url"] + "/" + suffix, {
-            "Ocp-Apim-Subscription-Key": key,
-            "x-turnstile-client-context": context,
-            "x-request-id": rid,
-            "x-request-source": "aigateway-user",
-            "Content-Type": "application/json",
-            "Accept-Encoding": "identity",
-        }
+        # Never forward an Agent-supplied user identity, including nested Anthropic metadata.
+        return (
+            selected["base_url"] + "/" + suffix,
+            {
+                "Ocp-Apim-Subscription-Key": key,
+                "x-turnstile-client-context": context,
+                "x-request-id": rid,
+                "x-request-source": "aigateway-user",
+                "Content-Type": "application/json",
+                "Accept-Encoding": "identity",
+            },
+            attributed_body(body, identity.effective_user_id, endpoints[path]),
+        )
 
-    url, headers = await run_in_threadpool(prepare)
+    url, headers, raw = await run_in_threadpool(prepare)
     upstream = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=15), follow_redirects=False)
     try:
         response = await upstream.send(

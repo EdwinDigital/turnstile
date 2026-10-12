@@ -25,6 +25,12 @@ paths:
       - Client User
       summary: Download
       operationId: download_api_v1_client_downloads_magpie_user_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserDownload'
       responses:
         '200':
           description: Successful Response
@@ -194,6 +200,19 @@ paths:
       - clientBearer: []
       description: Private desktop client endpoint; credentials and authorization
         are never inferred from caller identity headers.
+  /api/v1/client-runtime/refresh-models:
+    post:
+      tags: [Client User]
+      summary: Refresh the bound subscription's model catalog without reauthentication
+      operationId: refresh_models_api_v1_client_runtime_refresh_models_post
+      responses:
+        '200':
+          description: Latest authorized catalog for the existing binding
+          content:
+            application/json:
+              schema: {}
+      security:
+      - clientBearer: []
   /api/v1/client-runtime/image-capabilities:
     post:
       tags:

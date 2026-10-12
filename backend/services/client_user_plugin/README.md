@@ -5,14 +5,18 @@ Keep its `aigateway-proxy-user` directory in a permanent location. Do not copy i
 over an existing subscription installation.
 
 1. 在 magpie 插件页面添加本地 `aigateway-proxy-user` 文件夹。
-2. 选择「登录平台」，浏览器中确认当前账号和设备短码。包仅能由下载者登录。
-3. 选择「导入模型配置」，在平台选择本人可访问的应用订阅和网关。
-4. 成功导入后，文本模型完整替换该用户版供应商的旧目录，其他供应商不变。
-5. 「重新登录」强制平台再次认证并刷新可用目录；没有手动 API Key 入口。
+2. 下载时已经通过当前平台会话授权并绑定默认订阅。首次安装自动导入 OAuth 和模型。
+3. 「刷新模型」使用已有授权，直接读取当前绑定订阅的最新模型；不打开浏览器、不选择订阅。
+4. 刷新完整替换本插件的文本/图片模型目录，其他供应商和订阅版不变。
+5. 「重新登录」才打开平台验证页，重新认证并解析默认订阅，更新本地授权与配置。
+6. 不覆盖已有本插件账号；主动退出后不会从旧包恢复登录，此时使用「重新登录」。
 
-The bootstrap contains no APIM key, password, browser cookie, access token or
-refresh token. OAuth credentials are saved by magpie, not embedded in the package.
-Do not share runtime authentication/state files. Models and allowances are read
+The private download contains personal OAuth access and refresh tokens. It does
+not contain an APIM key, password or browser cookie. Never share, upload or commit
+the ZIP, extracted configuration or runtime state. Each download has an independent
+installation and revocable grant; access lasts 15 minutes, refresh validity is
+7 days (rolling), and the grant requires reauthentication after 30 days.
+Models and allowances are read
 from the platform; local token totals are not the shared application's allowance.
 Audit-only quota windows do not stop the account. Actual calls remain governed
 by the platform and APIM.
@@ -20,6 +24,17 @@ by the platform and APIM.
 Only this plugin's namespace is replaced. Do not rename the old subscription
 plugin or reuse its provider ID. Failed/canceled authorization preserves a
 previous valid import; revoked permissions are never restored from a cache.
+
+The default subscription is resolved by the platform, not by a client dropdown.
+An explicit gateway configuration binding takes precedence; otherwise an active
+owned subscription on the default gateway is preferred, using a stable ordering.
+An unavailable explicit default fails closed. Model refresh keeps the existing
+binding; only reauthentication resolves a new default. The platform overwrites
+caller-supplied OpenAI `user` / Anthropic `metadata.user_id` with the verified
+governance identity and also signs the trusted APIM attribution context.
+
+magpie's surrounding sign-in heading is host-owned. This plugin changes its two
+method labels without changing magpie application code.
 
 ## 文生图 / Image Generation
 

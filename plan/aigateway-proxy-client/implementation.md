@@ -122,3 +122,20 @@
 - 六次调用总计 520 Tokens，均为本人而非 unattributed。个人窗口 21729 -> 22249，cc-switch 共享窗口 1452189 -> 1452709；原生 magpie quota 接口已读到两组窗口。首次额度快照因摄取尚未包含最后 105 Tokens，下一次缓存到期后对齐；缓存为 60 秒，预算拦截不依赖该展示刷新。
 - 实际桌面模型回归发现并修复 Config.Model / Model.Info 形状差异；无图片订阅切换时，本机缺少配置写 API 不再阻断文本目录替换。
 - 仍未验收：WorkBuddy 新用户版专门会话、所有 Foundry 模型及参数、多轮长上下文/取消/高并发/长期续签、生产图片专属订阅与普通用户目录矩阵。不得把隔离 CLI、HTTP/MCP 或 fixture 验证写成这些场景已全部通过。
+
+## 浏览器授权 422 热修复（2026-10-12）
+
+- 根因：页面 JSON.stringify 请求没有 application/json 头，浏览器自动使用 text/plain;charset=UTF-8，FastAPI 在 body 模型解析前返回 model_attributes_type 422；并非密码、订阅权限或 PostgreSQL 关停。
+- 之前 HTTP 测试的 json= 参数自动补头，浏览器验收未提交决策，遗漏了这个客户端传输路径。新增真实组件回调 + request 客户端执行测试，覆盖三种目的的确认/拒绝和失败保留状态；后端同时复现 text/plain 422 / application/json 200。
+- 提交 65b6b2b 已推送并上线。只替换 frontend/dist，1915 个非前端包文件及 AppSettings 逐字节不变；实际挂载包、入口/静态资产和认证业务读取已核对。
+- 110 项相关 Python 回归通过（其中执行页面七种 Node 场景）；构建、Ruff 通过。真实 Edge 独立测试申请：请求 Content-Type application/json、响应 200、展示「已拒绝授权」。未操作用户自己的待处理申请。
+- 独立 HTTP 登录、导入、重新登录决策/兑换均 200；目录 5 文本/3 图片，测试 Family 已撤销且后续 catalog 401。PostgreSQL Ready、Web App Running。
+- 0.3.0 新流程尚在本节之后单独验证；不能把上述 0.2.1 热修复证据当作新流程验收。
+
+## 0.3.0 开发与本地验证（2026-10-12）
+
+- 已实现预授权下载、服务端默认订阅解析、一次性 OAuth 自动导入、空 URL「刷新模型」、重新登录解析默认绑定、OpenAI/Anthropic 可信 user 字段覆盖。V1 模板、019 迁移、APIM 策略和 magpie 源码未修改。
+- 原生 magpie 0.1.1194、独立 HOME/XDG、本地 HTTP fixture：安装无需登录即有 OAuth；刷新只请求 refresh-models，不发设备请求、不打开浏览器；old -> new 完整替换且只有一个账号；退出后不会恢复，其他账号不变。fixture 不是生产推理验收。
+- Python 完整回归 1829 passed / 7 skipped / 1 warning。随后补首次导入覆盖旧的未授权安装 ID/目录状态、兼容旧的未绑定授权及页面名称一致性；最终相关回归 150 passed，Node 11 个场景通过。全仓 Ruff、三个后端模块 Mypy、前端构建通过；已有大包 warning 未扩展处理。
+- 新下载包包含个人 OAuth；必须勾选风险提示，POST acknowledged=true，ZIP 文件 0600、响应 no-store。默认绑定缺失时明确阻断；刷新不会偷偷切到其他订阅。已有本插件账号不自动覆盖，旧版未绑定账号需要一次「重新登录」。
+- 生产发布与真实 0.3.0 ZIP/native 推理验证待后续证据，不把上一节热修复上线当作本版本上线。

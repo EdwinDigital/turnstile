@@ -70,6 +70,8 @@ paths:
     $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-auth~1revoke
   /api/v1/client-runtime/catalog:
     $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-runtime~1catalog
+  /api/v1/client-runtime/refresh-models:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-runtime~1refresh-models
   /api/v1/client-runtime/usage:
     $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-runtime~1usage
   /api/v1/client-runtime/image-capabilities:
@@ -379,6 +381,8 @@ components:
       $ref: ./openapi/schemas/client-user.yaml#/schemas/Decision
     TokenRequest:
       $ref: ./openapi/schemas/client-user.yaml#/schemas/TokenRequest
+    UserDownload:
+      $ref: ./openapi/schemas/client-user.yaml#/schemas/UserDownload
     GatewayApplicationBudgetProjection:
       $ref: ./openapi/schemas/application-access.yaml#/schemas/GatewayApplicationBudgetProjection
     ClientDownloadOptions:
