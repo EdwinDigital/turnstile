@@ -23,3 +23,13 @@ def test_plugin_hooks_and_dispatch() -> None:
         ["node", "--test", str(REPOSITORY_ROOT / "tests/platform/frontend/client-plugin.test.mjs")],
         check=True,
     )
+
+
+def test_browser_authorization_request_transport() -> None:
+    subprocess.run(
+        [
+            "node", "--test",
+            str(REPOSITORY_ROOT / "tests/platform/frontend/client-authorization.test.mjs"),
+        ],
+        check=True,
+    )

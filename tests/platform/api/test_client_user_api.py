@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 from uuid import uuid4
 
@@ -123,6 +124,32 @@ def test_browser_approval_and_native_catalog(desktop: ClientUserService) -> None
     revoked = client.post("/api/v1/client-auth/revoke", headers=auth)
     assert revoked.status_code == 200
     assert client.get("/api/v1/client-runtime/catalog", headers=auth).status_code == 401
+
+
+@pytest.mark.parametrize("purpose", ["login", "import", "reauth"])
+def test_browser_string_body_needs_json_content_type(
+    desktop: ClientUserService, purpose: str
+) -> None:
+    device = begin(desktop, purpose)
+    payload = json.dumps({"user_code": device["user_code"], "approve": False})
+    rejected = client.post(
+        "/api/v1/client-auth/decision",
+        content=payload,
+        headers={"Content-Type": "text/plain;charset=UTF-8"},
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"][0]["type"] == "model_attributes_type"
+    status = client.get(
+        "/api/v1/client-auth/verification", params={"user_code": device["user_code"]}
+    )
+    assert status.json()["state"] == "pending"
+    decided = client.post(
+        "/api/v1/client-auth/decision",
+        content=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["status"] == "denied"
 
 
 def test_user_binding_session_and_sensitive_validation(desktop: ClientUserService) -> None:

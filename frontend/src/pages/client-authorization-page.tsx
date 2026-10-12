@@ -34,6 +34,7 @@ export function ClientAuthorizationPage({ code }: { code: string }) {
     try {
       await request("/api/v1/client-auth/decision", {
         method: "POST", signal: controller.signal,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user_code: code, approve, ...(approve && importing && selected ? {
           application_id: selected.application_id, subscription_id: selected.subscription_id, gateway_id: selected.gateway_id,
         } : {}) }),
