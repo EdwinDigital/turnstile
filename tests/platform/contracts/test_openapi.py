@@ -93,14 +93,15 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     components = cast(dict[str, object], root["components"])
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
-    assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 800
-    assert len(paths) == 120
-    assert len(schemas) == 221
+    assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 900
+    assert len(paths) == 133
+    assert len(schemas) == 224
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
         "application-access.yaml",
         "client-downloads.yaml",
+        "client-user.yaml",
         "assistant.yaml",
         "authentication.yaml",
         "budgets.yaml",

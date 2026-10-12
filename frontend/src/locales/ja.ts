@@ -1,3 +1,4 @@
+import { CLIENT_USER_PHRASES } from "./ja/phrases-client-user"
 import { JAPANESE_CORE_PHRASES } from "./ja/phrases-core"
 import { USER_SETTINGS_PHRASES } from "./ja/phrases-user-settings"
 import { JAPANESE_COPILOT_PHRASES } from "./ja/phrases-copilot"
@@ -13,6 +14,7 @@ const JAPANESE_PHRASES: Record<string, string> = {
   ...JAPANESE_AUTH_PHRASES,
   ...IMAGE_GENERATION_PHRASES,
   ...ORGANIZATION_PHRASES,
+  ...CLIENT_USER_PHRASES,
 }
 
 const orderedPhrases = Object.entries(JAPANESE_PHRASES).sort(([left], [right]) => right.length - left.length)

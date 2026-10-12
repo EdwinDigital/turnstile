@@ -2,6 +2,8 @@
 
 日期：2026-10-11。用户更新：先不考虑精细权限控制，先实现核心功能验证。
 
+记录说明：既有章节是 V1 指定订阅版的历史实施/验证记录，不是 V2 用户登录版的交付证据。2026-10-12 文档扩展见末尾「用户登录版实施计划」；本轮没有发布或调用模型测试。
+
 ## 实现
 
 - 用户菜单新增下载客户端，跨数据源保持独立页面；可选择应用订阅、关联平台网关和主/备用密钥，查看对话模型并下载 ZIP。
@@ -62,3 +64,48 @@
 - 模型复验：GPT Sol Responses 2408 ms、Claude Anthropic 1584 ms 通过。此前一次 GPT 测试遇到线上 429，未改限流，稍后复测成功。
 - 本机 /Users/edwin/Downloads/aigateway-proxy 已原地更新模板、README 和 package.json 到 0.1.1；订阅配置未变，已有 plugin-auth.json 逐字节未变。仅执行插件 off/on 重载，不改 Codex、WorkBuddy 或日常 magpie providers.json，三者 hash 相同。
 - Node 插件测试通过（含并发/损坏/锁定/写入失败）；聚焦 API/前端/契约 28 项通过。Ruff、Mypy 268 源文件及 frontend 构建通过。最终完整回归和线上新包验收进行中。
+
+## 用户登录版实施计划（2026-10-12）
+
+本节为计划，不覆盖历史结果；所有开发、迁移、发布和新版端到端验收均未执行。需求见 requirements.md，详细架构与验收矩阵见 user-mode-design.md。
+
+| 阶段 | 内容 | 状态 / 放行条件 |
+| --- | --- | --- |
+| D0 | 更新双版本需求、认证/授权、订阅选择、目录替换、图片和额度设计 | designed；宿主限制及配套图片登记要求已记录 |
+| P0 | 隔离 magpie 验证 OAuth auto callback、同账号替换、动态目录、图片选择器/桥接 | implemented / isolated validated；本地 fixture 验证，不等于生产验收 |
+| P1 | 追加迁移、设备授权、令牌轮换/撤销、本人订阅目录与授权策略 | implemented / locally validated；019 已部署，旧数据计数及迁移 checksum 保持不变 |
+| P2 | 独立名称/包名/目录/供应商 ID 的用户版模板、平台验证/订阅选择页、导入准备/激活、双下载页面 | implemented / locally validated；尚未生产发布及浏览器验收 |
+| P3 | 用户调用代理与 APIM 可信上下文、动态模型和别名适配 | implemented；非当前 APIM 修订真实调用及归因通过，当前流量未切换 |
+| P4 | 个人/共享额度窗口、缓存和负载验证 | implemented / unit validated；真实额度展示及负载验收未完成 |
+| P5 | 文生图兼容性主路线或受控配套图片桥接 | implemented / fixture validated；需一次配套登记，真实图片模型及计量未验收 |
+| P6 | 新用户包真实 magpie / WorkBuddy 端到端验证及发布 | not deployed / not validated；完成前置阶段后单独执行 |
+
+### 已核对的宿主能力与限制
+
+- 本机 magpie 版本记录为 0.1.1194（2026-10-12）；OAuth 页面 URL、auto callback、`auth.refresh`、`auth.usage` 已有宿主实现，仍需对本次插件协议做隔离实测。
+- `host.js` 存在 `ask(inputs)` 动态问题扩展，但 authorize 的参数传递和账号读取作用域需要验证。主流程采用平台选择页，不依赖未经验证的原生动态订阅下拉。
+- 同 provider 的登录返回固定 `accountId` / `uid` 后，宿主 `settle` 可合并同账号；不能将订阅名称用作账号身份，否则每次切换可能新增账号。
+- 通用插件模型的图片输入标记不是图片输出能力。`gateway/draw.go` 的 `Drawers` 会排除普通插件账号，当前不能承诺只增加 `/images/generations` 即出现在图片选择器。
+- 当前指定订阅插件没有 `auth.usage`，本地元数据 `usage=false`；已有调用 Token 记录不等于额度卡片。尚未开发的用户版应补平台额度读数，而不是改 magpie 展示代码。
+
+### 实施保护
+
+- 冻结 V1 0.1.1 模板与包行为；新模板使用独立目录。新版不得自动改写现有指定订阅包、其他供应商、Agent 的模型选择或原始 usage 数据。
+- 命名按 user-mode-design.md 3.3 执行：旧插件 `aigateway-proxy`，新插件 `aigateway-proxy-user`。只改显示名不足以证明隔离，必须验证 package.name、providerId、账号槽位、状态目录和导入/卸载拥有范围；不以重命名旧版安装目录消除冲突。
+- 必须使用独立 HOME/XDG/端口做插件和桥接测试；生产包、数据库与 APIM 策略变更需留存基线，应用已执行迁移不可改 checksum。
+- 未来上线前应检查 PostgreSQL 状态和历史事件、备份/恢复路径、Storage 访问及当前部署配置；不得通过开放 Storage、防火墙或降低既有认证绕过失败。
+- 上线证据分别记录：implemented、deployed、validated、not verified；文档、源码检查、unit test、浏览器验证、真实 Agent/图片调用不可相互替代。
+
+## 用户版开发与隔离验证（2026-10-12，发布前）
+
+- 已实现独立 0.2.0 用户包、设备授权/平台确认、Token 摘要存储及轮换、同安装 generation 激活、本人订阅目录、动态模型、受限原生代理、别名适配和 `auth.usage`。
+- 双下载入口与验证页已实现；英文/韩文/日文目录同步。旧 `backend/services/client_plugin` 的 0.1.1 模板未修改。
+- 实际 magpie 0.1.1194 隔离 HOME/XDG/随机端口验证：动态模型、受控图片桥接及 MCP 工具调用成功；使用本地 1px 图片 fixture，不是生产模型验收。其他供应商值保持相同，退出用户登录后桥接停止。
+- 桌面推理端口没有 GUI 配置写接口，不能自动登记原生图片卡片；当前交付生成私密 `images-mcp.json` / `images-provider.json`，需要一次配套登记。P0 中通过隔离 CLI 登记图片供应商后，magpie `/v1/images/generations` HTTP 200。未修改 magpie 源码或日常配置。
+- 生产 PostgreSQL Ready，Standard_B1ms；18 个既有迁移 checksum 与源文件匹配。追加 019 后再次运行迁移逻辑无重复应用，前后原始用量和用户计数均为 207 / 12。未改旧表数据或旧 checksum。
+- 创建非当前 APIM 修订 `client-user-20261012` 验证，不切现有流量。校验错误签名 401、模型不匹配 403、真实 GPT 请求 200，约 4.45 秒、28 Tokens。当前 API 修订未改变。
+- 原始 APIM 表达式含单行注释，组合策略必须使用保留属性换行的 `parse_policy` / `serialize_policy`。普通 ElementTree 序列化的候选被 Azure 拒绝，未影响当前修订；修复后候选通过。
+- 应用预算 admission 是认证之后的共用块，不再复制到用户分支；用户分支仅复用个人预留，应用原块仍执行一次。回归覆盖既有 Employee/Subscription 分支不变。
+- 首轮完整回归 1815 passed / 7 skipped / 4 failed；迁移链清单、文档、32 个 locale 短语及 APIM 单测位置断言已修复。修复后的聚焦测试与类型/构建继续核对，不能把首轮失败当作完整回归通过。
+- 最终完整 Python 回归 1819 passed / 7 skipped / 1 warning，通过。随后补充授权请求体限制、私密响应缓存头、失效 Refresh Token 提示及池关闭；相关 API/服务/持久化回归 212 passed。前端/契约回归 129 passed，Node 插件测试 2 passed，全仓 Ruff、新增模块 Mypy 和前端构建通过。
+- 已备份生产实际挂载包、AppSettings 和 APIM 原策略到 Git 外；用户版尚未在当前生产 API 启用。正式发布与真实浏览器/Agent/图片模型验收另记录结果。

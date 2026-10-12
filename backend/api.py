@@ -24,6 +24,8 @@ from .http.authentication import get_entra_verifier as _get_entra_verifier
 from .http.authentication import router as authentication_router
 from .http.budgets import router as budgets_router
 from .http.client_downloads import router as client_downloads_router
+from .http.client_user import close_client_store
+from .http.client_user import router as client_user_router
 from .http.dependencies import get_repository
 from .http.directory_sync import router as directory_sync_router
 from .http.governance import router as governance_router
@@ -81,7 +83,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if settings.directory_empty_initialization_allowed:
             store.initialize_empty()
         store.require_ready()
-    yield
+    try:
+        yield
+    finally:
+        close_client_store()
 
 
 app = FastAPI(title="Token Observability API", version="0.1.0", lifespan=lifespan)
@@ -90,6 +95,11 @@ app.add_middleware(
     PrivateRouteBodyLimit,
     path_prefix="/api/v1/organization-management/",
     max_body_bytes=256 * 1024,
+)
+app.add_middleware(
+    PrivateRouteBodyLimit,
+    path_prefix="/api/v1/client-auth/",
+    max_body_bytes=16 * 1024,
 )
 
 
@@ -101,6 +111,8 @@ async def private_validation_errors(request: Request, error: RequestValidationEr
             "/api/v1/auth/",
             "/api/v1/organization-management/",
             "/api/v1/client-downloads/",
+            "/api/v1/client-auth/",
+            "/api/v1/client-runtime/",
         )
     ):
         return JSONResponse(
@@ -159,6 +171,7 @@ app.include_router(github_copilot_router)
 app.include_router(authentication_router)
 app.include_router(user_settings_router)
 app.include_router(client_downloads_router)
+app.include_router(client_user_router)
 app.add_middleware(
     PrivateRouteBodyLimit, path_prefix="/api/v1/client-downloads", max_body_bytes=8192,
 )

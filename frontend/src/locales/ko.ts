@@ -1,3 +1,4 @@
+import { CLIENT_USER_PHRASES } from "./ko/phrases-client-user"
 import { KOREAN_CORE_PHRASES } from "./ko/phrases-core"
 import { USER_SETTINGS_PHRASES } from "./ko/phrases-user-settings"
 import { KOREAN_COPILOT_PHRASES } from "./ko/phrases-copilot"
@@ -13,6 +14,7 @@ const KOREAN_PHRASES: Record<string, string> = {
   ...KOREAN_AUTH_PHRASES,
   ...IMAGE_GENERATION_PHRASES,
   ...ORGANIZATION_PHRASES,
+  ...CLIENT_USER_PHRASES,
 }
 
 const orderedPhrases = Object.entries(KOREAN_PHRASES).sort(([left], [right]) => right.length - left.length)

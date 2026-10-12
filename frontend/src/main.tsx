@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { App } from "./app"
 import { ApiError } from "./data-sources/apim/api"
 import { LoginPage } from "./pages/login-page"
+import { ClientAuthorizationPage } from "./pages/client-authorization-page"
 import { LocaleProvider } from "./locales/index"
 import { AuthProvider, useAuth } from "./providers/auth-provider"
 import { ThemeProvider } from "./providers/theme-provider"
@@ -48,6 +49,21 @@ const queryClient = new QueryClient({
   },
 })
 
+function pendingClientAuthorization(): string | null {
+  const supplied = new URLSearchParams(window.location.search).get("client_authorization")
+  try {
+    if (supplied && /^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(supplied)) {
+      sessionStorage.setItem("turnstile-client-authorization", JSON.stringify({ code: supplied, until: Date.now() + 300_000 }))
+      return supplied
+    }
+    const pending = JSON.parse(sessionStorage.getItem("turnstile-client-authorization") ?? "null") as { code: string; until: number } | null
+    if (pending && pending.until > Date.now() && /^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(pending.code)) return pending.code
+    sessionStorage.removeItem("turnstile-client-authorization")
+  } catch { /* Login still works when browser storage is unavailable. */ }
+  return null
+}
+const clientAuthorization = pendingClientAuthorization()
+
 /** Nothing behind this renders until the session is known.
  *
  *  It gates on mount rather than per route because every route in this product reads
@@ -88,7 +104,7 @@ createRoot(document.getElementById("root")!).render(
             <AuthProvider>
               <AuthGate>
                 <DataRefreshProvider>
-                  <App />
+                  {clientAuthorization ? <ClientAuthorizationPage code={clientAuthorization} /> : <App />}
                 </DataRefreshProvider>
               </AuthGate>
             </AuthProvider>

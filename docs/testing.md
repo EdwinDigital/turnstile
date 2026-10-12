@@ -1,5 +1,20 @@
 # Testing
 
+`019_client_user_authorization` adds independent desktop device authorizations,
+hashed user token families, and generation-checked imports. It does not change existing
+browser sessions, subscription keys, historical usage, or budget evidence. User mode remains
+disabled until `CLIENT_USER_ENABLED=true` and an exact `CLIENT_PLATFORM_ORIGIN` are configured.
+Run the real PostgreSQL client-grant tests, user API tests, plugin stream tests, and APIM
+client-policy tests before enabling it. Negative signatures and model/subscription mismatches
+must fail on an isolated APIM revision before current traffic is changed.
+
+The image companion uses loopback-only authentication and an image-only platform capability;
+it never puts an APIM key or the main OAuth refresh token into a normal image provider.
+Desktop magpie's inference port does not expose its GUI provider mutation APIs. Register the
+generated private MCP configuration in the intended Agent, or import the owned picture
+provider through magpie's supported UI; do not pretend automatic desktop registration passed.
+Test sign-out/disable shutdown and preservation of other providers separately from image calls.
+
 `018_permission_management` adds the persisted four-role menu matrix and audit.
 Permission regression tests use real PostgreSQL and authenticated sessions: Owner-only policy
 configuration, CAS save conflicts, existing-session revocation, ordinary-user self scope,

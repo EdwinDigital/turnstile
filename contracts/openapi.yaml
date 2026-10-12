@@ -54,6 +54,32 @@ tags:
 - name: Permission Management
   description: Owner-only revisioned four-role menu configuration; automatic row scopes are not editable.
 paths:
+  /api/v1/client-downloads/user-options:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-downloads~1user-options
+  /api/v1/client-downloads/magpie-user:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-downloads~1magpie-user
+  /api/v1/client-auth/device-authorizations:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-auth~1device-authorizations
+  /api/v1/client-auth/verification:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-auth~1verification
+  /api/v1/client-auth/decision:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-auth~1decision
+  /api/v1/client-auth/token:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-auth~1token
+  /api/v1/client-auth/revoke:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-auth~1revoke
+  /api/v1/client-runtime/catalog:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-runtime~1catalog
+  /api/v1/client-runtime/usage:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-runtime~1usage
+  /api/v1/client-runtime/image-capabilities:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-runtime~1image-capabilities
+  /api/v1/client-runtime/v1/models:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-runtime~1v1~1models
+  /api/v1/client-runtime/models:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-runtime~1models
+  /api/v1/client-runtime/{path}:
+    $ref: ./openapi/paths/client-user.yaml#/paths/~1api~1v1~1client-runtime~1{path}
   /api/v1/client-downloads/options:
     $ref: ./openapi/paths/client-downloads.yaml#/paths/~1api~1v1~1client-downloads~1options
   /api/v1/client-downloads/magpie:
@@ -296,6 +322,10 @@ paths:
     $ref: ./openapi/paths/organization-management.yaml#/paths/~1api~1v1~1organization-management~1units~1{unit_id}~1members
 components:
   securitySchemes:
+    clientBearer:
+      type: http
+      scheme: bearer
+      description: Revocable desktop user access or image-only capability token.
     sessionCookie:
       $ref: ./openapi/components/common.yaml#/securitySchemes/sessionCookie
   parameters:
@@ -343,6 +373,12 @@ components:
     ErrorResponse:
       $ref: ./openapi/components/common.yaml#/responses/ErrorResponse
   schemas:
+    DeviceRequest:
+      $ref: ./openapi/schemas/client-user.yaml#/schemas/DeviceRequest
+    Decision:
+      $ref: ./openapi/schemas/client-user.yaml#/schemas/Decision
+    TokenRequest:
+      $ref: ./openapi/schemas/client-user.yaml#/schemas/TokenRequest
     GatewayApplicationBudgetProjection:
       $ref: ./openapi/schemas/application-access.yaml#/schemas/GatewayApplicationBudgetProjection
     ClientDownloadOptions:

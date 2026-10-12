@@ -9,6 +9,20 @@ export type ClientDownloadOptions = {
   items: ClientSubscription[]; key_management_available: boolean; unavailable_reason: string | null; plugin_version: string
 }
 export const clientDownloadsApi = {
+  userOptions: (signal?: AbortSignal) => request<{ enabled: boolean; plugin_version: string; user_name: string }>("/api/v1/client-downloads/user-options", { signal }),
+  async downloadUser(signal?: AbortSignal): Promise<Blob> {
+    const response = await fetch(apiUrl("/api/v1/client-downloads/magpie-user"), {
+      method: "POST", credentials: "include", cache: "no-store", signal,
+      headers: { "Content-Type": "application/json" }, body: "{}",
+    })
+    if (response.status === 401) window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { detail?: string } | null
+      throw new ApiError(response.status, typeof body?.detail === "string" ? body.detail : "用户版下载失败，请重试。")
+    }
+    if (!response.headers.get("content-type")?.includes("application/zip")) throw new Error("下载失败，请重试。")
+    return response.blob()
+  },
   options: (signal?: AbortSignal) => request<ClientDownloadOptions>("/api/v1/client-downloads/options", { signal }),
   async download(item: ClientSubscription, keyKind: "primary" | "secondary", signal?: AbortSignal): Promise<Blob> {
     const response = await fetch(apiUrl("/api/v1/client-downloads/magpie"), {

@@ -11,6 +11,10 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     queryKey: ["client-downloads", user?.id, user?.directory_permission_revision],
     queryFn: ({ signal }) => clientDownloadsApi.options(signal), enabled: user?.role === "owner", staleTime: 0,
   })
+  const personal = useQuery({
+    queryKey: ["client-user-options", user?.id], queryFn: ({ signal }) => clientDownloadsApi.userOptions(signal),
+    enabled: Boolean(user), staleTime: 60_000,
+  })
   const [subscription, setSubscription] = useState("")
   const [keyKind, setKeyKind] = useState<"primary" | "secondary">("primary")
   const [acknowledged, setAcknowledged] = useState(false)
@@ -21,6 +25,27 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
   useEffect(() => () => { activeDownload.current?.abort() }, [user?.id])
   const items = query.data?.items ?? []
   const selected = items.find((item) => item.subscription_id === subscription) ?? items[0]
+  async function downloadUser() {
+    if (activeDownload.current) return
+    const controller = new AbortController()
+    activeDownload.current = controller
+    setBusy(true); setError(""); setNotice("")
+    try {
+      const blob = await clientDownloadsApi.downloadUser(controller.signal)
+      if (controller.signal.aborted) return
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = url; link.download = `aigateway-proxy-user-${user?.id}.zip`
+      document.body.append(link); link.click(); link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setNotice("用户版已下载。请导入 aigateway-proxy-user 文件夹，再登录平台并选择订阅。")
+    } catch (reason) {
+      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "下载失败，请重试。")
+    } finally {
+      activeDownload.current = null
+      if (!controller.signal.aborted) setBusy(false)
+    }
+  }
   async function download(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!selected || activeDownload.current) return
@@ -51,7 +76,19 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     <div className="finops-scroll-region"><div className="client-downloads-content">
       <header><h1>AIGateway-Proxy</h1><p>将平台订阅导入 magpie，供其他 Agent 使用。</p></header>
       <section className="client-downloads-card">
-        <div className="client-downloads-heading"><Download size={22} /><div><h2>magpie 供应商插件</h2><p>插件和订阅配置一起下载，无需手动填写网关地址。</p></div><span data-no-localize>v{query.data?.plugin_version ?? "0.1.1"}</span></div>
+        <div className="client-downloads-heading"><ShieldCheck size={22} /><div><h2>AIGateway-Proxy 用户版</h2><p>指定用户下载 · 登录平台后选择本人订阅，动态导入模型和读取额度。</p></div><span data-no-localize>v{personal.data?.plugin_version ?? "0.2.0"}</span></div>
+        <p>当前用户：<span data-no-localize>{personal.data?.user_name ?? user?.email}</span></p>
+        <p>安装目录为 <code data-no-localize>aigateway-proxy-user</code>，与下方订阅版独立，可同时安装。引导包不包含订阅密钥或登录令牌。</p>
+        <ol className="client-user-steps"><li>在 magpie 插件页面添加用户版文件夹。</li><li>点击「登录平台」，在浏览器确认设备和账号。</li><li>点击「导入模型配置」，在平台选择订阅与网关。</li><li>需要更新可用订阅时，点击「重新登录」。</li></ol>
+        <p>文生图通过配套 MCP 工具使用；首次需登记插件生成的 images-mcp.json，不会自动改写 Agent 配置。</p>
+        {personal.isError && <p role="alert">{personal.error.message}</p>}
+        {personal.data && !personal.data.enabled && <p role="status">当前平台暂未启用用户版。</p>}
+        <Button type="button" onClick={() => void downloadUser()} disabled={busy || !personal.data?.enabled}><Download size={16} />{busy ? "正在生成安装包" : "下载用户版插件"}</Button>
+        {error && <p role="alert" className="client-downloads-error">{error}</p>}
+        <p role="status">{notice}</p>
+      </section>
+      <section className="client-downloads-card">
+        <div className="client-downloads-heading"><Download size={22} /><div><h2>AIGateway-Proxy 订阅版</h2><p>指定订阅下载 · 保留当前 0.1.1 插件，安装目录 aigateway-proxy。</p></div><span data-no-localize>v{query.data?.plugin_version ?? "0.1.1"}</span></div>
         {user?.role !== "owner" ? <p role="status">当前核心验证阶段仅支持 Owner 下载。</p> : query.isPending ? <p role="status">正在加载</p> : query.isError ? <div role="alert"><p>{query.error.message}</p><Button variant="outline" onClick={() => void query.refetch()}><RefreshCw size={16} />重试</Button></div>
           : !items.length ? <p role="status">没有可下载的应用订阅。请联系管理员配置本人应用订阅。</p>
           : <form action="/api/v1/client-downloads/magpie" method="post" onSubmit={(event) => void download(event)}>
@@ -75,7 +112,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
             <Button type="submit" disabled={busy || !query.data?.key_management_available || !selected?.models.length}><Download size={16} />{busy ? "正在生成安装包" : "下载插件安装包"}</Button>
           </form>}
       </section>
-      <section className="client-downloads-card client-downloads-guide"><h2>导入 magpie</h2><ol><li>解压安装包，将插件文件夹保存在长期目录。</li><li>在 magpie 插件页面添加本地文件夹。</li><li>首次安装自动导入配置；如未登录，选择「导入配置」。</li><li>在 Agent 页面选择该供应商的模型。</li></ol><p>密钥轮换或模型授权更新后，请重新下载。图像生成模型不包含在此对话插件中。</p><a href="https://usemagpie.ai/docs/zh/plugins" target="_blank" rel="noreferrer">查看 magpie 插件文档</a></section>
+      <section className="client-downloads-card client-downloads-guide"><h2>订阅版导入 magpie</h2><ol><li>解压安装包，将插件文件夹保存在长期目录。</li><li>在 magpie 插件页面添加本地文件夹。</li><li>首次安装自动导入配置；如未登录，选择「导入配置」。</li><li>在 Agent 页面选择该供应商的模型。</li></ol><p>密钥轮换或模型授权更新后，请重新下载。图像生成模型不包含在此对话插件中。</p><a href="https://usemagpie.ai/docs/zh/plugins" target="_blank" rel="noreferrer">查看 magpie 插件文档</a></section>
     </div></div>
   </div>
 }
