@@ -1248,6 +1248,7 @@ export const ENGLISH_CORE_PHRASES: Record<string, string> = {
   "关闭搜索": "Close search",
   "搜索接入来源...": "Search access channels...",
   "搜索 ID、智能体、模型或人员": "Search ID, Agent, model, or person",
+  "搜索 ID、应用、智能体、模型或人员": "Search ID, application, Agent, model, or person",
   "搜索请求": "Search requests",
   "搜索": "Search ",
   "搜索...": "Search...",

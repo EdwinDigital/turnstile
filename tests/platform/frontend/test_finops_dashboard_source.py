@@ -56,8 +56,8 @@ def test_request_trace_kpis_are_diagnostic_not_executive_duplicates() -> None:
     assert "server_error_requests" in request_trace
     assert "latency_over_5s" in request_trace
     assert ".trace-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }" in css
-    assert 'finopsQueries.trends(filters, "none", "day")' in request_trace
-    assert '<PanelTitle title="调用趋势" meta="每日" />' in request_trace
+    assert 'finopsQueries.usageActivity(filters, "day", timezone)' in request_trace
+    assert '<PanelTitle title="调用趋势" meta={`每日 · ${timezone}`} />' in request_trace
     assert '<RequestVolumeTrendChart rows={volumeRows} />' in request_trace
     assert 'title="时延占比分布"' in request_trace
     assert '<RequestLatencyChart totals={totals} percentage />' in request_trace

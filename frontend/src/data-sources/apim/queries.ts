@@ -113,7 +113,8 @@ export const finopsKeys = {
     ["finops", "usage-activity", interval, timezone, scope] as const,
   anomalies: (scope: UsageScope) => ["finops", "anomalies", scope] as const,
   anomalyRules: ["finops", "anomaly-rules"] as const,
-  trends: (scope: UsageScope, groupBy: TrendDimension, interval: "hour" | "day" | "week") => ["finops", "trends", groupBy, interval, scope] as const,
+  trends: (scope: UsageScope, groupBy: TrendDimension, interval: "hour" | "day" | "week", timezone: string) =>
+    ["finops", "trends", groupBy, interval, timezone, scope] as const,
   requestDetail: (requestId: string) => ["finops", "request-detail", requestId] as const,
   budgets: (period: string) => ["finops", "budgets", period] as const,
   peopleBudgets: (
@@ -301,11 +302,12 @@ export const finopsQueries = {
     filters: UsageFilters,
     groupBy: TrendDimension,
     interval: "hour" | "day" | "week",
+    timezone: string,
   ) => {
     const scope = scopeFromFilters(filters)
     return queryOptions({
-      queryKey: finopsKeys.trends(scope, groupBy, interval),
-      queryFn: () => dataSource.trendPoints(filtersFromScope(scope), groupBy, interval),
+      queryKey: finopsKeys.trends(scope, groupBy, interval, timezone),
+      queryFn: () => dataSource.trendPoints(filtersFromScope(scope), groupBy, interval, timezone),
       ...cachePolicies.aggregate,
     })
   },
@@ -391,7 +393,7 @@ export function prefetchPage(
     void queryClient.prefetchQuery(finopsQueries.distribution(filters, "model"))
     void queryClient.prefetchQuery(finopsQueries.requests(filters))
   } else if (page === "finops-trends") {
-    void queryClient.prefetchQuery(finopsQueries.trends(filters, trendDimensionForFilters(filters), "hour"))
+    void queryClient.prefetchQuery(finopsQueries.trends(filters, trendDimensionForFilters(filters), "hour", resolveTimezone()))
     void queryClient.prefetchQuery(finopsQueries.requests(filters))
   } else if (page === "finops-governance") {
     void queryClient.prefetchQuery(finopsQueries.anomalyRules())
