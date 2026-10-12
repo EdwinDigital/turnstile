@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from functools import lru_cache
@@ -294,7 +295,8 @@ def attributed_body(body: dict[str, Any], user_id: str, protocol: str) -> bytes:
         metadata = body.get("metadata")
         body["metadata"] = {
             **(metadata if isinstance(metadata, dict) else {}),
-            "user_id": user_id,
+            # Anthropic rejects email-shaped IDs; APIM attribution keeps the signed identity.
+            "user_id": hashlib.sha256(user_id.encode()).hexdigest(),
         }
         body.pop("user", None)
     else:

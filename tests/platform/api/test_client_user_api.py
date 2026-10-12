@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from io import BytesIO
 from typing import Any, cast
@@ -249,4 +250,4 @@ def test_anthropic_user_id_is_verified_without_unsupported_user_field() -> None:
         )
     )
     assert "user" not in forwarded
-    assert forwarded["metadata"]["user_id"] == "verified-user"
+    assert forwarded["metadata"]["user_id"] == hashlib.sha256(b"verified-user").hexdigest()

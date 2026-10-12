@@ -91,7 +91,7 @@ def test_personal_package_has_bound_authorization_and_distinct_identity() -> Non
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
         package = json.loads(archive.read("aigateway-proxy-user/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.3.0"
+        assert package["version"] == "0.3.1"
         assert all((f.external_attr >> 16) & 0o777 == 0o600 for f in archive.infolist())
 
 

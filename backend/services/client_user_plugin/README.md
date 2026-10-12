@@ -33,6 +33,10 @@ binding; only reauthentication resolves a new default. The platform overwrites
 caller-supplied OpenAI `user` / Anthropic `metadata.user_id` with the verified
 governance identity and also signs the trusted APIM attribution context.
 
+Anthropic rejects email-shaped IDs, so its model-facing identifier is the SHA-256
+of the verified governance identity. APIM keeps the real signed identity for
+personal/application accounting; the hash does not replace the budget user key.
+
 magpie's surrounding sign-in heading is host-owned. This plugin changes its two
 method labels without changing magpie application code.
 

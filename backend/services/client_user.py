@@ -32,7 +32,7 @@ from .auth_service import SessionIdentity
 from .client_downloads import RESERVED, SDK
 from .client_user_store import ClientUserStore
 
-USER_PLUGIN_VERSION = "0.3.0"
+USER_PLUGIN_VERSION = "0.3.1"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
@@ -128,7 +128,8 @@ class ClientUserService:
         }
         root = Path(__file__).with_name("client_user_plugin")
         files = {
-            name: (root / name).read_bytes() for name in ("index.mjs", "images.mjs", "README.md")
+            name: (root / name).read_bytes()
+            for name in ("index.mjs", "helpers.mjs", "images.mjs", "README.md")
         }
         files["aigateway-user.config.json"] = json.dumps(cfg, ensure_ascii=False, indent=2).encode()
         files["package.json"] = json.dumps(

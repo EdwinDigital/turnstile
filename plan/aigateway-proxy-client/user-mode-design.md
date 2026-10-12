@@ -344,3 +344,8 @@ ACTIVE -> EXPIRED / REVOKED -> 需要重新登录，不恢复旧 Key
 - 浏览器/插件/Agent 提交的 user 或 metadata.user_id 不可信。服务端根据 OAuth 当前身份解析 effective_user_id，按实际模型协议覆盖请求体字段，同时发送现有签名的可信 APIM 上下文。
 - OpenAI Responses/Chat/Images 使用 user；Anthropic 使用 metadata.user_id 并去掉顶层 user；其他请求/工具参数不动。APIM 沿用已有个人/共享账本，不重新发布其策略、不修改历史 unattributed 数据。
 - 必须验证下载即有模型和额度、真实 magpie 无登录安装、刷新不发设备授权、目录替换/空清单、重新登录才变更绑定、注销不能复活、其他账号不变、伪造 user 覆盖及真实调用用量归因。测试令牌完成后撤销；WorkBuddy 和高负载结果不能由单测代替。
+
+### 14.5 原生验收补充（0.3.1）
+
+- magpie 将入口文件的所有函数导出都当作插件执行。入口仅 export default；私密文件写入、自动导入和别名适配工具迁至 helpers.mjs，包必须包含该文件。新增入口导出集断言及原生 loaded.error 检查，不能只根据账号已写入判断插件加载成功。
+- Foundry Anthropic 明确拒绝包含邮件的 metadata.user_id。该协议使用由已验证 effective_user_id 计算的 SHA-256 标识；不把邮件直接传给模型。APIM 签名上下文仍携带原始治理身份，预算和用量归因不改为哈希、不受影响。

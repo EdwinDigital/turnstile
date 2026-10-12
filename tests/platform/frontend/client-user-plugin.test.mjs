@@ -4,7 +4,12 @@ import { mkdir, mkdtemp, writeFile, copyFile, readFile, rm } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { adaptModelResponse, importBootstrap } from "../../../backend/services/client_user_plugin/index.mjs";
+import { adaptModelResponse, importBootstrap } from "../../../backend/services/client_user_plugin/helpers.mjs";
+import * as entry from "../../../backend/services/client_user_plugin/index.mjs";
+
+test("entry exports only the plugin factory, not helpers the host would execute as plugins", () => {
+  assert.deepEqual(Object.keys(entry), ["default"]);
+});
 
 test("SSE aliases preserve split UTF-8, tools, usage and real model differences", async () => {
   const original = 'event: response.created\ndata: {"response":{"model":"gpt-6-astra","id":"r","text":"中文"}}\n\nevent: message_start\ndata: {"message":{"model":"gpt-6-astra","id":"msg"}}\n\ndata: {"model":"other","call_id":"c","usage":{"output_tokens":2}}\n\ndata: [DONE]\n\n';
@@ -27,6 +32,7 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
   try {
     await copyFile(new URL("../../../backend/services/client_user_plugin/index.mjs", import.meta.url), join(folder, "index.mjs"));
     await copyFile(new URL("../../../backend/services/client_user_plugin/images.mjs", import.meta.url), join(folder, "images.mjs"));
+    await copyFile(new URL("../../../backend/services/client_user_plugin/helpers.mjs", import.meta.url), join(folder, "helpers.mjs"));
     await writeFile(join(folder, "aigateway-user.config.json"), JSON.stringify({ version: 2, platformOrigin: "https://platform.example", providerId: "aigateway-user-platform-user", userId: "uid", binding: "b", name: "User" }));
     const factory = (await import(pathToFileURL(join(folder, "index.mjs")).href)).default;
     const plugin = await factory({ directory: folder, project: { id: "magpie" } });
@@ -108,7 +114,7 @@ test("first authorized import replaces stale unauthenticated installation and ca
   const folder = await mkdtemp(join(tmpdir(), "ts-user-stale-bootstrap-"));
   try {
     const providerId = "aigateway-user-platform-user";
-    for (const name of ["index.mjs", "images.mjs"]) await copyFile(new URL(`../../../backend/services/client_user_plugin/${name}`, import.meta.url), join(folder, name));
+    for (const name of ["index.mjs", "helpers.mjs", "images.mjs"]) await copyFile(new URL(`../../../backend/services/client_user_plugin/${name}`, import.meta.url), join(folder, name));
     const state = join(folder, "aigateway-proxy-user", providerId);
     await mkdir(state, { recursive: true });
     await writeFile(join(state, "installation.json"), JSON.stringify({ id: "old-install" }));
