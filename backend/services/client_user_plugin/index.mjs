@@ -3,13 +3,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { localMagpieURL } from "./images.mjs";
-import { adaptModelResponse, importBootstrap, privateJSON } from "./helpers.mjs";
+import { adaptModelResponse, importBootstrap, privateJSON, syncAccountProfile } from "./helpers.mjs";
 
 export default async function AIGatewayUserPlugin(input) {
   const cfg = JSON.parse(await readFile(new URL("./aigateway-user.config.json", import.meta.url), "utf8"));
   const origin = new URL(cfg.platformOrigin);
   const local = origin.protocol === "http:" && ["localhost", "127.0.0.1"].includes(origin.hostname);
-  if (![2, 3].includes(cfg.version) || (origin.protocol !== "https:" && !local) || origin.username || origin.password
+  if (![2, 3, 4].includes(cfg.version) || (origin.protocol !== "https:" && !local) || origin.username || origin.password
       || origin.search || origin.hash || origin.pathname !== "/" || !/^aigateway-user-[a-z0-9-]+$/.test(cfg.providerId))
     throw new Error("Invalid user plugin bootstrap");
   const base = origin.origin;
@@ -39,6 +39,9 @@ export default async function AIGatewayUserPlugin(input) {
     try { cached = JSON.parse(await readFile(cachePath, "utf8")); hasCatalog = true; } catch { /* Display cache is optional. */ }
   }
   if (bootstrapped) await privateJSON(cachePath, cached);
+  let userName = cached.user?.name ?? cfg.userName;
+  if (cached.user) await syncAccountProfile(input, cfg, cached.user);
+  else if (cfg.userName) await syncAccountProfile(input, cfg, { id: cfg.userId, name: cfg.userName });
   const expired = () => Object.assign(new Error("请重新登录 AIGateway 平台"), { signIn: "expired" });
   const call = async (path, body, access) => {
     const response = await fetch(base + path, {
@@ -72,7 +75,7 @@ export default async function AIGatewayUserPlugin(input) {
               const latest = await updateCatalog(data.access_token, true);
               await privateJSON(join(directory, "profile.json"), { userId: cfg.userId, selection: latest.selection });
               return { type: "success", access: data.access_token, refresh: data.refresh_token,
-                expires: Date.now() + data.expires_in * 1000, accountId: cfg.userId, uid: cfg.userId,
+                expires: Date.now() + data.expires_in * 1000, accountId: userName ?? cfg.userId, uid: cfg.userId,
                 installationId: installation };
             } catch (error) {
               if (error.message === "authorization_pending") continue;
@@ -149,7 +152,11 @@ export default async function AIGatewayUserPlugin(input) {
   };
   const updateCatalog = async (access, fresh = false) => {
     const data = await call(fresh ? "/api/v1/client-runtime/refresh-models" : "/api/v1/client-runtime/catalog", fresh ? {} : undefined, access);
-    const next = { models: data.models ?? {}, aliases: data.aliases ?? {}, images: data.images ?? [], selection: data.selection ?? null };
+    if (data.user) {
+      await syncAccountProfile(input, cfg, data.user);
+      userName = data.user.name;
+    }
+    const next = { user: data.user, models: data.models ?? {}, aliases: data.aliases ?? {}, images: data.images ?? [], selection: data.selection ?? null };
     // Keep a usable previous catalog if fetching or persistence fails.
     await privateJSON(cachePath, next);
     cached = next;
@@ -166,7 +173,7 @@ export default async function AIGatewayUserPlugin(input) {
   const refreshModels = {
     type: "oauth", label: "刷新模型",
     async authorize() {
-      return { url: "", method: "auto", instructions: "从平台读取当前绑定订阅的最新模型，不重新登录或切换订阅。",
+      return { url: "", method: "auto", instructions: "从平台读取本人最新模型目录，不重新登录或绑定应用订阅。",
         async callback() {
           if (input.project?.id !== "magpie" || !input.directory) throw expired();
           const accounts = JSON.parse(await readFile(join(input.directory, "plugin-auth.json"), "utf8"));
@@ -180,7 +187,7 @@ export default async function AIGatewayUserPlugin(input) {
             await input.client.auth.set({ path: { id: cfg.providerId }, body: auth });
           }
           await updateCatalog(auth.access, true);
-          return { ...auth, type: "success", accountId: cfg.userId, uid: cfg.userId };
+          return { ...auth, type: "success", accountId: userName ?? cfg.userId, uid: cfg.userId };
         },
       };
     },

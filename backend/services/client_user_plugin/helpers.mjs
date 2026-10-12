@@ -13,7 +13,8 @@ export async function privateJSON(path, value) {
 export async function importBootstrap(input, cfg) {
   if (input.project?.id !== "magpie" || !input.directory || !cfg.authorization) return false;
   const auth = cfg.authorization;
-  if (auth.type !== "oauth" || auth.uid !== cfg.userId || auth.accountId !== cfg.userId
+  if (auth.type !== "oauth" || auth.uid !== cfg.userId
+      || ![cfg.userId, cfg.userName].filter(Boolean).includes(auth.accountId)
       || !auth.access?.startsWith("tsca_") || !auth.refresh?.startsWith("tscr_")
       || !Number.isFinite(auth.expires) || auth.installationId !== cfg.installationId)
     throw new Error("Invalid downloaded authorization");
@@ -51,6 +52,44 @@ export async function importBootstrap(input, cfg) {
     return true;
   } catch { return false; }
   finally { if (lock) { await lock.close(); await unlink(path + ".lock").catch(() => {}); } }
+}
+
+export async function syncAccountProfile(input, cfg, profile) {
+  if (!profile) return;
+  if (profile.id !== cfg.userId || typeof profile.name !== "string" || !profile.name.trim())
+    throw new Error("Platform profile does not match this user plugin");
+  if (input.project?.id !== "magpie" || !input.directory) return;
+  const path = join(input.directory, "plugin-auth.json");
+  let lock;
+  try {
+    const deadline = Date.now() + 2000;
+    while (!lock) {
+      try { lock = await open(path + ".lock", "wx", 0o600); }
+      catch (error) {
+        if (error.code !== "EEXIST" || Date.now() >= deadline) throw error;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    }
+    let accounts;
+    try { accounts = JSON.parse(await readFile(path, "utf8")); }
+    catch (error) { if (error.code === "ENOENT") return; throw error; }
+    if (!accounts || typeof accounts !== "object" || Array.isArray(accounts))
+      throw new Error("Plugin account state is invalid");
+    let changed = false;
+    for (const [id, auth] of Object.entries(accounts)) {
+      if ((id === cfg.providerId || id.startsWith(cfg.providerId + "#")) && auth?.type === "oauth"
+          && (auth.uid === cfg.userId || (!auth.uid && auth.accountId === cfg.userId))
+          && (auth.accountId !== profile.name || auth.uid !== cfg.userId)) {
+        accounts[id] = { ...auth, uid: cfg.userId, accountId: profile.name };
+        changed = true;
+      }
+    }
+    // Update display metadata in the existing slots before the host settles a new login.
+    if (changed) {
+      await privateJSON(path + ".bak", JSON.parse(await readFile(path, "utf8")));
+      await privateJSON(path, accounts);
+    }
+  } finally { if (lock) { await lock.close(); await unlink(path + ".lock").catch(() => {}); } }
 }
 
 export function adaptModelResponse(response, alias, expected) {

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, writeFile, copyFile, readFile, rm } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { adaptModelResponse, importBootstrap } from "../../../backend/services/client_user_plugin/helpers.mjs";
+import { adaptModelResponse, importBootstrap, syncAccountProfile } from "../../../backend/services/client_user_plugin/helpers.mjs";
 import * as entry from "../../../backend/services/client_user_plugin/index.mjs";
 
 test("entry exports only the plugin factory, not helpers the host would execute as plugins", () => {
@@ -42,7 +42,7 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
     let last;
     globalThis.fetch = async (url, init) => {
       last = { url: String(url), init };
-      if (String(url).endsWith("/catalog") || String(url).endsWith("/refresh-models")) return Response.json({ models: current, aliases: { new: "upstream" }, images: [] });
+      if (String(url).endsWith("/catalog") || String(url).endsWith("/refresh-models")) return Response.json({ user: { id: "uid", name: "Edwin" }, models: current, aliases: { new: "upstream" }, images: [] });
       if (String(url).endsWith("/usage")) return Response.json({ windows: [{ name: "audit", used: 100, aside: true }] });
       return Response.json({ model: "upstream", id: "response" });
     };
@@ -62,6 +62,8 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
     assert.equal(refresh.url, "");
     const refreshed = await refresh.callback();
     assert.equal(refreshed.access, auth.access);
+    assert.equal(refreshed.accountId, "Edwin");
+    assert.equal(refreshed.uid, "uid");
     assert.ok(last.url.endsWith("/refresh-models"));
     assert.equal(last.init.headers.Authorization, "Bearer private-user-token");
     await writeFile(join(folder, "aigateway-proxy-user/aigateway-user-platform-user/images-owned.json"), JSON.stringify({ providerId: "aigateway-user-platform-user-images" }));
@@ -90,12 +92,39 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
   } finally { globalThis.fetch = previous; await rm(folder, { recursive: true, force: true }); }
 });
 
+test("profile metadata migrates existing slots by stable uid without touching other users or providers", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ts-user-profile-"));
+  try {
+    const cfg = { providerId: "aigateway-user-platform-user", userId: "uuid-user" };
+    const input = { project: { id: "magpie" }, directory };
+    const path = join(directory, "plugin-auth.json");
+    const legacy = { type: "oauth", access: "private-access", refresh: "private-refresh", uid: cfg.userId, accountId: cfg.userId };
+    const other = { type: "oauth", access: "other-access", uid: "another-user", accountId: cfg.userId };
+    await writeFile(path, JSON.stringify({ [cfg.providerId + "#old"]: legacy,
+      [cfg.providerId + "#other"]: other, "aigateway-subscription": { type: "api", key: "legacy-key" } }));
+    await syncAccountProfile(input, cfg, { id: cfg.userId, name: "Edwin" });
+    let saved = JSON.parse(await readFile(path, "utf8"));
+    assert.deepEqual(saved[cfg.providerId + "#old"], { ...legacy, accountId: "Edwin" });
+    assert.deepEqual(saved[cfg.providerId + "#other"], other);
+    assert.deepEqual(saved["aigateway-subscription"], { type: "api", key: "legacy-key" });
+    await syncAccountProfile(input, cfg, { id: cfg.userId, name: "Renamed Edwin" });
+    saved = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(saved[cfg.providerId + "#old"].accountId, "Renamed Edwin");
+    assert.equal(Object.keys(saved).filter(id => id.startsWith(cfg.providerId)).length, 2);
+    await assert.rejects(syncAccountProfile(input, cfg, { id: "attacker", name: "Edwin" }), /does not match/);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), saved);
+    await writeFile(path, JSON.stringify({ unrelated: { type: "api", key: "keep" } }));
+    await syncAccountProfile(input, cfg, { id: cfg.userId, name: "Edwin" });
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { unrelated: { type: "api", key: "keep" } });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("downloaded OAuth imports once, preserves other accounts and cannot resurrect logout", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ts-user-bootstrap-"));
   try {
-    const cfg = { providerId: "aigateway-user-platform-user", userId: "user", installationId: "install",
+    const cfg = { version: 4, providerId: "aigateway-user-platform-user", userId: "user", userName: "Edwin", installationId: "install",
       authorization: { type: "oauth", access: "tsca_test", refresh: "tscr_test", expires: Date.now() + 900_000,
-        uid: "user", accountId: "user", installationId: "install" } };
+        uid: "user", accountId: "Edwin", installationId: "install" } };
     const input = { project: { id: "magpie" }, directory };
     const other = { unrelated: { type: "api", key: "other" }, "aigateway-old": { type: "api", key: "legacy" } };
     const path = join(directory, "plugin-auth.json");

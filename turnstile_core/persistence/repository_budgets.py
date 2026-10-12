@@ -167,11 +167,21 @@ class PostgreSqlBudgetRepositoryMixin:
                        WHERE scope_type = 'person' AND admitted_at >= %s AND admitted_at < %s
                        {evidence_person}
                        UNION ALL
-                       SELECT 'unattributed', 'unattributed', scope_id, effective_tokens
-                       FROM billable_request_effective_v1
-                       WHERE scope_type = 'person' AND effective_state = 'exact'
-                       AND NOT strict_budget_evidence(created_at)
-                       AND period_start >= %s::date AND period_start < %s::date{evidence_person}
+                       SELECT COALESCE(department.parent_scope_id, 'unattributed'),
+                              COALESCE(person.parent_scope_id, 'unattributed'),
+                              attempt.scope_id, attempt.effective_tokens
+                       FROM billable_request_effective_v1 attempt
+                       LEFT JOIN token_budget person
+                         ON person.period_start = attempt.period_start
+                        AND person.scope_type = 'user' AND person.scope_id = attempt.scope_id
+                       LEFT JOIN token_budget department
+                         ON department.period_start = attempt.period_start
+                        AND department.scope_type = 'department'
+                        AND department.scope_id = person.parent_scope_id
+                       WHERE attempt.scope_type = 'person' AND attempt.effective_state = 'exact'
+                       AND NOT strict_budget_evidence(attempt.created_at)
+                       AND attempt.period_start >= %s::date AND attempt.period_start < %s::date
+                       {evidence_person.replace('scope_id', 'attempt.scope_id')}
                    ), authorized_usage AS (
                        SELECT * FROM period_usage{scope}
                    ), scoped_usage AS (

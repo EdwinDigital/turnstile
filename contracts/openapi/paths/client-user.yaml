@@ -203,7 +203,7 @@ paths:
   /api/v1/client-runtime/refresh-models:
     post:
       tags: [Client User]
-      summary: Refresh the bound subscription's model catalog without reauthentication
+      summary: Refresh the personally authorized model catalog without reauthentication
       operationId: refresh_models_api_v1_client_runtime_refresh_models_post
       responses:
         '200':

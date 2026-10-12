@@ -39,7 +39,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
       link.href = url; link.download = `aigateway-proxy-user-${user?.id}.zip`
       document.body.append(link); link.click(); link.remove()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-      setNotice("用户版已下载。安装后自动导入授权和默认订阅；需要更新模型时点击「刷新模型」。")
+      setNotice("用户版已下载。安装后自动导入个人授权和模型；需要更新模型时点击「刷新模型」。")
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "下载失败，请重试。")
     } finally {
@@ -75,13 +75,13 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
       <span className="finops-header-icon"><Download size={17} /></span><h1>下载客户端</h1>
     </div></header>
     <div className="finops-scroll-region"><div className="client-downloads-content">
-      <header><h1>AIGateway-Proxy</h1><p>将平台订阅导入 magpie，供其他 Agent 使用。</p></header>
+      <header><h1>AIGateway-Proxy</h1><p>将个人授权或应用订阅导入 magpie，供其他 Agent 使用。</p></header>
       <section className="client-downloads-card">
-        <div className="client-downloads-heading"><ShieldCheck size={22} /><div><h2>AIGateway-Proxy 用户版</h2><p>指定用户下载 · 已授权并绑定平台默认订阅，安装后即可使用。</p></div><span data-no-localize>v{personal.data?.plugin_version ?? "0.3.1"}</span></div>
+        <div className="client-downloads-heading"><ShieldCheck size={22} /><div><h2>AIGateway-Proxy 用户版</h2><p>指定用户下载 · 使用个人授权、个人预算和模型目录，不绑定应用订阅。</p></div><span data-no-localize>v{personal.data?.plugin_version ?? "0.4.0"}</span></div>
         <p>当前用户：<span data-no-localize>{personal.data?.user_name ?? user?.email}</span></p>
         <p>安装目录为 <code data-no-localize>aigateway-proxy-user</code>，与下方订阅版独立，可同时安装。</p>
-        {personal.data?.default_subscription && <p>默认订阅：<strong data-no-localize>{personal.data.default_subscription.application_name} / {personal.data.default_subscription.subscription_name}</strong></p>}
-        <ol className="client-user-steps"><li>在 magpie 插件页面添加用户版文件夹。</li><li>首次安装自动导入授权、默认订阅和模型，无需再次选择订阅。</li><li>点击「刷新模型」，从平台获取当前绑定订阅的最新模型并替换本插件目录。</li><li>点击「重新登录」，重新验证用户并更新本地授权与默认订阅配置。</li></ol>
+        {personal.data?.personal_route && <p>个人授权网关：<strong data-no-localize>{personal.data.personal_route.gateway_name}</strong></p>}
+        <ol className="client-user-steps"><li>在 magpie 插件页面添加用户版文件夹。</li><li>首次安装自动导入个人授权和模型，无需选择应用订阅。</li><li>点击「刷新模型」，从平台获取本人最新模型并替换本插件目录。</li><li>点击「重新登录」，重新验证用户并更新本地授权与个人网关配置。</li></ol>
         <p>文生图通过配套 MCP 工具使用；首次需登记插件生成的 images-mcp.json，不会自动改写 Agent 配置。</p>
         {personal.isError && <p role="alert">{personal.error.message}</p>}
         {personal.data && !personal.data.enabled && <p role="status">当前平台暂未启用用户版。</p>}

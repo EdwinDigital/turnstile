@@ -5,10 +5,10 @@ Keep its `aigateway-proxy-user` directory in a permanent location. Do not copy i
 over an existing subscription installation.
 
 1. 在 magpie 插件页面添加本地 `aigateway-proxy-user` 文件夹。
-2. 下载时已经通过当前平台会话授权并绑定默认订阅。首次安装自动导入 OAuth 和模型。
-3. 「刷新模型」使用已有授权，直接读取当前绑定订阅的最新模型；不打开浏览器、不选择订阅。
+2. 下载时已经通过当前平台会话完成个人授权。首次安装自动导入 OAuth 和本人模型，不绑定应用订阅。
+3. 「刷新模型」使用已有授权，直接读取本人最新授权模型；不打开浏览器、不选择应用订阅。
 4. 刷新完整替换本插件的文本/图片模型目录，其他供应商和订阅版不变。
-5. 「重新登录」才打开平台验证页，重新认证并解析默认订阅，更新本地授权与配置。
+5. 「重新登录」才打开平台验证页，重新认证并解析个人网关，更新本地授权与配置。
 6. 不覆盖已有本插件账号；主动退出后不会从旧包恢复登录，此时使用「重新登录」。
 
 The private download contains personal OAuth access and refresh tokens. It does
@@ -16,8 +16,8 @@ not contain an APIM key, password or browser cookie. Never share, upload or comm
 the ZIP, extracted configuration or runtime state. Each download has an independent
 installation and revocable grant; access lasts 15 minutes, refresh validity is
 7 days (rolling), and the grant requires reauthentication after 30 days.
-Models and allowances are read
-from the platform; local token totals are not the shared application's allowance.
+Models and the personal monthly Token allowance are read from the platform.
+The user plugin does not show or consume an application's shared allowance.
 Audit-only quota windows do not stop the account. Actual calls remain governed
 by the platform and APIM.
 
@@ -25,17 +25,22 @@ Only this plugin's namespace is replaced. Do not rename the old subscription
 plugin or reuse its provider ID. Failed/canceled authorization preserves a
 previous valid import; revoked permissions are never restored from a cache.
 
-The default subscription is resolved by the platform, not by a client dropdown.
-An explicit gateway configuration binding takes precedence; otherwise an active
-owned subscription on the default gateway is preferred, using a stable ordering.
-An unavailable explicit default fails closed. Model refresh keeps the existing
-binding; only reauthentication resolves a new default. The platform overwrites
+The personal gateway is resolved by the platform, not by an application dropdown.
+No application ID, subscription ID or APIM subscription key is attached to a user
+invocation. An unavailable personal gateway fails closed without choosing an application.
+Model refresh keeps the existing personal gateway; only reauthentication resolves
+a new default. Old user grants are normalized to personal routing without rewriting
+their historical records. The platform overwrites
 caller-supplied OpenAI `user` / Anthropic `metadata.user_id` with the verified
 governance identity and also signs the trusted APIM attribution context.
 
 Anthropic rejects email-shaped IDs, so its model-facing identifier is the SHA-256
 of the verified governance identity. APIM keeps the real signed identity for
-personal/application accounting; the hash does not replace the budget user key.
+personal accounting; the hash does not replace the budget user key.
+
+The account name comes from the verified platform profile; the stable user UUID
+remains in `uid`. Profile synchronization updates this plugin's existing account
+slots, preserves tokens and other providers, and does not restore a signed-out account.
 
 magpie's surrounding sign-in heading is host-owned. This plugin changes its two
 method labels without changing magpie application code.
@@ -53,7 +58,7 @@ method labels without changing magpie application code.
 - `images-provider.json`：需要原生图片入口时，通过 magpie 现有供应商导入/编辑界面配置
   该独立的 Images 供应商，使用文件中的本地地址、模型清单和本地 Key。
 
-MCP 提供 `generate_image` 工具，模型枚举随当前订阅导入更新。重新导入会替换本插件
+MCP 提供 `generate_image` 工具，模型枚举随本人模型目录更新。刷新模型会替换本插件
 生成的图片配置；桥接每次调用检查当前插件仍启用且已登录。退出/停用/移除后桥接停止，
 旧本地地址不能绕过用户登录继续调用平台。宿主没有配置写入入口时，手动登记的原生
 Images 卡片可能需要手动移除，但旧图片服务已经不可调用。重新加载服务导致地址变化时，

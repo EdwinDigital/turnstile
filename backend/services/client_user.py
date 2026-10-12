@@ -29,10 +29,10 @@ from turnstile_core.services.application_access import ApplicationAccessService
 from turnstile_core.services.directory_catalog import catalog_for, directory_store
 
 from .auth_service import SessionIdentity
-from .client_downloads import RESERVED, SDK
+from .client_downloads import SDK
 from .client_user_store import ClientUserStore
 
-USER_PLUGIN_VERSION = "0.3.1"
+USER_PLUGIN_VERSION = "0.4.0"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
@@ -94,11 +94,11 @@ class ClientUserService:
 
     def package(self, identity: SessionIdentity) -> bytes:
         self.require_enabled()
-        selected = self.default_subscription(identity)
+        selected = self.default_route(identity)
         installation, grant_id = uuid4(), uuid4()
         access = "tsca_" + secrets.token_urlsafe(32)
         refresh = "tscr_" + secrets.token_urlsafe(32)
-        selection = {k: selected[k] for k in ("application_id", "subscription_id", "gateway_id")}
+        selection = {k: selected[k] for k in ("mode", "gateway_id")}
         self.store.issue_download(
             identity.id, installation, identity.method, selection, access, refresh, grant_id
         )
@@ -106,10 +106,11 @@ class ClientUserService:
         platform = hashlib.sha256(self.origin.encode()).hexdigest()[:12]
         uid = UUID(identity.id).hex
         cfg = {
-            "version": 3,
+            "version": 4,
             "platformOrigin": self.origin,
             "clientId": "magpie-user",
             "userId": identity.id,
+            "userName": identity.name or identity.email,
             "binding": self._binding(identity.id),
             "providerId": f"aigateway-user-{platform}-{uid}",
             "name": f"AIGateway User · {identity.name or identity.email}",
@@ -121,7 +122,7 @@ class ClientUserService:
                 "access": access,
                 "refresh": refresh,
                 "expires": int(time.time() * 1000) + 900_000,
-                "accountId": identity.id,
+                "accountId": identity.name or identity.email,
                 "uid": identity.id,
                 "installationId": str(installation),
             },
@@ -150,50 +151,11 @@ class ClientUserService:
                 z.writestr(info, data, compress_type=ZIP_DEFLATED)
         return out.getvalue()
 
-    def default_subscription(self, identity: SessionIdentity) -> dict[str, Any]:
-        items = [x for x in self.subscriptions(identity, force=True) if x["models"]]
-        gateways = self.repository.registry()["gateways"]
-        identities = {identity.id, identity.email, identity.effective_user_id}
-        for gateway in sorted(gateways, key=lambda g: not g.get("is_default", False)):
-            configured = (gateway.get("config") or {}).get("client_user_default_subscriptions", {})
-            if not isinstance(configured, dict):
-                raise HTTPException(409, "The default subscription configuration is invalid")
-            target = next(
-                (
-                    configured[k]
-                    for k in (identity.id, identity.effective_user_id, identity.email)
-                    if k in configured
-                ),
-                None,
-            )
-            if target:
-                match = next(
-                    (
-                        x
-                        for x in items
-                        if x["subscription_id"] == str(target)
-                        and x["gateway_id"] == str(gateway["id"])
-                    ),
-                    None,
-                )
-                if not match:
-                    raise HTTPException(409, "The configured default subscription is unavailable")
-                return match
-        if not items:
-            raise HTTPException(409, "No authorized default subscription with models is available")
-        default_gateways = {str(g["id"]) for g in gateways if g.get("is_default")}
-
-        def rank(item: dict[str, Any]) -> tuple[Any, ...]:
-            app = self.repository.get_gateway_application(UUID(item["application_id"])) or {}
-            return (
-                app.get("owner_id") not in identities,
-                item["gateway_id"] not in default_gateways,
-                item["application_name"].casefold(),
-                item["subscription_name"].casefold(),
-                item["subscription_id"],
-            )
-
-        return min(items, key=rank)
+    def default_route(self, identity: SessionIdentity) -> dict[str, Any]:
+        selected = self.selected(identity, {}, fresh=True)
+        if not selected["models"]:
+            raise HTTPException(409, "No personally authorized published models are available")
+        return selected
 
     def create_device(
         self,
@@ -253,142 +215,6 @@ class ClientUserService:
             )
         return identity
 
-    def subscriptions(
-        self,
-        identity: SessionIdentity,
-        *,
-        force: bool = False,
-    ) -> list[dict[str, Any]]:
-        key = f"directory:{identity.id}:{identity.role}:{identity.directory_permission_revision}"
-        with self._lock:
-            cached = self._cache.get(key)
-            if not force and cached and cached[0] > time.monotonic():
-                return cast(list[dict[str, Any]], cached[1]["items"])
-            items = self._build_subscriptions(identity)
-            if len(self._cache) > 256:
-                self._cache.clear()
-            self._cache[key] = (time.monotonic() + 60, {"items": items})
-            return items
-
-    def _build_subscriptions(self, identity: SessionIdentity) -> list[dict[str, Any]]:
-        self.require_enabled()
-        rows = self.repository.registry()
-        gateways = {str(x["id"]): x for x in rows["gateways"]}
-        runtimes = {str(x["id"]): x for x in rows["runtimes"]}
-        providers = {str(x["id"]): x for x in rows["providers"]}
-        policies = self.repository.list_user_model_policies([identity.effective_user_id])
-        policy = next(
-            (p for p in policies if str(p["user_id"]) == identity.effective_user_id), None
-        )
-        permitted = {str(x) for x in policy["model_ids"]} if policy else None
-        out = []
-        for app in self.applications.applications().items:
-            if app.status != "active" or app.system_managed:
-                continue
-            if identity.role != "owner" and app.owner_id not in {
-                identity.id,
-                identity.email,
-                identity.effective_user_id,
-            }:
-                continue
-            g = gateways.get(str(app.gateway_profile_id))
-            if not g or not g["enabled"] or g["implementation"] != "apim":
-                continue
-            base = str(g.get("base_url") or "").rstrip("/")
-            uri, expected = urlsplit(base), urlsplit(self.settings.apim_gateway_url or "")
-            if uri.scheme != "https" or uri.netloc != expected.netloc or uri.query or uri.fragment:
-                continue
-            publication = self.repository.effective_gateway_publication(app.gateway_profile_id)
-            if not publication:
-                continue
-            spec = publication["desired_spec"]
-            if not isinstance(spec, dict):
-                spec = spec.model_dump(mode="json")
-            published = {str(x["id"]) for x in spec.get("discovery_models", [])}
-            published.update(
-                str(b.get("model", {}).get("model_key", ""))
-                for b in spec.get("bindings", [])
-                if isinstance(b, dict)
-            )
-            models = []
-            for m in rows["models"]:
-                r, p = runtimes.get(str(m["runtime_id"])), providers.get(str(m["provider_id"]))
-                if (
-                    not m["enabled"]
-                    or not r
-                    or not r["enabled"]
-                    or not p
-                    or not p["enabled"]
-                    or str(r.get("gateway_profile_id")) != str(app.gateway_profile_id)
-                    or m["model_key"] not in published
-                    or (
-                        app.model_policy_configured
-                        and UUID(str(m["id"])) not in app.allowed_model_ids
-                    )
-                    or (permitted is not None and str(m["id"]) not in permitted)
-                    or (permitted is None and m.get("assignment_required"))
-                ):
-                    continue
-                capabilities = list(m["capabilities"])
-                if "image_generation" in capabilities:
-                    protocol = "openai_images"
-                elif "chat" in capabilities:
-                    paths = invocation_api_paths(
-                        {
-                            "model_key": m["model_key"],
-                            "upstream_model_id": m.get("upstream_model_id"),
-                            "model_family_key": m.get("family_key"),
-                            "provider_kind": p["provider_kind"],
-                            "provider_endpoint_url": p.get("endpoint_url"),
-                            "runtime_kind": r["runtime_kind"],
-                            "runtime_config": r["config"],
-                            "gateway_implementation": "apim",
-                        },
-                        tools="tools" in capabilities,
-                    )
-                    if not paths:
-                        continue
-                    chosen_protocol = next(
-                        (p for p in paths if p.value == "openai_responses"), next(iter(paths))
-                    )
-                    protocol = chosen_protocol.value
-                else:
-                    continue
-                models.append(
-                    {
-                        "id": m["model_key"],
-                        "name": m["display_name"],
-                        "model_id": str(m["id"]),
-                        "runtime_id": str(m["runtime_id"]),
-                        "protocol": protocol,
-                        "upstream_model_id": m.get("upstream_model_id") or m["model_key"],
-                        "context_window": m.get("context_window"),
-                        "capabilities": capabilities,
-                    }
-                )
-            for sub in self.repository.list_gateway_application_subscriptions([app.id]):
-                if (
-                    sub["state"] != "active"
-                    or not sub["scope_exists"]
-                    or str(sub["apim_subscription_id"]).lower() in RESERVED
-                    or str(sub["gateway_profile_id"]) != str(app.gateway_profile_id)
-                ):
-                    continue
-                out.append(
-                    {
-                        "application_id": str(app.id),
-                        "application_name": app.display_name,
-                        "subscription_id": str(sub["id"]),
-                        "subscription_name": sub["display_name"],
-                        "apim_subscription_id": sub["apim_subscription_id"],
-                        "gateway_id": str(app.gateway_profile_id),
-                        "gateway_name": g["name"],
-                        "base_url": base,
-                        "models": models,
-                    }
-                )
-        return out
-
     def selected(
         self,
         identity: SessionIdentity,
@@ -396,39 +222,127 @@ class ClientUserService:
         *,
         fresh: bool = False,
     ) -> dict[str, Any]:
-        found = next(
-            (
-                x
-                for x in self.subscriptions(identity, force=fresh)
-                if all(
-                    x[k] == str(selection.get(k, ""))
-                    for k in ("application_id", "subscription_id", "gateway_id")
-                )
-            ),
-            None,
-        )
-        if not found:
-            raise HTTPException(403, "Subscription access was removed; sign in and import again")
-        row = self.repository.get_gateway_application(UUID(found["application_id"]))
-        if not row or row["status"] != "active" or row["system_managed"]:
-            raise HTTPException(403, "Application access is no longer available")
-        if identity.role != "owner" and row.get("owner_id") not in {
-            identity.id,
-            identity.email,
-            identity.effective_user_id,
-        }:
-            raise HTTPException(403, "Application ownership changed")
-        subscriptions = self.repository.list_gateway_application_subscriptions(
-            [UUID(found["application_id"])]
-        )
-        if not any(
-            str(s["id"]) == found["subscription_id"]
-            and s["state"] == "active"
-            and s["scope_exists"]
-            for s in subscriptions
+        self.require_enabled()
+        if self.settings.directory_source == "database" and (
+            not identity.governance_user_id or identity.directory_person_active is not True
         ):
-            raise HTTPException(403, "Subscription access is no longer available")
-        return found
+            raise HTTPException(409, "Link an active person before using the user plugin")
+        # Old user grants carry application IDs. Their authentication remains valid,
+        # but they now use personal routing rather than inheriting that application's budget.
+        gateway_id = selection.get("gateway_id") if selection.get("mode") == "personal" else None
+        key = (
+            f"personal:{identity.id}:{identity.effective_user_id}:{identity.role}:"
+            f"{identity.directory_permission_revision}:{gateway_id or 'default'}"
+        )
+        with self._lock:
+            hit = self._cache.get(key)
+            if not fresh and hit and hit[0] > time.monotonic():
+                return hit[1]
+        rows = self.repository.registry()
+        candidates = [
+            g
+            for g in rows["gateways"]
+            if (str(g["id"]) == str(gateway_id) if gateway_id else g.get("is_default"))
+        ]
+        if len(candidates) != 1:
+            raise HTTPException(409, "A unique personal gateway must be configured")
+        g = candidates[0]
+        base = str(g.get("base_url") or "").rstrip("/")
+        uri = urlsplit(base)
+        if (
+            not g["enabled"]
+            or g["implementation"] != "apim"
+            or uri.scheme != "https"
+            or uri.username
+            or uri.password
+            or uri.query
+            or uri.fragment
+            or base != str(self.settings.apim_gateway_url or "").rstrip("/")
+        ):
+            raise HTTPException(409, "The trusted personal gateway is unavailable")
+        publication = self.repository.effective_gateway_publication(UUID(str(g["id"])))
+        if not publication:
+            raise HTTPException(409, "The personal gateway has no effective publication")
+        spec = publication["desired_spec"]
+        if not isinstance(spec, dict):
+            spec = spec.model_dump(mode="json")
+        published = {str(x["id"]) for x in spec.get("discovery_models", [])}
+        published.update(
+            str(b.get("model", {}).get("model_key", "")) for b in spec.get("bindings", [])
+        )
+        runtimes = {str(x["id"]): x for x in rows["runtimes"]}
+        providers = {str(x["id"]): x for x in rows["providers"]}
+        policies = self.repository.list_user_model_policies([identity.effective_user_id])
+        policy = next(
+            (p for p in policies if str(p["user_id"]) == identity.effective_user_id), None
+        )
+        permitted = {str(x) for x in policy["model_ids"]} if policy else None
+        models = []
+        for m in rows["models"]:
+            r, p = runtimes.get(str(m["runtime_id"])), providers.get(str(m["provider_id"]))
+            if (
+                not m["enabled"]
+                or not r
+                or not r["enabled"]
+                or not p
+                or not p["enabled"]
+                or str(r.get("gateway_profile_id")) != str(g["id"])
+                or m["model_key"] not in published
+                or identity.role not in m["allowed_roles"]
+                or identity.role not in r["allowed_roles"]
+                or (permitted is not None and str(m["id"]) not in permitted)
+                or (permitted is None and m.get("assignment_required"))
+            ):
+                continue
+            capabilities = list(m["capabilities"])
+            if "image_generation" in capabilities:
+                protocol = "openai_images"
+            elif "chat" in capabilities:
+                paths = invocation_api_paths(
+                    {
+                        "model_key": m["model_key"],
+                        "upstream_model_id": m.get("upstream_model_id"),
+                        "model_family_key": m.get("family_key"),
+                        "provider_kind": p["provider_kind"],
+                        "provider_endpoint_url": p.get("endpoint_url"),
+                        "runtime_kind": r["runtime_kind"],
+                        "runtime_config": r["config"],
+                        "gateway_implementation": "apim",
+                    },
+                    tools="tools" in capabilities,
+                )
+                if not paths:
+                    continue
+                chosen_protocol = next(
+                    (p for p in paths if p.value == "openai_responses"), next(iter(paths))
+                )
+                protocol = chosen_protocol.value
+            else:
+                continue
+            models.append(
+                {
+                    "id": m["model_key"],
+                    "name": m["display_name"],
+                    "model_id": str(m["id"]),
+                    "runtime_id": str(m["runtime_id"]),
+                    "protocol": protocol,
+                    "upstream_model_id": m.get("upstream_model_id") or m["model_key"],
+                    "context_window": m.get("context_window"),
+                    "capabilities": capabilities,
+                }
+            )
+        result = {
+            "mode": "personal",
+            "gateway_id": str(g["id"]),
+            "gateway_name": g["name"],
+            "base_url": base,
+            "models": models,
+        }
+        with self._lock:
+            if len(self._cache) > 256:
+                self._cache.clear()
+            self._cache[key] = (time.monotonic() + 60, result)
+        return result
 
     def validate_model(
         self,
@@ -439,11 +353,14 @@ class ClientUserService:
         route = self.repository.invocation_route(UUID(model["runtime_id"]), UUID(model["model_id"]))
         if not route:
             raise HTTPException(403, "The model route is no longer enabled")
-        app_policy = self.repository.list_gateway_application_model_access(
-            [UUID(selected["application_id"])]
-        )
-        if app_policy and not any(str(p.get("model_id")) == model["model_id"] for p in app_policy):
-            raise HTTPException(403, "Application model access was removed")
+        if (
+            str(route.get("gateway_id")) != selected["gateway_id"]
+            or route.get("gateway_implementation") != "apim"
+            or str(route.get("gateway_base_url") or "").rstrip("/") != selected["base_url"]
+            or identity.role not in route["model_allowed_roles"]
+            or identity.role not in route["runtime_allowed_roles"]
+        ):
+            raise HTTPException(403, "The personal model route is no longer authorized")
         policies = self.repository.list_user_model_policies([identity.effective_user_id])
         policy = next(
             (p for p in policies if str(p["user_id"]) == identity.effective_user_id), None
@@ -507,9 +424,7 @@ class ClientUserService:
     def catalog(
         self, grant: dict[str, Any], identity: SessionIdentity, *, fresh: bool = False
     ) -> dict[str, Any]:
-        if not grant["selection"]:
-            return {"models": {}, "images": [], "selection": None}
-        selected = self.selected(identity, grant["selection"], fresh=fresh)
+        selected = self.selected(identity, grant.get("selection") or {}, fresh=fresh)
         self.store.activate(grant["id"])
         models = {}
         images = []
@@ -532,6 +447,7 @@ class ClientUserService:
                 },
             }
         return {
+            "user": {"id": identity.id, "name": identity.name or identity.email},
             "models": models,
             "images": images,
             "aliases": {m["id"]: m["upstream_model_id"] for m in selected["models"]},
@@ -564,29 +480,6 @@ class ClientUserService:
                     "aside": person["mode"] != "block",
                 }
             )
-        if grant["selection"]:
-            selection = self.selected(identity, grant["selection"])
-            app = self.applications.application(UUID(selection["application_id"]))
-            if app.budget:
-                b = app.budget
-                occupied = (
-                    b.used_tokens
-                    + (b.pending_reserved_tokens or 0)
-                    + (b.finalized_upper_bound_tokens or 0)
-                )
-                windows.append(
-                    {
-                        "name": "应用共享月度 Token",
-                        "used": min(100, occupied / b.token_limit * 100),
-                        "amount": occupied,
-                        "limit": b.token_limit,
-                        "unit": "tokens",
-                        "resetsAt": reset,
-                        "span": (end - start).days * 86400,
-                        "aside": not b.enforce,
-                        "display": f"已确认 {b.used_tokens}；预留 {b.pending_reserved_tokens or 0}",
-                    }
-                )
         result = {
             "user": identity.name or identity.email,
             "plan": "AIGateway 用户授权",
@@ -638,7 +531,7 @@ class ClientUserService:
             "department_id": department.id,
             "department_name": department.name,
             "model": model,
-            "subscription": selection["apim_subscription_id"],
-            "application_id": selection["application_id"],
+            "scope": "personal",
+            "gateway_id": selection["gateway_id"],
         }
         return jwt.encode(payload, self.signing_key, algorithm="HS256")

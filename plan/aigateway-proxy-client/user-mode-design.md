@@ -208,7 +208,8 @@ P0 必须验证：显式命名插件图片模型能否经现有 draw 路径调�
 
 ## 8. 用户额度与刷新
 
-- `auth.usage` 向平台读取本人有效预算窗口，另外按需返回「当前应用共享额度」。组织/部门/个人/应用窗口独立，不能相加；没有合法可见范围的层级不返回。
+- `auth.usage` 只读取并返回本人个人月度 Token 预算窗口；不返回应用共享、组织或部门窗口。未配置个人预算时返回空 windows 和「未配置额度」，不以应用预算替代。
+- 额度读取不查询当前绑定应用的预算或订阅目录。仅收窄展示范围，不修改模型调用的应用绑定、APIM admission、原始用量或个人审计/阻断模式；默认应用绑定的纠正另行处理。
 - 响应包含 subject_scope、scope_id、unit、period_start/end、limit、confirmed_used、pending_reserved、finalized_upper_bound、available、enforce、as_of、source_watermark、stale 和 revision。
 - 复用现有预算 evidence policy；`available = max(limit - confirmed_used - pending_reserved - finalized_upper_bound, 0)` 仅在该账本契约成立时使用，其他 scope 按其权威计算返回，不用 display totals 替代 enforcement。
 - magpie window 使用 `amount/limit/unit/used/resetsAt/span`；`used` 必须明确是有效占用比还是已确认比，display 标注已确认与预留。不要一边显示 confirmed 百分比，一边称其为真正可用余额。
@@ -349,3 +350,13 @@ ACTIVE -> EXPIRED / REVOKED -> 需要重新登录，不恢复旧 Key
 
 - magpie 将入口文件的所有函数导出都当作插件执行。入口仅 export default；私密文件写入、自动导入和别名适配工具迁至 helpers.mjs，包必须包含该文件。新增入口导出集断言及原生 loaded.error 检查，不能只根据账号已写入判断插件加载成功。
 - Foundry Anthropic 明确拒绝包含邮件的 metadata.user_id。该协议使用由已验证 effective_user_id 计算的 SHA-256 标识；不把邮件直接传给模型。APIM 签名上下文仍携带原始治理身份，预算和用量归因不改为哈希、不受影响。
+
+## 15. 用户版 0.4.0 个人授权修复
+
+用户版的默认授权对象是本人个人预算与模型权限，不是应用订阅。0.3.x 的按名称排序默认应用选择和显式应用映射不再用于用户版；也不会自动改绑到 Edwin-Agent。grant.selection 改为 personal 模式与受信任平台网关；当前登录身份、目录权限及个人预算继续权威执行。
+
+账号 accountId 按宿主约定用于显示用户名称，稳定 UUID 保留在 uid；插件在宿主 settle 前迁移自身同 uid 的旧槽位名称，不修改 magpie。额度仅展示个人月度 Token，原始历史和订阅版不变。
+
+APIM 可信用户分支升级至 v2：拒绝个人请求携带 Subscription，保留签名、Model.Invoke、目标网关、model/jti 和人员账本准入。平台代理不读取或发送应用 Key。人员列表对无明细精确结算按当月预算层级读取投影，解决与个人汇总口径不一致。
+
+本节替代本文早期订阅选择、双额度与固定 accountId=UUID 的用户版描述。实现、兼容迁移、1841 项 Python 验证和未完成的 APIM/线上验收，以及共享 Core 摘要协调发布边界见 personal-authorization-design.md。

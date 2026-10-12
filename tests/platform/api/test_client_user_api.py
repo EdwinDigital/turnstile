@@ -7,6 +7,8 @@ from typing import Any, cast
 from uuid import uuid4
 from zipfile import ZipFile
 
+import httpx
+import jwt
 import pytest
 from cryptography.fernet import Fernet
 from pydantic import SecretStr
@@ -19,6 +21,8 @@ from tests.backend.model_platform.test_application_access import _discovery
 from tests.platform.api.api_support import OWNER_SESSION, client
 from tests.platform.api.test_application_access_api import StubSubscriptionKeyClient
 from turnstile_core.config import Settings
+from turnstile_core.domain.enterprise import enterprise_catalog
+from turnstile_core.domain.models import EnterpriseEntity
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.application_access import ApplicationAccessService
 
@@ -100,8 +104,8 @@ def test_browser_approval_and_native_catalog(desktop: ClientUserService) -> None
     uri = "/api/v1/client-auth/verification?user_code=" + device["user_code"]
     response = client.get(uri)
     assert response.status_code == 200, response.text
-    chosen = response.json()["subscription"]
-    fields = {k: chosen[k] for k in ("application_id", "subscription_id", "gateway_id")}
+    chosen = response.json()["personal_route"]
+    fields = {"gateway_id": chosen["gateway_id"]}
     approved = client.post(
         "/api/v1/client-auth/decision",
         json={
@@ -227,9 +231,107 @@ def test_download_is_authorized_and_refresh_keeps_binding(desktop: ClientUserSer
     repository.models.clear()
     refreshed = client.post("/api/v1/client-runtime/refresh-models", headers=auth)
     assert refreshed.status_code == 200 and refreshed.json()["models"] == {}
-    assert refreshed.json()["selection"]["subscription_id"] == cfg["selection"]["subscription_id"]
+    assert refreshed.json()["selection"]["gateway_id"] == cfg["selection"]["gateway_id"]
     client.post("/api/v1/client-auth/revoke", headers=auth)
     assert client.post("/api/v1/client-runtime/refresh-models", headers=auth).status_code == 401
+
+
+def test_personal_proxy_uses_signed_identity_without_an_application_key(
+    desktop: ClientUserService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = client.post("/api/v1/client-downloads/magpie-user", json={"acknowledged": True})
+    assert response.status_code == 200
+    with ZipFile(BytesIO(response.content)) as archive:
+        cfg = json.loads(archive.read("aigateway-proxy-user/aigateway-user.config.json"))
+    model = next(iter(cfg["catalog"]["models"]))
+    catalog = enterprise_catalog()
+    catalog.users.append(
+        EnterpriseEntity(
+            id="owner@contoso.com",
+            name="Edwin",
+            parent_id="department-platform",
+        )
+    )
+    monkeypatch.setattr("backend.services.client_user.catalog_for", lambda *_: catalog)
+    sent: list[httpx.Request] = []
+
+    class Upstream:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def build_request(self, method: str, url: str, **kwargs: Any) -> httpx.Request:
+            return httpx.Request(method, url, **kwargs)
+
+        async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+            sent.append(request)
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=httpx.ByteStream(b'{"result":"ok"}'),
+            )
+
+        async def aclose(self) -> None:
+            pass
+
+    def no_application_key(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("A personal call must never retrieve an application key")
+
+    monkeypatch.setattr("backend.http.client_user.httpx.AsyncClient", Upstream)
+    monkeypatch.setattr(
+        desktop.applications, "reveal_application_subscription_key", no_application_key
+    )
+    repository = cast(InMemoryRepository, desktop.repository)
+    repository.gateway_applications.clear()
+    repository.gateway_application_subscriptions.clear()
+    reply = client.post(
+        "/api/v1/client-runtime/responses",
+        headers={
+            "Authorization": "Bearer " + cfg["authorization"]["access"],
+            "Ocp-Apim-Subscription-Key": "forged-key",
+            "x-user-id": "forged-user",
+        },
+        json={
+            "model": model,
+            "input": "Hello",
+            "user": "forged-user",
+        },
+    )
+    assert reply.status_code == 200, reply.text
+    assert len(sent) == 1
+    outbound = sent[0]
+    assert "ocp-apim-subscription-key" not in outbound.headers
+    assert "authorization" not in outbound.headers
+    assert "x-user-id" not in outbound.headers
+    assert json.loads(outbound.content)["user"] == "owner@contoso.com"
+    claims = jwt.decode(
+        outbound.headers["x-turnstile-client-context"],
+        desktop.signing_key,
+        algorithms=["HS256"],
+        audience="turnstile-client-runtime",
+    )
+    assert claims["scope"] == "personal"
+    assert claims["preferred_username"] == "owner@contoso.com"
+    assert claims["gateway_id"] == cfg["selection"]["gateway_id"]
+    assert claims["jti"] == outbound.headers["x-request-id"]
+    assert "application_id" not in claims and "subscription" not in claims
+
+
+def test_personal_approval_rejects_application_binding(desktop: ClientUserService) -> None:
+    device = begin(desktop, "login")
+    result = client.post(
+        "/api/v1/client-auth/decision",
+        json={
+            "user_code": device["user_code"],
+            "approve": True,
+            "application_id": str(uuid4()),
+        },
+    )
+    assert result.status_code == 409
+    status = client.get(
+        "/api/v1/client-auth/verification", params={"user_code": device["user_code"]}
+    )
+    assert status.json()["state"] == "pending"
 
 
 @pytest.mark.parametrize("protocol", ["openai_responses", "openai_chat", "openai_images"])

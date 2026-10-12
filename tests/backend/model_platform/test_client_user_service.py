@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime
 from io import BytesIO
 from typing import Any, cast
+from unittest.mock import Mock
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -86,38 +88,34 @@ def test_personal_package_has_bound_authorization_and_distinct_identity() -> Non
         assert config["authorization"]["access"].startswith("tsca_")
         assert config["authorization"]["refresh"].startswith("tscr_")
         assert config["authorization"]["installationId"] == config["installationId"]
-        assert config["selection"]["apim_subscription_id"] == "cc-switch"
+        assert config["selection"]["mode"] == "personal"
+        assert "subscription_id" not in config["selection"]
+        assert config["authorization"]["accountId"] == identity.name
+        assert config["authorization"]["uid"] == identity.id
         assert config["catalog"]["models"]
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
         package = json.loads(archive.read("aigateway-proxy-user/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.3.1"
+        assert package["version"] == "0.4.0"
         assert all((f.external_attr >> 16) & 0o777 == 0o600 for f in archive.infolist())
 
 
-def test_personal_subscriptions_are_not_the_legacy_owner_inventory() -> None:
+def test_personal_routing_does_not_require_owned_applications() -> None:
     service, repo, owner = client_service()
-    assert len(service.subscriptions(owner)) == 1
-    member = SessionIdentity(
-        id=str(uuid4()),
-        email="member@example.com",
-        name="Member",
-        role="member",
-        method="password",
-        session_expires_at=datetime.now(UTC),
-    )
-    assert service.subscriptions(member) == []
-    repo.gateway_applications[0]["owner_id"] = member.id
-    assert len(service.subscriptions(member, force=True)) == 1
-    first = service.subscriptions(member)[0]
-    repo.gateway_applications[0]["owner_id"] = "another-user"
-    with pytest.raises(HTTPException):
-        service.selected(member, first)
+    repo.gateway_applications.clear()
+    repo.gateway_application_subscriptions.clear()
+    member = replace(owner, role="member", id=str(uuid4()), email="member@example.com")
+    selected = service.default_route(member)
+    assert selected["mode"] == "personal"
+    assert selected["models"]
+    assert "application_id" not in selected
+    repo.user_model_policies[member.email] = {"user_id": member.email, "model_ids": []}
+    assert not service.selected(member, selected, fresh=True)["models"]
 
 
 def test_catalog_protocol_aliases_and_live_empty_policy() -> None:
     service, repo, owner = client_service()
-    choice = service.subscriptions(owner)[0]
+    choice = service.default_route(owner)
     grant = {"id": uuid4(), "selection": choice}
     data = service.catalog(grant, owner)
     assert data["models"] and data["aliases"]
@@ -126,9 +124,10 @@ def test_catalog_protocol_aliases_and_live_empty_policy() -> None:
         for m in data["models"].values()
     )
     repo.gateway_application_subscriptions[0]["state"] = "suspended"
-    with pytest.raises(HTTPException):
-        service.catalog(grant, owner)
-    assert service.catalog({"selection": None}, owner)["models"] == {}
+    assert service.catalog(grant, owner)["models"]
+    repo.user_model_policies[owner.email] = {"user_id": owner.email, "model_ids": []}
+    assert service.catalog(grant, owner, fresh=True)["models"] == {}
+    assert service.catalog({"id": uuid4(), "selection": None}, owner, fresh=True)["models"] == {}
 
 
 def test_disabled_feature_cannot_export_a_user_package() -> None:
@@ -139,14 +138,107 @@ def test_disabled_feature_cannot_export_a_user_package() -> None:
     assert failure.value.status_code == 503
 
 
-def test_explicit_default_is_validated_and_never_falls_back_when_revoked() -> None:
+def test_personal_gateway_is_explicit_and_never_falls_back_to_applications() -> None:
     service, repo, owner = client_service()
-    first = service.default_subscription(owner)
-    repo.gateways[0]["config"]["client_user_default_subscriptions"] = {
-        owner.id: first["subscription_id"],
-    }
-    assert service.default_subscription(owner)["subscription_id"] == first["subscription_id"]
-    repo.gateways[0]["config"]["client_user_default_subscriptions"][owner.id] = str(uuid4())
+    first = service.default_route(owner)
+    repo.gateways[0]["config"]["client_user_default_subscriptions"] = {owner.id: str(uuid4())}
+    assert service.default_route(owner) == first
     with pytest.raises(HTTPException) as failure:
-        service.default_subscription(owner)
+        service.selected(owner, {"mode": "personal", "gateway_id": str(uuid4())}, fresh=True)
     assert failure.value.status_code == 409
+    repo.gateways[0]["enabled"] = False
+    with pytest.raises(HTTPException):
+        service.default_route(owner)
+
+
+def test_legacy_user_grants_normalize_to_personal_without_changing_history() -> None:
+    service, repo, owner = client_service()
+    old = {
+        "application_id": str(uuid4()),
+        "subscription_id": str(uuid4()),
+        "gateway_id": str(uuid4()),
+    }
+    grant = {"id": uuid4(), "selection": old}
+    repo.gateway_applications.clear()
+    result = service.catalog(grant, owner)
+    assert result["selection"]["mode"] == "personal"
+    assert "application_id" not in result["selection"]
+    assert grant["selection"] == old
+
+
+def test_model_permission_revocation_is_checked_even_with_cached_catalog() -> None:
+    service, repo, owner = client_service()
+    selected = service.default_route(owner)
+    model = selected["models"][0]
+    service.validate_model(owner, selected, model)
+    repo.user_model_policies[owner.email] = {"user_id": owner.email, "model_ids": []}
+    with pytest.raises(HTTPException) as denied:
+        service.validate_model(owner, selected, model)
+    assert denied.value.status_code == 403
+
+
+@pytest.mark.parametrize("mode", ["audit", "block"])
+def test_usage_shows_only_the_verified_personal_monthly_budget(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    service, repo, owner = client_service()
+    owner = replace(owner, governance_user_id="person@example.com")
+    personal = Mock(return_value={"used_tokens": 22555, "token_limit": 60000000, "mode": mode})
+    application = Mock(side_effect=AssertionError("Usage must not read the shared application"))
+    selection = Mock(side_effect=AssertionError("Usage must not depend on a subscription"))
+    monkeypatch.setattr(repo, "person_budget_state", personal)
+    monkeypatch.setattr(service.applications, "application", application)
+    monkeypatch.setattr(service, "selected", selection)
+
+    result = service.usage({"id": uuid4(), "selection": {"application_id": str(uuid4())}}, owner)
+
+    assert result["user"] == "Test"
+    assert len(result["windows"]) == 1
+    window = result["windows"][0]
+    assert window["name"] == "个人月度 Token"
+    assert window["amount"] == 22555
+    assert window["limit"] == 60000000
+    assert window["unit"] == "tokens"
+    assert window["used"] == pytest.approx(22555 / 60000000 * 100)
+    assert window["aside"] is (mode == "audit")
+    start = datetime.fromisoformat(result["as_of"]).date().replace(day=1)
+    end = date(start.year + 1, 1, 1) if start.month == 12 else date(start.year, start.month + 1, 1)
+    personal.assert_called_once_with("person@example.com", start, end)
+    assert window["resetsAt"] == datetime(end.year, end.month, 1, tzinfo=UTC).isoformat()
+    assert window["span"] == (end - start).days * 86400
+    application.assert_not_called()
+    selection.assert_not_called()
+
+
+def test_usage_without_personal_budget_does_not_fall_back_to_an_application(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repo, owner = client_service()
+    monkeypatch.setattr(repo, "person_budget_state", Mock(return_value=None))
+    application = Mock(side_effect=AssertionError("No shared allowance fallback"))
+    monkeypatch.setattr(service.applications, "application", application)
+
+    result = service.usage({"id": uuid4(), "selection": {}}, owner)
+
+    assert result["windows"] == []
+    assert result["balance"] == "未配置额度"
+    assert result["signIn"] == "kept"
+    application.assert_not_called()
+
+
+def test_personal_usage_keeps_the_sixty_second_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    service, repo, owner = client_service()
+    personal = Mock(return_value={"used_tokens": 10, "token_limit": 100, "mode": "audit"})
+    clock = Mock(return_value=10)
+    monkeypatch.setattr(repo, "person_budget_state", personal)
+    monkeypatch.setattr("backend.services.client_user.time.monotonic", clock)
+    grant = {"id": uuid4(), "selection": None}
+    first = service.usage(grant, owner)
+    personal.return_value = {"used_tokens": 20, "token_limit": 100, "mode": "audit"}
+    clock.return_value = 69
+    assert service.usage(grant, owner) == first
+    personal.assert_called_once()
+    clock.return_value = 71
+    assert service.usage(grant, owner)["windows"][0]["amount"] == 20
+    assert personal.call_count == 2
+    assert first["cache_seconds"] == 60
