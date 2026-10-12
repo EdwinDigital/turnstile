@@ -77,6 +77,7 @@ from turnstile_core.pricing.sync import ModelPriceUpdate, plan_price_sync
 from turnstile_core.security import CredentialCipher, credential_hint
 from turnstile_core.services.directory_catalog import catalog_for, directory_store
 
+from .gateway_credentials import with_platform_gateway_credential
 from .model_pricing import ModelPricingService
 
 logger = logging.getLogger(__name__)
@@ -1422,16 +1423,7 @@ class ModelRuntimeService:
         if enforce_user_model_access:
             self._assert_model_allowed(request, route, request_id)
         self._assert_budget_available(request, route, request_id)
-        route = self._decrypt_route(route)
-        if (
-            route.get("gateway_implementation") == GatewayKind.APIM
-            and not route.get("gateway_credential")
-            and self._settings.apim_dashboard_subscription_key
-        ):
-            route["gateway_credential"] = (
-                self._settings.apim_dashboard_subscription_key.get_secret_value()
-            )
-            route["gateway_auth_type"] = "api_key"
+        route = with_platform_gateway_credential(self._decrypt_route(route), self._settings)
         if timeout_ms is not None:
             runtime_config = dict(route.get("runtime_config") or {})
             configured_timeout = float(runtime_config.get("timeout_seconds", 120))
@@ -1508,11 +1500,7 @@ class ModelRuntimeService:
         route = self._decrypt_route(route)
         if not route.get("gateway_base_url") and self._settings.apim_gateway_url:
             route["gateway_base_url"] = self._settings.apim_gateway_url
-        if not route.get("gateway_credential") and self._settings.apim_dashboard_subscription_key:
-            route["gateway_credential"] = (
-                self._settings.apim_dashboard_subscription_key.get_secret_value()
-            )
-            route["gateway_auth_type"] = "api_key"
+        route = with_platform_gateway_credential(route, self._settings)
         now = datetime.now(UTC)
         directory_admission_id = request_id
         self._seal_directory_admission(request, request_id)

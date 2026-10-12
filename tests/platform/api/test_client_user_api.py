@@ -18,8 +18,8 @@ from backend.http.client_user import attributed_body, client_user_service
 from backend.services.client_user import ClientUserService
 from backend.services.client_user_store import ClientUserStore
 from tests.backend.model_platform.test_application_access import _discovery
+from tests.backend.model_platform.test_client_user_service import PlatformSubscriptionKeys
 from tests.platform.api.api_support import OWNER_SESSION, client
-from tests.platform.api.test_application_access_api import StubSubscriptionKeyClient
 from turnstile_core.config import Settings
 from turnstile_core.domain.enterprise import enterprise_catalog
 from turnstile_core.domain.models import EnterpriseEntity
@@ -59,9 +59,9 @@ def desktop(desktop_postgres: ClientUserStore) -> Any:
         repo,
         sync_available=True,
         key_management_available=True,
-        key_client=StubSubscriptionKeyClient(),
+        key_client=PlatformSubscriptionKeys(),
     )
-    applications.sync_discovery(_discovery("cc-switch"), "test")
+    applications.sync_discovery(_discovery("cc-switch", "turnstile-dashboard"), "test")
     svc = ClientUserService(
         desktop_postgres,
         repo,
@@ -69,6 +69,7 @@ def desktop(desktop_postgres: ClientUserStore) -> Any:
         Settings(
             credential_encryption_key=SecretStr(Fernet.generate_key().decode()),
             apim_gateway_url=str(gateway["base_url"]),
+            apim_dashboard_subscription_key=SecretStr("platform-primary"),
         ),
         enabled=True,
         origin="https://platform.example",
@@ -104,8 +105,8 @@ def test_browser_approval_and_native_catalog(desktop: ClientUserService) -> None
     uri = "/api/v1/client-auth/verification?user_code=" + device["user_code"]
     response = client.get(uri)
     assert response.status_code == 200, response.text
-    chosen = response.json()["personal_route"]
-    fields = {"gateway_id": chosen["gateway_id"]}
+    chosen = response.json()["subscription"]
+    fields = {k: chosen[k] for k in ("application_id", "subscription_id", "gateway_id")}
     approved = client.post(
         "/api/v1/client-auth/decision",
         json={
@@ -236,7 +237,7 @@ def test_download_is_authorized_and_refresh_keeps_binding(desktop: ClientUserSer
     assert client.post("/api/v1/client-runtime/refresh-models", headers=auth).status_code == 401
 
 
-def test_personal_proxy_uses_signed_identity_without_an_application_key(
+def test_proxy_reuses_platform_subscription_and_verified_personal_identity(
     desktop: ClientUserService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -274,16 +275,7 @@ def test_personal_proxy_uses_signed_identity_without_an_application_key(
         async def aclose(self) -> None:
             pass
 
-    def no_application_key(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("A personal call must never retrieve an application key")
-
     monkeypatch.setattr("backend.http.client_user.httpx.AsyncClient", Upstream)
-    monkeypatch.setattr(
-        desktop.applications, "reveal_application_subscription_key", no_application_key
-    )
-    repository = cast(InMemoryRepository, desktop.repository)
-    repository.gateway_applications.clear()
-    repository.gateway_application_subscriptions.clear()
     reply = client.post(
         "/api/v1/client-runtime/responses",
         headers={
@@ -300,7 +292,7 @@ def test_personal_proxy_uses_signed_identity_without_an_application_key(
     assert reply.status_code == 200, reply.text
     assert len(sent) == 1
     outbound = sent[0]
-    assert "ocp-apim-subscription-key" not in outbound.headers
+    assert outbound.headers["ocp-apim-subscription-key"] == "platform-primary"
     assert "authorization" not in outbound.headers
     assert "x-user-id" not in outbound.headers
     assert json.loads(outbound.content)["user"] == "owner@contoso.com"
@@ -310,14 +302,14 @@ def test_personal_proxy_uses_signed_identity_without_an_application_key(
         algorithms=["HS256"],
         audience="turnstile-client-runtime",
     )
-    assert claims["scope"] == "personal"
+    assert "scope" not in claims
     assert claims["preferred_username"] == "owner@contoso.com"
-    assert claims["gateway_id"] == cfg["selection"]["gateway_id"]
+    assert claims["subscription"] == "turnstile-dashboard"
     assert claims["jti"] == outbound.headers["x-request-id"]
-    assert "application_id" not in claims and "subscription" not in claims
+    assert claims["application_id"] == cfg["selection"]["application_id"]
 
 
-def test_personal_approval_rejects_application_binding(desktop: ClientUserService) -> None:
+def test_approval_rejects_a_different_default_application(desktop: ClientUserService) -> None:
     device = begin(desktop, "login")
     result = client.post(
         "/api/v1/client-auth/decision",

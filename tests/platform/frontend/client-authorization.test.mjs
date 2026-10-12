@@ -37,7 +37,7 @@ function render(purpose, { fail = false } = {}) {
         : Response.json({ detail: "Invalid authorization request body" }, { status: 422 })
     },
   })
-  const selected = { mode: "personal", gateway_id: "gateway-1", gateway_name: "APIM", models: [{ id: "model-1" }] }
+  const selected = { application_id: "app-1", subscription_id: "sub-1", gateway_id: "gateway-1", gateway_name: "APIM", models: [{ id: "model-1" }] }
   const jsx = (type, props) => ({ type, props })
   const page = load(pageCode, name => {
     if (name === "react") return {
@@ -49,7 +49,7 @@ function render(purpose, { fail = false } = {}) {
     }
     if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" }
     if (name === "@tanstack/react-query") return { useQuery: () => ({
-      data: { purpose, state: "pending", personal_route: selected },
+      data: { purpose, state: "pending", subscription: selected },
     }) }
     if (name === "../api/client") return client
     if (name === "../providers/auth-provider") return { useAuth: () => ({ user: { id: "user-1" } }) }

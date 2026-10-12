@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
@@ -297,6 +298,27 @@ class ApplicationAccessService:
             client.regenerate_application_subscription_key(apim_subscription_id, key_kind)
         except (httpx.HTTPError, PolicyCompilationError) as error:
             self._raise_key_management_error(error)
+
+    def match_application_subscription_key(
+        self,
+        application_id: UUID,
+        subscription_id: UUID,
+        credential: str,
+    ) -> Literal["primary", "secondary"] | None:
+        """Identify a configured platform credential without exporting subscription secrets."""
+        subscription = self._key_subscription(application_id, subscription_id)
+        client = self._require_key_client()
+        try:
+            primary, secondary = client.application_subscription_keys(
+                str(subscription["apim_subscription_id"])
+            )
+        except (httpx.HTTPError, PolicyCompilationError) as error:
+            self._raise_key_management_error(error)
+        if hmac.compare_digest(credential, primary):
+            return "primary"
+        if hmac.compare_digest(credential, secondary):
+            return "secondary"
+        return None
 
     def _key_subscription(
         self, application_id: UUID, application_subscription_id: UUID

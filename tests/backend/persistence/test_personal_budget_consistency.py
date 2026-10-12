@@ -120,3 +120,60 @@ def test_exact_personal_attempts_are_included_in_department_people_without_rewri
     finally:
         repo.close()
     assert snapshot() == before
+
+
+def test_people_budget_counts_the_persons_whole_month_not_only_department_headers(
+    directory_database: str,
+) -> None:
+    person, department = "test.user01@contoso.com", "department-platform"
+    start, end = date(2026, 10, 1), date(2026, 11, 1)
+    with psycopg.connect(directory_database) as db:
+        for kind, key, parent in (
+            ("organization", "org-contoso-global", None),
+            ("department", department, "org-contoso-global"),
+            ("user", person, department),
+        ):
+            db.execute(
+                "INSERT INTO token_budget(period_start,scope_type,scope_id,parent_scope_id,"
+                "token_limit,updated_by) VALUES(%s,%s,%s,%s,60000000,'test')",
+                (start, kind, key, parent),
+            )
+        db.execute(
+            "INSERT INTO billable_request_attempt(id,operation_key,plan_sha256,scope_type,"
+            "scope_id,period_start,model_id,model_key,reserved_tokens,attempt_index,"
+            "state,actual_tokens,created_at) "
+            "VALUES(%s,'legacy-exact',%s,'person',%s,%s,'fixture','fixture',1000,1,'exact',492,%s)",
+            (uuid4(), "a" * 64, person, start, datetime(2026, 10, 1, tzinfo=UTC)),
+        )
+    repo = PostgreSqlOpsDbProxy(directory_database)
+    try:
+        for index, (dept, amount) in enumerate(
+            ((department, 19976), ("unattributed", 1847), ("protocol-validation", 240))
+        ):
+            repo.write_token_usage(
+                _usage_record(f"history-{index}", "APIM", amount).model_copy(
+                    update={"ts": datetime(2026, 10, 1, tzinfo=UTC), "department_id": dept},
+                )
+            )
+        with psycopg.connect(directory_database) as db:
+            before = db.execute("SELECT to_jsonb(u) FROM token_usage u ORDER BY id").fetchall()
+        state = repo.person_budget_state(person, start, end)
+        assert state is not None and state["used_tokens"] == 22555
+        for scope in (
+            None,
+            DataAccessScope(department_ids=(department,)),
+            DataAccessScope(user_ids=(person,)),
+        ):
+            people = TokenBudgetService(repo).people(
+                "2026-10", department, None, "all", 0, 50, data_scope=scope
+            )
+            assert next(x for x in people.items if x.scope_id == person).used_tokens == 22555
+        with psycopg.connect(directory_database) as db:
+            assert (
+                db.execute("SELECT to_jsonb(u) FROM token_usage u ORDER BY id").fetchall() == before
+            )
+            assert db.execute(
+                "SELECT department_id FROM token_usage WHERE id='history-2'"
+            ).fetchone() == ("protocol-validation",)
+    finally:
+        repo.close()

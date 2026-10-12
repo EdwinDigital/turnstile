@@ -351,12 +351,12 @@ ACTIVE -> EXPIRED / REVOKED -> 需要重新登录，不恢复旧 Key
 - magpie 将入口文件的所有函数导出都当作插件执行。入口仅 export default；私密文件写入、自动导入和别名适配工具迁至 helpers.mjs，包必须包含该文件。新增入口导出集断言及原生 loaded.error 检查，不能只根据账号已写入判断插件加载成功。
 - Foundry Anthropic 明确拒绝包含邮件的 metadata.user_id。该协议使用由已验证 effective_user_id 计算的 SHA-256 标识；不把邮件直接传给模型。APIM 签名上下文仍携带原始治理身份，预算和用量归因不改为哈希、不受影响。
 
-## 15. 用户版 0.4.0 个人授权修复
+## 15. 0.4.0 默认订阅纠正（遵循既有平台设计）
 
-用户版的默认授权对象是本人个人预算与模型权限，不是应用订阅。0.3.x 的按名称排序默认应用选择和显式应用映射不再用于用户版；也不会自动改绑到 Edwin-Agent。grant.selection 改为 personal 模式与受信任平台网关；当前登录身份、目录权限及个人预算继续权威执行。
+本节撤销此前只在 91a6880 中提交、未上线的无订阅/APIM v2 方案。用户版仍使用应用订阅 Key 和既有 v1 用户签名分支，不改变 APIM 策略。
 
-账号 accountId 按宿主约定用于显示用户名称，稳定 UUID 保留在 uid；插件在宿主 settle 前迁移自身同 uid 的旧槽位名称，不修改 magpie。额度仅展示个人月度 Token，原始历史和订阅版不变。
+平台调用测试当前用的是 APIM_DASHBOARD_SUBSCRIPTION_KEY，已比对对应 turnstile-dashboard 主 Key。用户版的默认订阅应来自实际网关凭据配置的唯一匹配，而非应用归属/名称排序；有效的显式用户绑定保留。新下载绑定正确默认，旧授权保持直到重新登录。
 
-APIM 可信用户分支升级至 v2：拒绝个人请求携带 Subscription，保留签名、Model.Invoke、目标网关、model/jti 和人员账本准入。平台代理不读取或发送应用 Key。人员列表对无明细精确结算按当月预算层级读取投影，解决与个人汇总口径不一致。
+个人额度按治理用户标识汇总，客户端只显示个人月度窗口；平台应用统计和限制正常保留。名称迁移和稳定 uid 设计保留，不改 magpie。人员列表按整月个人用量读取后筛选人员，不改写历史归因。
 
-本节替代本文早期订阅选择、双额度与固定 accountId=UUID 的用户版描述。实现、兼容迁移、1841 项 Python 验证和未完成的 APIM/线上验收，以及共享 Core 摘要协调发布边界见 personal-authorization-design.md。
+详细默认凭据复用、主/备用匹配、失败保护、预算修复及不改 APIM 的验收边界见 personal-authorization-design.md。

@@ -116,8 +116,10 @@ def user_options(identity: CurrentSession, response: Response, service: Service)
     }
     if result["enabled"]:
         try:
-            selected = service.default_route(identity)
-            result["personal_route"] = {k: v for k, v in selected.items() if k != "base_url"}
+            selected = service.default_subscription(identity)
+            result["default_subscription"] = {
+                k: v for k, v in selected.items() if k not in {"base_url", "apim_subscription_id"}
+            }
         except HTTPException as error:
             result.update(enabled=False, unavailable_reason=error.detail)
     return result
@@ -162,9 +164,7 @@ def verification(
             "expires_at": row["expires_at"].isoformat(),
             "reauth_required": row["purpose"] == "reauth"
             and (not owner or owner.get("created_at", row["created_at"]) < row["created_at"]),
-            "personal_route": {
-                k: v for k, v in service.default_route(identity).items() if k != "base_url"
-            },
+            "subscription": service.default_subscription(identity),
         },
         headers=PRIVATE,
     )
@@ -178,12 +178,13 @@ def decision(
     service.store.device(body.user_code, identity.id)
     selection = None
     if body.approve:
-        chosen = service.default_route(identity)
-        selection = {k: chosen[k] for k in ("mode", "gateway_id")}
-        if body.application_id is not None or body.subscription_id is not None:
-            raise HTTPException(409, "User authorization does not bind an application subscription")
-        if body.gateway_id is not None and str(body.gateway_id) != selection["gateway_id"]:
-            raise HTTPException(409, "The personal gateway changed; reload the verification page")
+        chosen = service.default_subscription(identity)
+        selection = {k: chosen[k] for k in ("application_id", "subscription_id", "gateway_id")}
+        if any(
+            getattr(body, k) is not None and str(getattr(body, k)) != selection[k]
+            for k in selection
+        ):
+            raise HTTPException(409, "Subscription selection changed; reload the verification page")
     owner = store.session_owner(
         hash_session_token(request.cookies.get(service.settings.session_cookie_name, ""))
     )
@@ -231,6 +232,8 @@ def catalog(request: Request, service: Service) -> JSONResponse:
 @router.post("/api/v1/client-runtime/refresh-models")
 def refresh_models(request: Request, service: Service) -> JSONResponse:
     grant, identity = authorized(request, service)
+    if not grant["selection"]:
+        raise HTTPException(409, "Reauthenticate to bind the platform default subscription")
     return JSONResponse(service.catalog(grant, identity, fresh=True), headers=PRIVATE)
 
 
@@ -245,6 +248,8 @@ def image_capability(request: Request, service: Service) -> JSONResponse:
     import secrets
 
     grant, identity = authorized(request, service)
+    if not grant["selection"]:
+        raise HTTPException(409, "Import a subscription first")
     service.catalog(grant, identity)
     key = "tsci_" + secrets.token_urlsafe(32)
     service.store.image_key(grant["id"], key)
@@ -259,7 +264,9 @@ def models(request: Request, service: Service) -> JSONResponse:
     image = access.startswith("tsci_")
     grant = service.store.grant(access, image=image)
     identity = service.identity(grant)
-    current = service.selected(identity, grant.get("selection") or {})
+    current = (
+        service.selected(identity, grant["selection"]) if grant["selection"] else {"models": []}
+    )
     return JSONResponse(
         {
             "object": "list",
@@ -325,7 +332,9 @@ async def proxy(path: str, request: Request, service: Service) -> Response:
             raise HTTPException(403, "This capability permits images only")
         grant = service.store.grant(credential, image=image_key)
         identity = service.identity(grant)
-        selected = service.selected(identity, grant.get("selection") or {})
+        if not grant["selection"]:
+            raise HTTPException(409, "Import a subscription first")
+        selected = service.selected(identity, grant["selection"])
         service.store.activate(grant["id"])
         model = next((m for m in selected["models"] if m["id"] == body["model"]), None)
         if not model or model["protocol"] != endpoints[path]:
@@ -333,6 +342,7 @@ async def proxy(path: str, request: Request, service: Service) -> Response:
         service.validate_model(identity, selected, model)
         rid = str(uuid4())
         context = service.context(identity, selected, body["model"], rid)
+        key = service.subscription_credential(selected)
         suffix = (
             "v1/messages" if endpoints[path] == "anthropic_messages" else path.removeprefix("v1/")
         )
@@ -340,6 +350,7 @@ async def proxy(path: str, request: Request, service: Service) -> Response:
         return (
             selected["base_url"] + "/" + suffix,
             {
+                "Ocp-Apim-Subscription-Key": key,
                 "x-turnstile-client-context": context,
                 "x-request-id": rid,
                 "x-request-source": "aigateway-user",

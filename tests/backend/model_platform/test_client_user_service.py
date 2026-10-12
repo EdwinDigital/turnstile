@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 from io import BytesIO
 from typing import Any, cast
 from unittest.mock import Mock
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zipfile import ZipFile
 
 import pytest
@@ -22,6 +22,14 @@ from tests.platform.api.test_application_access_api import StubSubscriptionKeyCl
 from turnstile_core.config import Settings
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.application_access import ApplicationAccessService
+
+
+class PlatformSubscriptionKeys(StubSubscriptionKeyClient):
+    def application_subscription_keys(self, apim_subscription_id: str) -> tuple[str, str]:
+        self.calls.append(("reveal", apim_subscription_id, None))
+        if apim_subscription_id == "turnstile-dashboard":
+            return "platform-primary", "platform-secondary"
+        return "primary-secret", "secondary-secret"
 
 
 class DesktopStore:
@@ -51,11 +59,12 @@ def client_service() -> tuple[ClientUserService, InMemoryRepository, SessionIden
         repository,
         sync_available=True,
         key_management_available=True,
-        key_client=StubSubscriptionKeyClient(),
+        key_client=PlatformSubscriptionKeys(),
     )
-    applications.sync_discovery(_discovery("cc-switch", "master"), "test")
+    applications.sync_discovery(_discovery("cc-switch", "turnstile-dashboard", "master"), "test")
     settings = Settings(
         apim_gateway_url=str(gateway["base_url"]),
+        apim_dashboard_subscription_key=SecretStr("platform-primary"),
         credential_encryption_key=SecretStr(Fernet.generate_key().decode()),
     )
     service = ClientUserService(
@@ -88,8 +97,7 @@ def test_personal_package_has_bound_authorization_and_distinct_identity() -> Non
         assert config["authorization"]["access"].startswith("tsca_")
         assert config["authorization"]["refresh"].startswith("tscr_")
         assert config["authorization"]["installationId"] == config["installationId"]
-        assert config["selection"]["mode"] == "personal"
-        assert "subscription_id" not in config["selection"]
+        assert config["selection"]["apim_subscription_id"] == "turnstile-dashboard"
         assert config["authorization"]["accountId"] == identity.name
         assert config["authorization"]["uid"] == identity.id
         assert config["catalog"]["models"]
@@ -100,75 +108,59 @@ def test_personal_package_has_bound_authorization_and_distinct_identity() -> Non
         assert all((f.external_attr >> 16) & 0o777 == 0o600 for f in archive.infolist())
 
 
-def test_personal_routing_does_not_require_owned_applications() -> None:
+def test_member_default_uses_the_actual_platform_credential_not_owned_name_order() -> None:
     service, repo, owner = client_service()
-    repo.gateway_applications.clear()
-    repo.gateway_application_subscriptions.clear()
     member = replace(owner, role="member", id=str(uuid4()), email="member@example.com")
-    selected = service.default_route(member)
-    assert selected["mode"] == "personal"
+    selected = service.default_subscription(member)
+    assert selected["apim_subscription_id"] == "turnstile-dashboard"
     assert selected["models"]
-    assert "application_id" not in selected
-    repo.user_model_policies[member.email] = {"user_id": member.email, "model_ids": []}
-    assert not service.selected(member, selected, fresh=True)["models"]
+    application = repo.get_gateway_application(UUID(selected["application_id"]))
+    assert application is not None and application["owner_id"] is None
+    assert service.subscription_credential(selected) == "platform-primary"
+    repo.gateway_applications[0]["owner_id"] = member.email
+    assert service.default_subscription(member)["apim_subscription_id"] == "turnstile-dashboard"
 
 
 def test_catalog_protocol_aliases_and_live_empty_policy() -> None:
     service, repo, owner = client_service()
-    choice = service.default_route(owner)
+    choice = service.default_subscription(owner)
     grant = {"id": uuid4(), "selection": choice}
     data = service.catalog(grant, owner)
     assert data["models"] and data["aliases"]
-    assert all(
-        m["provider"]["npm"] in {"@ai-sdk/openai", "@ai-sdk/anthropic", "@ai-sdk/openai-compatible"}
-        for m in data["models"].values()
-    )
-    repo.gateway_application_subscriptions[0]["state"] = "suspended"
-    assert service.catalog(grant, owner)["models"]
+    assert data["user"] == {"id": owner.id, "name": owner.name}
     repo.user_model_policies[owner.email] = {"user_id": owner.email, "model_ids": []}
     assert service.catalog(grant, owner, fresh=True)["models"] == {}
-    assert service.catalog({"id": uuid4(), "selection": None}, owner, fresh=True)["models"] == {}
 
 
-def test_disabled_feature_cannot_export_a_user_package() -> None:
+def test_platform_secondary_and_configured_gateway_key_take_precedence() -> None:
+    service, repo, owner = client_service()
+    service.settings.apim_dashboard_subscription_key = SecretStr("platform-secondary")
+    selected = service.default_subscription(owner)
+    assert selected["apim_subscription_id"] == "turnstile-dashboard"
+    assert service.subscription_credential(selected) == "platform-secondary"
+    repo.gateways[0]["credential_ciphertext"] = service.cipher.encrypt("primary-secret")
+    assert service.default_subscription(owner)["apim_subscription_id"] == "cc-switch"
+
+
+def test_unknown_platform_key_fails_closed_instead_of_choosing_an_owned_application() -> None:
     service, _, owner = client_service()
-    service.enabled = False
-    with pytest.raises(HTTPException) as failure:
-        service.package(owner)
-    assert failure.value.status_code == 503
+    service.settings.apim_dashboard_subscription_key = SecretStr("unknown")
+    with pytest.raises(HTTPException) as denied:
+        service.default_subscription(owner)
+    assert denied.value.status_code == 409
 
 
-def test_personal_gateway_is_explicit_and_never_falls_back_to_applications() -> None:
-    service, repo, owner = client_service()
-    first = service.default_route(owner)
-    repo.gateways[0]["config"]["client_user_default_subscriptions"] = {owner.id: str(uuid4())}
-    assert service.default_route(owner) == first
-    with pytest.raises(HTTPException) as failure:
-        service.selected(owner, {"mode": "personal", "gateway_id": str(uuid4())}, fresh=True)
-    assert failure.value.status_code == 409
-    repo.gateways[0]["enabled"] = False
-    with pytest.raises(HTTPException):
-        service.default_route(owner)
-
-
-def test_legacy_user_grants_normalize_to_personal_without_changing_history() -> None:
-    service, repo, owner = client_service()
-    old = {
-        "application_id": str(uuid4()),
-        "subscription_id": str(uuid4()),
-        "gateway_id": str(uuid4()),
-    }
+def test_existing_user_selection_remains_bound_until_reauthentication() -> None:
+    service, _, owner = client_service()
+    old = next(x for x in service.subscriptions(owner) if x["apim_subscription_id"] == "cc-switch")
     grant = {"id": uuid4(), "selection": old}
-    repo.gateway_applications.clear()
-    result = service.catalog(grant, owner)
-    assert result["selection"]["mode"] == "personal"
-    assert "application_id" not in result["selection"]
-    assert grant["selection"] == old
+    assert service.catalog(grant, owner)["selection"]["subscription_id"] == old["subscription_id"]
+    assert service.default_subscription(owner)["apim_subscription_id"] == "turnstile-dashboard"
 
 
 def test_model_permission_revocation_is_checked_even_with_cached_catalog() -> None:
     service, repo, owner = client_service()
-    selected = service.default_route(owner)
+    selected = service.default_subscription(owner)
     model = selected["models"][0]
     service.validate_model(owner, selected, model)
     repo.user_model_policies[owner.email] = {"user_id": owner.email, "model_ids": []}

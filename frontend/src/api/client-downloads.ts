@@ -5,15 +5,11 @@ export type ClientSubscription = {
   gateway_id: string; gateway_name: string; base_url: string
   models: Array<{ id: string; name: string; protocol: string; context_window: number | null; capabilities: string[] }>
 }
-export type ClientPersonalRoute = {
-  mode: "personal"; gateway_id: string; gateway_name: string
-  models: ClientSubscription["models"]
-}
 export type ClientDownloadOptions = {
   items: ClientSubscription[]; key_management_available: boolean; unavailable_reason: string | null; plugin_version: string
 }
 export const clientDownloadsApi = {
-  userOptions: (signal?: AbortSignal) => request<{ enabled: boolean; plugin_version: string; user_name: string; personal_route?: ClientPersonalRoute; unavailable_reason?: string }>("/api/v1/client-downloads/user-options", { signal }),
+  userOptions: (signal?: AbortSignal) => request<{ enabled: boolean; plugin_version: string; user_name: string; default_subscription?: ClientSubscription; unavailable_reason?: string }>("/api/v1/client-downloads/user-options", { signal }),
   async downloadUser(signal?: AbortSignal): Promise<Blob> {
     const response = await fetch(apiUrl("/api/v1/client-downloads/magpie-user"), {
       method: "POST", credentials: "include", cache: "no-store", signal,

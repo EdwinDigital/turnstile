@@ -173,7 +173,7 @@ export default async function AIGatewayUserPlugin(input) {
   const refreshModels = {
     type: "oauth", label: "刷新模型",
     async authorize() {
-      return { url: "", method: "auto", instructions: "从平台读取本人最新模型目录，不重新登录或绑定应用订阅。",
+      return { url: "", method: "auto", instructions: "从平台读取当前绑定订阅的最新模型，不重新登录或切换订阅。",
         async callback() {
           if (input.project?.id !== "magpie" || !input.directory) throw expired();
           const accounts = JSON.parse(await readFile(join(input.directory, "plugin-auth.json"), "utf8"));
