@@ -7,12 +7,13 @@ import { pathToFileURL } from "node:url";
 import { adaptModelResponse } from "../../../backend/services/client_user_plugin/index.mjs";
 
 test("SSE aliases preserve split UTF-8, tools, usage and real model differences", async () => {
-  const original = 'event: response.created\ndata: {"response":{"model":"gpt-6-astra","id":"r","text":"中文"}}\n\ndata: {"model":"other","call_id":"c","usage":{"output_tokens":2}}\n\ndata: [DONE]\n\n';
+  const original = 'event: response.created\ndata: {"response":{"model":"gpt-6-astra","id":"r","text":"中文"}}\n\nevent: message_start\ndata: {"message":{"model":"gpt-6-astra","id":"msg"}}\n\ndata: {"model":"other","call_id":"c","usage":{"output_tokens":2}}\n\ndata: [DONE]\n\n';
   const bytes = new TextEncoder().encode(original);
   const body = new ReadableStream({ start(controller) { for (const b of bytes) controller.enqueue(new Uint8Array([b])); controller.close(); } });
   const response = adaptModelResponse(new Response(body, { headers: { "content-type": "text/event-stream" } }), "astra-platform", "gpt-6-astra");
   const text = await response.text();
   assert.ok(text.includes('"model":"astra-platform"'));
+  assert.ok(text.includes('"message":{"model":"astra-platform","id":"msg"}'));
   assert.ok(text.includes('"text":"中文"'));
   assert.ok(text.includes('"model":"other"'));
   assert.ok(text.includes('"call_id":"c"'));

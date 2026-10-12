@@ -17,6 +17,7 @@ export function adaptModelResponse(response, alias, expected) {
   const replace = (value) => {
     if (value?.model === expected) value.model = alias;
     if (value?.response?.model === expected) value.response.model = alias;
+    if (value?.message?.model === expected) value.message.model = alias;
     return value;
   };
   const headers = new Headers(response.headers);
