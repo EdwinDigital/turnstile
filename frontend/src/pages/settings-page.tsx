@@ -23,6 +23,8 @@ import { getIntlLocale, type LocalePreference, useLocale } from "../locales/inde
 import { type ThemePreference, useTheme } from "../providers/theme-provider"
 import { useTimezone } from "../providers/timezone-provider"
 import { useAuth } from "../providers/auth-provider"
+import { useDataRefresh } from "../providers/data-refresh-provider"
+import { DATA_REFRESH_OPTIONS, normalizeDataRefreshMinutes } from "../lib/data-refresh"
 
 const themes: Array<{
   value: ThemePreference
@@ -269,6 +271,7 @@ export function SettingsPage({ dataSource, onToggleSidebar }: {
   const { preference, resolvedTheme, setPreference } = useTheme()
   const { locale, setLocale } = useLocale()
   const { preference: timezonePreference, browserTimezone, setPreference: setTimezonePreference } = useTimezone()
+  const refresh = useDataRefresh()
   const browserTimezoneLabel = `${browserTimezone}（浏览器）`
   const timezoneLabel = timezonePreference === "UTC" ? "UTC" : browserTimezoneLabel
   return <Tabs.Root className="smh-workspace settings-workspace" value={activePane}
@@ -331,6 +334,23 @@ export function SettingsPage({ dataSource, onToggleSidebar }: {
             <SelectItem value="UTC">UTC</SelectItem>
           </SelectContent>
         </Select>
+      </div>
+      <div className="settings-section compact">
+        <div><h2>数据自动刷新</h2><p>统一设置各页面的业务数据刷新频率，仅刷新当前打开的数据，后台标签页暂停。</p></div>
+        <Select value={String(refresh.minutes)} items={DATA_REFRESH_OPTIONS.map(option => ({ value: String(option.minutes), label: option.label }))}
+          onValueChange={(value) => value && refresh.setMinutes(normalizeDataRefreshMinutes(value))}>
+          <SelectTrigger aria-label="数据自动刷新频率" className="settings-select-trigger">
+            <SelectValue>{refresh.label}</SelectValue>
+          </SelectTrigger>
+          <SelectContent align="start" alignItemWithTrigger={false}>
+            <SelectGroup>
+              {DATA_REFRESH_OPTIONS.map(option => <SelectItem key={option.minutes} value={String(option.minutes)}>{option.label}</SelectItem>)}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+        <small>立即生效并保存在当前浏览器；不改变后台采集、对账或网关额度执行频率。近实时表示每分钟查询，不是实时推送。</small>
+        <small>关闭定时刷新时，打开或切换页面会更新一次；停留和从后台切回时不自动刷新，也可随时手动刷新。</small>
+        {!refresh.persisted && <p className="settings-warning" role="alert">浏览器无法保存偏好，本次会话仍使用所选刷新频率。</p>}
       </div>
       </Tabs.Panel>
     </div>

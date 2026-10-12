@@ -88,7 +88,7 @@ import {
   DropdownMenuTrigger,
 } from "../../../components/ui/dropdown-menu"
 import { usageWindow } from "../api"
-import { cachePolicies } from "../../../api/cache-policies"
+import { useDataRefresh } from "../../../providers/data-refresh-provider"
 import { getIntlLocale, useLocale, type LocalePreference } from "../../../locales/index"
 import { useTimezone } from "../../../providers/timezone-provider"
 import { priceRequests } from "../../../lib/pricing"
@@ -115,7 +115,6 @@ import type {
 
 type AnalyticsTab = "overview" | "analytics" | "trends" | "governance" | "requests" | "invoke"
 export type FinOpsScope = Omit<UsageFilters, "from" | "to">
-const liveRefresh = cachePolicies.liveUsage
 type RankingLimit = 5 | 10 | 20
 
 const rankingLimits: RankingLimit[] = [5, 10, 20]
@@ -642,9 +641,9 @@ function ModelUsage({ filters, costAvailable }: { filters: UsageFilters; costAva
   const current = mixDimensions.find((item) => item.id === dimension) ?? mixDimensions[0]
   // One split query feeds both the ranking and the stacked chart, so changing the
   // dimension costs a single request and nothing the second time.
-  const grouped = useQuery({ ...finopsQueries.distribution(filters, dimension, "model"), ...liveRefresh })
-  const models = useQuery({ ...finopsQueries.distribution(filters, "model"), ...liveRefresh })
-  const overview = useQuery({ ...finopsQueries.executiveOverview(filters), ...liveRefresh })
+  const grouped = useQuery(finopsQueries.distribution(filters, dimension, "model"))
+  const models = useQuery(finopsQueries.distribution(filters, "model"))
+  const overview = useQuery(finopsQueries.executiveOverview(filters))
   if (grouped.isLoading || models.isLoading || overview.isLoading) return <LoadingState />
   if (grouped.error || models.error || overview.error) return <ErrorState error={grouped.error ?? models.error ?? overview.error} />
   const totals = overview.data?.totals
@@ -763,12 +762,12 @@ function UsageTrends({ filters }: { filters: UsageFilters }) {
   const [contributionLimit, setContributionLimit] = useState<RankingLimit>(5)
   const { hiddenSeries: hiddenTrendSeries, toggleSeries: toggleTrendSeries } = useSeriesToggle()
   const dimension = trendDimensionForFilters(filters)
-  const query = useQuery({ ...finopsQueries.trends(filters, dimension, interval, timezone), ...liveRefresh })
+  const query = useQuery(finopsQueries.trends(filters, dimension, interval, timezone))
   // Success rate, tail latency and the quality chart describe the whole window, so they read
   // server aggregates. `none` collapses each bucket to one point because a percentile cannot
   // be merged across the comparison series the main chart is grouped by.
-  const overview = useQuery({ ...finopsQueries.executiveOverview(filters), ...liveRefresh })
-  const qualityBuckets = useQuery({ ...finopsQueries.trends(filters, "none", interval, timezone), ...liveRefresh })
+  const overview = useQuery(finopsQueries.executiveOverview(filters))
+  const qualityBuckets = useQuery(finopsQueries.trends(filters, "none", interval, timezone))
   if (query.isLoading || overview.isLoading || qualityBuckets.isLoading) return <LoadingState />
   if (query.error || overview.error || qualityBuckets.error) return <ErrorState error={query.error ?? overview.error ?? qualityBuckets.error} />
 
@@ -970,16 +969,16 @@ function GovernanceRiskTrendChart({ rows }: { rows: GovernanceRiskPoint[] }) {
 
 function Governance({ filters, entities, models, onOpenRequest }: { filters: UsageFilters; entities: EnterpriseEntityCatalog; models: ManagedModel[]; onOpenRequest: (requestId: string) => void }) {
   const { timezone } = useTimezone()
-  const rules = useQuery({ ...finopsQueries.anomalyRules(), ...liveRefresh })
+  const rules = useQuery(finopsQueries.anomalyRules())
   // Every figure below describes the whole window, so each comes from a server aggregate:
   // totals for the KPIs and the two histograms, the model distribution for per-model success
   // and failure counts, and an ungrouped daily trend for the risk chart. The request page is
   // still fetched, but only so the signal dialog can show the actual rows behind a signal.
-  const overview = useQuery({ ...finopsQueries.executiveOverview(filters), ...liveRefresh })
-  const anomalies = useQuery({ ...finopsQueries.anomalies(filters), ...liveRefresh })
-  const modelUsage = useQuery({ ...finopsQueries.distribution(filters, "model"), ...liveRefresh })
-  const riskBuckets = useQuery({ ...finopsQueries.trends(filters, "none", "day", timezone), ...liveRefresh })
-  const requests = useQuery({ ...finopsQueries.requests(filters), ...liveRefresh })
+  const overview = useQuery(finopsQueries.executiveOverview(filters))
+  const anomalies = useQuery(finopsQueries.anomalies(filters))
+  const modelUsage = useQuery(finopsQueries.distribution(filters, "model"))
+  const riskBuckets = useQuery(finopsQueries.trends(filters, "none", "day", timezone))
+  const requests = useQuery(finopsQueries.requests(filters))
   const [selectedSignal, setSelectedSignal] = useState<UsageAnomaly | null>(null)
   if (rules.isLoading || overview.isLoading || anomalies.isLoading || modelUsage.isLoading || riskBuckets.isLoading || requests.isLoading) return <LoadingState />
   if (rules.error || overview.error || anomalies.error || modelUsage.error || riskBuckets.error || requests.error) return <ErrorState error={rules.error ?? overview.error ?? anomalies.error ?? modelUsage.error ?? riskBuckets.error ?? requests.error} />
@@ -1162,16 +1161,17 @@ function RequestTrace({
   models: ManagedModel[];
 }) {
   const { timezone } = useTimezone()
+  const refresh = useDataRefresh()
   const initialRequestId = new URLSearchParams(window.location.search).get("request")
   const [selected, setSelected] = useState<string | null>(initialRequestId);
   const [searchText, setSearchText] = useState(initialRequestId ?? "");
   const [statusFilter, setStatusFilter] = useState<"all" | "success" | "error">("all");
-  const query = useQuery({ ...finopsQueries.requests(filters), ...liveRefresh })
+  const query = useQuery(finopsQueries.requests(filters))
   // The header describes the whole window, so it reads the server aggregate. The list below
   // is a page of recent requests and legitimately uses the rows.
-  const overview = useQuery({ ...finopsQueries.executiveOverview(filters), ...liveRefresh })
-  const volumeTrend = useQuery({ ...finopsQueries.usageActivity(filters, "day", timezone), ...liveRefresh })
-  const detail = useQuery({ ...finopsQueries.requestDetail(selected ?? ""), ...liveRefresh })
+  const overview = useQuery(finopsQueries.executiveOverview(filters))
+  const volumeTrend = useQuery(finopsQueries.usageActivity(filters, "day", timezone))
+  const detail = useQuery(finopsQueries.requestDetail(selected ?? ""))
   const firstRequestId = query.data?.[0]?.correlation_id ?? null
   const selectedCorrelationId = detail.data?.correlation_id ?? selected
   useEffect(() => {
@@ -1250,7 +1250,7 @@ function RequestTrace({
       </section>
       <div className="trace-layout span-3">
         <section className="finops-panel trace-list">
-          <PanelTitle title="请求记录" meta={`${visibleRows.length} / ${requestRows.length} 条 · 近实时，10秒刷新`} />
+          <PanelTitle title="请求记录" meta={`${visibleRows.length} / ${requestRows.length} 条 · ${refresh.label}`} />
           <div className="trace-list-tools">
             <label>
               <Search size={14} />

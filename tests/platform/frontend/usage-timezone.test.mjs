@@ -39,12 +39,7 @@ test("IANA zones handle daylight saving offsets without altering raw timestamps"
   assert.equal(summer, "2026-07-12T04:30:00Z")
 })
 
-test("live usage polling is foreground-only and immediately refreshes on return", () => {
-  assert.deepEqual(cachePolicies.liveUsage, {
-    staleTime: 0,
-    refetchInterval: 10_000,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
-  })
+test("query cache freshness does not define an independent polling cadence", () => {
+  assert.equal(cachePolicies.liveUsage, undefined)
   assert.equal(cachePolicies.aggregate.staleTime, 5 * 60_000)
 })

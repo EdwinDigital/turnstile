@@ -39,7 +39,7 @@ export function ApimNativeRoutesPage({
 }) {
   const { user } = useAuth()
   const isMobile = useIsMobile()
-  const registry = useQuery(finopsQueries.registry())
+  const registry = useQuery({ ...finopsQueries.registry(), meta: { automaticRefresh: true } })
   const [search, setSearch] = useState("")
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null)
   const [pendingCreatedModelId, setPendingCreatedModelId] = useState<string | null>(null)

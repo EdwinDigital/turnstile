@@ -944,7 +944,6 @@ export function App() {
   const anomalyQuery = useQuery({
     ...finopsQueries.anomalies(sidebarFilters),
     enabled: selectedDataSource === "apim" && canAccessMenu(user, "finops-governance") && page !== "user-settings",
-    refetchInterval: 5 * 60_000,
   });
   const anomalyCount = anomalyQuery.data?.length ?? 0;
   const [assistantConversationId, setAssistantConversationId] = useState(

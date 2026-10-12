@@ -8,6 +8,7 @@ import { LocaleProvider } from "./locales/index"
 import { AuthProvider, useAuth } from "./providers/auth-provider"
 import { ThemeProvider } from "./providers/theme-provider"
 import { TimezoneProvider } from "./providers/timezone-provider"
+import { DataRefreshProvider } from "./providers/data-refresh-provider"
 import "./styles.css"
 
 /** Local development only: move the whole page to `localhost` before anything else runs.
@@ -35,6 +36,7 @@ const queryClient = new QueryClient({
     queries: {
       gcTime: 30 * 60_000,
       refetchOnWindowFocus: false,
+      refetchOnMount: "always",
       // One retry, but only for failures that could plausibly go away. A 4xx is the
       // server's considered answer -- retrying a 404 from an API older than this UI just
       // doubles how long the page sits on a spinner before saying so. Measured against a
@@ -85,7 +87,9 @@ createRoot(document.getElementById("root")!).render(
           <QueryClientProvider client={queryClient}>
             <AuthProvider>
               <AuthGate>
-                <App />
+                <DataRefreshProvider>
+                  <App />
+                </DataRefreshProvider>
               </AuthGate>
             </AuthProvider>
           </QueryClientProvider>

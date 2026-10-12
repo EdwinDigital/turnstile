@@ -94,6 +94,7 @@ export function renderApimPage({
   }
   if (!page.startsWith("finops-")) return null
   return <FinOpsDashboard
+    key={page}
     initialTab={page.replace("finops-", "") as "overview" | "analytics" | "trends" | "governance" | "requests" | "invoke"}
     onToggleSidebar={onToggleSidebar}
     days={days}

@@ -282,7 +282,7 @@ function modelManagementTabFromUrl(): Tab {
 export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () => void }) {
   const { user } = useAuth()
   const client = useQueryClient()
-  const { data, isLoading, error } = useQuery(finopsQueries.registry())
+  const { data, isLoading, error } = useQuery({ ...finopsQueries.registry(), meta: { automaticRefresh: true } })
   const [tab, setTab] = useState<Tab>(modelManagementTabFromUrl)
   const [editor, setEditor] = useState<{ kind: Exclude<RegistryKind, "model">; item?: RegistryItem } | null>(null)
   const [editingModel, setEditingModel] = useState<ManagedModel | null>(null)

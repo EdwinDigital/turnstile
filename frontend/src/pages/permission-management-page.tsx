@@ -112,7 +112,9 @@ function ModuleRows({ module, rows, roles: roleList, groups, ids, disabled, chan
 
 export function PermissionManagementPage({ onToggleSidebar }: { onToggleSidebar: () => void }) {
   const query = useQuery({ queryKey: ["permission-configuration"], queryFn: permissionApi.read,
-    staleTime: 0, refetchOnWindowFocus: false })
+    staleTime: 0, refetchOnWindowFocus: false,
+    // The editor remounts on dataUpdatedAt; automatic reads would discard unsaved changes.
+    meta: { automaticRefresh: false } })
   return <section className="permission-workspace">
     <header className="permission-header">
       <Button variant="ghost" size="icon-sm" aria-label="切换侧边栏" title="切换侧边栏" onClick={onToggleSidebar}>
