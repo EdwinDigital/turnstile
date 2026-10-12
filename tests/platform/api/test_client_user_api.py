@@ -220,6 +220,10 @@ def test_download_is_authorized_and_refresh_keeps_binding(desktop: ClientUserSer
     response = client.post("/api/v1/client-downloads/magpie-user", json={"acknowledged": True})
     assert response.status_code == 200, response.text
     assert response.headers["cache-control"] == "no-store"
+    assert 'filename="aigateway-proxy-user-Owner.zip"' in response.headers["content-disposition"]
+    assert response.headers["access-control-expose-headers"] == "Content-Disposition"
+    assert USER not in response.headers["content-disposition"]
+    assert USER.replace("-", "") not in response.headers["content-disposition"]
     with ZipFile(BytesIO(response.content)) as archive:
         cfg = json.loads(archive.read("aigateway-proxy-user/aigateway-user.config.json"))
     auth = {"Authorization": "Bearer " + cfg["authorization"]["access"]}

@@ -4,6 +4,7 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from io import BytesIO
+from urllib.parse import quote
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -84,6 +85,11 @@ def test_download_is_private_complete_zip(service: ClientDownloadService) -> Non
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["content-type"] == "application/zip"
+    assert response.headers["access-control-expose-headers"] == "Content-Disposition"
+    disposition = response.headers["content-disposition"]
+    assert 'filename="aigateway-proxy-Cc-Switch.zip"' in disposition
+    assert str(selected.subscription_id) not in disposition
+    assert selected.subscription_id.hex not in disposition
     with ZipFile(BytesIO(response.content)) as archive:
         assert set(archive.namelist()) == {
             f"aigateway-proxy/{name}"
@@ -96,6 +102,27 @@ def test_download_is_private_complete_zip(service: ClientDownloadService) -> Non
         template = archive.read("aigateway-proxy/index.mjs").decode()
         assert "primary-secret" not in template and "secondary-secret" not in template
         assert all((item.external_attr >> 16) & 0o777 == 0o600 for item in archive.infolist())
+
+
+def test_subscription_filename_preserves_unicode_and_sanitizes_paths(
+    service: ClientDownloadService,
+) -> None:
+    selected = service.options(identity()).items[0]
+    repository = service.repository
+    assert isinstance(repository, InMemoryRepository)
+    subscription = next(
+        row for row in repository.gateway_application_subscriptions
+        if row["id"] == selected.subscription_id
+    )
+    subscription["display_name"] = '../../研发 "Agent": A\\B\r\n'
+    response = client.post("/api/v1/client-downloads/magpie", json={
+        "application_id": str(selected.application_id),
+        "subscription_id": str(selected.subscription_id), "gateway_id": str(selected.gateway_id),
+    })
+    assert response.status_code == 200
+    disposition = response.headers["content-disposition"]
+    assert f"filename*=UTF-8''{quote('aigateway-proxy-研发-Agent-A-B.zip')}" in disposition
+    assert str(selected.subscription_id) not in disposition
 
 
 @pytest.mark.parametrize("change", ["disabled-gateway", "foreign-gateway",

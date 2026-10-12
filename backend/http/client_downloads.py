@@ -15,6 +15,7 @@ from ..services.client_downloads import (
     ClientDownloadRequest,
     ClientDownloadService,
 )
+from ..services.download_filename import attachment_header
 from .dependencies import Repository
 from .service_dependencies import ApplicationAccessServiceDependency
 from .session import Config, OwnerSession, require_allowed_write_origin
@@ -49,14 +50,14 @@ def options(
 })
 def download(identity: OwnerSession, service: Service, body: ClientDownloadRequest) -> Response:
     try:
-        content = service.download(identity, body)
+        archive = service.download(identity, body)
     except ControlPlaneNotFoundError as error:
         raise HTTPException(404, "订阅已不存在。", headers=HEADERS) from error
     except ControlPlaneConflictError as error:
         raise HTTPException(409, "订阅当前无法导出。", headers=HEADERS) from error
     except ControlPlaneUnavailableError as error:
         raise HTTPException(503, "暂时无法读取订阅密钥，请稍后重试。", headers=HEADERS) from error
-    return Response(content, media_type="application/zip", headers={
-        **HEADERS, "Content-Disposition":
-        f'attachment; filename="aigateway-proxy-{body.subscription_id}.zip"',
+    return Response(archive.content, media_type="application/zip", headers={
+        **HEADERS, "Content-Disposition": attachment_header(archive.filename),
+        "Access-Control-Expose-Headers": "Content-Disposition",
     })

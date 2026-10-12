@@ -185,3 +185,11 @@
 - 纠正后定向测试 135 项通过，涵盖现有 Runtime 调用、订阅管理、用户插件 API、模型权限和真实 PostgreSQL；Node 13 项、聚焦 Mypy 与前端构建通过。
 - 只读 SQL 已核对完整差值：19976（AI Platform）+1847（unattributed）+240（protocol-validation）+492（无明细精确结算）=22555。人员列表改为整月个人统计后筛选人员，保留原始部门/组织标签。
 - APIM 策略源码与 91a6880 前版本逐字节相同；未创建 APIM revision、未写 Named Value、未发布策略。订阅版过滤 Dashboard/master/probe 的保护不变，只有用户版在服务端验证实际平台默认 Key 匹配后使用其默认订阅。
+
+### 下载文件名修正（本地验证，尚未上线）
+
+- 用户版 ZIP 使用 `aigateway-proxy-user-用户名.zip`，订阅版使用 `aigateway-proxy-订阅名称.zip`；名称缺失或本身为 UUID 时使用通用名称，不回退到内部 ID。
+- 服务端从当前登录身份或已校验的订阅读取名称；响应使用 ASCII fallback 与 UTF-8 `filename*`，并向允许的跨域客户端暴露 Content-Disposition。前端保存 Blob 时复用该名称，不再自行拼接 UUID。
+- 保留中文，规范化空格及不安全字符，限制名称字节长度。ZIP 内目录、provider/account ID、认证配置与订阅 Key 保持不变；不修改 magpie 源码、APIM 策略或历史用量数据。
+- API、文件名及浏览器组件执行回归 56 项通过（包含新增 11 个 Node 场景）；前端构建通过。此记录不代表已发布到生产。
+- 发布前完整回归：1855 passed、7 skipped、1 warning；全仓 Ruff、后端/Core/脚本 Mypy（152 个文件）及前端构建通过。生产 PostgreSQL Ready，19 个迁移已应用，没有待处理的网关发布/释放操作；完整包与设置备份及数据库隔离恢复验证单独留存在私有发布证据中。

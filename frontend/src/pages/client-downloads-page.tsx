@@ -32,11 +32,11 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     activeDownload.current = controller
     setBusy(true); setError(""); setNotice("")
     try {
-      const blob = await clientDownloadsApi.downloadUser(controller.signal)
+      const { blob, filename } = await clientDownloadsApi.downloadUser(controller.signal)
       if (controller.signal.aborted) return
       const url = URL.createObjectURL(blob)
       const link = document.createElement("a")
-      link.href = url; link.download = `aigateway-proxy-user-${user?.id}.zip`
+      link.href = url; link.download = filename
       document.body.append(link); link.click(); link.remove()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       setNotice("用户版已下载。安装后自动导入授权和默认订阅；需要更新模型时点击「刷新模型」。")
@@ -54,11 +54,11 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     activeDownload.current = controller
     setBusy(true); setError(""); setNotice("")
     try {
-      const blob = await clientDownloadsApi.download(selected, keyKind, controller.signal)
+      const { blob, filename } = await clientDownloadsApi.download(selected, keyKind, controller.signal)
       if (controller.signal.aborted) return
       const url = URL.createObjectURL(blob)
       const link = document.createElement("a")
-      link.href = url; link.download = `aigateway-proxy-${selected.subscription_id}.zip`
+      link.href = url; link.download = filename
       document.body.append(link); link.click(); link.remove()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       setNotice("插件已下载，请解压后在 magpie 中导入文件夹。")

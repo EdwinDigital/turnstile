@@ -8,9 +8,24 @@ export type ClientSubscription = {
 export type ClientDownloadOptions = {
   items: ClientSubscription[]; key_management_available: boolean; unavailable_reason: string | null; plugin_version: string
 }
+export type ClientPluginDownload = { blob: Blob; filename: string }
+
+function downloadFilename(response: Response, prefix: string, fallback: string): string {
+  const disposition = response.headers.get("content-disposition") ?? ""
+  const encoded = /(?:^|;)\s*filename\*=UTF-8'[^']*'([^;]+)/i.exec(disposition)?.[1]
+  const plain = /(?:^|;)\s*filename="([^"]+)"/i.exec(disposition)?.[1]
+  let decoded: string | undefined
+  try { if (encoded) decoded = decodeURIComponent(encoded.trim()) } catch { /* Use ASCII fallback. */ }
+  for (const name of [decoded, plain]) {
+    if (name?.startsWith(`${prefix}-`) && name.endsWith(".zip") && name.length <= 180
+      && !/[\p{C}/\\:*?"<>|]/u.test(name)) return name
+  }
+  return `${prefix}-${fallback}.zip`
+}
+
 export const clientDownloadsApi = {
   userOptions: (signal?: AbortSignal) => request<{ enabled: boolean; plugin_version: string; user_name: string; default_subscription?: ClientSubscription; unavailable_reason?: string }>("/api/v1/client-downloads/user-options", { signal }),
-  async downloadUser(signal?: AbortSignal): Promise<Blob> {
+  async downloadUser(signal?: AbortSignal): Promise<ClientPluginDownload> {
     const response = await fetch(apiUrl("/api/v1/client-downloads/magpie-user"), {
       method: "POST", credentials: "include", cache: "no-store", signal,
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ acknowledged: true }),
@@ -21,10 +36,10 @@ export const clientDownloadsApi = {
       throw new ApiError(response.status, typeof body?.detail === "string" ? body.detail : "用户版下载失败，请重试。")
     }
     if (!response.headers.get("content-type")?.includes("application/zip")) throw new Error("下载失败，请重试。")
-    return response.blob()
+    return { blob: await response.blob(), filename: downloadFilename(response, "aigateway-proxy-user", "user") }
   },
   options: (signal?: AbortSignal) => request<ClientDownloadOptions>("/api/v1/client-downloads/options", { signal }),
-  async download(item: ClientSubscription, keyKind: "primary" | "secondary", signal?: AbortSignal): Promise<Blob> {
+  async download(item: ClientSubscription, keyKind: "primary" | "secondary", signal?: AbortSignal): Promise<ClientPluginDownload> {
     const response = await fetch(apiUrl("/api/v1/client-downloads/magpie"), {
       method: "POST", credentials: "include", cache: "no-store", signal,
       headers: { "Content-Type": "application/json" },
@@ -37,6 +52,6 @@ export const clientDownloadsApi = {
       throw new ApiError(response.status, typeof body?.detail === "string" ? body.detail : "下载失败，请重试。")
     }
     if (!response.headers.get("content-type")?.includes("application/zip")) throw new Error("下载失败，请重试。")
-    return response.blob()
+    return { blob: await response.blob(), filename: downloadFilename(response, "aigateway-proxy", "subscription") }
   },
 }

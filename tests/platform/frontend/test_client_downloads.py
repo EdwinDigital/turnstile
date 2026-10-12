@@ -33,3 +33,13 @@ def test_browser_authorization_request_transport() -> None:
         ],
         check=True,
     )
+
+
+def test_browser_download_names() -> None:
+    subprocess.run(
+        [
+            "node", "--test",
+            str(REPOSITORY_ROOT / "tests/platform/frontend/client-downloads.test.mjs"),
+        ],
+        check=True,
+    )

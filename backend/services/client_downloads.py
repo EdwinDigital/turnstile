@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -20,6 +21,7 @@ from turnstile_core.persistence.repository import QueryRepository
 from turnstile_core.services.application_access import ApplicationAccessService
 
 from .auth_service import SessionIdentity
+from .download_filename import plugin_filename
 
 PLUGIN_VERSION = "0.1.1"
 RESERVED = {"master", "turnstile-dashboard", "turnstile-publisher-probe"}
@@ -61,6 +63,12 @@ class ClientDownloadRequest(StrictModel):
     subscription_id: UUID
     gateway_id: UUID
     key_kind: str = Field(default="primary", pattern="^(primary|secondary)$")
+
+
+@dataclass(frozen=True)
+class ClientDownloadArchive:
+    content: bytes
+    filename: str
 
 
 class ClientDownloadService:
@@ -162,7 +170,9 @@ class ClientDownloadService:
             unavailable_reason=applications.key_management_unavailable_reason,
         )
 
-    def download(self, identity: SessionIdentity, request: ClientDownloadRequest) -> bytes:
+    def download(
+        self, identity: SessionIdentity, request: ClientDownloadRequest,
+    ) -> ClientDownloadArchive:
         option = next((item for item in self.options(identity).items if (
             item.application_id == request.application_id
             and item.subscription_id == request.subscription_id
@@ -210,4 +220,7 @@ class ClientDownloadService:
                 info = ZipInfo(f"aigateway-proxy/{name}")
                 info.external_attr = 0o100600 << 16
                 archive.writestr(info, content, compress_type=ZIP_DEFLATED)
-        return output.getvalue()
+        return ClientDownloadArchive(
+            content=output.getvalue(),
+            filename=plugin_filename("aigateway-proxy", option.subscription_name, "subscription"),
+        )
