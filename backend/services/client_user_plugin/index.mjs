@@ -254,7 +254,18 @@ export default async function AIGatewayUserPlugin(input) {
       cached = { models: data.models ?? {}, aliases: data.aliases ?? {}, images: data.images ?? [] };
       await privateJSON(cachePath, cached);
       await syncImages(cached.images, auth.access);
-      return cached.models;
+      // config uses Config.Model, but provider.models returns normalized Model.Info.
+      return Object.fromEntries(Object.entries(cached.models).map(([id, model]) => [id, {
+        id, providerID: cfg.providerId, name: model.name ?? id,
+        api: { id, url: model.provider?.api ?? runtime, npm: model.provider?.npm ?? "@ai-sdk/openai-compatible" },
+        limit: model.limit ?? { context: 32768, output: 8192 },
+        options: {}, headers: {}, variants: {},
+        capabilities: {
+          temperature: true, toolcall: model.tool_call === true, reasoning: model.reasoning === true,
+          input: { text: true, image: model.modalities?.input?.includes("image") === true },
+          output: { text: true },
+        },
+      }]));
     } },
   };
 }

@@ -31,7 +31,7 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
     const plugin = await factory({ directory: folder });
     assert.deepEqual(plugin.auth.methods.map((x) => x.label), ["登录平台", "导入模型配置", "重新登录"]);
     assert.ok(plugin.auth.methods.every((x) => x.type === "oauth"));
-    let current = { new: { id: "new" } };
+    let current = { new: { id: "new", provider: { npm: "@ai-sdk/openai", api: "https://platform.example/api/v1/client-runtime" }, tool_call: true, reasoning: true, modalities: { input: ["text", "image"] } } };
     let last;
     globalThis.fetch = async (url, init) => {
       last = { url: String(url), init };
@@ -40,7 +40,14 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
       return Response.json({ model: "upstream", id: "response" });
     };
     const auth = { type: "oauth", access: "private-user-token" };
-    assert.deepEqual(await plugin.provider.models({ models: { old: {} } }, { auth }), current);
+    const discovered = await plugin.provider.models({ models: { old: {} } }, { auth });
+    assert.deepEqual(Object.keys(discovered), ["new"]);
+    assert.equal(discovered.new.api.npm, "@ai-sdk/openai");
+    assert.equal(discovered.new.api.url, "https://platform.example/api/v1/client-runtime");
+    assert.equal(discovered.new.api.id, "new");
+    assert.equal(discovered.new.capabilities.toolcall, true);
+    assert.equal(discovered.new.capabilities.reasoning, true);
+    assert.equal(discovered.new.capabilities.input.image, true);
     current = {};
     assert.deepEqual(await plugin.provider.models({ models: { old: {} } }, { auth }), {});
     const data = await plugin.auth.usage(async () => auth);

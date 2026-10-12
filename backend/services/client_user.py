@@ -32,7 +32,7 @@ from .auth_service import SessionIdentity
 from .client_downloads import RESERVED, SDK
 from .client_user_store import ClientUserStore
 
-USER_PLUGIN_VERSION = "0.2.0"
+USER_PLUGIN_VERSION = "0.2.1"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
