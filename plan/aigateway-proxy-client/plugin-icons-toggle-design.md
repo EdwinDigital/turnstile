@@ -94,4 +94,6 @@ python -m scripts.prepare_plugin_icons --upload company.png \
   对话框，再验证真实 Installed 页；未伪造 DOM 或修改宿主源码。
 - 原生证据：`/var/folders/_n/vxzws45j78148dvlcyxmc7680000gn/T/ts-icon-toggle-native-0ouz7vvo/`。
   测试脚本 `/tmp/ts-icon-toggle-check-20261013/`；临时网关、图片助手、web GUI 和浏览器已停止。
-- 本记录为本地开发验收，尚未提交或部署；不是线上下载包已更新的证明。
+- 本节为发布前的本地开发验收记录，不单独作为线上下载包已更新的证明。
+  后续已提交并上线，实际包、原生图标及当前强制预算分支验收见
+  [0.4.3 / 0.1.3 上线验收](release-icons-toggle-2026-10-13.md)。
