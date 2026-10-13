@@ -102,6 +102,7 @@ export default async function AIGatewayProxyPlugin(input) {
     },
     auth: {
       provider: cfg.providerId,
+      icon: cfg.icon,
       methods: [
         {
           type: "oauth", label: "导入配置",

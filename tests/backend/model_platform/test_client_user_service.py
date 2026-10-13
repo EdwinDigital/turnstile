@@ -111,7 +111,11 @@ def test_personal_package_has_bound_authorization_and_distinct_identity(name: st
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
         package = json.loads(archive.read("aigateway-proxy-user/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.4.2"
+        assert package["version"] == "0.4.3"
+        assert package["magpie"]["icon"] == config["icon"]
+        assert "aigateway-proxy-user/icons/icon.svg" in archive.namelist()
+        icon_manifest = json.loads(archive.read("aigateway-proxy-user/icons/manifest.json"))
+        assert config["iconRevision"] == icon_manifest["revision"]
         assert all((f.external_attr >> 16) & 0o777 == 0o600 for f in archive.infolist())
 
 

@@ -30,12 +30,13 @@ from turnstile_core.services.directory_catalog import catalog_for, directory_sto
 
 from .auth_service import SessionIdentity
 from .client_downloads import RESERVED, SDK
+from .client_icons import PluginIconUnavailable, load_plugin_icons
 from .client_namespace import plugin_namespace
 from .client_pricing import plugin_model_cost
 from .client_user_store import ClientUserStore
 from .gateway_credentials import with_platform_gateway_credential
 
-USER_PLUGIN_VERSION = "0.4.2"
+USER_PLUGIN_VERSION = "0.4.3"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
@@ -97,6 +98,10 @@ class ClientUserService:
 
     def package(self, identity: SessionIdentity) -> bytes:
         self.require_enabled()
+        try:
+            icons = load_plugin_icons()
+        except PluginIconUnavailable as error:
+            raise HTTPException(503, "插件图标资源尚未准备就绪") from error
         selected = self.default_subscription(identity)
         installation, grant_id = uuid4(), uuid4()
         access = "tsca_" + secrets.token_urlsafe(32)
@@ -118,6 +123,8 @@ class ClientUserService:
             "binding": self._binding(identity.id),
             "providerId": provider_id,
             "name": f"AIGateway User · {identity.name or identity.email}",
+            "icon": icons.data_uri,
+            "iconRevision": icons.revision,
             "installationId": str(installation),
             "selection": catalog["selection"],
             "catalog": catalog,
@@ -137,6 +144,7 @@ class ClientUserService:
             for name in ("index.mjs", "helpers.mjs", "images.mjs", "quota.mjs", "README.md")
         }
         files["pricing.mjs"] = (root.parent / "client_plugin" / "pricing.mjs").read_bytes()
+        files.update(icons.package_files())
         files["aigateway-user.config.json"] = json.dumps(cfg, ensure_ascii=False, indent=2).encode()
         files["package.json"] = json.dumps(
             {
@@ -145,6 +153,7 @@ class ClientUserService:
                 "type": "module",
                 "main": "./index.mjs",
                 "description": "AIGateway-Proxy user authorization provider for magpie",
+                "magpie": {"icon": icons.data_uri},
                 "files": list(files),
             }
         ).encode()

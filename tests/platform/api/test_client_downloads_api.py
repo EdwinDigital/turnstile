@@ -118,6 +118,8 @@ def test_download_is_private_complete_zip(service: ClientDownloadService) -> Non
             f"aigateway-proxy/{name}"
             for name in (
                 "index.mjs", "pricing.mjs", "package.json", "README.md", "aigateway.config.json",
+                "icons/icon.svg", "icons/icon-light.svg", "icons/icon-dark.svg",
+                "icons/manifest.json",
             )
         }
         config = json.loads(archive.read("aigateway-proxy/aigateway.config.json"))
@@ -127,7 +129,9 @@ def test_download_is_private_complete_zip(service: ClientDownloadService) -> Non
         assert selected.subscription_id.hex not in config["providerId"]
         assert config["name"] == f"AIGateway Subscription · {selected.subscription_name}"
         assert config["accountId"] == selected.subscription_name
-        assert json.loads(archive.read("aigateway-proxy/package.json"))["version"] == "0.1.2"
+        package = json.loads(archive.read("aigateway-proxy/package.json"))
+        assert package["version"] == "0.1.3"
+        assert package["magpie"]["icon"] == config["icon"]
         template = archive.read("aigateway-proxy/index.mjs").decode()
         assert "primary-secret" not in template and "secondary-secret" not in template
         assert all((item.external_attr >> 16) & 0o777 == 0o600 for item in archive.infolist())

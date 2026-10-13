@@ -14,9 +14,10 @@ test("subscription namespaces accept readable names but reject path injection", 
     const factory = (await import(pathToFileURL(join(dir, "index.mjs")))).default;
     for (const id of ["aigateway-subscription-edwin-agent-012345abcdef", "aigateway-subscription-研发-012345abcdef", "aigateway-test"]) {
       await writeFile(join(dir, "aigateway.config.json"), JSON.stringify({ version: 1, providerId: id,
-        name: "Subscription", accountId: "Edwin-Agent", subscriptionKey: "fixture-key", baseURL: "https://gateway.example/llm", models: {}, modelsPath: "/v1/models" }));
+        name: "Subscription", accountId: "Edwin-Agent", subscriptionKey: "fixture-key", baseURL: "https://gateway.example/llm", models: {}, modelsPath: "/v1/models", icon: "data:image/svg+xml;base64,PHN2Zy8+" }));
       const hooks = await factory();
       assert.equal(hooks.auth.provider, id);
+      assert.equal(hooks.auth.icon, "data:image/svg+xml;base64,PHN2Zy8+");
       assert.equal(hooks.provider.id, id);
       const cfg = {};
       await hooks.config(cfg);

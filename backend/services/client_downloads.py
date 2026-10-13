@@ -21,11 +21,12 @@ from turnstile_core.persistence.repository import QueryRepository
 from turnstile_core.services.application_access import ApplicationAccessService
 
 from .auth_service import SessionIdentity
+from .client_icons import PluginIconUnavailable, load_plugin_icons
 from .client_namespace import plugin_namespace
 from .client_pricing import plugin_model_cost
 from .download_filename import plugin_filename
 
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 RESERVED = {"master", "turnstile-dashboard", "turnstile-publisher-probe"}
 SDK = {
     "openai_chat": "@ai-sdk/openai-compatible",
@@ -178,6 +179,10 @@ class ClientDownloadService:
     def download(
         self, identity: SessionIdentity, request: ClientDownloadRequest,
     ) -> ClientDownloadArchive:
+        try:
+            icons = load_plugin_icons()
+        except PluginIconUnavailable as error:
+            raise HTTPException(503, "插件图标资源尚未准备就绪") from error
         option = next((item for item in self.options(identity).items if (
             item.application_id == request.application_id
             and item.subscription_id == request.subscription_id
@@ -199,6 +204,8 @@ class ClientDownloadService:
             "version": 1, "providerId": provider_id,
             "name": f"AIGateway Subscription · {option.subscription_name}",
             "accountId": option.subscription_name,
+            "icon": icons.data_uri,
+            "iconRevision": icons.revision,
             "applicationId": str(option.application_id),
             "subscriptionId": str(option.subscription_id), "gatewayId": str(option.gateway_id),
             "baseURL": option.base_url, "modelsPath": "/v1/models",
@@ -217,13 +224,15 @@ class ClientDownloadService:
         root = Path(__file__).resolve().parent / "client_plugin"
         files = {name: (root / name).read_bytes()
                  for name in ("index.mjs", "pricing.mjs", "README.md")}
+        files.update(icons.package_files())
         files["aigateway.config.json"] = json.dumps(config, ensure_ascii=False, indent=2).encode()
         files["package.json"] = json.dumps({
             "name": f"opencode-aigateway-subscription-{provider_id.rsplit('-', 1)[-1]}-auth",
             "version": PLUGIN_VERSION, "type": "module", "main": "./index.mjs",
             "description": "AIGateway-Proxy provider for magpie",
             "keywords": ["opencode", "opencode-plugin", "aigateway"], "license": "MIT",
-            "files": ["index.mjs", "pricing.mjs", "aigateway.config.json", "README.md"],
+            "magpie": {"icon": icons.data_uri},
+            "files": list(files),
         }, indent=2).encode()
         output = BytesIO()
         with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:

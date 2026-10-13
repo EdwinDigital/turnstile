@@ -17,9 +17,10 @@ test("user namespaces accept readable names and preserve stable authorization id
     const factory = (await import(pathToFileURL(join(folder, "index.mjs")))).default;
     for (const providerId of ["aigateway-user-edwin-012345abcdef", "aigateway-user-研发-012345abcdef", "aigateway-user-platform-user"]) {
       await writeFile(join(folder, "aigateway-user.config.json"), JSON.stringify({ version: 4,
-        platformOrigin: "https://platform.example", providerId, userId: "stable-user", userName: "Edwin", name: "User" }));
+        platformOrigin: "https://platform.example", providerId, userId: "stable-user", userName: "Edwin", name: "User", icon: "data:image/svg+xml;base64,PHN2Zy8+" }));
       const hooks = await factory({ directory: folder, project: { id: "opencode" } });
       assert.equal(hooks.auth.provider, providerId);
+      assert.equal(hooks.auth.icon, "data:image/svg+xml;base64,PHN2Zy8+");
       assert.equal(hooks.provider.id, providerId);
       const cfg = {};
       await hooks.config(cfg);

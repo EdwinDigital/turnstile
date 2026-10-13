@@ -226,43 +226,21 @@ export default async function AIGatewayUserPlugin(input) {
     if (!window) throw new Error("未配置个人额度，不能启用 magpie 额度阻断");
     return { auth, forced: !window.aside };
   };
-  const quotaChoices = [
-    { value: "on", label: "开启 magpie 本地阻断", hint: "按个人额度提前拦截，并记录原生卡片趋势" },
-    { value: "off", label: "关闭 magpie 本地阻断", hint: "仅展示额度，不新增原生趋势采样" },
-  ];
   const quotaControl = {
     type: "oauth", label: "额度控制",
-    // The host forwards chosen inputs to authorize only when prompts are declared.
-    prompts: [{ type: "select", key: "magpieBlock", message: "magpie 本地额度控制", options: quotaChoices,
-      validate(value) { return ["on", "off"].includes(value) ? undefined : "无效的额度控制选项"; } }],
-    async ask(inputs = {}) {
+    async authorize() {
       const { forced } = await controlReading();
-      if (forced) return null;
-      if (inputs.magpieBlock !== undefined) {
-        if (!["on", "off"].includes(inputs.magpieBlock)) throw new Error("无效的额度控制选项");
-        return null;
-      }
-      const enabled = await localQuotaControl(directory, cfg);
-      return { type: "select", key: "magpieBlock",
-        message: `平台仅记录、不阻断。magpie 本地阻断当前${enabled ? "开启" : "关闭"}；此选项不修改平台预算。`,
-        options: quotaChoices };
-    },
-    async authorize(inputs = {}) {
-      const { forced } = await controlReading();
-      if (inputs.magpieBlock !== undefined && !["on", "off"].includes(inputs.magpieBlock))
-        throw new Error("无效的额度控制选项");
-      if (forced && inputs.magpieBlock === "off") throw new Error("平台已强制开启预算阻断，不可关闭");
-      if (!forced && inputs.magpieBlock === undefined) throw new Error("请选择 magpie 本地额度控制方式");
+      const target = forced ? null : !await localQuotaControl(directory, cfg);
       return { url: "", method: "auto",
         instructions: forced ? "平台已强制开启预算阻断，不可关闭。magpie 同步执行本地阻断。"
-          : `magpie 本地阻断将${inputs.magpieBlock === "on" ? "开启" : "关闭"}；平台预算和历史数据不变。`,
+          : `本次切换目标：magpie 本地阻断${target ? "开启" : "关闭"}，保存完成后生效；平台预算和历史数据不变。`,
         async callback() {
-          // Recheck after selection: an administrator may have changed the platform policy.
+          // The target is captured once so a repeated callback cannot toggle it back.
           const current = await controlReading();
-          if (current.forced && inputs.magpieBlock === "off")
+          if (current.forced && target === false)
             throw new Error("平台已强制开启预算阻断，不可关闭");
-          if (!current.forced && inputs.magpieBlock !== undefined)
-            await saveQuotaControl(directory, cfg, inputs.magpieBlock === "on");
+          if (!current.forced && target !== null)
+            await saveQuotaControl(directory, cfg, target);
           return { ...current.auth, type: "success", accountId: userName ?? cfg.userId, uid: cfg.userId };
         } };
     },
@@ -274,6 +252,7 @@ export default async function AIGatewayUserPlugin(input) {
     },
     auth: {
       provider: cfg.providerId,
+      icon: cfg.icon,
       methods: [refreshModels, method("重新登录", "reauth"), quotaTrend, quotaControl],
       refreshLead: 60_000,
       async refresh(auth) {

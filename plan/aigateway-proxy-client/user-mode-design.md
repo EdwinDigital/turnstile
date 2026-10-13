@@ -5,6 +5,7 @@
 
 价格和独立个人额度趋势见 [插件可观测性修复](plugin-observability-fixes.md)；
 0.4.2 的可选本地阻断与原生个人趋势见 [额度控制设计](quota-control-design.md)。
+0.4.3 的一键切换及两版预生成品牌资源见 [图标与一键控制设计](plugin-icons-toggle-design.md)。
 不修改 magpie 原生卡片、会话分组或 Agent 图标。
 
 日期：2026-10-12。状态：implemented / deployed；当前用户版 0.3.1，新流程以第 14 节为准，验证范围见 implementation.md。

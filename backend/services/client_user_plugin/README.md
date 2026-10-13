@@ -17,7 +17,14 @@ and reselect its models in the Agent; do not install both generations as duplica
 5. 「重新登录」才打开平台验证页，重新认证并解析平台实际默认订阅，更新本地授权与配置。
 6. 不覆盖已有本插件账号；主动退出后不会从旧包恢复登录，此时使用「重新登录」。
 7. 「查看额度趋势」打开本机独立个人额度曲线。只记录平台真实快照，不修改 magpie 原生历史或预算模式；首次采样之前的数据未知。再次点击更新快照，平台有 60 秒读数缓存。
-8. 从 0.4.2 起，「额度控制」配置 magpie 本地阻断。平台仅记录时默认关闭，可以选择开启；开启后原生卡片开始积累个人额度趋势。平台强制阻断时不显示可修改选项，且忽略本地关闭配置。不会修改平台预算或重新登录。
+8. 从 0.4.3 起，「额度控制」点击一次直接切换 magpie 本地阻断，不再弹出选择框。平台仅记录时默认关闭；开启后原生卡片开始积累个人额度趋势。平台强制阻断时只提示不可关闭，不修改本地偏好。不会修改平台预算或重新登录。
+
+The platform brand icon is prepared before download and bundled under icons/.
+Both auth.icon and package.json.magpie.icon use the same offline data URI, so
+plugin and provider pages show it without a network fetch. The current host has
+one icon slot: the platform blue/white badge works in light and dark themes
+without relying on automatic monochrome inversion. Prepared light/dark assets
+and a versioned manifest are retained for future branding integration.
 
 The quota-control choice is private to this user plugin. Platform blocking OR
 the user's local choice determines magpie blocking; platform blocking cannot be

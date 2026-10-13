@@ -39,23 +39,15 @@ async function fixture(run) {
   } finally { globalThis.fetch = previous; await rm(root, { recursive: true, force: true }); }
 }
 
-test("audit mode defaults off; selection enables native quota history without changing the platform or credentials", async () => {
+test("one click toggles audit-mode blocking without prompts, policy changes or credential changes", async () => {
   await fixture(async ({ plugin, action, auth, directory, folder, current }) => {
     const before = await readFile(join(folder, "plugin-auth.json"), "utf8");
     assert.equal(action.label, "额度控制");
-    assert.equal(action.prompts[0].key, "magpieBlock");
-    assert.equal(action.prompts[0].validate("on"), undefined);
-    assert.ok(action.prompts[0].validate("fake"));
+    assert.equal(action.prompts, undefined);
+    assert.equal(action.ask, undefined);
     assert.equal((await plugin.auth.usage(async () => auth)).windows[0].aside, true);
-    const prompt = await action.ask({});
-    assert.equal(prompt.type, "select");
-    assert.match(prompt.message, /当前关闭/);
-    assert.deepEqual(prompt.options.map(o => o.value), ["on", "off"]);
-    await assert.rejects(action.authorize({}), /请选择/);
-    await assert.rejects(action.ask({ magpieBlock: "fake" }), /无效/);
-    await assert.rejects(action.authorize({ magpieBlock: "fake" }), /无效/);
-    assert.equal(await action.ask({ magpieBlock: "on" }), null);
-    const choice = await action.authorize({ magpieBlock: "on" });
+    const choice = await action.authorize();
+    assert.match(choice.instructions, /阻断开启/);
     assert.equal(await localQuotaControl(directory, cfg), false);
     assert.equal(choice.url, "");
     const saved = await choice.callback();
@@ -63,16 +55,19 @@ test("audit mode defaults off; selection enables native quota history without ch
     assert.equal(saved.refresh, auth.refresh);
     assert.equal(saved.uid, auth.uid);
     assert.equal(await localQuotaControl(directory, cfg), true);
+    await choice.callback();
+    assert.equal(await localQuotaControl(directory, cfg), true);
     assert.equal((await stat(join(directory, "quota-control.json"))).mode & 0o777, 0o600);
     assert.equal((await plugin.auth.usage(async () => auth)).windows[0].aside, false);
     assert.equal(current.usage.windows[0].aside, true);
     const history = JSON.parse(await readFile(join(directory, "quota-history.json"), "utf8"));
     assert.equal(history.windows[0].points[0].aside, true);
     assert.equal(await readFile(join(folder, "plugin-auth.json"), "utf8"), before);
-    const off = await action.authorize({ magpieBlock: "off" });
+    const off = await action.authorize();
+    assert.match(off.instructions, /阻断关闭/);
     await off.callback();
     assert.equal((await plugin.auth.usage(async () => auth)).windows[0].aside, true);
-    assert.ok(current.requests.filter(url => url.endsWith("fresh=true")).length >= 6);
+    assert.ok(current.requests.filter(url => url.endsWith("fresh=true")).length >= 4);
   });
 });
 
@@ -81,9 +76,8 @@ test("platform blocking hides choices, cannot be disabled and overrides a tamper
     await saveQuotaControl(directory, cfg, false);
     const before = await readFile(join(directory, "quota-control.json"), "utf8");
     current.usage = reading(false);
-    assert.equal(await action.ask({}), null);
-    await assert.rejects(action.authorize({ magpieBlock: "off" }), /不可关闭/);
-    const locked = await action.authorize({});
+    assert.equal(action.ask, undefined);
+    const locked = await action.authorize();
     assert.match(locked.instructions, /不可关闭/);
     assert.equal((await locked.callback()).access, auth.access);
     assert.equal(await readFile(join(directory, "quota-control.json"), "utf8"), before);
@@ -94,20 +88,19 @@ test("platform blocking hides choices, cannot be disabled and overrides a tamper
   });
 });
 
-test("saving rechecks policy changes and a cancelled selection writes nothing", async () => {
+test("saving rechecks policy changes and cancelled clicks never write preferences", async () => {
   await fixture(async ({ action, directory, current }) => {
-    await action.ask({});
-    await action.authorize({ magpieBlock: "on" });
+    await action.authorize();
     await assert.rejects(readFile(join(directory, "quota-control.json")), { code: "ENOENT" });
-    const off = await action.authorize({ magpieBlock: "off" });
+    await saveQuotaControl(directory, cfg, true);
+    const off = await action.authorize();
     current.usage = reading(false);
     await assert.rejects(off.callback(), /不可关闭/);
-    await assert.rejects(readFile(join(directory, "quota-control.json")), { code: "ENOENT" });
+    assert.equal(await localQuotaControl(directory, cfg), true);
     current.usage = { ...reading(true), windows: [] };
-    await assert.rejects(action.ask({}), /未配置/);
-    await assert.rejects(action.authorize({ magpieBlock: "on" }), /未配置/);
+    await assert.rejects(action.authorize(), /未配置/);
     current.usage = reading(undefined);
-    await assert.rejects(action.authorize({ magpieBlock: "off" }), /无效/);
+    await assert.rejects(action.authorize(), /无效/);
   });
 });
 
@@ -137,7 +130,7 @@ test("local dispatch rejects exhausted quotas, but audit off and unconfigured bu
   assert.equal(quotaRefusal(reading(false), false).status, 429);
   assert.equal(quotaRefusal({ ...reading(true), windows: [{ ...reading(true).windows[0], amount: 99, used: 99 }] }, true), null);
   await fixture(async ({ plugin, action, auth, current }) => {
-    await (await action.authorize({ magpieBlock: "on" })).callback();
+    await (await action.authorize()).callback();
     const loader = await plugin.auth.loader(async () => auth);
     const refusal = await loader.fetch(loader.baseURL + "/responses", { method: "POST", body: '{"model":"fixture"}' });
     assert.equal(refusal.status, 429);

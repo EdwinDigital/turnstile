@@ -3,6 +3,11 @@
 This is a **private** plugin download. `aigateway.config.json` contains an APIM
 subscription key. Do not upload this folder to npm, GitHub, chat, or a shared drive.
 
+From 0.1.3, the prepared platform icon is bundled under icons/ and declared in
+both auth.icon and package.json.magpie.icon. Downloads read the versioned files;
+they do not render or fetch icons. The platform badge is legible in light/dark
+themes. An installed older package must be replaced to receive a new brand icon.
+
 ## 安装 / Install
 
 1. 解压 ZIP，把 `aigateway-proxy` 文件夹移动到自己保管的长期目录。
