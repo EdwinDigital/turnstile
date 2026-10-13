@@ -23,7 +23,9 @@ const item = { application_id: "app-uuid", subscription_id: "subscription-uuid",
 
 function load(code, require, globals = {}) {
   const module = { exports: {} }
-  vm.runInNewContext(code, { exports: module.exports, module, require, AbortController, Error, ...globals })
+  const resolve = name => name === "../components/magpie-client-download"
+    ? { MagpieClientDownload: "magpie-client-download" } : require(name)
+  vm.runInNewContext(code, { exports: module.exports, module, require: resolve, AbortController, Error, ...globals })
   return module.exports
 }
 
@@ -93,6 +95,7 @@ for (const [userMode, prefix, label] of [
       nodes.push(node); visit(node.props?.children)
     }
     visit(page.ClientDownloadsPage({ onToggleSidebar: () => {} }))
+    assert.ok(nodes.some(node => node.type === "magpie-client-download"))
     assert.ok(nodes.some(node => node.type === "p" && node.props.children ===
       "解压后的文件夹名称与 ZIP 文件名一致（不含 .zip），与下方订阅版独立，可同时安装。"))
     assert.ok(nodes.some(node => node.type === "p" && node.props.children ===

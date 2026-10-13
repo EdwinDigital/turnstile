@@ -4,6 +4,7 @@ import { Download, PanelLeft, RefreshCw, ShieldCheck } from "lucide-react"
 import { clientDownloadsApi } from "../api/client-downloads"
 import { canDownloadPlugin } from "../api/auth"
 import { Button } from "../components/ui/button"
+import { MagpieClientDownload } from "../components/magpie-client-download"
 import { useAuth } from "../providers/auth-provider"
 
 export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () => void }) {
@@ -88,7 +89,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     <header className="finops-header"><div>
       <Button variant="ghost" size="icon-sm" className="finops-sidebar-trigger" onClick={onToggleSidebar} aria-label="切换导航栏"><PanelLeft size={16} /></Button>
       <span className="finops-header-icon"><Download size={17} /></span><h1>下载客户端</h1>
-    </div></header>
+    </div><MagpieClientDownload /></header>
     <div className="finops-scroll-region"><div className="client-downloads-content">
       <header><h1>AIGateway-Proxy</h1><p>将平台订阅导入 magpie，供其他 Agent 使用。</p></header>
       {!canDownloadUser && !canDownloadSubscription && <p role="status">当前角色没有插件下载权限。</p>}

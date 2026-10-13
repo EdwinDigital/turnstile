@@ -1,4 +1,10 @@
 .client-downloads-content { padding: 24px; display: grid; gap: 24px; max-width: 1480px; width: 100%; margin-inline: auto; box-sizing: border-box; min-width: 0; }
+.client-downloads-workspace > .finops-header { flex-wrap: wrap; flex-basis: auto; }
+.client-downloads-client-actions { margin-inline-start: auto; flex-wrap: wrap; justify-content: flex-end; }
+.client-downloads-client-button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 8px 12px; border: 1px solid var(--primary); border-radius: 6px; background: var(--primary); color: var(--primary-foreground); font-size: 13px; text-decoration: none; }
+.client-downloads-client-button:hover { background: color-mix(in srgb, var(--primary) 90%, var(--background)); }
+.client-downloads-other-versions { font-size: 12px; color: var(--muted-foreground); text-underline-offset: 3px; }
+.client-downloads-client-button:focus-visible, .client-downloads-other-versions:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .client-downloads-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 24px; align-items: start; min-width: 0; }
 .client-downloads-panels > .client-downloads-card { min-width: 0; }
 .client-downloads-panels:has(> .client-downloads-card:only-child) { max-width: 760px; width: 100%; margin-inline: auto; }
@@ -40,6 +46,9 @@
 .client-downloads-guide ol { padding-left: 20px; font-size: 13px; line-height: 2.2; }
 .client-downloads-guide a { display: inline-block; margin-top: 12px; font-size: 13px; text-underline-offset: 3px; }
 @media (max-width: 700px) {
+  .client-downloads-workspace .finops-header > .client-downloads-client-actions { gap: 8px; }
+  .client-downloads-client-button { min-height: 44px; }
+  .client-downloads-other-versions { display: inline-flex; align-items: center; min-height: 44px; }
   .client-downloads-content { padding: 16px; gap: 16px; }
   .client-downloads-card { padding: 16px; }
   .client-downloads-fields, .client-downloads-models { grid-template-columns: 1fr; }
