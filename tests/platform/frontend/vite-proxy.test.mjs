@@ -44,6 +44,7 @@ test("development proxy preserves the write-origin security boundary", async sui
 
   const vite = await createViteServer({
     configFile: false,
+    cacheDir: "frontend/node_modules/.vite-proxy-test",
     appType: "custom",
     logLevel: "silent",
     server: {
