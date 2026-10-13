@@ -215,11 +215,47 @@ for (const [userConsent, subscriptionConsent] of [[false, false], [true, false],
     assert.equal(userButton.props.disabled, !userConsent)
     assert.equal(subscriptionButton.props.disabled, !subscriptionConsent)
     assert.equal(userButton.props.variant, subscriptionButton.props.variant)
+    assert.equal(userButton.props.className, "client-downloads-download-button")
+    assert.equal(subscriptionButton.props.className, userButton.props.className)
     // Exercise handlers directly, bypassing native form validation and disabled-button behavior.
     await nodes.find(n => n.type === "form").props.onSubmit({ preventDefault() {} })
     await new Promise(resolve => setImmediate(resolve))
     userButton.props.onClick()
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(view.calls.length, Number(userConsent) + Number(subscriptionConsent))
+  })
+}
+
+for (const [userReady, subscriptionReady] of [[false, false], [true, false], [false, true], [true, true]]) {
+  test(`catalogs replace loading together after this visit's reads: user=${userReady}, subscription=${subscriptionReady}`, () => {
+    const queries = [], jsx = (type, props) => ({ type, props })
+    const page = load(pageCode, name => {
+      if (name === "react") return { useEffect: () => {}, useRef: value => ({ current: value }), useState: value => [value, () => {}] }
+      if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" }
+      if (name === "@tanstack/react-query") return { useQuery: options => {
+        queries.push(options)
+        const subscription = options.queryKey[0] === "client-downloads"
+        return { isPending: false, isFetchedAfterMount: subscription ? subscriptionReady : userReady,
+          data: subscription ? { items: [item], key_management_available: true } : { enabled: true, user_name: "Edwin" } }
+      } }
+      if (name === "../api/client-downloads") return { clientDownloadsApi: {} }
+      if (name === "../api/auth") return authHelpers
+      if (name === "../providers/auth-provider") return { useAuth: () => ({ user: { id: "owner", role: "owner", name: "Edwin" } }) }
+      if (name === "../components/ui/button") return { Button: "button" }
+      if (name === "lucide-react") return { Download: "icon", PanelLeft: "icon", RefreshCw: "icon", ShieldCheck: "icon" }
+      throw new Error(`Unexpected import ${name}`)
+    })
+    const nodes = []
+    function visit(node) {
+      if (Array.isArray(node)) { node.forEach(visit); return }
+      if (!node || typeof node !== "object") return
+      nodes.push(node); visit(node.props?.children)
+    }
+    visit(page.ClientDownloadsPage({ onToggleSidebar: () => {} }))
+    const ready = userReady && subscriptionReady
+    assert.equal(nodes.filter(n => n.type === "button" && n.props.className === "client-downloads-download-button").length, ready ? 2 : 0)
+    assert.equal(nodes.some(n => n.props?.className === "client-downloads-card client-downloads-loading"), !ready)
+    assert.equal(nodes.find(n => n.props?.className === "client-downloads-panels").props["aria-busy"], !ready)
+    assert.ok(queries.every(q => q.staleTime === 60_000 && q.refetchOnMount === "always"))
   })
 }
