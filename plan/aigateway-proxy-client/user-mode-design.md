@@ -368,3 +368,18 @@ ACTIVE -> EXPIRED / REVOKED -> 需要重新登录，不恢复旧 Key
 个人额度按治理用户标识汇总，客户端只显示个人月度窗口；平台应用统计和限制正常保留。名称迁移和稳定 uid 设计保留，不改 magpie。人员列表按整月个人用量读取后筛选人员，不改写历史归因。
 
 详细默认凭据复用、主/备用匹配、失败保护、预算修复及不改 APIM 的验收边界见 personal-authorization-design.md。
+
+## ZIP 解压目录与下载名称一致（用户版 0.4.4 / 订阅版 0.1.4）
+
+- 用户版示例：`aigateway-proxy-user-Edwin.zip` 内只有顶层目录
+  `aigateway-proxy-user-Edwin/`；订阅版示例：`aigateway-proxy-Edwin-Agent.zip` 内只有
+  `aigateway-proxy-Edwin-Agent/`。规则为平台返回的 ZIP 文件名去掉 `.zip`，不是固定目录名。
+- 用户版响应文件名和 ZIP 根目录共用 `ClientUserService.package_filename`；订阅版先生成
+  一次安全文件名，再用于响应与归档路径。沿用原有显示名清洗、Unicode、长度及 UUID 回退规则，
+  禁止目录穿越。用户在本地重命名 ZIP 或浏览器追加下载序号不会反向改变包内目录。
+- 只变更归档顶层目录及下载说明。相对模块路径、配置文件名、预生成图标、供应商/账号 ID、
+  授权流程、默认订阅及配置目录下的运行状态路径保持原样，不修改 magpie 或 APIM。
+- 旧下载包不会自动改目录；替换已安装插件时需同步更新宿主登记的本地文件夹路径，
+  不要把新旧文件夹作为两个供应商重复安装。
+- 本地回归：89 项 Python/API/打包测试、41 项插件 JS、前端构建通过。
+  本节为开发记录，不代表已提交或上线；实际线上仍使用上一发布版本。

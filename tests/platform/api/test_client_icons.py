@@ -66,10 +66,13 @@ def test_upload_hook_prepares_once_and_downloads_reuse_published_files(
     first, second = service.package(identity), service.package(identity)
     for data in (first, second):
         with ZipFile(BytesIO(data)) as z:
-            cfg = json.loads(z.read("aigateway-proxy-user/aigateway-user.config.json"))
+            cfg = json.loads(z.read("aigateway-proxy-user-Test/aigateway-user.config.json"))
             assert cfg["iconRevision"] == revision
             assert cfg["icon"] == store.load().data_uri  # type: ignore[union-attr]
-            assert z.read("aigateway-proxy-user/icons/icon.png") == store.load().files["icon.png"]  # type: ignore[union-attr]
+            assert (
+                z.read("aigateway-proxy-user-Test/icons/icon.png")
+                == store.load().files["icon.png"]  # type: ignore[union-attr]
+            )
     assert mtimes == {p: p.stat().st_mtime_ns for p in tmp_path.rglob("*") if p.is_file()}
     generation.assert_not_called()
 

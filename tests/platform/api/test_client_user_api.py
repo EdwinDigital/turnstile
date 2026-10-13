@@ -234,7 +234,10 @@ def test_download_is_authorized_and_refresh_keeps_binding(desktop: ClientUserSer
     assert USER not in response.headers["content-disposition"]
     assert USER.replace("-", "") not in response.headers["content-disposition"]
     with ZipFile(BytesIO(response.content)) as archive:
-        cfg = json.loads(archive.read("aigateway-proxy-user/aigateway-user.config.json"))
+        assert {name.split("/", 1)[0] for name in archive.namelist()} == {
+            "aigateway-proxy-user-Owner"
+        }
+        cfg = json.loads(archive.read("aigateway-proxy-user-Owner/aigateway-user.config.json"))
     auth = {"Authorization": "Bearer " + cfg["authorization"]["access"]}
     initial = client.get("/api/v1/client-runtime/catalog", headers=auth)
     assert initial.status_code == 200 and initial.json()["models"]
@@ -257,7 +260,7 @@ def test_proxy_reuses_platform_subscription_and_verified_personal_identity(
     response = client.post("/api/v1/client-downloads/magpie-user", json={"acknowledged": True})
     assert response.status_code == 200
     with ZipFile(BytesIO(response.content)) as archive:
-        cfg = json.loads(archive.read("aigateway-proxy-user/aigateway-user.config.json"))
+        cfg = json.loads(archive.read("aigateway-proxy-user-Owner/aigateway-user.config.json"))
     model = next(iter(cfg["catalog"]["models"]))
     catalog = enterprise_catalog()
     catalog.users.append(

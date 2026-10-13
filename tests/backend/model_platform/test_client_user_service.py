@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import Mock
 from uuid import UUID, uuid4
@@ -90,9 +91,10 @@ def client_service() -> tuple[ClientUserService, InMemoryRepository, SessionIden
 def test_personal_package_has_bound_authorization_and_distinct_identity(name: str) -> None:
     service, _, identity = client_service()
     identity = replace(identity, name=name)
+    archive_root = f"aigateway-proxy-user-{name}"
     with ZipFile(BytesIO(service.package(identity))) as archive:
-        assert all(name.startswith("aigateway-proxy-user/") for name in archive.namelist())
-        config = json.loads(archive.read("aigateway-proxy-user/aigateway-user.config.json"))
+        assert {entry.split("/", 1)[0] for entry in archive.namelist()} == {archive_root}
+        config = json.loads(archive.read(f"{archive_root}/aigateway-user.config.json"))
         label = "test" if name == "Test" else "xn--oory84avxopxc"
         assert config["providerId"].startswith(f"aigateway-user-{label}-")
         assert config["userName"] == name
@@ -109,14 +111,42 @@ def test_personal_package_has_bound_authorization_and_distinct_identity(name: st
         assert config["authorization"]["uid"] == identity.id
         assert config["catalog"]["models"]
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
-        package = json.loads(archive.read("aigateway-proxy-user/package.json"))
+        package = json.loads(archive.read(f"{archive_root}/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.4.3"
+        assert package["version"] == "0.4.4"
         assert package["magpie"]["icon"] == config["icon"]
-        assert "aigateway-proxy-user/icons/icon.svg" in archive.namelist()
-        icon_manifest = json.loads(archive.read("aigateway-proxy-user/icons/manifest.json"))
+        assert f"{archive_root}/icons/icon.svg" in archive.namelist()
+        icon_manifest = json.loads(archive.read(f"{archive_root}/icons/manifest.json"))
         assert config["iconRevision"] == icon_manifest["revision"]
         assert all((f.external_attr >> 16) & 0o777 == 0o600 for f in archive.infolist())
+
+
+@pytest.mark.parametrize(("name", "label"), [
+    ("Edwin", "Edwin"),
+    ("研发用户", "研发用户"),
+    ('../../研发 "Agent": A\\B\r\n', "研发-Agent-A-B"),
+    ("..", "user"),
+    ("03ba5bbc-07df-42bb-a13d-6faebf421ae2", "user"),
+    ("", "test-example.com"),
+    ("用户" * 100, "用户" * 13),
+])
+def test_user_archive_extracts_to_its_safe_download_name(
+    tmp_path: Path, name: str, label: str,
+) -> None:
+    service, _, identity = client_service()
+    identity = replace(identity, name=name)
+    filename = service.package_filename(identity)
+    archive_root = f"aigateway-proxy-user-{label}"
+    assert filename == archive_root + ".zip"
+    with ZipFile(BytesIO(service.package(identity))) as archive:
+        assert archive.testzip() is None
+        assert {entry.split("/", 1)[0] for entry in archive.namelist()} == {archive_root}
+        archive.extractall(tmp_path)
+    assert [path.name for path in tmp_path.iterdir()] == [archive_root]
+    assert (tmp_path / archive_root / "package.json").is_file()
+    assert (tmp_path / archive_root / "icons/icon.svg").is_file()
+    config = json.loads((tmp_path / archive_root / "aigateway-user.config.json").read_text())
+    assert config["userId"] == identity.id
 
 
 def test_member_default_uses_the_actual_platform_credential_not_owned_name_order() -> None:

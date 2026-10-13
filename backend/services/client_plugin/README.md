@@ -10,7 +10,8 @@ themes. An installed older package must be replaced to receive a new brand icon.
 
 ## 安装 / Install
 
-1. 解压 ZIP，把 `aigateway-proxy` 文件夹移动到自己保管的长期目录。
+1. 解压 ZIP，把与 ZIP 同名（不含 `.zip`）的文件夹移动到自己保管的长期目录。
+   例如 `aigateway-proxy-Edwin-Agent.zip` 解压为 `aigateway-proxy-Edwin-Agent/`。
 2. 在 magpie 的「插件」页面，选择本地文件夹，添加该文件夹（不是 ZIP）。
 3. 首次加载时自动导入配置中的密钥到 magpie 的 `plugin-auth.json`（权限 0600）；
    已有供应商登录信息不会被覆盖。自动导入失败时，点击供应商选择「导入配置」。
@@ -20,7 +21,7 @@ themes. An installed older package must be replaced to receive a new brand icon.
 CLI equivalent (uses your normal magpie configuration):
 
 ```sh
-magpie plugin add /absolute/path/aigateway-proxy
+magpie plugin add /absolute/path/aigateway-proxy-Edwin-Agent
 # Usually not needed after installation; this explicitly re-imports the bundled key.
 magpie plugin login <providerId-from-aigateway.config.json> 1
 magpie provider test <providerId-from-aigateway.config.json>

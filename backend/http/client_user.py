@@ -19,7 +19,7 @@ from turnstile_core.domain.models import StrictModel
 from ..services.auth_service import hash_session_token
 from ..services.client_user import USER_PLUGIN_VERSION, ClientUserService
 from ..services.client_user_store import ClientUserStore
-from ..services.download_filename import attachment_header, plugin_filename
+from ..services.download_filename import attachment_header
 from .dependencies import Repository
 from .service_dependencies import ApplicationAccessServiceDependency
 from .session import CurrentSession, Store, require_allowed_write_origin
@@ -134,9 +134,7 @@ def download(body: UserDownload, identity: CurrentSession, service: Service) -> 
         headers={
             **PRIVATE,
             "Access-Control-Expose-Headers": "Content-Disposition",
-            "Content-Disposition": attachment_header(
-                plugin_filename("aigateway-proxy-user", identity.name or identity.email, "user")
-            ),
+            "Content-Disposition": attachment_header(service.package_filename(identity)),
         },
     )
 

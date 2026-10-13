@@ -30,7 +30,7 @@ def test_user_catalog_and_download_use_platform_accounting_prices(
     assert catalog["models"][model["model_key"]]["cost"] == expected
     assert plugin_model_cost(repo.model_prices()[str(model["id"])]) == expected
     with ZipFile(BytesIO(service.package(identity))) as archive:
-        config = json.loads(archive.read("aigateway-proxy-user/aigateway-user.config.json"))
+        config = json.loads(archive.read("aigateway-proxy-user-Test/aigateway-user.config.json"))
         assert config["catalog"]["models"][model["model_key"]]["cost"] == expected
         assert {"pricing.mjs", "quota.mjs"} <= {
             name.rsplit("/", 1)[-1] for name in archive.namelist()

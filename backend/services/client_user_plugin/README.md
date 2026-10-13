@@ -1,8 +1,9 @@
 # AIGateway-Proxy 用户版 / User Plugin
 
 This package is separate from the subscription plugin `aigateway-proxy`.
-Keep its `aigateway-proxy-user` directory in a permanent location. Do not copy it
-over an existing subscription installation.
+Keep its extracted directory in a permanent location. From 0.4.4, the directory
+matches the ZIP filename without `.zip`: `aigateway-proxy-user-Edwin.zip` contains
+`aigateway-proxy-user-Edwin/`. Do not copy it over a subscription installation.
 
 From 0.4.1, model namespaces use the username plus a short hashed disambiguator,
 not the user's UUID. The UUID remains inside the private authorization config.
@@ -10,7 +11,7 @@ Existing downloaded packages keep their namespace: refreshing models or signing
 in again does not rename it. Replace the old plugin with a new download explicitly
 and reselect its models in the Agent; do not install both generations as duplicates.
 
-1. 在 magpie 插件页面添加本地 `aigateway-proxy-user` 文件夹。
+1. 在 magpie 插件页面添加解压后的同名文件夹，例如 `aigateway-proxy-user-Edwin`。
 2. 下载时已经通过当前平台会话授权，并绑定平台实际默认订阅。首次安装自动导入 OAuth 和本人模型。
 3. 「刷新模型」使用已有授权，直接读取本人最新授权模型；不打开浏览器、不切换订阅。
 4. 刷新完整替换本插件的文本/图片模型目录，其他供应商和订阅版不变。

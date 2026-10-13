@@ -1,4 +1,6 @@
 export const CLIENT_USER_PHRASES: Record<string, string> = {
+  "解压后的文件夹名称与 ZIP 文件名一致（不含 .zip），与下方订阅版独立，可同时安装。": "The extracted folder matches the ZIP filename without .zip. It is separate from the subscription plugin below; both can be installed together.",
+  "指定订阅下载 · 保留订阅密钥认证方式，解压目录与 ZIP 文件名一致。": "Subscription-bound download · Keeps subscription-key authentication; the extracted folder matches the ZIP filename.",
   "平台默认订阅：": "Platform default subscription:",
   "订阅版导入 magpie": "Import the subscription plugin into magpie",
   "文生图通过配套 MCP 工具使用；首次需登记插件生成的 images-mcp.json，不会自动改写 Agent 配置。": "Image generation uses the companion MCP tool. Register the generated images-mcp.json once; Agent configurations are not overwritten automatically.",

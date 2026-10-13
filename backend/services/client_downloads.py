@@ -26,7 +26,7 @@ from .client_namespace import plugin_namespace
 from .client_pricing import plugin_model_cost
 from .download_filename import plugin_filename
 
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 RESERVED = {"master", "turnstile-dashboard", "turnstile-publisher-probe"}
 SDK = {
     "openai_chat": "@ai-sdk/openai-compatible",
@@ -235,12 +235,14 @@ class ClientDownloadService:
             "files": list(files),
         }, indent=2).encode()
         output = BytesIO()
+        filename = plugin_filename("aigateway-proxy", option.subscription_name, "subscription")
+        archive_root = filename.removesuffix(".zip")
         with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
             for name, content in files.items():
-                info = ZipInfo(f"aigateway-proxy/{name}")
+                info = ZipInfo(f"{archive_root}/{name}")
                 info.external_attr = 0o100600 << 16
                 archive.writestr(info, content, compress_type=ZIP_DEFLATED)
         return ClientDownloadArchive(
             content=output.getvalue(),
-            filename=plugin_filename("aigateway-proxy", option.subscription_name, "subscription"),
+            filename=filename,
         )

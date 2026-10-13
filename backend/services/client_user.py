@@ -34,9 +34,10 @@ from .client_icons import PluginIconUnavailable, load_plugin_icons
 from .client_namespace import plugin_namespace
 from .client_pricing import plugin_model_cost
 from .client_user_store import ClientUserStore
+from .download_filename import plugin_filename
 from .gateway_credentials import with_platform_gateway_credential
 
-USER_PLUGIN_VERSION = "0.4.3"
+USER_PLUGIN_VERSION = "0.4.4"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
@@ -95,6 +96,10 @@ class ClientUserService:
     def _binding(self, uid: str) -> str:
         message = f"{self.origin}|{UUID(uid)}".encode()
         return hmac.new(self.signing_key, b"bootstrap|" + message, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def package_filename(identity: SessionIdentity) -> str:
+        return plugin_filename("aigateway-proxy-user", identity.name or identity.email, "user")
 
     def package(self, identity: SessionIdentity) -> bytes:
         self.require_enabled()
@@ -158,9 +163,10 @@ class ClientUserService:
             }
         ).encode()
         out = BytesIO()
+        archive_root = self.package_filename(identity).removesuffix(".zip")
         with ZipFile(out, "w", compression=ZIP_DEFLATED) as z:
             for name, data in files.items():
-                info = ZipInfo("aigateway-proxy-user/" + name)
+                info = ZipInfo(f"{archive_root}/{name}")
                 info.external_attr = 0o100600 << 16
                 z.writestr(info, data, compress_type=ZIP_DEFLATED)
         return out.getvalue()

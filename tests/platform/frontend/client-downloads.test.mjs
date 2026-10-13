@@ -89,6 +89,10 @@ for (const [userMode, prefix, label] of [
       nodes.push(node); visit(node.props?.children)
     }
     visit(page.ClientDownloadsPage({ onToggleSidebar: () => {} }))
+    assert.ok(nodes.some(node => node.type === "p" && node.props.children ===
+      "解压后的文件夹名称与 ZIP 文件名一致（不含 .zip），与下方订阅版独立，可同时安装。"))
+    assert.ok(nodes.some(node => node.type === "p" && node.props.children ===
+      "指定订阅下载 · 保留订阅密钥认证方式，解压目录与 ZIP 文件名一致。"))
     if (userMode) {
       nodes.find(node => node.type === "button" && Array.isArray(node.props.children)
         && node.props.children.includes("下载用户版插件")).props.onClick()
