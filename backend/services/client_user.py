@@ -35,7 +35,7 @@ from .client_pricing import plugin_model_cost
 from .client_user_store import ClientUserStore
 from .gateway_credentials import with_platform_gateway_credential
 
-USER_PLUGIN_VERSION = "0.4.1"
+USER_PLUGIN_VERSION = "0.4.2"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
@@ -665,11 +665,13 @@ class ClientUserService:
             "selection": {k: v for k, v in selected.items() if k not in {"models", "base_url"}},
         }
 
-    def usage(self, grant: dict[str, Any], identity: SessionIdentity) -> dict[str, Any]:
+    def usage(
+        self, grant: dict[str, Any], identity: SessionIdentity, *, fresh: bool = False,
+    ) -> dict[str, Any]:
         cache_key = f"usage:{grant['id']}:{identity.directory_permission_revision}"
         with self._lock:
             hit = self._cache.get(cache_key)
-            if hit and hit[0] > time.monotonic():
+            if not fresh and hit and hit[0] > time.monotonic():
                 return hit[1]
         now = datetime.now(UTC)
         start = date(now.year, now.month, 1)

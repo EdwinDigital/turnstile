@@ -240,9 +240,9 @@ def refresh_models(request: Request, service: Service) -> JSONResponse:
 
 
 @router.get("/api/v1/client-runtime/usage")
-def usage(request: Request, service: Service) -> JSONResponse:
+def usage(request: Request, service: Service, fresh: bool = False) -> JSONResponse:
     grant, identity = authorized(request, service)
-    return JSONResponse(service.usage(grant, identity), headers=PRIVATE)
+    return JSONResponse(service.usage(grant, identity, fresh=fresh), headers=PRIVATE)
 
 
 @router.post("/api/v1/client-runtime/image-capabilities")

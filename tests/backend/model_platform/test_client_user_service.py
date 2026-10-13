@@ -111,7 +111,7 @@ def test_personal_package_has_bound_authorization_and_distinct_identity(name: st
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
         package = json.loads(archive.read("aigateway-proxy-user/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.4.1"
+        assert package["version"] == "0.4.2"
         assert all((f.external_attr >> 16) & 0o777 == 0o600 for f in archive.infolist())
 
 
@@ -241,3 +241,20 @@ def test_personal_usage_keeps_the_sixty_second_cache(monkeypatch: pytest.MonkeyP
     assert service.usage(grant, owner)["windows"][0]["amount"] == 20
     assert personal.call_count == 2
     assert first["cache_seconds"] == 60
+
+
+def test_personal_usage_control_bypasses_cache_and_updates_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repo, owner = client_service()
+    personal = Mock(return_value={"used_tokens": 10, "token_limit": 100, "mode": "audit"})
+    monkeypatch.setattr(repo, "person_budget_state", personal)
+    grant = {"id": uuid4(), "selection": None}
+    assert service.usage(grant, owner)["windows"][0]["aside"] is True
+    personal.return_value = {"used_tokens": 20, "token_limit": 100, "mode": "block"}
+    assert service.usage(grant, owner)["windows"][0]["aside"] is True
+    fresh = service.usage(grant, owner, fresh=True)
+    assert fresh["windows"][0]["aside"] is False
+    assert fresh["windows"][0]["amount"] == 20
+    assert service.usage(grant, owner) == fresh
+    assert personal.call_count == 2

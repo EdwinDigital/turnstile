@@ -4,6 +4,7 @@ import hashlib
 import json
 from io import BytesIO
 from typing import Any, cast
+from unittest.mock import Mock
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -97,7 +98,9 @@ def begin(service: ClientUserService, purpose: str = "import") -> dict[str, Any]
     return cast(dict[str, Any], response.json())
 
 
-def test_browser_approval_and_native_catalog(desktop: ClientUserService) -> None:
+def test_browser_approval_and_native_catalog(
+    desktop: ClientUserService, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     options = client.get("/api/v1/client-downloads/user-options")
     assert options.status_code == 200
     assert options.headers["cache-control"] == "no-store"
@@ -132,6 +135,12 @@ def test_browser_approval_and_native_catalog(desktop: ClientUserService) -> None
     assert models.headers["cache-control"] == "no-store"
     usage = client.get("/api/v1/client-runtime/usage", headers=auth)
     assert usage.status_code == 200 and "windows" in usage.json()
+    spy = Mock(wraps=desktop.usage)
+    monkeypatch.setattr(desktop, "usage", spy)
+    fresh = client.get("/api/v1/client-runtime/usage?fresh=true", headers=auth)
+    assert fresh.status_code == 200 and fresh.headers["cache-control"] == "no-store"
+    assert spy.call_args.kwargs == {"fresh": True}
+    assert client.get("/api/v1/client-runtime/usage?fresh=true").status_code == 401
     assert "subscriptionKey" not in models.text and "primary-secret" not in models.text
     revoked = client.post("/api/v1/client-auth/revoke", headers=auth)
     assert revoked.status_code == 200

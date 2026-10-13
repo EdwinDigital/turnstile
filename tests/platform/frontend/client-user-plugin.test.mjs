@@ -113,7 +113,7 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
     await writeFile(join(folder, "aigateway-user.config.json"), JSON.stringify({ version: 2, platformOrigin: "https://platform.example", providerId: "aigateway-user-platform-user", userId: "uid", binding: "b", name: "User" }));
     const factory = (await import(pathToFileURL(join(folder, "index.mjs")).href)).default;
     const plugin = await factory({ directory: folder, project: { id: "magpie" } });
-    assert.deepEqual(plugin.auth.methods.map((x) => x.label), ["刷新模型", "重新登录", "查看额度趋势"]);
+    assert.deepEqual(plugin.auth.methods.map((x) => x.label), ["刷新模型", "重新登录", "查看额度趋势", "额度控制"]);
     assert.ok(plugin.auth.methods.every((x) => x.type === "oauth"));
     let current = { new: { id: "new", provider: { npm: "@ai-sdk/openai", api: "https://platform.example/api/v1/client-runtime" }, tool_call: true, reasoning: true, modalities: { input: ["text", "image"] } } };
     let last;

@@ -17,6 +17,23 @@ and reselect its models in the Agent; do not install both generations as duplica
 5. 「重新登录」才打开平台验证页，重新认证并解析平台实际默认订阅，更新本地授权与配置。
 6. 不覆盖已有本插件账号；主动退出后不会从旧包恢复登录，此时使用「重新登录」。
 7. 「查看额度趋势」打开本机独立个人额度曲线。只记录平台真实快照，不修改 magpie 原生历史或预算模式；首次采样之前的数据未知。再次点击更新快照，平台有 60 秒读数缓存。
+8. 从 0.4.2 起，「额度控制」配置 magpie 本地阻断。平台仅记录时默认关闭，可以选择开启；开启后原生卡片开始积累个人额度趋势。平台强制阻断时不显示可修改选项，且忽略本地关闭配置。不会修改平台预算或重新登录。
+
+The quota-control choice is private to this user plugin. Platform blocking OR
+the user's local choice determines magpie blocking; platform blocking cannot be
+disabled here. Opening and confirming this action re-read the platform policy
+without the normal 60-second cache. Ordinary quota polling keeps that cache.
+Local blocking is an early guard, not a replacement for platform enforcement
+across clients or concurrent requests. No budget means no invented local limit.
+Text dispatch checks the allowance before invoking a model; exhausted local limits
+return 429 without a model request. The image/MCP bridge checks it too when local
+blocking is enabled. Its current OAuth access is read from the existing local account
+only for read-only quota queries; image invocations still use the image-only capability.
+No refresh token is stored in the bridge descriptor or sent by this guard. Quota
+reads share a process-local cache of at most 60 seconds, with no background timer.
+Turning local blocking off stops new native history samples but does not erase
+magpie's existing history. Native curves also require the host's Trends setting
+not to be Off. The independent page continues to show the platform's own mode.
 
 Model prices use the platform's accounting rates in USD per million tokens,
 including input, output, cache reads and cache writes. The native adapter only
@@ -35,7 +52,8 @@ Do not replace manual prices or host settings files by hand to force synchroniza
 
 The independent quota page is for a local desktop installation; remote/web-only
 hosts may not open its `file:` URL. It is not an embedded curve in magpie's native
-card. No application shared budget is added, and audit mode stays non-blocking.
+card. No application shared budget is added. Platform audit mode remains unchanged;
+magpie is non-blocking by default unless the user explicitly enables local blocking.
 WorkBuddy's native session IDs and provider-card Agent icons remain host/client
 integration limitations, not something this provider can manufacture.
 
@@ -46,8 +64,8 @@ installation and revocable grant; access lasts 15 minutes, refresh validity is
 7 days (rolling), and the grant requires reauthentication after 30 days.
 Models and the personal monthly Token allowance are read from the platform.
 Only the personal monthly allowance is shown. Application accounting and control remain governed by the existing platform.
-Audit-only quota windows do not stop the account. Actual calls remain governed
-by the platform and APIM.
+Audit-only quota windows do not stop the account unless local blocking is explicitly
+enabled. Actual calls remain governed by the platform and APIM.
 
 Only this plugin's namespace is replaced. Do not rename the old subscription
 plugin or reuse its provider ID. Failed/canceled authorization preserves a

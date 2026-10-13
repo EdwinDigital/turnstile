@@ -1,6 +1,7 @@
 import { readFile, realpath, unlink, writeFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
+import { localQuotaControl, quotaReader, quotaRefusal } from "./quota.mjs";
 
 export function localMagpieURL(address = "127.0.0.1:3425") {
   const url = new URL(address.includes("://") ? address : "http://" + address);
@@ -16,6 +17,31 @@ export async function ownLogin(settingsDirectory, providerId, userId) {
     && value?.type === "oauth" && value.uid === userId && value.access);
 }
 
+export function imageQuotaGuard() {
+  // Cache is per bridge instance and origin; model calls still use the image-only capability.
+  let origin, cached;
+  return async current => {
+    const directory = join(current.settingsDirectory, "aigateway-proxy-user", current.providerId);
+    if (!await localQuotaControl(directory, current)) return null;
+    const accounts = JSON.parse(await readFile(join(current.settingsDirectory, "plugin-auth.json"), "utf8"));
+    const own = Object.entries(accounts).find(([id, auth]) => (id === current.providerId || id.startsWith(current.providerId + "#"))
+      && auth?.type === "oauth" && auth.uid === current.userId)?.[1];
+    if (!own?.access) throw new Error("请重新登录 AIGateway 平台");
+    if (origin !== current.platformOrigin) {
+      origin = current.platformOrigin;
+      const target = origin + "/api/v1/client-runtime/usage";
+      cached = quotaReader(async access => {
+        const response = await fetch(target, {
+          method: "GET", headers: { Authorization: "Bearer " + access }, redirect: "manual", signal: AbortSignal.timeout(20000),
+        });
+        if (!response.ok) throw new Error("额度读取失败，请刷新模型或重新登录");
+        return response.json();
+      });
+    }
+    return quotaRefusal(await cached(own.access), true);
+  };
+}
+
 async function descriptor(path) {
   const data = JSON.parse(await readFile(path, "utf8"));
   if (!/^aigateway-user-[\p{L}\p{N}-]+$/u.test(data.providerId) || !Array.isArray(data.images)
@@ -24,10 +50,14 @@ async function descriptor(path) {
   const origin = new URL(data.platformOrigin);
   if (origin.protocol !== "https:" && !(origin.protocol === "http:" && ["localhost", "127.0.0.1"].includes(origin.hostname)))
     throw new Error("Invalid picture platform origin");
+  const bootstrap = JSON.parse(await readFile(join(data.spec, "aigateway-user.config.json"), "utf8"));
+  if (bootstrap.platformOrigin !== data.platformOrigin || bootstrap.providerId !== data.providerId || bootstrap.userId !== data.userId)
+    throw new Error("Picture quota origin must match the installed user plugin");
   return data;
 }
 
 export async function pictureBridge(statePath, readyPath) {
+  const quotaGuard = imageQuotaGuard();
   const initial = await descriptor(statePath);
   const http = localMagpieURL(initial.magpieAddress);
   const nonce = initial.nonce;
@@ -51,7 +81,7 @@ export async function pictureBridge(statePath, readyPath) {
       if (!matchNonce(request.headers.get("authorization")) || request.headers.get("origin"))
         return Response.json({ error: "Unauthorized" }, { status: 401 });
       const path = new URL(request.url).pathname;
-      if (path === "/health") return Response.json({ providerId: initial.providerId, bridgeVersion: 2, pid: process.pid });
+      if (path === "/health") return Response.json({ providerId: initial.providerId, bridgeVersion: 3, pid: process.pid });
       let state;
       try { state = await descriptor(statePath); if (!await enabled(state)) throw new Error(); }
       catch { return Response.json({ error: "The user plugin is disabled or signed out" }, { status: 403 }); }
@@ -65,6 +95,9 @@ export async function pictureBridge(statePath, readyPath) {
         if (rpc.method !== "tools/call" || rpc.params?.name !== "generate_image") return Response.json({ jsonrpc: "2.0", id: rpc.id, error: { code: -32601, message: "Method not found" } });
         const args = rpc.params.arguments;
         if (!state.images.some((m) => m.id === args?.model) || typeof args?.prompt !== "string") return reply({ isError: true, content: [{ type: "text", text: "Image model and prompt are required" }] });
+        try {
+          if (await quotaGuard(state)) return reply({ isError: true, content: [{ type: "text", text: "个人月度额度已用尽，插件已在本地阻断图片调用。" }] });
+        } catch { return reply({ isError: true, content: [{ type: "text", text: "额度读取失败，请刷新模型或重新登录。" }] }); }
         const response = await fetch(state.platformOrigin + "/api/v1/client-runtime/images/generations", { method: "POST", redirect: "manual", headers: { Authorization: "Bearer " + state.capability, "Content-Type": "application/json" }, body: JSON.stringify(args), signal: request.signal });
         const data = await response.json().catch(() => null);
         if (!response.ok || !data?.data?.length) return reply({ isError: true, content: [{ type: "text", text: "Image generation failed; check platform access and quota" }] });
@@ -76,6 +109,8 @@ export async function pictureBridge(statePath, readyPath) {
       try { body = await request.json(); } catch { return Response.json({ error: "JSON required" }, { status: 400 }); }
       if (!state.images.some((m) => m.id === body?.model)) return Response.json({ error: "Image model not authorized" }, { status: 403 });
       try {
+        const refusal = await quotaGuard(state);
+        if (refusal) return refusal;
         const response = await fetch(state.platformOrigin + "/api/v1/client-runtime/images/generations", {
           method: "POST", redirect: "manual", headers: { Authorization: "Bearer " + state.capability, "Content-Type": "application/json" },
           body: JSON.stringify(body), signal: request.signal,

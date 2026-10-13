@@ -5,9 +5,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { localMagpieURL } from "./images.mjs";
 import { adaptModelResponse, importBootstrap, privateJSON, syncAccountProfile } from "./helpers.mjs";
 import { costForHost, syncPricing } from "./pricing.mjs";
-import { recordQuota } from "./quota.mjs";
+import { localQuotaControl, personalQuota, quotaForMagpie, quotaReader, quotaRefusal, recordQuota, saveQuotaControl } from "./quota.mjs";
 
 export default async function AIGatewayUserPlugin(input) {
+  const nativeMagpie = input.project?.id === "magpie";
   const pricingWorker = process.env.AIGATEWAY_PRICING_WORKER === "1";
   const cfg = JSON.parse(await readFile(new URL("./aigateway-user.config.json", import.meta.url), "utf8"));
   const origin = new URL(cfg.platformOrigin);
@@ -60,6 +61,8 @@ export default async function AIGatewayUserPlugin(input) {
     }
     return data;
   };
+  const readQuota = quotaReader((access, fresh) =>
+    call("/api/v1/client-runtime/usage" + (fresh ? "?fresh=true" : ""), undefined, access));
   const method = (label, purpose) => ({
     type: "oauth", label,
     async authorize() {
@@ -118,7 +121,7 @@ export default async function AIGatewayUserPlugin(input) {
       if (!Number.isInteger(ready.port) || ready.port < 1 || ready.port > 65535) throw new Error();
       const live = await fetch(`http://127.0.0.1:${ready.port}/health`, { headers: { Authorization: "Bearer " + ready.nonce }, signal: AbortSignal.timeout(2000) }).then((r) => r.json());
       if (live.providerId !== cfg.providerId) throw new Error();
-      if (live.bridgeVersion !== 2) {
+      if (live.bridgeVersion !== 3) {
         process.kill(ready.pid, "SIGTERM");
         for (let i = 0; i < 50; i++) {
           try { process.kill(ready.pid, 0); await new Promise((r) => setTimeout(r, 100)); }
@@ -206,7 +209,7 @@ export default async function AIGatewayUserPlugin(input) {
     type: "oauth", label: "查看额度趋势",
     async authorize() {
       const auth = await currentAuthorization();
-      const usage = await call("/api/v1/client-runtime/usage", undefined, auth.access);
+      const usage = await readQuota(auth.access);
       const file = await recordQuota(directory, cfg, usage);
       if (!file) throw new Error("平台未返回有效的额度快照时间");
       const view = pathToFileURL(file);
@@ -216,6 +219,54 @@ export default async function AIGatewayUserPlugin(input) {
         async callback() { return { ...auth, type: "success", accountId: userName ?? cfg.userId, uid: cfg.userId }; } };
     },
   };
+  const controlReading = async () => {
+    const auth = await currentAuthorization();
+    const usage = await readQuota(auth.access, true);
+    const window = personalQuota(usage);
+    if (!window) throw new Error("未配置个人额度，不能启用 magpie 额度阻断");
+    return { auth, forced: !window.aside };
+  };
+  const quotaChoices = [
+    { value: "on", label: "开启 magpie 本地阻断", hint: "按个人额度提前拦截，并记录原生卡片趋势" },
+    { value: "off", label: "关闭 magpie 本地阻断", hint: "仅展示额度，不新增原生趋势采样" },
+  ];
+  const quotaControl = {
+    type: "oauth", label: "额度控制",
+    // The host forwards chosen inputs to authorize only when prompts are declared.
+    prompts: [{ type: "select", key: "magpieBlock", message: "magpie 本地额度控制", options: quotaChoices,
+      validate(value) { return ["on", "off"].includes(value) ? undefined : "无效的额度控制选项"; } }],
+    async ask(inputs = {}) {
+      const { forced } = await controlReading();
+      if (forced) return null;
+      if (inputs.magpieBlock !== undefined) {
+        if (!["on", "off"].includes(inputs.magpieBlock)) throw new Error("无效的额度控制选项");
+        return null;
+      }
+      const enabled = await localQuotaControl(directory, cfg);
+      return { type: "select", key: "magpieBlock",
+        message: `平台仅记录、不阻断。magpie 本地阻断当前${enabled ? "开启" : "关闭"}；此选项不修改平台预算。`,
+        options: quotaChoices };
+    },
+    async authorize(inputs = {}) {
+      const { forced } = await controlReading();
+      if (inputs.magpieBlock !== undefined && !["on", "off"].includes(inputs.magpieBlock))
+        throw new Error("无效的额度控制选项");
+      if (forced && inputs.magpieBlock === "off") throw new Error("平台已强制开启预算阻断，不可关闭");
+      if (!forced && inputs.magpieBlock === undefined) throw new Error("请选择 magpie 本地额度控制方式");
+      return { url: "", method: "auto",
+        instructions: forced ? "平台已强制开启预算阻断，不可关闭。magpie 同步执行本地阻断。"
+          : `magpie 本地阻断将${inputs.magpieBlock === "on" ? "开启" : "关闭"}；平台预算和历史数据不变。`,
+        async callback() {
+          // Recheck after selection: an administrator may have changed the platform policy.
+          const current = await controlReading();
+          if (current.forced && inputs.magpieBlock === "off")
+            throw new Error("平台已强制开启预算阻断，不可关闭");
+          if (!current.forced && inputs.magpieBlock !== undefined)
+            await saveQuotaControl(directory, cfg, inputs.magpieBlock === "on");
+          return { ...current.auth, type: "success", accountId: userName ?? cfg.userId, uid: cfg.userId };
+        } };
+    },
+  };
   return {
     config: async (config) => {
       config.provider ??= {};
@@ -223,7 +274,7 @@ export default async function AIGatewayUserPlugin(input) {
     },
     auth: {
       provider: cfg.providerId,
-      methods: [refreshModels, method("重新登录", "reauth"), quotaTrend],
+      methods: [refreshModels, method("重新登录", "reauth"), quotaTrend, quotaControl],
       refreshLead: 60_000,
       async refresh(auth) {
         const next = await refreshAuthorization(auth);
@@ -234,9 +285,9 @@ export default async function AIGatewayUserPlugin(input) {
       },
       async usage(getAuth) {
         const auth = await getAuth(); if (auth?.type !== "oauth" || !auth.access) throw expired();
-        const usage = await call("/api/v1/client-runtime/usage", undefined, auth.access);
+        const usage = await readQuota(auth.access);
         await recordQuota(directory, cfg, usage).catch(() => {});
-        return usage;
+        return input.project?.id === "magpie" ? quotaForMagpie(directory, cfg, usage) : usage;
       },
       async loader(getAuth) {
         const auth = await getAuth(); if (auth?.type !== "oauth" || !auth.access) throw expired();
@@ -252,6 +303,12 @@ export default async function AIGatewayUserPlugin(input) {
               || !allowed.includes(path) || url.username || url.password || url.search || url.hash)
             throw new Error("Refusing credentials outside the user runtime");
           const current = await getAuth(); if (current?.type !== "oauth" || !current.access) throw expired();
+          if (nativeMagpie && !(path === "/models" || path === "/v1/models")) {
+            const usage = await readQuota(current.access);
+            const window = personalQuota(usage);
+            const refusal = quotaRefusal(usage, window && !window.aside ? true : await localQuotaControl(directory, cfg));
+            if (refusal) return refusal;
+          }
           const headers = new Headers(input instanceof Request ? input.headers : undefined);
           new Headers(init.headers).forEach((v, k) => headers.set(k, v));
           for (const k of ["authorization", "ocp-apim-subscription-key", "x-api-key", "x-user-id", "x-user-email", "x-turnstile-client-context"])

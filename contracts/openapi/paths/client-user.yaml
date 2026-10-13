@@ -190,6 +190,14 @@ paths:
       - Client User
       summary: Usage
       operationId: usage_api_v1_client_runtime_usage_get
+      parameters:
+      - name: fresh
+        in: query
+        required: false
+        description: Bypass the 60-second usage cache for an explicit quota-control decision; ordinary polling keeps the cache.
+        schema:
+          type: boolean
+          default: false
       responses:
         '200':
           description: Successful Response

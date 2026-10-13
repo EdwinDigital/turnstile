@@ -8,6 +8,67 @@ const escape = value => String(value).replace(/[&<>"']/g, char => ({
 })[char]);
 const number = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
+export function personalQuota(usage) {
+  const windows = (usage.windows ?? []).filter(window => window.name === "个人月度 Token");
+  if (!windows.length) return null;
+  const window = windows[0];
+  if (windows.length !== 1 || typeof window.aside !== "boolean"
+      || !number(window.amount) || !number(window.limit) || !window.limit
+      || !number(window.used) || window.used > 100
+      || !number(window.span) || !window.span || !Number.isFinite(Date.parse(window.resetsAt)))
+    throw new Error("平台个人额度信息无效，不能修改额度控制");
+  return window;
+}
+
+export async function localQuotaControl(directory, cfg) {
+  let saved;
+  try { saved = JSON.parse(await readFile(join(directory, "quota-control.json"), "utf8")); }
+  catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  if (saved.version !== 1 || saved.userId !== cfg.userId || typeof saved.enabled !== "boolean")
+    throw new Error("本地额度控制配置无效，保留原文件");
+  return saved.enabled;
+}
+
+export async function saveQuotaControl(directory, cfg, enabled) {
+  if (typeof enabled !== "boolean") throw new Error("Invalid local quota control");
+  await localQuotaControl(directory, cfg);
+  await privateJSON(join(directory, "quota-control.json"), { version: 1, userId: cfg.userId, enabled });
+}
+
+export async function quotaForMagpie(directory, cfg, usage) {
+  const window = personalQuota(usage);
+  // Platform blocking always wins, including over a disabled or corrupt local preference.
+  if (!window || !window.aside || !await localQuotaControl(directory, cfg)) return usage;
+  return { ...usage, windows: usage.windows.map(item => item === window ? { ...item, aside: false } : item) };
+}
+
+export function quotaRefusal(usage, enabled) {
+  const window = personalQuota(usage);
+  if (!window || window.aside && !enabled || window.amount < window.limit) return null;
+  return Response.json({ error: { type: "insufficient_quota", code: "aigateway_local_quota_exceeded",
+    message: "个人月度额度已用尽，magpie 插件已在本地阻断；请等待额度重置或联系平台管理员。" } },
+  { status: 429, headers: { "cache-control": "no-store" } });
+}
+
+export function quotaReader(read) {
+  let snapshot, pending;
+  return async (access, fresh = false) => {
+    if (!fresh && snapshot?.access === access && snapshot.until > Date.now()) return snapshot.usage;
+    if (!fresh && pending?.access === access) return pending.promise;
+    const promise = (async () => {
+      const usage = await read(access, fresh), observed = Date.parse(usage.as_of);
+      if (!Number.isFinite(observed)) throw new Error("平台未返回有效的额度快照时间");
+      if (!snapshot || snapshot.access !== access || !Number.isFinite(Date.parse(snapshot.usage.as_of))
+          || observed >= Date.parse(snapshot.usage.as_of))
+        snapshot = { access, usage, until: Math.min(Date.now() + 60000, Number.isFinite(observed) ? observed + 60000 : 0) };
+      return snapshot.access === access ? snapshot.usage : usage;
+    })();
+    const current = { access, promise }; pending = current;
+    try { return await promise; }
+    finally { if (pending === current) pending = undefined; }
+  };
+}
+
 export function quotaHTML(history, usage) {
   let observed = Date.parse(usage.as_of);
   const charts = (usage.windows ?? []).map(window => {
@@ -24,7 +85,7 @@ export function quotaHTML(history, usage) {
     const coords = points.filter(point => point.reset === current.reset)
       .map(point => `${x(point).toFixed(2)},${y(point).toFixed(2)}`).join(" ");
     return `<section><h2>${escape(window.name)}</h2><p class="metric">${current.amount.toLocaleString("en-US")} / ${current.limit.toLocaleString("en-US")} Token</p>
-<p>剩余 ${Math.max(0, current.limit - current.amount).toLocaleString("en-US")} Token · ${current.aside ? "仅记录，不阻断" : "平台预算阻断已启用"}</p>
+<p>剩余 ${Math.max(0, current.limit - current.amount).toLocaleString("en-US")} Token · ${current.aside ? "平台仅记录，不阻断" : "平台预算阻断已启用"}</p>
 <div class="plot"><div class="axis" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div><svg viewBox="0 0 800 248" role="img" aria-label="个人剩余额度百分比的真实采样趋势"><path class="grid" d="M32 24H768 M32 120H768 M32 216H768"/>
 <polyline class="line" points="${coords}"/><circle cx="${x(current).toFixed(2)}" cy="${y(current).toFixed(2)}" r="4"/></svg></div>
 <div class="dates"><time datetime="${escape(new Date(start).toISOString())}"></time><time datetime="${escape(current.reset)}"></time></div>
