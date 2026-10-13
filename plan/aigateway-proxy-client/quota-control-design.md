@@ -75,3 +75,5 @@ loader 还执行调用前额度检查，超额返回本地 429 且不发送模�
 - 原生证据：`/var/folders/_n/vxzws45j78148dvlcyxmc7680000gn/T/ts-quota-control-native-ggh7nz82/`；
   私有测试脚本 `/tmp/ts-quota-control-check-20261013/native.py`。
   上线结果另行记录，不将开发模拟数据当作生产预算或真实调用证明。
+
+上线、真实额度卡片及模型对账见 [0.4.2 上线验收](release-quota-control-2026-10-13.md)。
