@@ -391,6 +391,10 @@ def test_data_plane_creates_an_entra_only_budget_ledger() -> None:
     assert "publicNetworkAccess: 'Enabled'" in DATA_PLANE
     assert "bypass: 'AzureServices'" in DATA_PLANE
     assert "name: ledgerTableName" in DATA_PLANE
+    assert (
+        "var ledgerTableEndpoint = 'https://${ledgerStorage.name}.table."
+        "${environment().suffixes.storage}'" in DATA_PLANE
+    )
     assert "output ledgerTableEndpoint string = ledgerTableEndpoint" in DATA_PLANE
 
 

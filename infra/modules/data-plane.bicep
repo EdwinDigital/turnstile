@@ -329,7 +329,7 @@ resource routeTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023
   name: 'ModelRoutes'
 }
 
-var ledgerTableEndpoint = ledgerStorage.properties.primaryEndpoints.table
+var ledgerTableEndpoint = 'https://${ledgerStorage.name}.table.${environment().suffixes.storage}'
 
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' = {
   name: virtualNetworkName
