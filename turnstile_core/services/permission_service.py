@@ -30,6 +30,10 @@ class PermissionService:
                 }
                 for module, menu, label, source in MENU_CATALOG
             ],
+            "download_catalog": [
+                {"id": "user-plugin", "label": "下载用户版插件"},
+                {"id": "subscription-plugin", "label": "下载订阅版插件"},
+            ],
         }
 
     def save(self, principal: DirectoryPrincipal, write: PermissionPolicyWrite) -> dict[str, Any]:
@@ -43,11 +47,20 @@ class PermissionService:
                     "permission_revision_conflict", "Permission configuration changed", 409
                 )
             normalized = {key: sorted(value) for key, value in write.groups.items()}
-            if normalized != {key: sorted(value) for key, value in before["groups"].items()}:
+            downloads = write.download_groups if write.download_groups is not None else before[
+                "download_groups"
+            ]
+            changed_downloads = {key: sorted(value) for key, value in downloads.items()} != {
+                key: sorted(value) for key, value in before["download_groups"].items()
+            }
+            if changed_downloads or normalized != {
+                key: sorted(value) for key, value in before["groups"].items()
+            }:
                 connection.execute(
-                    """UPDATE permission_policy SET groups=%s,revision=revision+1,
+                    """UPDATE permission_policy
+                       SET groups=%s,download_groups=%s,revision=revision+1,
                        updated_at=now(),updated_by=%s WHERE singleton""",
-                    (Jsonb(write.groups), principal.email),
+                    (Jsonb(write.groups), Jsonb(downloads), principal.email),
                 )
                 connection.execute(
                     """INSERT INTO permission_policy_audit(
@@ -55,8 +68,9 @@ class PermissionService:
                        VALUES (%s,%s,%s,%s)""",
                     (
                         before["revision"] + 1,
-                        Jsonb(before["groups"]),
-                        Jsonb(write.groups),
+                        Jsonb({"version": 2, "groups": before["groups"],
+                               "download_groups": before["download_groups"]}),
+                        Jsonb({"version": 2, "groups": write.groups, "download_groups": downloads}),
                         principal.email,
                     ),
                 )

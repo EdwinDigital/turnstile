@@ -144,9 +144,10 @@ class DirectoryStore:
                 "SELECT to_regclass('permission_policy') AS relation"
             ).fetchone()
             policy_row = connection.execute(
-                "SELECT groups FROM permission_policy WHERE singleton"
+                "SELECT groups,download_groups FROM permission_policy WHERE singleton"
             ).fetchone() if policy_exists and policy_exists["relation"] else None
             policy = dict(policy_row["groups"]) if policy_row else None
+            download_policy = dict(policy_row["download_groups"]) if policy_row else None
             rows = self.people_rows(connection, account_id=account_id)
             person = next(
                 (p for p in rows if p["status"] == "active" and not p["manual_disabled"]
@@ -168,6 +169,7 @@ class DirectoryStore:
                               for item in person["menu_administrator_scopes"]) if person else ()
                     ),
                     permission_policy=policy,
+                    download_policy=download_policy,
                 )
             subject = connection.execute(
                 "SELECT 1 FROM directory_department_grant WHERE app_user_id = %s LIMIT 1",
@@ -220,6 +222,7 @@ class DirectoryStore:
                       for item in person["menu_administrator_scopes"]) if person else ()
             ),
             permission_policy=policy,
+            download_policy=download_policy,
         )
         if policy is None:
             raise DirectoryError(

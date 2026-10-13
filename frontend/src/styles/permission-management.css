@@ -34,3 +34,12 @@
   .permission-matrix-scroll { padding: 0 12px 12px; }
   .permission-matrix th:first-child { min-width: 132px; }
 }
+.permission-section { margin-bottom: 24px; min-width: 0; }
+.permission-section > summary { display: flex; align-items: center; gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 15px; font-weight: 600; list-style: none; }
+.permission-section > summary::-webkit-details-marker { display: none; }
+.permission-section > summary > svg { transform: rotate(-90deg); flex: 0 0 auto; }
+.permission-section[open] > summary > svg { transform: none; }
+.permission-section > summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.permission-description { margin: 12px 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.7; }
+.permission-module th [data-slot="button"] { justify-content: flex-start; padding-inline: 0; font: inherit; }
+.permission-chevron-closed { transform: rotate(-90deg); }

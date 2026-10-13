@@ -1,5 +1,18 @@
 # Testing
 
+`020_plugin_download_permissions` adds the four-role download matrix to the existing
+permission policy. Existing menu choices, revisions, audit history, browser sessions,
+budgets and usage are preserved; user-plugin downloads remain enabled for all groups,
+while subscription-plugin downloads remain Owner-only until explicitly delegated.
+Validate atomic menu/download saves, CAS conflicts, menu-only client compatibility,
+existing-session revocation, and rejection before key reads or grant creation.
+Delegation permits only applications owned by that account; it does not grant access
+to another application's subscription key or change model/gateway authorization.
+The PostgreSQL upgrade test checks 001-019 checksums and business history, then reruns
+the standard migration entry point as a no-op. Browser QA checks collapsible sections,
+desktop two-column/mobile single-column downloads, independent card visibility and
+the absence of requests for hidden editions.
+
 `019_client_user_authorization` adds independent desktop device authorizations,
 hashed user token families, and generation-checked imports. It does not change existing
 browser sessions, subscription keys, historical usage, or budget evidence. User mode remains

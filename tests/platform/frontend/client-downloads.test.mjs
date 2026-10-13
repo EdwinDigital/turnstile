@@ -15,6 +15,7 @@ async function compile(path) {
   try { return (await bundle.generate({ format: "cjs" })).output[0].code }
   finally { await bundle.close() }
 }
+const authCode = await compile("api/auth.ts")
 const apiCode = await compile("api/client-downloads.ts")
 const pageCode = await compile("pages/client-downloads-page.tsx")
 const item = { application_id: "app-uuid", subscription_id: "subscription-uuid",
@@ -25,6 +26,8 @@ function load(code, require, globals = {}) {
   vm.runInNewContext(code, { exports: module.exports, module, require, AbortController, Error, ...globals })
   return module.exports
 }
+
+const authHelpers = load(authCode, () => ({ apiUrl: path => path, ApiError: Error }))
 
 function api(disposition) {
   const calls = []
@@ -73,6 +76,7 @@ for (const [userMode, prefix, label] of [
           : { enabled: true, user_name: "Edwin" },
       }) }
       if (name === "../api/client-downloads") return { clientDownloadsApi: view.downloads }
+      if (name === "../api/auth") return authHelpers
       if (name === "../providers/auth-provider") return { useAuth: () => ({ user: { id: "user-uuid", role: "owner" } }) }
       if (name === "../components/ui/button") return { Button: "button" }
       if (name === "lucide-react") return { Download: "icon", PanelLeft: "icon", RefreshCw: "icon", ShieldCheck: "icon" }
@@ -127,3 +131,47 @@ for (const header of [undefined, 'attachment; filename="../../danger.zip"',
     assert.equal((await view.downloads.downloadUser()).filename, "aigateway-proxy-user-user.zip")
   })
 }
+
+for (const permissions of [[], ["user-plugin"], ["subscription-plugin"], ["user-plugin", "subscription-plugin"]]) {
+  test(`download cards and queries follow independent permissions: ${permissions.join(",") || "none"}`, () => {
+    const user = { id: "member", role: "member", download_permissions: permissions }
+    const queries = [], jsx = (type, props) => ({ type, props })
+    const page = load(pageCode, name => {
+      if (name === "react") return { useEffect: () => {}, useRef: value => ({ current: value }),
+        useState: value => [value, () => {}] }
+      if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" }
+      if (name === "@tanstack/react-query") return { useQuery: options => {
+        queries.push(options)
+        return { data: options.queryKey[0] === "client-downloads"
+          ? { items: [item], key_management_available: true } : { enabled: true, user_name: "Member" } }
+      } }
+      if (name === "../api/client-downloads") return { clientDownloadsApi: {} }
+      if (name === "../api/auth") return authHelpers
+      if (name === "../providers/auth-provider") return { useAuth: () => ({ user }) }
+      if (name === "../components/ui/button") return { Button: "button" }
+      if (name === "lucide-react") return { Download: "icon", PanelLeft: "icon", RefreshCw: "icon", ShieldCheck: "icon" }
+      throw new Error(`Unexpected import ${name}`)
+    })
+    const nodes = []
+    function visit(node) {
+      if (Array.isArray(node)) { node.forEach(visit); return }
+      if (!node || typeof node !== "object") return
+      nodes.push(node); visit(node.props?.children)
+    }
+    visit(page.ClientDownloadsPage({ onToggleSidebar: () => {} }))
+    const titles = nodes.filter(n => n.type === "h2").map(n => n.props.children)
+    assert.equal(titles.includes("AIGateway-Proxy 用户版"), permissions.includes("user-plugin"))
+    assert.equal(titles.includes("AIGateway-Proxy 订阅版"), permissions.includes("subscription-plugin"))
+    assert.equal(queries.find(q => q.queryKey[0] === "client-user-options").enabled, permissions.includes("user-plugin"))
+    assert.equal(queries.find(q => q.queryKey[0] === "client-downloads").enabled, permissions.includes("subscription-plugin"))
+    assert.equal(titles.includes("订阅版导入 magpie"), false)
+  })
+}
+
+test("download permission defaults preserve legacy behavior and never restrict Owner", () => {
+  assert.equal(authHelpers.canDownloadPlugin({ role: "member" }, "user-plugin"), true)
+  assert.equal(authHelpers.canDownloadPlugin({ role: "member" }, "subscription-plugin"), false)
+  assert.equal(authHelpers.canDownloadPlugin({ role: "member", download_permissions: [] }, "user-plugin"), false)
+  assert.equal(authHelpers.canDownloadPlugin({ role: "owner", download_permissions: [] }, "subscription-plugin"), true)
+  assert.equal(authHelpers.canDownloadPlugin(null, "user-plugin"), false)
+})

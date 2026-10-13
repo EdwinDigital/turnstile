@@ -29,6 +29,7 @@ from turnstile_core.services.application_access import ApplicationAccessService
 from turnstile_core.services.directory_catalog import catalog_for, directory_store
 
 from .auth_service import SessionIdentity
+from .client_download_permissions import require_plugin_download
 from .client_downloads import RESERVED, SDK
 from .client_icons import PluginIconUnavailable, load_plugin_icons
 from .client_namespace import plugin_namespace
@@ -102,6 +103,7 @@ class ClientUserService:
         return plugin_filename("aigateway-proxy-user", identity.name or identity.email, "user")
 
     def package(self, identity: SessionIdentity) -> bytes:
+        require_plugin_download(identity, "user-plugin")
         self.require_enabled()
         try:
             icons = load_plugin_icons()

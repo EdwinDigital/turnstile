@@ -10,7 +10,12 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from .data_access import DataAccessScope
-from .menu_permissions import MenuPermissionGroup, menu_permissions
+from .menu_permissions import (
+    DownloadPermission,
+    MenuPermissionGroup,
+    download_permissions,
+    menu_permissions,
+)
 
 DirectoryStatus = Literal["active", "inactive", "archived"]
 AdministratorScopeKind = Literal["organization", "department", "team"]
@@ -51,6 +56,7 @@ class DirectoryPrincipal(DirectoryModel):
     menu_administrator_scopes: tuple[MenuAdministratorScope, ...] = ()
     data_scope: DataAccessScope | None = None
     permission_policy: dict[str, list[str]] | None = None
+    download_policy: dict[str, list[str]] | None = None
 
     def is_menu_administrator(self, scope_kind: AdministratorScopeKind, scope_id: str) -> bool:
         return any(
@@ -75,6 +81,12 @@ class DirectoryPrincipal(DirectoryModel):
     def menu_permissions(self) -> tuple[str, ...]:
         return menu_permissions(
             self.menu_permission_groups, owner=self.owner, policy=self.permission_policy,
+        )
+
+    @property
+    def download_permissions(self) -> tuple[DownloadPermission, ...]:
+        return download_permissions(
+            self.menu_permission_groups, owner=self.owner, policy=self.download_policy,
         )
 
     @property

@@ -10,6 +10,7 @@ from turnstile_core.services.control_plane import (
     ControlPlaneUnavailableError,
 )
 
+from ..services.client_download_permissions import require_plugin_download
 from ..services.client_downloads import (
     ClientDownloadOptions,
     ClientDownloadRequest,
@@ -18,7 +19,7 @@ from ..services.client_downloads import (
 from ..services.download_filename import attachment_header
 from .dependencies import Repository
 from .service_dependencies import ApplicationAccessServiceDependency
-from .session import Config, OwnerSession, require_allowed_write_origin
+from .session import Config, CurrentSession, require_allowed_write_origin
 
 router = APIRouter(
     prefix="/api/v1/client-downloads", tags=["Client Downloads"],
@@ -38,8 +39,9 @@ Service = Annotated[ClientDownloadService, Depends(client_download_service)]
 
 @router.get("/options", response_model=ClientDownloadOptions)
 def options(
-    identity: OwnerSession, service: Service, response: Response,
+    identity: CurrentSession, service: Service, response: Response,
 ) -> ClientDownloadOptions:
+    require_plugin_download(identity, "subscription-plugin")
     response.headers.update(HEADERS)
     return service.options(identity)
 
@@ -48,7 +50,8 @@ def options(
     200: {"description": "Private magpie plugin ZIP including subscription credentials",
           "content": {"application/zip": {"schema": {"type": "string", "format": "binary"}}}},
 })
-def download(identity: OwnerSession, service: Service, body: ClientDownloadRequest) -> Response:
+def download(identity: CurrentSession, service: Service, body: ClientDownloadRequest) -> Response:
+    require_plugin_download(identity, "subscription-plugin")
     try:
         archive = service.download(identity, body)
     except ControlPlaneNotFoundError as error:

@@ -9,7 +9,8 @@ def test_all_page_ids_have_menu_definitions_and_personal_fallback_is_available()
 
     assert set(re.findall(r'"([a-z-]+)"', ids)) == set(ALL_MENUS) | {"client-downloads"}
     navigation = (FRONTEND_SOURCE / "lib/menu-access.ts").read_text()
-    assert 'if (page === "client-downloads") return true' in navigation
+    assert 'canDownloadPlugin(user, "user-plugin")' in navigation
+    assert 'canDownloadPlugin(user, "subscription-plugin")' in navigation
     for menus in MENU_GROUPS.values():
         assert {"user-settings", "finops-invoke"} <= set(menus)
         assert len(set(menus)) == len(menus)

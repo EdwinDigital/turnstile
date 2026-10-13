@@ -1398,10 +1398,10 @@ export function App() {
                       <Settings size={16} />
                       <span>用户设置</span>
                     </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => { navigatePage("client-downloads"); setSidebarOpenMobile(false); }}>
+                    {canAccessMenu(user, "client-downloads") && <DropdownMenuItem onClick={() => { navigatePage("client-downloads"); setSidebarOpenMobile(false); }}>
                       <Download size={16} />
                       <span>下载客户端</span>
-                    </DropdownMenuItem>
+                    </DropdownMenuItem>}
                     <DropdownMenuItem onClick={() => void signOut()}>
                       <LogOut size={16} />
                       <span>退出登录</span>

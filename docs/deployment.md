@@ -90,6 +90,18 @@ local-key authentication or weaken networking merely to complete installation.
 
 ### User settings database upgrade
 
+The plugin-download permission update adds `020_plugin_download_permissions` to the
+existing permission policy. Run the standard migration entry point before starting
+the new API; preserve 001-019 checksums and existing business history. It also changes
+shared Core code, so stage matching API, Telemetry and Control-plane manifests and
+expected Core digests using the existing coordinated upgrade procedure. It is not
+an API-only or frontend-only hotfix. APIM policy and infrastructure do not change.
+Default downloads preserve the prior behavior: all role groups may download their
+user plugin, and only Owner may export subscription plugins until delegation is
+explicitly configured. Subscription delegation never grants another application's key.
+Do not roll new download-deny policies back to an API that cannot enforce them;
+retain a compatible secured runtime or keep the affected downloads in maintenance.
+
 For the permission-management upgrade, apply pending `018_permission_management` using
 the same `backend.migrate` entry point before the candidate API starts. Preserve 001-017
 checksums and business tables; 018 adds only policy/audit and the effective-appointment

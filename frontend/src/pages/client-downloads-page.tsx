@@ -2,18 +2,22 @@ import { type FormEvent, useEffect, useRef, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Download, PanelLeft, RefreshCw, ShieldCheck } from "lucide-react"
 import { clientDownloadsApi } from "../api/client-downloads"
+import { canDownloadPlugin } from "../api/auth"
 import { Button } from "../components/ui/button"
 import { useAuth } from "../providers/auth-provider"
 
 export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () => void }) {
   const { user } = useAuth()
+  const canDownloadUser = canDownloadPlugin(user, "user-plugin")
+  const canDownloadSubscription = canDownloadPlugin(user, "subscription-plugin")
   const query = useQuery({
     queryKey: ["client-downloads", user?.id, user?.directory_permission_revision],
-    queryFn: ({ signal }) => clientDownloadsApi.options(signal), enabled: user?.role === "owner", staleTime: 0,
+    queryFn: ({ signal }) => clientDownloadsApi.options(signal), enabled: canDownloadSubscription, staleTime: 0,
   })
   const personal = useQuery({
-    queryKey: ["client-user-options", user?.id], queryFn: ({ signal }) => clientDownloadsApi.userOptions(signal),
-    enabled: Boolean(user), staleTime: 60_000,
+    queryKey: ["client-user-options", user?.id, user?.directory_permission_revision],
+    queryFn: ({ signal }) => clientDownloadsApi.userOptions(signal),
+    enabled: canDownloadUser, staleTime: 60_000,
   })
   const [subscription, setSubscription] = useState("")
   const [keyKind, setKeyKind] = useState<"primary" | "secondary">("primary")
@@ -23,11 +27,14 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const activeDownload = useRef<AbortController | null>(null)
-  useEffect(() => () => { activeDownload.current?.abort() }, [user?.id])
+  useEffect(() => {
+    setBusy(false); setError(""); setNotice("")
+    return () => { activeDownload.current?.abort(); activeDownload.current = null }
+  }, [user?.id, canDownloadUser, canDownloadSubscription])
   const items = query.data?.items ?? []
   const selected = items.find((item) => item.subscription_id === subscription) ?? items[0]
   async function downloadUser() {
-    if (activeDownload.current || !userAcknowledged) return
+    if (!canDownloadUser || activeDownload.current || !userAcknowledged) return
     const controller = new AbortController()
     activeDownload.current = controller
     setBusy(true); setError(""); setNotice("")
@@ -43,13 +50,15 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "下载失败，请重试。")
     } finally {
-      activeDownload.current = null
-      if (!controller.signal.aborted) setBusy(false)
+      if (activeDownload.current === controller) {
+        activeDownload.current = null
+        if (!controller.signal.aborted) setBusy(false)
+      }
     }
   }
   async function download(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!selected || activeDownload.current) return
+    if (!canDownloadSubscription || !selected || activeDownload.current) return
     const controller = new AbortController()
     activeDownload.current = controller
     setBusy(true); setError(""); setNotice("")
@@ -65,8 +74,10 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "下载失败，请重试。")
     } finally {
-      activeDownload.current = null
-      if (!controller.signal.aborted) setBusy(false)
+      if (activeDownload.current === controller) {
+        activeDownload.current = null
+        if (!controller.signal.aborted) setBusy(false)
+      }
     }
   }
   return <div className="finops-workspace client-downloads-workspace">
@@ -76,7 +87,9 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     </div></header>
     <div className="finops-scroll-region"><div className="client-downloads-content">
       <header><h1>AIGateway-Proxy</h1><p>将平台订阅导入 magpie，供其他 Agent 使用。</p></header>
-      <section className="client-downloads-card">
+      {!canDownloadUser && !canDownloadSubscription && <p role="status">当前角色没有插件下载权限。</p>}
+      <div className="client-downloads-panels">
+      {canDownloadUser && <section className="client-downloads-card">
         <div className="client-downloads-heading"><ShieldCheck size={22} /><div><h2>AIGateway-Proxy 用户版</h2><p>指定用户下载 · 已授权并绑定平台默认订阅，安装后即可使用。</p></div><span data-no-localize>v{personal.data?.plugin_version ?? "0.4.4"}</span></div>
         <p>当前用户：<span data-no-localize>{personal.data?.user_name ?? user?.email}</span></p>
         <p>解压后的文件夹名称与 ZIP 文件名一致（不含 .zip），与下方订阅版独立，可同时安装。</p>
@@ -89,12 +102,10 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
         <div className="client-downloads-warning" id="client-user-secret-warning"><ShieldCheck size={18} /><p>用户版下载包包含个人登录凭据，不包含 APIM 密钥。请勿分享、上传或提交到仓库。</p></div>
         <label className="client-downloads-consent"><input type="checkbox" checked={userAcknowledged} disabled={busy} aria-describedby="client-user-secret-warning" onChange={event => setUserAcknowledged(event.target.checked)} />我已了解用户版下载包包含个人登录凭据</label>
         <Button type="button" onClick={() => void downloadUser()} disabled={busy || !personal.data?.enabled || !userAcknowledged}><Download size={16} />{busy ? "正在生成安装包" : "下载用户版插件"}</Button>
-        {error && <p role="alert" className="client-downloads-error">{error}</p>}
-        <p role="status">{notice}</p>
-      </section>
-      <section className="client-downloads-card">
+      </section>}
+      {canDownloadSubscription && <section className="client-downloads-card">
         <div className="client-downloads-heading"><Download size={22} /><div><h2>AIGateway-Proxy 订阅版</h2><p>指定订阅下载 · 保留订阅密钥认证方式，解压目录与 ZIP 文件名一致。</p></div><span data-no-localize>v{query.data?.plugin_version ?? "0.1.4"}</span></div>
-        {user?.role !== "owner" ? <p role="status">当前核心验证阶段仅支持 Owner 下载。</p> : query.isPending ? <p role="status">正在加载</p> : query.isError ? <div role="alert"><p>{query.error.message}</p><Button variant="outline" onClick={() => void query.refetch()}><RefreshCw size={16} />重试</Button></div>
+        {query.isPending ? <p role="status">正在加载</p> : query.isError ? <div role="alert"><p>{query.error.message}</p><Button variant="outline" onClick={() => void query.refetch()}><RefreshCw size={16} />重试</Button></div>
           : !items.length ? <p role="status">没有可下载的应用订阅。请联系管理员配置本人应用订阅。</p>
           : <form action="/api/v1/client-downloads/magpie" method="post" onSubmit={(event) => void download(event)}>
             <div className="client-downloads-fields">
@@ -112,12 +123,12 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
             <div className="client-downloads-warning" id="client-secret-warning"><ShieldCheck size={18} /><p>下载包包含订阅密钥。请妥善保管，不要上传到公共仓库或分享给他人。</p></div>
             <label className="client-downloads-consent"><input type="checkbox" name="acknowledged" required checked={acknowledged} disabled={busy} aria-describedby="client-secret-warning" onChange={(event) => setAcknowledged(event.target.checked)} />我已了解下载包包含密钥</label>
             {!query.data?.key_management_available && <p role="alert">暂时无法读取订阅密钥，请联系管理员。</p>}
-            {error && <p role="alert" className="client-downloads-error">{error}</p>}
-            <p role="status">{notice}</p>
             <Button type="submit" disabled={busy || !query.data?.key_management_available || !selected?.models.length}><Download size={16} />{busy ? "正在生成安装包" : "下载插件安装包"}</Button>
           </form>}
-      </section>
-      <section className="client-downloads-card client-downloads-guide"><h2>订阅版导入 magpie</h2><ol><li>解压安装包，将插件文件夹保存在长期目录。</li><li>在 magpie 插件页面添加本地文件夹。</li><li>首次安装自动导入配置；如未登录，选择「导入配置」。</li><li>在 Agent 页面选择该供应商的模型。</li></ol><p>密钥轮换或模型授权更新后，请重新下载。图像生成模型不包含在此对话插件中。</p><a href="https://usemagpie.ai/docs/zh/plugins" target="_blank" rel="noreferrer">查看 magpie 插件文档</a></section>
+      </section>}
+      </div>
+      {error && <p role="alert" className="client-downloads-error">{error}</p>}
+      {notice && <p role="status">{notice}</p>}
     </div></div>
   </div>
 }

@@ -1,4 +1,4 @@
-"""Application navigation entitlements, never gateway or data-scope authorization."""
+"""Menu and download entitlements, never gateway or data-scope authorization."""
 
 from collections.abc import Iterable
 from typing import Literal
@@ -6,6 +6,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MenuPermissionGroup = Literal["user", "organization_admin", "department_admin", "team_admin"]
+DownloadPermission = Literal["user-plugin", "subscription-plugin"]
+DOWNLOAD_PERMISSIONS: tuple[DownloadPermission, ...] = ("user-plugin", "subscription-plugin")
+DOWNLOAD_GROUPS: dict[MenuPermissionGroup, tuple[DownloadPermission, ...]] = {
+    group: ("user-plugin",)
+    for group in ("user", "organization_admin", "department_admin", "team_admin")
+}
 
 PERSONAL_MENUS = ("user-settings", "finops-invoke")
 ANALYSIS_MENUS = (
@@ -86,6 +92,7 @@ class PermissionPolicyWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_revision: int = Field(ge=1)
     groups: dict[MenuPermissionGroup, list[str]]
+    download_groups: dict[MenuPermissionGroup, list[DownloadPermission]] | None = None
 
     @model_validator(mode="after")
     def validate_groups(self) -> "PermissionPolicyWrite":
@@ -102,6 +109,15 @@ class PermissionPolicyWrite(BaseModel):
             group: [menu for menu in ALL_MENUS if menu in values]
             for group, values in self.groups.items()
         }
+        if self.download_groups is not None:
+            if set(self.download_groups) != set(DOWNLOAD_GROUPS):
+                raise ValueError("Provide all four download permission groups")
+            if any(len(values) != len(set(values)) for values in self.download_groups.values()):
+                raise ValueError("Duplicate download permission")
+            self.download_groups = {
+                group: [permission for permission in DOWNLOAD_PERMISSIONS if permission in values]
+                for group, values in self.download_groups.items()
+            }
         return self
 
 
@@ -121,3 +137,16 @@ def menu_permissions(
     }
     allowed.add("user-settings")
     return tuple(menu for menu in ALL_MENUS if menu in allowed)
+
+
+def download_permissions(
+    groups: Iterable[MenuPermissionGroup] = ("user",), *, owner: bool = False,
+    policy: dict[str, list[str]] | None = None,
+) -> tuple[DownloadPermission, ...]:
+    if owner:
+        return DOWNLOAD_PERMISSIONS
+    allowed = {
+        permission for group in groups
+        for permission in (policy.get(group, []) if policy is not None else DOWNLOAD_GROUPS[group])
+    }
+    return tuple(permission for permission in DOWNLOAD_PERMISSIONS if permission in allowed)

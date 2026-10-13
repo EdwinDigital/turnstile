@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import Mock
 from urllib.parse import quote
 from uuid import uuid4
 from zipfile import ZipFile
@@ -96,6 +98,40 @@ def test_options_filter_system_subscriptions_and_never_read_keys(
     assert [item["subscription_name"] for item in response.json()["items"]] == ["Cc Switch"]
     assert "secret" not in response.text
     assert response.json()["items"][0]["models"]
+
+
+def test_delegated_subscription_export_checks_ownership_and_rechecks_permission(
+    service: ClientDownloadService, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = service.options(identity()).items[0]
+    member = replace(identity("member"), download_permissions=("subscription-plugin",))
+    reveal = Mock(wraps=service.applications.reveal_application_subscription_key)
+    monkeypatch.setattr(service.applications, "reveal_application_subscription_key", reveal)
+    request = ClientDownloadRequest(
+        application_id=selected.application_id, subscription_id=selected.subscription_id,
+        gateway_id=selected.gateway_id,
+    )
+    assert service.options(member).items == []
+    with pytest.raises(HTTPException) as forbidden:
+        service.download(member, request)
+    assert forbidden.value.status_code == 404
+    reveal.assert_not_called()
+    repository = service.repository
+    assert isinstance(repository, InMemoryRepository)
+    application = next(row for row in repository.gateway_applications
+                       if row["id"] == selected.application_id)
+    application["owner_id"] = member.id
+    assert [item.subscription_id for item in service.options(member).items] == [
+        selected.subscription_id
+    ]
+    archive = service.download(member, request)
+    assert archive.filename == "aigateway-proxy-Cc-Switch.zip"
+    reveal.assert_called_once()
+    reveal.reset_mock()
+    with pytest.raises(HTTPException) as revoked:
+        service.download(replace(member, download_permissions=()), request)
+    assert revoked.value.status_code == 403
+    reveal.assert_not_called()
 
 
 def test_download_is_private_complete_zip(service: ClientDownloadService) -> None:

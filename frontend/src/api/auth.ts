@@ -2,6 +2,7 @@ import { apiUrl, ApiError } from "./client"
 
 export type SignInMethod = "password" | "entra"
 export type MenuPermissionGroup = "user" | "organization_admin" | "department_admin" | "team_admin"
+export type DownloadPermission = "user-plugin" | "subscription-plugin"
 export type MenuAdministratorScope = {
   scope_kind: "organization" | "department" | "team"
   scope_id: string
@@ -26,6 +27,7 @@ export type AuthUser = {
   menu_permission_groups?: MenuPermissionGroup[]
   menu_administrator_scopes?: MenuAdministratorScope[]
   menu_permissions?: string[]
+  download_permissions?: DownloadPermission[]
   /** Absent only while a newly built frontend is talking to a pre-expiry-field API. */
   session_expires_at?: string
 }
@@ -36,6 +38,14 @@ export function isMenuAdministrator(
   return user?.menu_administrator_scopes?.some(
     (scope) => scope.scope_kind === scopeKind && scope.scope_id === scopeId,
   ) ?? false
+}
+
+export function canDownloadPlugin(
+  user: AuthUser | null | undefined, permission: DownloadPermission,
+): boolean {
+  if (!user) return false
+  if (user.role === "owner") return true
+  return (user.download_permissions ?? ["user-plugin"]).includes(permission)
 }
 
 async function readProfile(): Promise<AuthUser | null> {

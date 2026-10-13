@@ -1,4 +1,6 @@
 export const CLIENT_USER_PHRASES: Record<string, string> = {
+  "AIGateway-Proxy 用户版": "AIGateway-Proxy User Plugin",
+  "AIGateway-Proxy 订阅版": "AIGateway-Proxy Subscription Plugin",
   "解压后的文件夹名称与 ZIP 文件名一致（不含 .zip），与下方订阅版独立，可同时安装。": "The extracted folder matches the ZIP filename without .zip. It is separate from the subscription plugin below; both can be installed together.",
   "指定订阅下载 · 保留订阅密钥认证方式，解压目录与 ZIP 文件名一致。": "Subscription-bound download · Keeps subscription-key authentication; the extracted folder matches the ZIP filename.",
   "平台默认订阅：": "Platform default subscription:",

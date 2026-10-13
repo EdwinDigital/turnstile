@@ -17,6 +17,7 @@ from turnstile_core.config import get_settings
 from turnstile_core.domain.models import StrictModel
 
 from ..services.auth_service import hash_session_token
+from ..services.client_download_permissions import require_plugin_download
 from ..services.client_user import USER_PLUGIN_VERSION, ClientUserService
 from ..services.client_user_store import ClientUserStore
 from ..services.download_filename import attachment_header
@@ -107,6 +108,7 @@ def authorized(request: Request, service: ClientUserService) -> tuple[dict[str, 
 
 @router.get("/api/v1/client-downloads/user-options")
 def user_options(identity: CurrentSession, response: Response, service: Service) -> dict[str, Any]:
+    require_plugin_download(identity, "user-plugin")
     response.headers.update(PRIVATE)
     result: dict[str, Any] = {
         "enabled": os.getenv("CLIENT_USER_ENABLED", "false").lower() == "true"
@@ -128,6 +130,7 @@ def user_options(identity: CurrentSession, response: Response, service: Service)
 
 @router.post("/api/v1/client-downloads/magpie-user")
 def download(body: UserDownload, identity: CurrentSession, service: Service) -> Response:
+    require_plugin_download(identity, "user-plugin")
     return Response(
         service.package(identity),
         media_type="application/zip",

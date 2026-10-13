@@ -21,6 +21,7 @@ from turnstile_core.persistence.repository import QueryRepository
 from turnstile_core.services.application_access import ApplicationAccessService
 
 from .auth_service import SessionIdentity
+from .client_download_permissions import require_plugin_download
 from .client_icons import PluginIconUnavailable, load_plugin_icons
 from .client_namespace import plugin_namespace
 from .client_pricing import plugin_model_cost
@@ -85,8 +86,7 @@ class ClientDownloadService:
         self.settings = settings
 
     def options(self, identity: SessionIdentity) -> ClientDownloadOptions:
-        # Phase one reuses the existing Owner session gate; row delegation is deferred.
-        del identity
+        require_plugin_download(identity, "subscription-plugin")
         applications = self.applications.applications()
         rows = self.repository.registry()
         prices = self.repository.model_prices()
@@ -96,6 +96,10 @@ class ClientDownloadService:
         items: list[ClientSubscription] = []
         for application in applications.items:
             if application.system_managed or application.status != "active":
+                continue
+            if identity.role != "owner" and application.owner_id not in {
+                identity.id, identity.email, identity.effective_user_id,
+            }:
                 continue
             gateway = gateways.get(str(application.gateway_profile_id))
             if not gateway or not gateway["enabled"] or gateway["implementation"] != "apim":
@@ -179,6 +183,7 @@ class ClientDownloadService:
     def download(
         self, identity: SessionIdentity, request: ClientDownloadRequest,
     ) -> ClientDownloadArchive:
+        require_plugin_download(identity, "subscription-plugin")
         try:
             icons = load_plugin_icons()
         except PluginIconUnavailable as error:

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.api import app
+from backend.http.client_downloads import client_download_service
+from backend.http.client_user import client_user_service
 from backend.http.dependencies import get_repository
 from tests.backend.persistence.test_directory_migration import (
     directory_database as directory_database,
@@ -59,6 +63,54 @@ def test_owner_policy_atomic_save_conflict_and_existing_session_revocation(
     assert "permission-management" not in profile["menu_permissions"]
     assert client.get("/api/v1/user-settings/me/account").status_code == 200
     assert client.post("/api/v1/auth/logout").status_code == 204
+
+
+def test_download_policy_saves_atomically_and_revokes_existing_session_exports(
+    directory_http: tuple[TestClient, dict[str, Any]],
+) -> None:
+    client, data = directory_http
+    initial = client.get("/api/v1/permission-management").json()
+    menus = initial["groups"]
+    downloads = initial["download_groups"]
+    assert all(values == ["user-plugin"] for values in downloads.values())
+    downloads["organization_admin"] = ["subscription-plugin"]
+    downloads["department_admin"] = []
+    downloads["user"] = []
+    write = {"groups": menus, "download_groups": downloads,
+             "expected_revision": initial["revision"]}
+    saved = client.put("/api/v1/permission-management", json=write)
+    assert saved.status_code == 200
+    assert saved.json()["revision"] == initial["revision"] + 1
+    assert saved.json()["groups"] == menus
+    assert saved.json()["download_groups"] == downloads
+    assert client.put("/api/v1/permission-management", json=write).status_code == 409
+    # An older menu-only client must not reset the new download restrictions.
+    legacy_save = client.put("/api/v1/permission-management", json={
+        "groups": menus, "expected_revision": saved.json()["revision"],
+    })
+    assert legacy_save.json()["revision"] == saved.json()["revision"]
+    assert legacy_save.json()["download_groups"] == downloads
+    client.cookies.set(data["settings"].session_cookie_name, "directory-member")
+    assert client.get("/api/v1/auth/me").json()["download_permissions"] == []
+    called = Mock()
+    app.dependency_overrides[client_user_service] = lambda: SimpleNamespace(package=called)
+    app.dependency_overrides[client_download_service] = lambda: SimpleNamespace(
+        options=called, download=called,
+    )
+    try:
+        assert client.get("/api/v1/client-downloads/user-options").status_code == 403
+        assert client.post("/api/v1/client-downloads/magpie-user", json={
+            "acknowledged": True,
+        }).status_code == 403
+        assert client.get("/api/v1/client-downloads/options").status_code == 403
+        assert client.post("/api/v1/client-downloads/magpie", json={
+            "application_id": str(uuid4()), "subscription_id": str(uuid4()),
+            "gateway_id": str(uuid4()),
+        }).status_code == 403
+        called.assert_not_called()
+    finally:
+        app.dependency_overrides.pop(client_user_service, None)
+        app.dependency_overrides.pop(client_download_service, None)
 
 
 def test_organization_department_and_ordinary_users_have_automatic_read_scopes(

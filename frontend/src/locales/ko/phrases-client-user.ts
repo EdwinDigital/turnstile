@@ -1,4 +1,6 @@
 export const CLIENT_USER_PHRASES: Record<string, string> = {
+  "AIGateway-Proxy 用户版": "AIGateway-Proxy 사용자 버전",
+  "AIGateway-Proxy 订阅版": "AIGateway-Proxy 구독 버전",
   "解压后的文件夹名称与 ZIP 文件名一致（不含 .zip），与下方订阅版独立，可同时安装。": "압축을 푼 폴더 이름은 .zip을 제외한 ZIP 파일 이름과 같습니다. 아래 구독 버전과 독립적이며 함께 설치할 수 있습니다.",
   "指定订阅下载 · 保留订阅密钥认证方式，解压目录与 ZIP 文件名一致。": "구독 지정 다운로드 · 구독 키 인증을 유지하며 압축을 푼 폴더 이름은 ZIP 파일 이름과 같습니다.",
   "平台默认订阅：": "플랫폼 기본 구독:",

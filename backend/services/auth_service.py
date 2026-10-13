@@ -68,6 +68,7 @@ class SessionIdentity:
     menu_permission_groups: tuple[str, ...] = ("user",)
     menu_administrator_scopes: tuple[MenuAdministratorScope, ...] = ()
     menu_permissions: tuple[str, ...] = ()
+    download_permissions: tuple[str, ...] = ("user-plugin",)
     data_scope: DataAccessScope | None = None
 
     @property

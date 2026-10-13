@@ -9,7 +9,7 @@ from fastapi import Depends, HTTPException, Request
 
 from turnstile_core.config import Settings, get_settings
 from turnstile_core.domain.directory import DirectoryError, MenuAdministratorScope
-from turnstile_core.domain.menu_permissions import menu_permissions
+from turnstile_core.domain.menu_permissions import download_permissions, menu_permissions
 from turnstile_core.persistence.auth_store import AuthStore
 from turnstile_core.services.directory_catalog import directory_store
 
@@ -53,6 +53,7 @@ def require_authenticated_session(
     menu_groups: tuple[str, ...] = ("user",)
     menu_scopes: tuple[MenuAdministratorScope, ...] = ()
     menus = menu_permissions(owner=role == "owner")
+    downloads = download_permissions(owner=role == "owner")
     data_scope = None
     if settings.directory_source == "legacy" and settings.database_url:
         state = directory_store(settings.database_url).state_if_present()
@@ -71,6 +72,7 @@ def require_authenticated_session(
         menu_groups = principal.menu_permission_groups
         menu_scopes = principal.menu_administrator_scopes
         menus = principal.menu_permissions
+        downloads = principal.download_permissions
         data_scope = principal.data_scope
         person = directory.linked_person(UUID(str(owner["id"])))
         if person:
@@ -100,6 +102,7 @@ def require_authenticated_session(
         menu_permission_groups=menu_groups,
         menu_administrator_scopes=menu_scopes,
         menu_permissions=menus,
+        download_permissions=downloads,
         data_scope=data_scope,
     )
     require_menu_access(request, identity)
