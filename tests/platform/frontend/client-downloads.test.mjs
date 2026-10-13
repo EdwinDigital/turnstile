@@ -24,12 +24,23 @@ const item = { application_id: "app-uuid", subscription_id: "subscription-uuid",
 function load(code, require, globals = {}) {
   const module = { exports: {} }
   const resolve = name => name === "../components/magpie-client-download"
-    ? { MagpieClientDownload: "magpie-client-download" } : require(name)
+    ? { MagpieClientDownload: "magpie-client-download" }
+    : name === "../components/ui/badge" ? { Badge: "badge" } : require(name)
   vm.runInNewContext(code, { exports: module.exports, module, require: resolve, AbortController, Error, ...globals })
   return module.exports
 }
 
 const authHelpers = load(authCode, () => ({ apiUrl: path => path, ApiError: Error }))
+
+for (const locale of ["en", "ja", "ko"]) {
+  test(`download layout and action labels are localized in ${locale}`, async () => {
+    const { CLIENT_USER_PHRASES: phrases } = await import(new URL(`../../../frontend/src/locales/${locale}/phrases-client-user.ts`, import.meta.url))
+    for (const label of ["当前用户", "平台默认订阅", "安装与使用", "文生图接入", "下载订阅版插件", "下载 macOS 客户端", "其他版本"]) {
+      assert.ok(phrases[label], label)
+      assert.notEqual(phrases[label], label)
+    }
+  })
+}
 
 function api(disposition) {
   const calls = []
@@ -97,9 +108,13 @@ for (const [userMode, prefix, label] of [
     visit(page.ClientDownloadsPage({ onToggleSidebar: () => {} }))
     assert.ok(nodes.some(node => node.type === "magpie-client-download"))
     assert.ok(nodes.some(node => node.type === "p" && node.props.children ===
-      "解压后的文件夹名称与 ZIP 文件名一致（不含 .zip），与下方订阅版独立，可同时安装。"))
+      "解压目录与 ZIP 文件名一致（不含 .zip）。"))
     assert.ok(nodes.some(node => node.type === "p" && node.props.children ===
-      "指定订阅下载 · 保留订阅密钥认证方式，解压目录与 ZIP 文件名一致。"))
+      "使用指定应用订阅与密钥，导入已授权模型。"))
+    assert.equal(nodes.filter(node => node.type === "h1").length, 1)
+    assert.equal(nodes.some(node => node.type === "h2" && node.props.children === "AIGateway-Proxy"), false)
+    assert.ok(nodes.some(node => node.type === "dl" && node.props.className === "client-downloads-facts"))
+    assert.equal(nodes.filter(node => node.props?.className === "client-downloads-footer").length, 2)
     if (userMode) {
       nodes.find(node => node.type === "button" && Array.isArray(node.props.children)
         && node.props.children.includes("下载用户版插件")).props.onClick()
@@ -214,7 +229,7 @@ for (const [userConsent, subscriptionConsent] of [[false, false], [true, false],
     }
     visit(page.ClientDownloadsPage({ onToggleSidebar: () => {} }))
     const userButton = nodes.find(n => n.type === "button" && Array.isArray(n.props.children) && n.props.children.includes("下载用户版插件"))
-    const subscriptionButton = nodes.find(n => n.type === "button" && Array.isArray(n.props.children) && n.props.children.includes("下载插件安装包"))
+    const subscriptionButton = nodes.find(n => n.type === "button" && Array.isArray(n.props.children) && n.props.children.includes("下载订阅版插件"))
     assert.equal(userButton.props.disabled, !userConsent)
     assert.equal(subscriptionButton.props.disabled, !subscriptionConsent)
     assert.equal(userButton.props.variant, subscriptionButton.props.variant)
