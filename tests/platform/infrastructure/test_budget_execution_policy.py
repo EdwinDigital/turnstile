@@ -185,7 +185,7 @@ def application_tpm_expressions() -> dict[str, str]:
     root = parse_policy(composed.replace("__TOKENS_PER_MINUTE__", "100000"))
     names = {
         "applicationLedgerUrl", "applicationLedgerState", "applicationTokensPerMinute",
-        "applicationRateLimitPartition",
+        "applicationRateLimitPartition", "applicationRateLimitUrl",
     }
     return {node.attrib["name"]: node.attrib["value"]
             for node in root.iter("set-variable") if node.get("name") in names}
@@ -523,6 +523,9 @@ def test_execution_retains_configured_public_application_tpm(
         "body": "{}", "expression": expression_id(expressions["applicationLedgerUrl"]),
         "variables": {"applicationLedgerPartition": "unit-app|2026-09",
                       "applicationMapState": {"applicationType": "service"}},
+    }, {
+        "body": "{}", "expression": expression_id(expressions["applicationRateLimitUrl"]),
+        "variables": {"applicationRateLimitPartition": "app-tpm|unit-application"},
     }])
     assert values[0] == 4321
     from urllib.parse import unquote
@@ -530,6 +533,10 @@ def test_execution_retains_configured_public_application_tpm(
     query = unquote(values[1])
     assert "RowKey eq 'M'" in query and "RowKey eq 'Q'" not in query
     assert "RowKey eq 'C'" not in query and "RowKey eq 'R" not in query
+    assert values[2] == (
+        "__LEDGER_TABLE_ENDPOINT__/__LEDGER_TABLE_NAME__"
+        "(PartitionKey='app-tpm%7Cunit-application',RowKey='T')"
+    )
 
 
 @pytest.mark.parametrize("status,etag,changes", [

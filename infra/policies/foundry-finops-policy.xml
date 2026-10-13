@@ -778,10 +778,15 @@
         }" />
         <set-variable name="applicationAdmission" value="@((string)((JObject)context.Variables[&quot;applicationMapState&quot;])[&quot;status&quot;])" />
         <set-variable name="applicationRateLimitPartition" value="@(&quot;app-tpm|&quot; + (string)((JObject)context.Variables[&quot;applicationMapState&quot;])[&quot;applicationId&quot;])" />
+        <set-variable name="applicationRateLimitUrl" value="@{
+          return &quot;__LEDGER_TABLE_ENDPOINT__/__LEDGER_TABLE_NAME__(PartitionKey=\u0027&quot;
+            + Uri.EscapeDataString((string)context.Variables[&quot;applicationRateLimitPartition&quot;])
+            + &quot;\u0027,RowKey=\u0027T\u0027)&quot;;
+        }" />
         <choose>
           <when condition="@((string)context.Variables[&quot;applicationAdmission&quot;] == &quot;ok&quot;)">
             <send-request mode="new" response-variable-name="applicationRateLimitRead" timeout="2" ignore-error="true">
-              <set-url>@(&quot;__LEDGER_TABLE_ENDPOINT__/__LEDGER_TABLE_NAME__(PartitionKey=\u0027&quot; + Uri.EscapeDataString((string)context.Variables[&quot;applicationRateLimitPartition&quot;]) + &quot;\u0027,RowKey=\u0027T\u0027)&quot;)</set-url>
+              <set-url>@((string)context.Variables[&quot;applicationRateLimitUrl&quot;])</set-url>
               <set-method>GET</set-method>
               <set-header name="x-ms-version" exists-action="override"><value>2020-12-06</value></set-header>
               <set-header name="Accept" exists-action="override"><value>application/json;odata=nometadata</value></set-header>

@@ -450,6 +450,11 @@ def test_application_tpm_uses_independent_validated_row_and_fails_closed() -> No
     assert '"app-tpm|"' in partition.attrib["value"]
     assert 'context.Variables["applicationMapState"]' in partition.attrib["value"]
     assert "application_tpm_unavailable" in ElementTree.tostring(root, encoding="unicode")
+    rate_read = root.find(".//send-request[@response-variable-name='applicationRateLimitRead']")
+    assert rate_read is not None
+    assert rate_read.findtext("set-url") == (
+        '@((string)context.Variables["applicationRateLimitUrl"])'
+    )
 
     limits = root.findall(".//llm-token-limit")
     employee = next(node for node in limits if "finops:employee:" in node.attrib["counter-key"])
