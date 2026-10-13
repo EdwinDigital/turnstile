@@ -27,8 +27,25 @@ ALTER TABLE gateway_application_budget
     );
 
 ALTER TABLE gateway_application_ledger_state
-    ALTER COLUMN token_limit DROP NOT NULL,
-    DROP CONSTRAINT gateway_application_ledger_state_available_tokens_check;
+    ALTER COLUMN token_limit DROP NOT NULL;
+
+DO $$
+DECLARE available_constraint_name TEXT;
+BEGIN
+    SELECT ledger_constraint.conname INTO STRICT available_constraint_name
+    FROM pg_constraint ledger_constraint
+    JOIN pg_attribute ledger_column
+        ON ledger_column.attrelid = ledger_constraint.conrelid
+    WHERE ledger_constraint.conrelid = 'gateway_application_ledger_state'::regclass
+        AND ledger_constraint.contype = 'c'
+        AND ledger_column.attname = 'available_tokens'
+        AND ledger_column.attnum = ANY(ledger_constraint.conkey);
+    EXECUTE format(
+        'ALTER TABLE gateway_application_ledger_state DROP CONSTRAINT %I',
+        available_constraint_name
+    );
+END
+$$;
 
 ALTER TABLE gateway_application_ledger_state
     ADD COLUMN budget_mode TEXT NOT NULL DEFAULT 'tokens'

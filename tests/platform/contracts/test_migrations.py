@@ -59,9 +59,9 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
 
 def test_final_product_indexes_keep_source_keys_and_do_not_rewrite_history() -> None:
     sql = (MIGRATIONS / "028_product_index_alignment.up.sql").read_text()
-    assert "ON pinned_chart (owner_id, position, created_at)" in sql
-    assert "CREATE UNIQUE INDEX pinned_chart_owner_query_idx" in sql
-    assert "ON pinned_chart (owner_id, (chart->'query'))" in sql
+    assert "pinned_chart" not in sql
+    assert "CREATE INDEX pinned_chart_report_position_idx" in schema()
+    assert "CREATE UNIQUE INDEX pinned_chart_report_query_idx" in schema()
     assert "scope_type, scope_id, period_start, reservation_created_at DESC" in sql
     assert "ON gateway_release_operation ((semantic_preview->>'request_id'))" in sql
     assert "WHERE operation_kind = 'self_hosted_gateway_provision'" in sql
@@ -180,7 +180,13 @@ def test_usd_upgrade_keeps_exact_price_evidence_and_public_legacy_snapshot_balan
     assert "GREATEST(cached_tokens - cache_write_tokens, 0) * cache_read_rate" in sql
     assert "WHEN count(*) FILTER (WHERE usd_cost IS NULL) > 0 THEN NULL" in sql
     assert "usage.usd_price_sha256 = admitted_price->>'price_sha256'" in sql
-    assert "DROP CONSTRAINT gateway_application_ledger_state_available_tokens_check" in sql
+    assert "SELECT ledger_constraint.conname INTO STRICT available_constraint_name" in sql
+    assert "ledger_constraint.conrelid = 'gateway_application_ledger_state'::regclass" in sql
+    assert "ledger_constraint.contype = 'c'" in sql
+    assert "ledger_column.attname = 'available_tokens'" in sql
+    assert "ledger_column.attnum = ANY(ledger_constraint.conkey)" in sql
+    assert "ALTER TABLE gateway_application_ledger_state DROP CONSTRAINT %I" in sql
+    assert "DROP CONSTRAINT IF EXISTS" not in sql
     assert "- finalized_upper_bound_tokens, 0" in sql
     assert "WHERE EXCLUDED.evidence_rank > stored.evidence_rank" in sql
     assert "UPDATE token_usage" not in sql and "DELETE FROM token_usage" not in sql
