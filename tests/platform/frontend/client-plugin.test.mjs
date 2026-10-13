@@ -5,11 +5,48 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+test("subscription namespaces accept readable names but reject path injection", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "aigateway-subscription-name-"));
+  const nativeFetch = globalThis.fetch;
+  try {
+    await copyFile(new URL("../../../backend/services/client_plugin/index.mjs", import.meta.url), join(dir, "index.mjs"));
+    await copyFile(new URL("../../../backend/services/client_plugin/pricing.mjs", import.meta.url), join(dir, "pricing.mjs"));
+    const factory = (await import(pathToFileURL(join(dir, "index.mjs")))).default;
+    for (const id of ["aigateway-subscription-edwin-agent-012345abcdef", "aigateway-subscription-研发-012345abcdef", "aigateway-test"]) {
+      await writeFile(join(dir, "aigateway.config.json"), JSON.stringify({ version: 1, providerId: id,
+        name: "Subscription", accountId: "Edwin-Agent", subscriptionKey: "fixture-key", baseURL: "https://gateway.example/llm", models: {}, modelsPath: "/v1/models" }));
+      const hooks = await factory();
+      assert.equal(hooks.auth.provider, id);
+      assert.equal(hooks.provider.id, id);
+      const cfg = {};
+      await hooks.config(cfg);
+      assert.deepEqual(Object.keys(cfg.provider), [id]);
+      if (id.includes("研发")) {
+        let target, body;
+        globalThis.fetch = async input => { target = input instanceof Request ? input.url : String(input);
+          body = input instanceof Request ? await input.text() : undefined;
+          return Response.json({ model: "fixture" }); };
+        const loader = await hooks.auth.loader(async () => ({ type: "api", key: "fixture-key" }));
+        const broken = "https://gateway.example/llmplugin://" + encodeURIComponent(id) + "/v1/responses";
+        await loader.fetch(new Request(broken, { method: "POST", body: '{"model":"fixture"}' }));
+        assert.equal(target, "https://gateway.example/llm/responses");
+        assert.equal(body, '{"model":"fixture"}');
+        await assert.rejects(loader.fetch(broken.replace("/v1/responses", "/v1/admin")), /outside/);
+        await assert.rejects(loader.fetch(broken.replace(encodeURIComponent(id), "another-provider")), /outside/);
+      }
+    }
+    await writeFile(join(dir, "aigateway.config.json"), JSON.stringify({ version: 1,
+      providerId: "aigateway-../../other", subscriptionKey: "fixture-key", baseURL: "https://gateway.example/llm" }));
+    await assert.rejects(factory(), /Invalid AIGateway subscription configuration/);
+  } finally { globalThis.fetch = nativeFetch; await rm(dir, { recursive: true, force: true }); }
+});
+
 test("private provider import, bounded dispatch and live model intersection", async () => {
   const dir = await mkdtemp(join(tmpdir(), "aigateway-plugin-test-"));
   const nativeFetch = globalThis.fetch;
   try {
     await copyFile(new URL("../../../backend/services/client_plugin/index.mjs", import.meta.url), join(dir, "index.mjs"));
+    await copyFile(new URL("../../../backend/services/client_plugin/pricing.mjs", import.meta.url), join(dir, "pricing.mjs"));
     await writeFile(join(dir, "aigateway.config.json"), JSON.stringify({
       version: 1, providerId: "aigateway-test", name: "Test", baseURL: "https://gateway.example.com/llm",
       subscriptionKey: "private-key", accountId: "Test subscription", modelsPath: "/v1/models",
@@ -57,7 +94,9 @@ test("private provider import, bounded dispatch and live model intersection", as
     globalThis.fetch = async () => Response.json({ data: [] });
     assert.deepEqual(await hooks.provider.models(provider, { auth }), {});
     globalThis.fetch = async () => { throw new Error("offline"); };
-    assert.equal(await hooks.provider.models(provider, { auth }), provider.models);
+    const offline = await hooks.provider.models(provider, { auth });
+    assert.deepEqual(Object.keys(offline), Object.keys(provider.models));
+    assert.equal(offline[Symbol.for("magpie.fellBack")], true);
     globalThis.fetch = async () => new Response("denied", { status: 403 });
     await assert.rejects(hooks.provider.models(provider, { auth }), (error) => error.signIn === "expired");
   } finally {
@@ -70,6 +109,7 @@ test("magpie automatically imports once, preserves accounts and respects logout"
   const dir = await mkdtemp(join(tmpdir(), "aigateway-auto-import-"));
   try {
     await copyFile(new URL("../../../backend/services/client_plugin/index.mjs", import.meta.url), join(dir, "index.mjs"));
+    await copyFile(new URL("../../../backend/services/client_plugin/pricing.mjs", import.meta.url), join(dir, "pricing.mjs"));
     const config = {
       version: 1, providerId: "aigateway-test", name: "Test", baseURL: "https://gateway.example.com/llm",
       subscriptionKey: "bundled-key", accountId: "Subscription", modelsPath: "/v1/models", models: {},

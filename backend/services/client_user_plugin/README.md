@@ -4,12 +4,40 @@ This package is separate from the subscription plugin `aigateway-proxy`.
 Keep its `aigateway-proxy-user` directory in a permanent location. Do not copy it
 over an existing subscription installation.
 
+From 0.4.1, model namespaces use the username plus a short hashed disambiguator,
+not the user's UUID. The UUID remains inside the private authorization config.
+Existing downloaded packages keep their namespace: refreshing models or signing
+in again does not rename it. Replace the old plugin with a new download explicitly
+and reselect its models in the Agent; do not install both generations as duplicates.
+
 1. 在 magpie 插件页面添加本地 `aigateway-proxy-user` 文件夹。
 2. 下载时已经通过当前平台会话授权，并绑定平台实际默认订阅。首次安装自动导入 OAuth 和本人模型。
 3. 「刷新模型」使用已有授权，直接读取本人最新授权模型；不打开浏览器、不切换订阅。
 4. 刷新完整替换本插件的文本/图片模型目录，其他供应商和订阅版不变。
 5. 「重新登录」才打开平台验证页，重新认证并解析平台实际默认订阅，更新本地授权与配置。
 6. 不覆盖已有本插件账号；主动退出后不会从旧包恢复登录，此时使用「重新登录」。
+7. 「查看额度趋势」打开本机独立个人额度曲线。只记录平台真实快照，不修改 magpie 原生历史或预算模式；首次采样之前的数据未知。再次点击更新快照，平台有 60 秒读数缓存。
+
+Model prices use the platform's accounting rates in USD per million tokens,
+including input, output, cache reads and cache writes. The native adapter only
+passes the first two fields, so this plugin uses the existing `magpie model price`
+command to import complete prices for this provider alone. Manual per-model,
+provider-wide and global model price preferences take precedence. Pricing workers
+cannot bootstrap accounts, rename profiles or start image companions.
+
+The normal magpie data directory and a native CLI are required for automatic
+price import (`magpie` on PATH, or the standard macOS app installation).
+`AIGATEWAY_MAGPIE_EXECUTABLE` can explicitly name the installed magpie executable.
+Imports have an eight-second batch budget; a later model refresh retries pending
+models. Status and complete prices are private files under
+`aigateway-pricing/<providerId>/`. Failed imports do not bill cache tokens as free.
+Do not replace manual prices or host settings files by hand to force synchronization.
+
+The independent quota page is for a local desktop installation; remote/web-only
+hosts may not open its `file:` URL. It is not an embedded curve in magpie's native
+card. No application shared budget is added, and audit mode stays non-blocking.
+WorkBuddy's native session IDs and provider-card Agent icons remain host/client
+integration limitations, not something this provider can manufacture.
 
 The private download contains personal OAuth access and refresh tokens. It does
 not contain an APIM key, password or browser cookie. Never share, upload or commit

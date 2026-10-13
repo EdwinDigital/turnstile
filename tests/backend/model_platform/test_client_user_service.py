@@ -86,12 +86,19 @@ def client_service() -> tuple[ClientUserService, InMemoryRepository, SessionIden
     return service, repository, identity
 
 
-def test_personal_package_has_bound_authorization_and_distinct_identity() -> None:
+@pytest.mark.parametrize("name", ["Test", "研发用户"])
+def test_personal_package_has_bound_authorization_and_distinct_identity(name: str) -> None:
     service, _, identity = client_service()
+    identity = replace(identity, name=name)
     with ZipFile(BytesIO(service.package(identity))) as archive:
         assert all(name.startswith("aigateway-proxy-user/") for name in archive.namelist())
         config = json.loads(archive.read("aigateway-proxy-user/aigateway-user.config.json"))
-        assert config["providerId"].startswith("aigateway-user-")
+        label = "test" if name == "Test" else "xn--oory84avxopxc"
+        assert config["providerId"].startswith(f"aigateway-user-{label}-")
+        assert config["userName"] == name
+        assert config["name"] == f"AIGateway User · {name}"
+        assert identity.id not in config["providerId"]
+        assert UUID(identity.id).hex not in config["providerId"]
         assert config["userId"] == identity.id
         assert not {"subscriptionKey", "password"}.intersection(config)
         assert config["authorization"]["access"].startswith("tsca_")
@@ -104,7 +111,7 @@ def test_personal_package_has_bound_authorization_and_distinct_identity() -> Non
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
         package = json.loads(archive.read("aigateway-proxy-user/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.4.0"
+        assert package["version"] == "0.4.1"
         assert all((f.external_attr >> 16) & 0o777 == 0o600 for f in archive.infolist())
 
 

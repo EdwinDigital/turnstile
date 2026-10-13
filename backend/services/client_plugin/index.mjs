@@ -1,5 +1,6 @@
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { costForHost, syncPricing, tokenCost } from "./pricing.mjs";
 
 async function durableWrite(path, content) {
   const temporary = `${path}.aigateway-${process.pid}-${crypto.randomUUID()}`;
@@ -66,14 +67,18 @@ export default async function AIGatewayProxyPlugin(input) {
   const base = new URL(cfg.baseURL);
   if (cfg.version !== 1 || base.protocol !== "https:" || base.username || base.password || base.search || base.hash)
     throw new Error("Invalid AIGateway configuration");
-  if (!/^aigateway-[a-z0-9-]+$/.test(cfg.providerId) || typeof cfg.subscriptionKey !== "string" || !cfg.subscriptionKey)
+  if (!/^aigateway-[\p{L}\p{N}-]+$/u.test(cfg.providerId) || typeof cfg.subscriptionKey !== "string" || !cfg.subscriptionKey)
     throw new Error("Invalid AIGateway subscription configuration");
-  await importOnce(input, cfg);
+  if (process.env.AIGATEWAY_PRICING_WORKER !== "1") await importOnce(input, cfg);
   const root = cfg.baseURL.replace(/\/$/, "");
   const endpoints = new Set(["/chat/completions", "/responses", "/messages", cfg.modelsPath]);
   const expired = () => Object.assign(new Error("AIGateway subscription rejected; check access or rotate the key"), { signIn: "expired" });
   const dispatch = async (key, input, init = {}) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
+    // Repair only this provider's escaped plugin prefix, never another host or path.
+    const escapedPrefix = root + "plugin://" + encodeURIComponent(cfg.providerId) + "/v1/";
+    if (encodeURIComponent(cfg.providerId) !== cfg.providerId && url.href.startsWith(escapedPrefix))
+      url.href = root + "/" + url.href.slice(escapedPrefix.length);
     if (url.origin !== base.origin || !endpoints.has(url.pathname.slice(base.pathname.replace(/\/$/, "").length))
         || !url.pathname.startsWith(base.pathname.replace(/\/$/, "") + "/") || url.username || url.password)
       throw new Error("Refusing to send subscription credentials outside the configured gateway");
@@ -119,17 +124,27 @@ export default async function AIGatewayProxyPlugin(input) {
       id: cfg.providerId,
       async models(provider, { auth } = {}) {
         if (auth?.type !== "api") return provider.models;
+        const finish = async (models, costs = cfg.models, fallback = false) => {
+          const activeCosts = Object.fromEntries(Object.keys(models).map(id => [id, costs[id] ?? {}]));
+          const pricing = await syncPricing(input, cfg, activeCosts);
+          const result = Object.fromEntries(Object.entries(models).map(([id, model]) => [id,
+            { ...model, cost: costForHost(input, cfg.providerId, id, costs[id]?.cost, pricing) }]));
+          if (fallback) result[Symbol.for("magpie.fellBack")] = true;
+          return result;
+        };
         let response;
         try { response = await dispatch(auth.key, root + cfg.modelsPath); }
-        catch { return provider.models; }
+        catch { return finish(provider.models, cfg.models, true); }
         if (response.status === 401 || response.status === 403) throw expired();
-        if (!response.ok) return provider.models;
+        if (!response.ok) return finish(provider.models, cfg.models, true);
         try {
           const body = await response.json();
-          if (!Array.isArray(body.data)) return provider.models;
+          if (!Array.isArray(body.data)) return finish(provider.models, cfg.models, true);
           const allowed = new Set(body.data.map((model) => model.id));
-          return Object.fromEntries(Object.entries(provider.models).filter(([id]) => allowed.has(id)));
-        } catch { return provider.models; }
+          const costs = Object.fromEntries(Object.entries(cfg.models).map(([id, model]) => [id,
+            { ...model, cost: body.data.find(item => item.id === id && tokenCost(item.cost))?.cost ?? model.cost }]));
+          return finish(Object.fromEntries(Object.entries(provider.models).filter(([id]) => allowed.has(id))), costs);
+        } catch { return finish(provider.models, cfg.models, true); }
       },
     },
   };

@@ -63,6 +63,29 @@ def identity(role: str = "owner") -> SessionIdentity:
     )
 
 
+def test_subscription_download_includes_full_platform_prices(
+    service: ClientDownloadService,
+) -> None:
+    option = service.options(identity()).items[0]
+    repo = service.repository
+    assert isinstance(repo, InMemoryRepository)
+    row = next(model for model in repo.models if model["model_key"] == option.models[0].id)
+    row.update(input_cost_per_million=2.0, output_cost_per_million=10.0,
+               cached_cost_per_million=0.2, cache_write_cost_per_million=2.5)
+    response = client.post("/api/v1/client-downloads/magpie", json={
+        "application_id": str(option.application_id),
+        "subscription_id": str(option.subscription_id),
+        "gateway_id": str(option.gateway_id), "key_kind": "primary",
+    })
+    assert response.status_code == 200
+    with ZipFile(BytesIO(response.content)) as archive:
+        config = json.loads(archive.read("aigateway-proxy/aigateway.config.json"))
+        assert config["models"][row["model_key"]]["cost"] == {
+            "input": 2.0, "output": 10.0, "cache_read": 0.2, "cache_write": 2.5,
+        }
+        assert "aigateway-proxy/pricing.mjs" in archive.namelist()
+
+
 def test_options_filter_system_subscriptions_and_never_read_keys(
     service: ClientDownloadService,
 ) -> None:
@@ -93,12 +116,18 @@ def test_download_is_private_complete_zip(service: ClientDownloadService) -> Non
     with ZipFile(BytesIO(response.content)) as archive:
         assert set(archive.namelist()) == {
             f"aigateway-proxy/{name}"
-            for name in ("index.mjs", "package.json", "README.md", "aigateway.config.json")
+            for name in (
+                "index.mjs", "pricing.mjs", "package.json", "README.md", "aigateway.config.json",
+            )
         }
         config = json.loads(archive.read("aigateway-proxy/aigateway.config.json"))
         assert config["subscriptionKey"] == "secondary-secret"
         assert config["subscriptionId"] == str(selected.subscription_id)
-        assert config["providerId"].endswith(selected.subscription_id.hex)
+        assert config["providerId"].startswith("aigateway-subscription-cc-switch-")
+        assert selected.subscription_id.hex not in config["providerId"]
+        assert config["name"] == f"AIGateway Subscription · {selected.subscription_name}"
+        assert config["accountId"] == selected.subscription_name
+        assert json.loads(archive.read("aigateway-proxy/package.json"))["version"] == "0.1.2"
         template = archive.read("aigateway-proxy/index.mjs").decode()
         assert "primary-secret" not in template and "secondary-secret" not in template
         assert all((item.external_attr >> 16) & 0o777 == 0o600 for item in archive.infolist())

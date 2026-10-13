@@ -30,10 +30,12 @@ from turnstile_core.services.directory_catalog import catalog_for, directory_sto
 
 from .auth_service import SessionIdentity
 from .client_downloads import RESERVED, SDK
+from .client_namespace import plugin_namespace
+from .client_pricing import plugin_model_cost
 from .client_user_store import ClientUserStore
 from .gateway_credentials import with_platform_gateway_credential
 
-USER_PLUGIN_VERSION = "0.4.0"
+USER_PLUGIN_VERSION = "0.4.1"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
@@ -104,8 +106,9 @@ class ClientUserService:
             identity.id, installation, identity.method, selection, access, refresh, grant_id
         )
         catalog = self.catalog({"id": grant_id, "selection": selection}, identity)
-        platform = hashlib.sha256(self.origin.encode()).hexdigest()[:12]
-        uid = UUID(identity.id).hex
+        provider_id = plugin_namespace(
+            "user", identity.name or identity.email, self.origin, str(UUID(identity.id))
+        )
         cfg = {
             "version": 4,
             "platformOrigin": self.origin,
@@ -113,7 +116,7 @@ class ClientUserService:
             "userId": identity.id,
             "userName": identity.name or identity.email,
             "binding": self._binding(identity.id),
-            "providerId": f"aigateway-user-{platform}-{uid}",
+            "providerId": provider_id,
             "name": f"AIGateway User · {identity.name or identity.email}",
             "installationId": str(installation),
             "selection": catalog["selection"],
@@ -131,12 +134,13 @@ class ClientUserService:
         root = Path(__file__).with_name("client_user_plugin")
         files = {
             name: (root / name).read_bytes()
-            for name in ("index.mjs", "helpers.mjs", "images.mjs", "README.md")
+            for name in ("index.mjs", "helpers.mjs", "images.mjs", "quota.mjs", "README.md")
         }
+        files["pricing.mjs"] = (root.parent / "client_plugin" / "pricing.mjs").read_bytes()
         files["aigateway-user.config.json"] = json.dumps(cfg, ensure_ascii=False, indent=2).encode()
         files["package.json"] = json.dumps(
             {
-                "name": f"opencode-aigateway-user-{platform}-{uid}-auth",
+                "name": f"opencode-aigateway-user-{provider_id.rsplit('-', 1)[-1]}-auth",
                 "version": USER_PLUGIN_VERSION,
                 "type": "module",
                 "main": "./index.mjs",
@@ -630,6 +634,7 @@ class ClientUserService:
         if not grant["selection"]:
             return {"models": {}, "images": [], "selection": None}
         selected = self.selected(identity, grant["selection"], fresh=fresh)
+        prices = self.repository.model_prices()
         self.store.activate(grant["id"])
         models = {}
         images = []
@@ -640,6 +645,7 @@ class ClientUserService:
             models[m["id"]] = {
                 "id": m["id"],
                 "name": m["name"],
+                "cost": plugin_model_cost(prices.get(m["model_id"])),
                 "provider": {
                     "npm": SDK[m["protocol"]],
                     "api": self.origin + "/api/v1/client-runtime",

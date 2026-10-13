@@ -77,7 +77,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
     <div className="finops-scroll-region"><div className="client-downloads-content">
       <header><h1>AIGateway-Proxy</h1><p>将平台订阅导入 magpie，供其他 Agent 使用。</p></header>
       <section className="client-downloads-card">
-        <div className="client-downloads-heading"><ShieldCheck size={22} /><div><h2>AIGateway-Proxy 用户版</h2><p>指定用户下载 · 已授权并绑定平台默认订阅，安装后即可使用。</p></div><span data-no-localize>v{personal.data?.plugin_version ?? "0.4.0"}</span></div>
+        <div className="client-downloads-heading"><ShieldCheck size={22} /><div><h2>AIGateway-Proxy 用户版</h2><p>指定用户下载 · 已授权并绑定平台默认订阅，安装后即可使用。</p></div><span data-no-localize>v{personal.data?.plugin_version ?? "0.4.1"}</span></div>
         <p>当前用户：<span data-no-localize>{personal.data?.user_name ?? user?.email}</span></p>
         <p>安装目录为 <code data-no-localize>aigateway-proxy-user</code>，与下方订阅版独立，可同时安装。</p>
         {personal.data?.default_subscription && <p>平台默认订阅：<strong data-no-localize>{personal.data.default_subscription.application_name} / {personal.data.default_subscription.subscription_name}</strong></p>}
@@ -93,7 +93,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
         <p role="status">{notice}</p>
       </section>
       <section className="client-downloads-card">
-        <div className="client-downloads-heading"><Download size={22} /><div><h2>AIGateway-Proxy 订阅版</h2><p>指定订阅下载 · 保留当前 0.1.1 插件，安装目录 aigateway-proxy。</p></div><span data-no-localize>v{query.data?.plugin_version ?? "0.1.1"}</span></div>
+        <div className="client-downloads-heading"><Download size={22} /><div><h2>AIGateway-Proxy 订阅版</h2><p>指定订阅下载 · 保留订阅密钥认证方式，安装目录 aigateway-proxy。</p></div><span data-no-localize>v{query.data?.plugin_version ?? "0.1.2"}</span></div>
         {user?.role !== "owner" ? <p role="status">当前核心验证阶段仅支持 Owner 下载。</p> : query.isPending ? <p role="status">正在加载</p> : query.isError ? <div role="alert"><p>{query.error.message}</p><Button variant="outline" onClick={() => void query.refetch()}><RefreshCw size={16} />重试</Button></div>
           : !items.length ? <p role="status">没有可下载的应用订阅。请联系管理员配置本人应用订阅。</p>
           : <form action="/api/v1/client-downloads/magpie" method="post" onSubmit={(event) => void download(event)}>

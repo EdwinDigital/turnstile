@@ -17,13 +17,28 @@ CLI equivalent (uses your normal magpie configuration):
 ```sh
 magpie plugin add /absolute/path/aigateway-proxy
 # Usually not needed after installation; this explicitly re-imports the bundled key.
-magpie plugin login aigateway-<subscription-uuid-without-hyphens> 1
-magpie provider test aigateway-<subscription-uuid-without-hyphens>
+magpie plugin login <providerId-from-aigateway.config.json> 1
+magpie provider test <providerId-from-aigateway.config.json>
 ```
+
+From 0.1.2, model namespaces use the subscription name plus a short hashed
+disambiguator, not the subscription UUID. Existing 0.1.1 packages remain supported
+and are not silently renamed. Replace an old installation explicitly and reselect
+its models in the Agent; installing both generations creates separate providers.
 
 The exact provider ID is `providerId` in the configuration. Each subscription has
 a distinct ID. Keep the folder in place: magpie loads local plugins in place.
 For development tests, isolate HOME, XDG_CONFIG_HOME, XDG_CACHE_HOME and MAGPIE_ADDR.
+
+From 0.1.2, the private snapshot includes the platform's complete token prices
+(USD per million tokens). Gateway discovery can update a bundled model's prices
+when it returns a complete `cost` object; discovery never grants a new model.
+The shared pricing adapter imports only this provider's prices through the
+existing `magpie model price` CLI, preserving manual overrides and other providers.
+Complete cache prices are never replaced by zero to work around a missing CLI.
+The normal magpie data directory and native CLI are needed for automatic import;
+`AIGATEWAY_MAGPIE_EXECUTABLE` can name the installed executable explicitly.
+Status is kept under `aigateway-pricing/<providerId>/status.json`.
 
 The plugin sends requests only to the selected HTTPS gateway, with the selected
 APIM subscription key; agent credentials are not forwarded. Redirects are not

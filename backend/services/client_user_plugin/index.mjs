@@ -1,21 +1,24 @@
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { localMagpieURL } from "./images.mjs";
 import { adaptModelResponse, importBootstrap, privateJSON, syncAccountProfile } from "./helpers.mjs";
+import { costForHost, syncPricing } from "./pricing.mjs";
+import { recordQuota } from "./quota.mjs";
 
 export default async function AIGatewayUserPlugin(input) {
+  const pricingWorker = process.env.AIGATEWAY_PRICING_WORKER === "1";
   const cfg = JSON.parse(await readFile(new URL("./aigateway-user.config.json", import.meta.url), "utf8"));
   const origin = new URL(cfg.platformOrigin);
   const local = origin.protocol === "http:" && ["localhost", "127.0.0.1"].includes(origin.hostname);
   if (![2, 3, 4].includes(cfg.version) || (origin.protocol !== "https:" && !local) || origin.username || origin.password
-      || origin.search || origin.hash || origin.pathname !== "/" || !/^aigateway-user-[a-z0-9-]+$/.test(cfg.providerId))
+      || origin.search || origin.hash || origin.pathname !== "/" || !/^aigateway-user-[\p{L}\p{N}-]+$/u.test(cfg.providerId))
     throw new Error("Invalid user plugin bootstrap");
   const base = origin.origin;
   const directory = join(input.directory ?? fileURLToPath(new URL(".", import.meta.url)), "aigateway-proxy-user", cfg.providerId);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const bootstrapped = await importBootstrap(input, cfg);
+  const bootstrapped = !pricingWorker && await importBootstrap(input, cfg);
   const installPath = join(directory, "installation.json");
   if (bootstrapped) await privateJSON(installPath, { id: cfg.installationId });
   let installation;
@@ -40,8 +43,9 @@ export default async function AIGatewayUserPlugin(input) {
   }
   if (bootstrapped) await privateJSON(cachePath, cached);
   let userName = cached.user?.name ?? cfg.userName;
-  if (cached.user) await syncAccountProfile(input, cfg, cached.user);
-  else if (cfg.userName) await syncAccountProfile(input, cfg, { id: cfg.userId, name: cfg.userName });
+  if (cached.user && cached.user.id !== cfg.userId) throw new Error("Cached profile belongs to another user");
+  if (!pricingWorker && cached.user) await syncAccountProfile(input, cfg, cached.user);
+  else if (!pricingWorker && cfg.userName) await syncAccountProfile(input, cfg, { id: cfg.userId, name: cfg.userName });
   const expired = () => Object.assign(new Error("请重新登录 AIGateway 平台"), { signIn: "expired" });
   const call = async (path, body, access) => {
     const response = await fetch(base + path, {
@@ -89,6 +93,7 @@ export default async function AIGatewayUserPlugin(input) {
     },
   });
   const syncImages = async (images, access) => {
+    if (pricingWorker) return;
     if (input.project?.id !== "magpie" || typeof Bun === "undefined") return;
     const magpie = localMagpieURL(process.env.MAGPIE_ADDR);
     const imageId = cfg.providerId + "-images";
@@ -153,7 +158,8 @@ export default async function AIGatewayUserPlugin(input) {
   const updateCatalog = async (access, fresh = false) => {
     const data = await call(fresh ? "/api/v1/client-runtime/refresh-models" : "/api/v1/client-runtime/catalog", fresh ? {} : undefined, access);
     if (data.user) {
-      await syncAccountProfile(input, cfg, data.user);
+      if (data.user.id !== cfg.userId) throw new Error("Platform profile belongs to another user");
+      if (!pricingWorker) await syncAccountProfile(input, cfg, data.user);
       userName = data.user.name;
     }
     const next = { user: data.user, models: data.models ?? {}, aliases: data.aliases ?? {}, images: data.images ?? [], selection: data.selection ?? null };
@@ -170,26 +176,44 @@ export default async function AIGatewayUserPlugin(input) {
     const data = await call("/api/v1/client-auth/token", { grant_type: "refresh_token", refresh_token: auth.refresh, request_id: requestId });
     return { ...auth, access: data.access_token, refresh: data.refresh_token, expires: Date.now() + data.expires_in * 1000 };
   };
+  const currentAuthorization = async () => {
+    if (input.project?.id !== "magpie" || !input.directory) throw expired();
+    const accounts = JSON.parse(await readFile(join(input.directory, "plugin-auth.json"), "utf8"));
+    let auth = Object.entries(accounts).find(([id, value]) =>
+      (id === cfg.providerId || id.startsWith(cfg.providerId + "#")) && value.type === "oauth"
+      && (value.uid === cfg.userId || value.accountId === cfg.userId))?.[1];
+    if (!auth?.access || !auth.refresh) throw expired();
+    if (auth.expires <= Date.now() + 60_000) {
+      auth = await refreshAuthorization(auth);
+      // Persist rotation before any later catalog or quota failure.
+      await input.client.auth.set({ path: { id: cfg.providerId }, body: auth });
+    }
+    return auth;
+  };
   const refreshModels = {
     type: "oauth", label: "刷新模型",
     async authorize() {
       return { url: "", method: "auto", instructions: "从平台读取当前绑定订阅的最新模型，不重新登录或切换订阅。",
         async callback() {
-          if (input.project?.id !== "magpie" || !input.directory) throw expired();
-          const accounts = JSON.parse(await readFile(join(input.directory, "plugin-auth.json"), "utf8"));
-          let auth = Object.entries(accounts).find(([id, value]) =>
-            (id === cfg.providerId || id.startsWith(cfg.providerId + "#")) && value.type === "oauth"
-            && (value.uid === cfg.userId || value.accountId === cfg.userId))?.[1];
-          if (!auth?.access || !auth.refresh) throw expired();
-          if (auth.expires <= Date.now() + 60_000) {
-            auth = await refreshAuthorization(auth);
-            // Commit rotation before a catalog failure can leave the host with an invalid token.
-            await input.client.auth.set({ path: { id: cfg.providerId }, body: auth });
-          }
+          const auth = await currentAuthorization();
           await updateCatalog(auth.access, true);
           return { ...auth, type: "success", accountId: userName ?? cfg.userId, uid: cfg.userId };
         },
       };
+    },
+  };
+  const quotaTrend = {
+    type: "oauth", label: "查看额度趋势",
+    async authorize() {
+      const auth = await currentAuthorization();
+      const usage = await call("/api/v1/client-runtime/usage", undefined, auth.access);
+      const file = await recordQuota(directory, cfg, usage);
+      if (!file) throw new Error("平台未返回有效的额度快照时间");
+      const view = pathToFileURL(file);
+      view.searchParams.set("snapshot", usage.as_of);
+      return { url: view.href, method: "auto",
+        instructions: "打开本机个人额度快照曲线，不改变预算、不重新登录。再次点击可更新快照。",
+        async callback() { return { ...auth, type: "success", accountId: userName ?? cfg.userId, uid: cfg.userId }; } };
     },
   };
   return {
@@ -199,7 +223,7 @@ export default async function AIGatewayUserPlugin(input) {
     },
     auth: {
       provider: cfg.providerId,
-      methods: [refreshModels, method("重新登录", "reauth")],
+      methods: [refreshModels, method("重新登录", "reauth"), quotaTrend],
       refreshLead: 60_000,
       async refresh(auth) {
         const next = await refreshAuthorization(auth);
@@ -210,12 +234,18 @@ export default async function AIGatewayUserPlugin(input) {
       },
       async usage(getAuth) {
         const auth = await getAuth(); if (auth?.type !== "oauth" || !auth.access) throw expired();
-        return call("/api/v1/client-runtime/usage", undefined, auth.access);
+        const usage = await call("/api/v1/client-runtime/usage", undefined, auth.access);
+        await recordQuota(directory, cfg, usage).catch(() => {});
+        return usage;
       },
       async loader(getAuth) {
         const auth = await getAuth(); if (auth?.type !== "oauth" || !auth.access) throw expired();
         return { baseURL: runtime, async fetch(input, init = {}) {
           const url = new URL(input instanceof Request ? input.url : String(input));
+          // magpie URL-escapes Unicode plugin hosts before stripping the provider prefix.
+          const escapedPrefix = runtime + "plugin://" + encodeURIComponent(cfg.providerId) + "/v1/";
+          if (encodeURIComponent(cfg.providerId) !== cfg.providerId && url.href.startsWith(escapedPrefix))
+            url.href = runtime + "/" + url.href.slice(escapedPrefix.length);
           const allowed = ["/responses", "/chat/completions", "/messages", "/v1/messages", "/models", "/v1/models"];
           const path = url.pathname.slice(new URL(runtime).pathname.length);
           if (url.origin !== base || !url.pathname.startsWith(new URL(runtime).pathname + "/")
@@ -229,7 +259,8 @@ export default async function AIGatewayUserPlugin(input) {
           headers.set("Authorization", "Bearer " + current.access);
           let model;
           try { model = input instanceof Request ? (await input.clone().json()).model : JSON.parse(init.body).model; } catch { /* Discovery has no body. */ }
-          const response = await fetch(input, { ...init, headers, redirect: "manual" });
+          const request = input instanceof Request ? new Request(url, input) : url;
+          const response = await fetch(request, { ...init, headers, redirect: "manual" });
           return adaptModelResponse(response, model, cached.aliases?.[model]);
         } };
       },
@@ -238,9 +269,11 @@ export default async function AIGatewayUserPlugin(input) {
       if (auth?.type !== "oauth" || !auth.access) return {};
       if (!hasCatalog) await updateCatalog(auth.access);
       await syncImages(cached.images, auth.access);
+      const pricing = await syncPricing(input, cfg, cached.models);
       // config uses Config.Model, but provider.models returns normalized Model.Info.
       return Object.fromEntries(Object.entries(cached.models).map(([id, model]) => [id, {
         id, providerID: cfg.providerId, name: model.name ?? id,
+        cost: costForHost(input, cfg.providerId, id, model.cost, pricing),
         api: { id, url: model.provider?.api ?? runtime, npm: model.provider?.npm ?? "@ai-sdk/openai-compatible" },
         limit: model.limit ?? { context: 32768, output: 8192 },
         options: {}, headers: {}, variants: {},

@@ -21,9 +21,11 @@ from turnstile_core.persistence.repository import QueryRepository
 from turnstile_core.services.application_access import ApplicationAccessService
 
 from .auth_service import SessionIdentity
+from .client_namespace import plugin_namespace
+from .client_pricing import plugin_model_cost
 from .download_filename import plugin_filename
 
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 RESERVED = {"master", "turnstile-dashboard", "turnstile-publisher-probe"}
 SDK = {
     "openai_chat": "@ai-sdk/openai-compatible",
@@ -38,6 +40,7 @@ class ClientModel(StrictModel):
     protocol: str
     context_window: int | None
     capabilities: list[str]
+    cost: dict[str, float] | None = None
 
 
 class ClientSubscription(StrictModel):
@@ -85,6 +88,7 @@ class ClientDownloadService:
         del identity
         applications = self.applications.applications()
         rows = self.repository.registry()
+        prices = self.repository.model_prices()
         gateways = {str(row["id"]): row for row in rows["gateways"]}
         runtimes = {str(row["id"]): row for row in rows["runtimes"]}
         providers = {str(row["id"]): row for row in rows["providers"]}
@@ -147,6 +151,7 @@ class ClientDownloadService:
                     id=str(row["model_key"]), name=str(row["display_name"]),
                     protocol=protocol.value, context_window=row.get("context_window"),
                     capabilities=list(row["capabilities"]),
+                    cost=plugin_model_cost(prices.get(str(row["id"]))),
                 ))
             for subscription in self.repository.list_gateway_application_subscriptions(
                 [application.id]
@@ -186,16 +191,21 @@ class ClientDownloadService:
             request.application_id, request.subscription_id,
             "primary" if request.key_kind == "primary" else "secondary",
         )
+        provider_id = plugin_namespace(
+            "subscription", option.subscription_name, str(option.gateway_id),
+            str(option.subscription_id),
+        )
         config = {
-            "version": 1, "providerId": f"aigateway-{option.subscription_id.hex}",
-            "name": f"AIGateway · {option.application_name}",
-            "accountId": f"{option.application_name} / {option.subscription_name}",
+            "version": 1, "providerId": provider_id,
+            "name": f"AIGateway Subscription · {option.subscription_name}",
+            "accountId": option.subscription_name,
             "applicationId": str(option.application_id),
             "subscriptionId": str(option.subscription_id), "gatewayId": str(option.gateway_id),
             "baseURL": option.base_url, "modelsPath": "/v1/models",
             "subscriptionKey": key.value, "keyKind": request.key_kind,
             "models": {model.id: {
                 "id": model.id, "name": model.name,
+                "cost": model.cost,
                 "provider": {"npm": SDK[model.protocol], "api": option.base_url},
                 "limit": {"context": model.context_window or 32768, "output": 8192},
                 "tool_call": "tools" in model.capabilities,
@@ -205,14 +215,15 @@ class ClientDownloadService:
             } for model in option.models},
         }
         root = Path(__file__).resolve().parent / "client_plugin"
-        files = {name: (root / name).read_bytes() for name in ("index.mjs", "README.md")}
+        files = {name: (root / name).read_bytes()
+                 for name in ("index.mjs", "pricing.mjs", "README.md")}
         files["aigateway.config.json"] = json.dumps(config, ensure_ascii=False, indent=2).encode()
         files["package.json"] = json.dumps({
-            "name": f"opencode-aigateway-{option.subscription_id.hex}-auth",
+            "name": f"opencode-aigateway-subscription-{provider_id.rsplit('-', 1)[-1]}-auth",
             "version": PLUGIN_VERSION, "type": "module", "main": "./index.mjs",
             "description": "AIGateway-Proxy provider for magpie",
             "keywords": ["opencode", "opencode-plugin", "aigateway"], "license": "MIT",
-            "files": ["index.mjs", "aigateway.config.json", "README.md"],
+            "files": ["index.mjs", "pricing.mjs", "aigateway.config.json", "README.md"],
         }, indent=2).encode()
         output = BytesIO()
         with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:

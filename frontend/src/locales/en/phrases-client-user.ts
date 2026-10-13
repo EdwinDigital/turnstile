@@ -13,7 +13,7 @@ export const CLIENT_USER_PHRASES: Record<string, string> = {
   "当前平台暂未启用用户版。": "The user plugin is not enabled on this platform yet.",
   "当前用户：": "Current user:",
   "指定用户下载 · 登录平台后选择本人订阅，动态导入模型和读取额度。": "User-bound download · Sign in to select your subscription, synchronize models and read allowances.",
-  "指定订阅下载 · 保留当前 0.1.1 插件，安装目录 aigateway-proxy。": "Subscription-bound download · Keeps plugin 0.1.1 in the aigateway-proxy folder.",
+  "指定订阅下载 · 保留订阅密钥认证方式，安装目录 aigateway-proxy。": "Subscription-bound download · Keeps subscription-key authentication in the aigateway-proxy folder.",
   "授权用户：": "Authorized user:",
   "本次导入模型": "Models in this import",
   "正在确认…": "Confirming…",

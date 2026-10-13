@@ -18,7 +18,7 @@ export async function ownLogin(settingsDirectory, providerId, userId) {
 
 async function descriptor(path) {
   const data = JSON.parse(await readFile(path, "utf8"));
-  if (!/^aigateway-user-[a-z0-9-]+$/.test(data.providerId) || !Array.isArray(data.images)
+  if (!/^aigateway-user-[\p{L}\p{N}-]+$/u.test(data.providerId) || !Array.isArray(data.images)
       || !data.capability?.startsWith("tsci_") || !data.nonce || !data.settingsDirectory)
     throw new Error("Invalid private picture bridge state");
   const origin = new URL(data.platformOrigin);

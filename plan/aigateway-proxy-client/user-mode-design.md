@@ -1,5 +1,11 @@
 # AIGateway-Proxy 用户登录版设计
 
+2026-10-13 命名修订：新包的供应商/模型命名空间以
+[模型列表可读命名空间](model-namespace-design.md) 为准，覆盖本文历史 UUID 命名规则。
+
+价格和独立个人额度趋势见 [插件可观测性修复](plugin-observability-fixes.md)；
+不修改 magpie 原生卡片、会话分组或 Agent 图标。
+
 日期：2026-10-12。状态：implemented / deployed；当前用户版 0.3.1，新流程以第 14 节为准，验证范围见 implementation.md。
 
 本文最初作为 V2 设计基线；用户批准后已实施平台与插件代码、追加授权迁移和发布。V1 0.1.1 指定订阅版继续使用 design.md 的既有流程。未修改 magpie 应用源码或用户日常 Agent 配置；实际宿主测试使用独立 HOME/XDG 与端口。
