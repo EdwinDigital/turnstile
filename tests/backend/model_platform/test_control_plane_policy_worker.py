@@ -28,12 +28,16 @@ from tests.backend.model_platform.test_control_plane_contracts import (
 from turnstile_core.domain.budget_counting import BudgetPublicationContracts
 from turnstile_core.domain.control_plane import (
     GatewayModelBinding,
+    GatewayPublication,
     GatewayPublicationCreate,
     GatewayPublicationRetry,
     ModelCreateTarget,
     RuntimeTarget,
 )
-from turnstile_core.domain.gateway_targets import GatewayDeploymentScope, GatewayServingDeployment
+from turnstile_core.domain.gateway_targets import (
+    GatewayDeploymentScope,
+    GatewayServingDeployment,
+)
 from turnstile_core.domain.model_availability import ModelAvailabilityCoverage
 from turnstile_core.domain.runtime_models import ProviderTarget, databricks_connection_config
 from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
@@ -46,6 +50,7 @@ from turnstile_core.integrations.apim_control_plane import (
     RetryablePublicationError,
 )
 from turnstile_core.integrations.apim_control_plane_contract import (
+    GatewayEndpointProbeResult,
     ImageProbeJournal,
     PublisherPermissionError,
 )
@@ -173,7 +178,7 @@ def test_budget_rollback_rejects_legacy_parent_before_probing() -> None:
     with (patch.object(client, "revision_api_policy", return_value=source),
           patch.object(client, "probe_revision") as probe,
           pytest.raises(PolicyCompilationError, match="compatible canonical")):
-        worker._validate_rollback_parent(publication)
+                worker._validate_rollback_parent(publication, client)
     probe.assert_not_called()
 
 
@@ -375,7 +380,7 @@ def test_parent_policy_hooks_are_idempotent_and_preserve_inference_invariants() 
 
     patched = compiler.patch_parent_policy(source)
     assert compiler.patch_parent_policy(patched) == patched
-    assert patched.count("<send-request") == 5
+    assert patched.count("<send-request") == source.count("<send-request")
     assert patched.count("<log-to-eventhub") == 5
     assert "selectedProviderName" in patched
     assert "selectedRuntimeName" in patched
@@ -413,12 +418,12 @@ def test_existing_application_tpm_upgrade_preserves_default_and_is_idempotent(
     assert observed is not None
     assert f"long defaultRate = {default_rate};" in observed.attrib["value"]
     assert upgrade_application_tpm_policy(upgraded) == upgraded
-    assert validate_parent_policy(source, canonical) == upgraded
-    assert 'name="applicationTokensPerMinute"' in ApimPolicyCompiler().patch_parent_policy(source)
+    with pytest.raises(PolicyCompilationError, match="applicationTokensPerMinute"):
+        validate_parent_policy(upgraded, canonical)
 
 
 @pytest.mark.parametrize("default_rate", ["25000", "2147483647", "__TOKENS_PER_MINUTE__"])
-def test_application_tpm_upgrade_converts_long_to_policy_integer(default_rate: str) -> None:
+def test_current_application_tpm_rejects_legacy_long_conversion(default_rate: str) -> None:
     canonical = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
     root = parse_policy(canonical.replace("__TOKENS_PER_MINUTE__", default_rate))
     subscription = next(node for node in root.iter("llm-token-limit")
@@ -428,20 +433,10 @@ def test_application_tpm_upgrade_converts_long_to_policy_integer(default_rate: s
     )
     source = serialize_policy(root)
 
-    upgraded = upgrade_application_tpm_policy(source)
-
-    observed = parse_policy(upgraded)
-    limit = next(node for node in observed.iter("llm-token-limit")
-                 if "finops:subscription:" in node.get("counter-key", ""))
-    assert limit.get("tokens-per-minute") == (
-        '@((int)(long)context.Variables["applicationTokensPerMinute"])'
-    )
-    variable = observed.find(".//set-variable[@name='applicationTokensPerMinute']")
-    original = root.find(".//set-variable[@name='applicationTokensPerMinute']")
-    assert variable is not None and original is not None
-    assert variable.attrib == original.attrib
-    assert upgrade_application_tpm_policy(upgraded) == upgraded
-    assert validate_parent_policy(source, canonical) == upgraded
+    with pytest.raises(PolicyCompilationError):
+        upgrade_application_tpm_policy(source)
+    with pytest.raises(PolicyCompilationError):
+        validate_parent_policy(source, canonical)
 
 
 @pytest.mark.parametrize("change", ["guard", "attribute", "duplicate", "invalid-default"])
@@ -480,7 +475,7 @@ def test_application_tpm_upgrade_rejects_misplaced_rate_variable(placement: str)
         inbound.insert(0, variable)
 
     with pytest.raises(PolicyCompilationError):
-        ApimPolicyCompiler().patch_parent_policy(serialize_policy(root))
+        upgrade_application_tpm_policy(serialize_policy(root))
 
 
 def test_parent_policy_rejects_publication_without_compact_admission() -> None:
@@ -721,7 +716,7 @@ def test_promoted_publication_recovers_without_repeating_writes_or_probes(
     assert active is not None and active.status == "active"
     assert resolve.call_args.kwargs["include_probe_credentials"] is False
     assert client.permission_checks[-1] is True
-    assert client.calls == before
+    assert client.calls == [*before, ("parent-readback", active.apim_revision)]
 
 
 @pytest.mark.parametrize("changed", [False, True])
@@ -754,12 +749,16 @@ def test_foundry_publication_waits_for_rbac_and_resumes_the_same_candidate() -> 
             publication: object,
             *,
             journal: ImageProbeJournal | None = None,
-        ) -> None:
+            baseline_publication: GatewayPublication | None = None,
+        ) -> tuple[GatewayEndpointProbeResult, ...]:
             if not self.authorized:
                 raise AuthorizationRequiredError(
                     "Foundry rejected the APIM managed identity"
                 )
-            super().probe_revision(revision, publication, journal=journal)
+            return super().probe_revision(
+                revision, publication, journal=journal,
+                baseline_publication=baseline_publication,
+            )
 
     repository = InMemoryRepository()
     foundry_provider_ids = {
@@ -914,7 +913,7 @@ def test_managed_foundry_removal_preserves_the_shared_project_connection() -> No
     assert runtime_config["path"] == "/chat/completions"
     assert runtime_config["backend_path"] == "/openai/v1/chat/completions"
 
-    second_publication = service.publish(
+    second_publication = service.seed_legacy_publication(
         GatewayPublicationCreate(
             gateway_profile_id=APIM_ID,
             provider=ProviderTarget(existing_id=provider["id"]),
@@ -1020,7 +1019,7 @@ def test_candidate_discovery_propagation_is_retryable(
     )
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -1065,7 +1064,7 @@ def test_first_foundry_regression_probe_reports_missing_authorization() -> None:
     )
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -1117,6 +1116,10 @@ def test_foundry_claude_candidate_probe_uses_messages_operation() -> None:
                 },
             )
         payload = json.loads(request.content)
+        if request.url.path.endswith("/v1/messages/count_tokens"):
+            assert payload["model"] == alias
+            assert "max_completion_tokens" not in payload
+            return httpx.Response(200, json={"input_tokens": 1})
         assert request.url.path.endswith("/v1/messages")
         assert payload["model"] == alias
         assert payload["max_tokens"] == 8
@@ -1134,7 +1137,7 @@ def test_foundry_claude_candidate_probe_uses_messages_operation() -> None:
     )
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 

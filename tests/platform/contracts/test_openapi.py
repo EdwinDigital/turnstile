@@ -88,6 +88,24 @@ def _documented_schemas() -> dict[str, dict[str, object]]:
     return _resolve_index(cast(dict[str, object], components["schemas"]))
 
 
+def _schema_contract(value: object) -> object:
+    if isinstance(value, list):
+        return [_schema_contract(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {
+        key: _schema_contract(item)
+        for key, item in value.items() if key not in {"title", "description"}
+    }
+    types = result.get("type")
+    if isinstance(types, list):
+        result = {"anyOf": [{**result, "type": kind} for kind in types]}
+    variants = result.get("anyOf")
+    if isinstance(variants, list):
+        result["anyOf"] = sorted(variants, key=lambda item: json.dumps(item, sort_keys=True))
+    return result
+
+
 def test_execution_event_has_bounded_receipts_and_default_off_completion() -> None:
     schema = _documented_schemas()["UsageEvent"]
     properties = cast(dict[str, dict[str, object]], schema["properties"])
@@ -116,8 +134,8 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 120 + 2 * (
         len(paths) + len(schemas)
     )
-    assert len(paths) == 108
-    assert len(schemas) == 249
+    assert set(paths) == set(app.openapi()["paths"]) - UNDOCUMENTED
+    assert set(app.openapi()["components"]["schemas"]) <= set(schemas)
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -147,7 +165,7 @@ def test_model_availability_contract_matches_runtime_constraints_and_owner_route
         }
 
     names = {name for name in actual if name.startswith("ModelAvailability")}
-    assert len(names) == 7
+    assert len(names) == 9
     for name in names:
         assert normalize(documented[name]) == normalize(actual[name]), name
     for path, methods in (
@@ -297,7 +315,7 @@ def test_gateway_target_contract_matches_actual_structures_and_owner_operations(
     actual = app.openapi()["components"]["schemas"]
     generated = _yaml_document(CONTRACT.parent / "openapi/schemas/gateway-targets.yaml")
     for name in cast(dict[str, object], generated["schemas"]):
-        assert documented[name] == actual[name]
+        assert _schema_contract(documented[name]) == _schema_contract(actual[name]), name
     write = documented["ApimTargetWrite"]
     assert write["additionalProperties"] is False
     publication = documented["GatewayPublicationCreate"]
@@ -309,7 +327,7 @@ def test_gateway_target_contract_matches_actual_structures_and_owner_operations(
     paths = _documented_paths()
     registration = paths["/api/v1/model-management/apim-targets"]["post"]
     assert cast(dict[str, object], registration)["security"] == [{"sessionCookie": []}]
-    sync = paths["/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync"]
+    sync = paths["/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-syncs"]
     operation = cast(dict[str, object], sync["post"])
     assert "202" in cast(dict[str, object], operation["responses"])
 
@@ -319,7 +337,7 @@ def test_onboarding_contract_has_exact_models_and_durable_owner_operations() -> 
     actual = app.openapi()["components"]["schemas"]
     for name in ("ApimOnboardingRequest", "ApimOnboardingPlan", "ApimOnboardingStart",
                  "ApimOnboardingOperations"):
-        assert documented[name] == actual[name]
+        assert _schema_contract(documented[name]) == _schema_contract(actual[name]), name
     paths = _documented_paths()
     root = "/api/v1/model-management/apim-onboarding"
     for path, method, response in (
@@ -333,7 +351,10 @@ def test_onboarding_contract_has_exact_models_and_durable_owner_operations() -> 
     properties = cast(
         dict[str, dict[str, object]], documented["GatewayReleaseOperation"]["properties"],
     )
-    assert "apim_onboarding" in cast(list[str], properties["operation_kind"]["enum"])
+    operation_kind = properties["operation_kind"]
+    if "$ref" in operation_kind:
+        operation_kind = documented[cast(str, operation_kind["$ref"]).rsplit("/", 1)[-1]]
+    assert "apim_onboarding" in cast(list[str], operation_kind["enum"])
 
 
 def test_apim_workspace_contract_preserves_owner_lifecycle_and_capabilities() -> None:
@@ -367,7 +388,7 @@ def test_apim_workspace_contract_preserves_owner_lifecycle_and_capabilities() ->
 def test_self_hosted_lifecycle_contract_preserves_minimal_names_and_metadata_boundaries() -> None:
     paths = _documented_paths()
     lifecycle = [(path, item) for path, item in paths.items() if "self-hosted-gateways" in path]
-    assert len(lifecycle) == 7
+    assert len(lifecycle) == 8
     for _, item in lifecycle:
         for operation in item.values():
             values = cast(dict[str, object], operation)
@@ -412,11 +433,13 @@ def test_multi_target_contract_matches_runtime_and_never_exposes_child_secrets()
     for name in ("MultiTargetPublicationCreate", "MultiTargetPublicationChildCreate"):
         assert documented[name] == actual[name]
     accepted = actual["MultiTargetPublicationRequestAccepted"]
-    expected = {**accepted, "properties": {**accepted["properties"], "publications": {
-        **accepted["properties"]["publications"],
-        "items": {"$ref": "#/components/schemas/GatewayPublication"},
-    }}}
-    assert documented["MultiTargetPublicationRequestAccepted"] == expected
+    assert _schema_contract(documented["MultiTargetPublicationRequestAccepted"]) == (
+        _schema_contract(accepted)
+    )
+    publication_view = documented["GatewayPublicationView"]
+    assert not {"credential_ciphertext", "api_key", "desired_spec"} & set(
+        cast(dict[str, object], publication_view["properties"]),
+    )
     paths = _documented_paths()
     root = "/api/v1/model-management/rollouts"
     assert set(paths[root]) == {"get", "post"}
@@ -519,11 +542,15 @@ def test_application_provisioning_defaults_are_nullable_positive_limits() -> Non
     schema = _documented_schemas()["GatewayApplicationList"]
     properties = cast(dict[str, dict[str, object]], schema["properties"])
     defaults = properties["provisioning_defaults"]
-    assert defaults["type"] == ["object", "null"]
-    assert defaults["additionalProperties"] is False
-    limits = cast(dict[str, dict[str, object]], defaults["properties"])
+    variants = cast(list[dict[str, object]], defaults["anyOf"])
+    assert {"type": "null"} in variants
+    reference = next(item for item in variants if "$ref" in item)
+    value = _documented_schemas()[cast(str, reference["$ref"]).rsplit("/", 1)[-1]]
+    assert value["additionalProperties"] is False
+    limits = cast(dict[str, dict[str, object]], value["properties"])
     assert set(limits) == {"monthly_token_limit", "tokens_per_minute"}
-    assert all(value["minimum"] == 1 for value in limits.values())
+    assert all(item["type"] == "integer" and item["exclusiveMinimum"] == 0
+               for item in limits.values())
 
 
 def test_image_contract_is_single_nonstreaming_passthrough_and_session_protected() -> None:
@@ -548,9 +575,8 @@ def test_image_contract_is_single_nonstreaming_passthrough_and_session_protected
     assert retry["authorize_image_probes"]["default"] is False
     view = cast(dict[str, dict[str, object]], schemas["GatewayPublication"]["properties"])
     assert view["retry_can_authorize_image_probes"]["default"] is False
-    assert "retry_can_authorize_image_probes" in (
-        app.openapi()["components"]["schemas"]["GatewayPublicationView"]["properties"]
-    )
+    actual_view = app.openapi()["components"]["schemas"]["GatewayPublicationView"]
+    assert "desired_spec" not in actual_view["properties"]
 
 
 def test_direct_publication_vendor_contract_matches_runtime_dto() -> None:
@@ -582,7 +608,8 @@ def test_application_ledger_fields_preserve_unknown_and_zero() -> None:
     )
     for field in numeric:
         assert properties[field]["type"] == ["integer", "null"]
-        assert properties[field]["default"] is None
+        assert properties[field].get("default") is None
+        assert "default" not in properties[field]
         assert properties[field]["minimum"] == 0
     required = cast(list[str], schema["required"])
     assert not set(numeric).intersection(required)

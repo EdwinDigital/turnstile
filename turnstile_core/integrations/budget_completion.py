@@ -1,6 +1,7 @@
-# ruff: noqa: UP017
+# ruff: noqa: UP017 - Shared with the Observer's Python 3.10 runtime.
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -30,7 +31,13 @@ UTC = timezone.utc
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(
-        self, request: Any, response: Any, code: int, message: str, headers: Any, target: str
+        self,
+        request: Any,
+        response: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        target: str,
     ) -> None:
         return None
 
@@ -108,13 +115,7 @@ class BudgetCompletionClient:
 
     def _read(self, partition: str, row: str) -> tuple[dict[str, Any], str]:
         status, headers, payload = self._request(
-            "GET",
-            entity_url(
-                self._endpoint,
-                self._table,
-                partition,
-                row,
-            ),
+            "GET", entity_url(self._endpoint, self._table, partition, row)
         )
         if status != 200:
             raise TableBatchUnavailable("Completion storage did not return the required entity")
@@ -127,16 +128,28 @@ class BudgetCompletionClient:
 
     def complete_event(self, event: dict[str, Any]) -> int:
         evidence = completion_evidence(event)
+        if event.get("event_schema_version") != 2:
+            raise ValueError("Completion requires schema-two Gateway attribution")
         receipts = event["budget_execution"]
         if not isinstance(receipts, list) or not 1 <= len(receipts) <= 2:
             raise ValueError("Completion requires bounded admission receipts")
+        identity_parts = [
+            event["gateway_profile_id"],
+            event["apim_service_id"].lower(),
+            event["native_gateway_id"].lower(),
+            event["correlation_id"].lower(),
+        ]
+        canonical = ".".join(base64.b64encode(value.encode()).decode() for value in identity_parts)
+        expected_id = "turnstile-v2-" + hashlib.sha256(canonical.encode()).hexdigest()
+        if event.get("id") != expected_id or event.get("usage_id") != expected_id:
+            raise ValueError("Completion event does not match its canonical Gateway identity")
         completed, seen = 0, set()
         for receipt in receipts:
             identity = normalized_identity(receipt["identity"])
             scope = identity["scope"]
             if (
                 any(
-                    identity[field] != event.get(field)
+                    identity[field] != event[field]
                     for field in (
                         "gateway_profile_id",
                         "native_gateway_id",
@@ -147,18 +160,14 @@ class BudgetCompletionClient:
                 or scope["scope_type"] in seen
             ):
                 raise ValueError("Completion receipt does not match the trusted response")
-            if scope["scope_type"] == "person" and scope["scope_id"] != event.get("user_id"):
+            if scope["scope_type"] == "person" and scope["scope_id"] != event["user_id"]:
                 raise ValueError("Completion person does not match verified attribution")
             seen.add(scope["scope_type"])
             scope_hash = hashlib.sha256(scope["scope_id"].encode()).hexdigest()
             partition = f"budget2|{scope['scope_type']}|{scope_hash}|{scope['period_start'][:7]}"
             parts = [
                 identity[field]
-                for field in (
-                    "gateway_profile_id",
-                    "native_gateway_id",
-                    "correlation_id",
-                )
+                for field in ("gateway_profile_id", "native_gateway_id", "correlation_id")
             ]
             key = hashlib.sha256(
                 json.dumps(parts, separators=(",", ":"), ensure_ascii=False).encode()

@@ -1,9 +1,9 @@
-import { useId, useRef, useState } from "react"
+import { useId, useState } from "react"
 import { useMutation } from "@tanstack/react-query"
 import { ArrowLeft, CheckCircle2, ChevronRight, Circle, CircleAlert, Link2, Play, RefreshCw, X } from "lucide-react"
 
 import { dataSource } from "../../data-sources/apim/api"
-import type { ApimOnboardingPlan, ApimOnboardingRequest, ApimOnboardingStart, GatewayReleaseOperation } from "../../data-sources/apim/types"
+import type { ApimOnboardingPlan, ApimOnboardingRequest, GatewayReleaseOperation } from "../../data-sources/apim/types"
 import { apimOnboardingFormPayload, apimOnboardingFormValid } from "../../lib/gateway-forms"
 import { apimOnboardingDetails, apimOnboardingOperationName } from "../../lib/gateway-topology"
 import { ApimLogo } from "../brand-logos"
@@ -11,15 +11,13 @@ import { Button } from "../ui/button"
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../ui/dialog"
 import { Input } from "../ui/input"
 
-export { apimOnboardingOperationName } from "../../lib/gateway-topology"
-
 const steps: Record<string, string> = {
   validate_target: "检查实例",
   create_api: "创建专用 API",
   configure_governance: "配置鉴权与计量",
   create_subscriptions: "创建系统订阅",
   project_access: "初始化额度",
-  verify_managed_gateway: "验证托管网关",
+  verify_managed_gateway: "验证 Managed Gateway",
   activate_target: "完成接入",
 }
 const blockers: Record<string, string> = {
@@ -40,21 +38,18 @@ export function ApimOnboardingDialog({ available, onClose, onAdopt, onAccepted, 
   available: boolean
   onClose: () => void
   onAdopt: () => void
-  onAccepted: (operation: GatewayReleaseOperation) => void | Promise<void>
+  onAccepted: (operation: GatewayReleaseOperation) => void
   onSettled: () => void
 }) {
-  const prefix = useId()
-  const submitting = useRef(false)
   const [value, setValue] = useState<ApimOnboardingRequest>({ tenant_id: "", resource_id: "", name: "" })
   const [plan, setPlan] = useState<ApimOnboardingPlan | null>(null)
-  const preview = useMutation({ mutationFn: (request: ApimOnboardingRequest) => dataSource.previewApimOnboarding(request), onSuccess: setPlan })
+  const preview = useMutation({ mutationFn: dataSource.previewApimOnboarding, onSuccess: setPlan })
   const start = useMutation({
-    mutationFn: (request: ApimOnboardingStart) => dataSource.startApimOnboarding(request),
-    onSuccess: accepted => onAccepted(accepted.operation),
+    mutationFn: dataSource.startApimOnboarding,
+    onSuccess: (accepted) => onAccepted(accepted.operation),
     onSettled,
   })
   const busy = preview.isPending || start.isPending
-  const valid = apimOnboardingFormValid(value)
   const update = (field: keyof ApimOnboardingRequest, next: string) => {
     setValue(current => ({ ...current, [field]: next }))
     setPlan(null)
@@ -62,43 +57,48 @@ export function ApimOnboardingDialog({ available, onClose, onAdopt, onAccepted, 
     start.reset()
   }
   const error = preview.error ?? start.error
-  return <Dialog open onOpenChange={open => { if (!open && !busy && !submitting.current) onClose() }}>
+  const valid = apimOnboardingFormValid(value)
+  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}>
     <DialogContent className="registry-editor-dialog infrastructure-editor-dialog apim-onboarding-dialog" finalFocus={false}>
-      <form className="registry-editor" onSubmit={async event => {
+      <form className="registry-editor" onSubmit={event => {
         event.preventDefault()
-        if (busy || submitting.current || !available || !valid) return
-        submitting.current = true
-        try {
-          if (plan?.ready) {
-            await start.mutateAsync({ request: plan.request, confirmation_sha256: plan.confirmation_sha256 })
-          } else {
-            await preview.mutateAsync(apimOnboardingFormPayload(value))
-          }
-        } catch {}
-        finally { submitting.current = false }
+        if (busy || !available || !valid) return
+        if (plan?.ready) start.mutate({ request: plan.request, confirmation_sha256: plan.confirmation_sha256 })
+        else preview.mutate(apimOnboardingFormPayload(value))
       }}>
-        <DialogHeader className="registry-editor-header"><DialogTitle>添加 APIM 实例</DialogTitle><DialogDescription>托管网关初始化</DialogDescription></DialogHeader>
+        <DialogHeader className="registry-editor-header">
+          <DialogTitle>添加 APIM 实例</DialogTitle>
+          <DialogDescription>Managed Gateway 初始化</DialogDescription>
+        </DialogHeader>
         <DialogClose render={<Button type="button" variant="ghost" size="icon-sm" className="registry-editor-close" disabled={busy} />}><X size={16} /><span className="sr-only">关闭</span></DialogClose>
         <div className="registry-editor-body infrastructure-editor-body">
           {!plan && <>
-            <label className="registry-field" htmlFor={`${prefix}-name`}><span className="registry-field-label">Turnstile 显示名称（可选）</span><Input id={`${prefix}-name`} name="name" value={value.name ?? ""} maxLength={120} disabled={busy} autoFocus onChange={event => update("name", event.target.value)} /></label>
-            <label className="registry-field" htmlFor={`${prefix}-tenant`}><span className="registry-field-label">租户 ID</span><Input id={`${prefix}-tenant`} name="tenant_id" value={value.tenant_id} required maxLength={36} disabled={busy} onChange={event => update("tenant_id", event.target.value)} /></label>
-            <label className="registry-field" htmlFor={`${prefix}-resource`}><span className="registry-field-label">APIM 资源 ID</span><Input id={`${prefix}-resource`} name="resource_id" value={value.resource_id} required maxLength={1024} disabled={busy} onChange={event => update("resource_id", event.target.value)} placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.ApiManagement/service/..." /></label>
+            <label className="registry-field"><span className="registry-field-label">Turnstile 显示名称（可选）</span><Input value={value.name ?? ""} maxLength={120} disabled={busy} onChange={event => update("name", event.target.value)} autoFocus /></label>
+            <label className="registry-field"><span className="registry-field-label">Tenant ID</span><Input value={value.tenant_id} disabled={busy} onChange={event => update("tenant_id", event.target.value)} /></label>
+            <label className="registry-field"><span className="registry-field-label">APIM 资源 ID</span><Input value={value.resource_id} maxLength={1024} disabled={busy} onChange={event => update("resource_id", event.target.value)} placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.ApiManagement/service/..." /></label>
           </>}
           {plan && <section className="apim-onboarding-plan" aria-label="APIM 初始化计划">
             <div className="apim-onboarding-target"><ApimLogo size={20} /><strong data-no-localize>{plan.request.name ?? plan.service_name}</strong><span data-no-localize>{plan.service_tier} · {plan.location}</span></div>
             <dl>
               <dt>Azure 资源名称</dt><dd><code data-no-localize>{plan.service_name}</code></dd>
-              <dt>入口类型</dt><dd>托管网关</dd>
+              <dt>入口类型</dt><dd>Managed Gateway</dd>
               <dt>专用 API</dt><dd><code data-no-localize>{plan.api_id}</code></dd>
-              <dt>调用地址</dt><dd><code data-no-localize>{plan.managed_gateway_origin.replace(/\/$/, "")}/{plan.api_path}</code></dd>
+              <dt>调用地址</dt><dd><code data-no-localize>{`${plan.managed_gateway_origin.replace(/\/$/, "")}/${plan.api_path}`}</code></dd>
             </dl>
-            <section className="apim-onboarding-group" aria-label="控制台调用应用"><h3>控制台调用应用</h3><dl>
-              <dt>控制台订阅</dt><dd><code data-no-localize>{plan.dashboard_subscription_id}</code></dd>
-              <dt>共享月度 Token 上限</dt><dd>{plan.initial_monthly_token_limit.toLocaleString()} Tokens</dd>
-              <dt>共享每分钟 Token 上限 (TPM)</dt><dd>{plan.initial_tokens_per_minute.toLocaleString()}</dd>
-            </dl></section>
-            <section className="apim-onboarding-group" aria-label="系统探测验证"><h3>系统探测验证</h3><dl><dt>探测订阅</dt><dd><code data-no-localize>{plan.probe_subscription_id}</code></dd></dl></section>
+            <section className="apim-onboarding-group" aria-label="Dashboard 调用应用">
+              <h3>Dashboard 调用应用</h3>
+              <dl>
+                <dt>Dashboard 订阅</dt><dd><code data-no-localize>{plan.dashboard_subscription_id}</code></dd>
+                <dt>共享月度 Token 上限</dt><dd>{plan.initial_monthly_token_limit.toLocaleString()} Tokens</dd>
+                <dt>共享每分钟 Token 上限 (TPM)</dt><dd>{plan.initial_tokens_per_minute.toLocaleString()}</dd>
+              </dl>
+            </section>
+            <section className="apim-onboarding-group" aria-label="Probe 系统验证">
+              <h3>Probe 系统验证</h3>
+              <dl>
+                <dt>Probe 订阅</dt><dd><code data-no-localize>{plan.probe_subscription_id}</code></dd>
+              </dl>
+            </section>
             <ol className="apim-onboarding-steps">{plan.steps.map(step => <li key={step}><Circle size={13} /><span>{steps[step] ?? step}</span></li>)}</ol>
             {plan.blockers.length > 0 && <ul className="registry-error apim-onboarding-blockers" role="alert">{plan.blockers.map(blocker => <li key={blocker}>{blockers[blocker] ?? blocker}</li>)}</ul>}
           </section>}
@@ -106,7 +106,7 @@ export function ApimOnboardingDialog({ available, onClose, onAdopt, onAccepted, 
           {error && <div className="registry-error" role="alert">{error.message}</div>}
         </div>
         <DialogFooter className="registry-editor-footer apim-onboarding-footer">
-          {plan ? <Button type="button" variant="ghost" disabled={busy} onClick={() => { if (!submitting.current) { setPlan(null); preview.reset(); start.reset() } }}><ArrowLeft size={14} />返回修改</Button>
+          {plan ? <Button type="button" variant="ghost" disabled={busy} onClick={() => { setPlan(null); preview.reset(); start.reset() }}><ArrowLeft size={14} />返回修改</Button>
             : <Button type="button" variant="ghost" disabled={busy} onClick={onAdopt}><Link2 size={14} />关联已有配置</Button>}
           <DialogClose render={<Button type="button" variant="outline" disabled={busy} />}>取消</DialogClose>
           <Button type="submit" disabled={busy || !available || !valid}>{busy ? <RefreshCw size={14} className="spin" /> : plan?.ready ? <Play size={14} /> : <CheckCircle2 size={14} />}{start.isPending ? "正在提交" : preview.isPending ? "正在检查" : plan?.ready ? "开始初始化" : plan ? "重新检查" : "检查资源"}</Button>
@@ -124,31 +124,46 @@ export function ApimOnboardingRow({ operation, available, retryingId, onRetry }:
 }) {
   const [expanded, setExpanded] = useState(true)
   const detailsId = useId()
-  const failed = operation.status === "failed"
   const succeeded = operation.status === "succeeded"
+  const failed = operation.status === "failed"
   const completed = new Set(succeeded ? Object.keys(steps) : Array.isArray(operation.checkpoint.completed_steps)
-    ? operation.checkpoint.completed_steps.filter((item): item is string => typeof item === "string") : [])
-  const activeStep = Object.keys(steps).find(step => !completed.has(step))
+    ? operation.checkpoint.completed_steps.filter((value): value is string => typeof value === "string") : [])
   const name = apimOnboardingOperationName(operation)
   const details = apimOnboardingDetails(operation)
   const resourceLabel = [details.serviceName, details.resourceGroup].filter(Boolean).join(" · ")
-  const status = failed ? "初始化失败" : succeeded ? "初始化完成" : operation.worker_available ? "正在初始化" : "初始化已排队，后台处理服务当前不可用"
+  const activeStep = Object.keys(steps).find(step => !completed.has(step))
+  const status = failed ? "初始化失败" : succeeded ? "初始化完成" : operation.worker_available ? "正在初始化" : "初始化已排队，Worker 当前不可用"
   const disclosureLabel = expanded ? "收起初始化进度" : "展开初始化进度"
   return <section className="connection-provider-group apim-target-group apim-onboarding-row" role="rowgroup" aria-label={name} data-status={operation.status}>
     <article className="connection-provider-heading apim-target-heading" role="row">
-      <div className="connection-provider-identity" role="cell"><span className="model-list-icon" data-model-family="apim"><ApimLogo size={16} /></span><span><b title={name} data-no-localize>{name}</b><small className="apim-target-resource" title={resourceLabel} data-no-localize>{resourceLabel}</small></span></div>
-      <span className="connection-provider-summary" role="cell"><b title={details.endpoint ?? undefined} data-no-localize>{details.endpoint ?? "-"}</b><small>计划调用地址</small></span>
-      <span className="connection-provider-summary" role="cell"><b>托管网关</b><small title={details.apiId} data-no-localize>{details.apiId || "-"}</small></span>
-      <div className="model-status-cell" role="cell"><span className={`gateway-readiness apim-onboarding-status ${failed ? "unavailable" : succeeded ? "ready" : "warning"}`} role="status"><span>{failed ? <CircleAlert size={13} /> : succeeded ? <CheckCircle2 size={13} /> : <RefreshCw size={13} className={operation.worker_available ? "spin" : ""} />}{status}</span><small>{activeStep ? steps[activeStep] : "完成接入"}</small></span></div>
-      <div className="model-row-actions infrastructure-row-actions" role="cell"><button type="button" className="connection-provider-chevron apim-row-chevron" title={disclosureLabel} aria-label={disclosureLabel} aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded(current => !current)}><ChevronRight size={15} /></button></div>
-    </article>
-    <div className="apim-onboarding-details" role="row" hidden={!expanded && !failed && !operation.error_message}><div role="cell" aria-colspan={5}>
-      <div className="apim-onboarding-progress" id={detailsId} hidden={!expanded}>
-        <dl className="apim-onboarding-mobile-summary"><dt>计划调用地址</dt><dd data-no-localize>{details.endpoint ?? "-"}</dd><dt>专用 API</dt><dd data-no-localize>{details.apiId || "-"}</dd></dl>
-        <ol className="apim-onboarding-steps">{Object.entries(steps).map(([step, label]) => <li key={step} data-complete={completed.has(step)} data-failed={failed && step === activeStep} aria-current={step === activeStep ? "step" : undefined}>{completed.has(step) ? <CheckCircle2 size={13} /> : failed && step === activeStep ? <CircleAlert size={13} /> : <Circle size={13} />}<span>{label}</span></li>)}</ol>
+      <div className="connection-provider-identity" role="cell">
+        <span className="model-list-icon" data-model-family="apim"><ApimLogo size={16} /></span>
+        <span><b title={name} data-no-localize>{name}</b><small className="apim-target-resource" title={resourceLabel} data-no-localize>{resourceLabel}</small></span>
       </div>
-      {(failed || operation.error_message) && <div className="registry-error apim-onboarding-error"><p role="alert">{operation.error_message || "初始化失败"}</p>{failed && <Button type="button" size="sm" variant="outline" className="apim-onboarding-retry" disabled={!available || retryingId !== null} onClick={() => onRetry(operation.id)}><RefreshCw size={14} className={retryingId === operation.id ? "spin" : ""} /><span>重试初始化</span></Button>}</div>}
-    </div>
+      <span className="connection-provider-summary" role="cell"><b title={details.endpoint ?? undefined} data-no-localize>{details.endpoint ?? "-"}</b><small>计划调用地址</small></span>
+      <span className="connection-provider-summary" role="cell"><b>Managed Gateway</b><small title={details.apiId} data-no-localize>{details.apiId || "-"}</small></span>
+      <div className="model-status-cell" role="cell"><span className={`gateway-readiness apim-onboarding-status ${failed ? "unavailable" : succeeded ? "ready" : "warning"}`} role="status">
+        <span>{failed ? <CircleAlert size={13} /> : succeeded ? <CheckCircle2 size={13} /> : <RefreshCw size={13} className={operation.worker_available ? "spin" : ""} />}{status}</span>
+        <small>{activeStep ? steps[activeStep] : "完成接入"}</small>
+      </span></div>
+      <div className="model-row-actions infrastructure-row-actions" role="cell">
+        <button type="button" className="connection-provider-chevron apim-row-chevron" title={disclosureLabel} aria-label={disclosureLabel} aria-expanded={expanded} aria-controls={detailsId} onClick={() => setExpanded(current => !current)}><ChevronRight size={15} /></button>
+      </div>
+    </article>
+    <div className="apim-onboarding-details" role="row" hidden={!expanded && !failed && !operation.error_message}>
+      <div role="cell" aria-colspan={5}>
+        <div className="apim-onboarding-progress" id={detailsId} hidden={!expanded}>
+          <dl className="apim-onboarding-mobile-summary">
+            <dt>计划调用地址</dt><dd data-no-localize>{details.endpoint ?? "-"}</dd>
+            <dt>专用 API</dt><dd data-no-localize>{details.apiId || "-"}</dd>
+          </dl>
+          <ol className="apim-onboarding-steps">{Object.entries(steps).map(([step, label]) => <li key={step} data-complete={completed.has(step)} data-failed={failed && step === activeStep} aria-current={step === activeStep ? "step" : undefined}>{completed.has(step) ? <CheckCircle2 size={13} /> : failed && step === activeStep ? <CircleAlert size={13} /> : <Circle size={13} />}<span>{label}</span></li>)}</ol>
+        </div>
+        {(failed || operation.error_message) && <div className="registry-error apim-onboarding-error">
+          <p role="alert">{operation.error_message || "初始化失败"}</p>
+          {failed && <Button type="button" size="sm" variant="outline" className="apim-onboarding-retry" disabled={!available || retryingId !== null} onClick={() => onRetry(operation.id)}><RefreshCw size={14} className={retryingId === operation.id ? "spin" : ""} /><span>重试初始化</span></Button>}
+        </div>}
+      </div>
     </div>
   </section>
 }

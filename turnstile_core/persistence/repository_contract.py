@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Protocol
 from uuid import UUID
 
-from ..domain.application_access import GatewayApplicationLedgerState, UsageApplicationAttribution
+from ..domain.application_access import (
+    GatewayApplicationLedgerState,
+    UsageApplicationAttribution,
+)
 from ..domain.billable_requests import BillableRequestAttempt, BillableRequestPlan
+from ..domain.control_plane import GatewayPublication
 from ..domain.gateway_targets import (
     ApimOnboardingPlan,
     ApimTarget,
@@ -15,14 +20,14 @@ from ..domain.gateway_targets import (
     GatewayDeployment,
     GatewayDeploymentInventory,
     GatewayInstanceObservation,
+    SelfHostedGatewayProvisionSpec,
+    UsageGatewayAttribution,
 )
 from ..domain.ledger import (
     BudgetReservationAdmission,
     BudgetReservationFinalization,
     LedgerAdmissionReceipt,
-    LedgerScopeType,
 )
-from ..domain.model_availability import ModelAvailabilityState
 from ..domain.models import (
     ApimCacheReadBucket,
     AuditFindingUpdate,
@@ -42,6 +47,8 @@ class OpsDbProxy(Protocol):
         record: TokenUsageRecord,
         application: UsageApplicationAttribution | None = None,
         *,
+        gateway: UsageGatewayAttribution | None = None,
+        terminal_observation: dict[str, Any] | None = None,
         execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
         usage_complete: bool = False,
         gateway_profile_id: UUID | None = None,
@@ -64,25 +71,27 @@ class QueryRepository(ABC):
     def model_availability_supported(self) -> bool:
         return False
 
-    def get_model_availability_state(self, model_id: UUID) -> ModelAvailabilityState | None:
-        return None
+    def list_self_hosted_gateway_provisions(self) -> Sequence[dict[str, Any]]:
+        raise NotImplementedError
 
-    @abstractmethod
-    def begin_platform_invocation(self, attempt: PlatformInvocationAttempt) -> None: ...
+    def retry_self_hosted_gateway_provision(
+        self, operation_id: UUID, actor: str,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
 
-    @abstractmethod
-    def finish_platform_invocation(self, completion: PlatformInvocationCompletion) -> None: ...
+    def finish_self_hosted_gateway_provision(
+        self, operation_id: UUID, worker_id: str, spec: SelfHostedGatewayProvisionSpec,
+        deployment: GatewayDeployment, inventory: GatewayDeploymentInventory,
+        checkpoint: Mapping[str, Any],
+        *, enqueue_inventory_sync: bool = False,
+    ) -> None:
+        raise NotImplementedError
 
-    @abstractmethod
-    def finish_apim_onboarding_operation(
-        self, operation_id: UUID, worker_id: str, credential_ciphertext: bytes,
-        credential_hint: str, configuration_sha256: str,
-    ) -> dict[str, Any] | None: ...
+    def begin_platform_invocation(self, attempt: PlatformInvocationAttempt) -> None:
+        raise NotImplementedError("Durable platform invocation records are required")
 
-    @abstractmethod
-    def enroll_apim_onboarding_budget_target(
-        self, operation_id: UUID, worker_id: str,
-    ) -> dict[str, Any]: ...
+    def finish_platform_invocation(self, completion: PlatformInvocationCompletion) -> None:
+        raise NotImplementedError("Durable platform invocation records are required")
 
     @abstractmethod
     def create_apim_onboarding_operation(
@@ -96,131 +105,16 @@ class QueryRepository(ABC):
     def retry_apim_onboarding_operation(self, operation_id: UUID, actor: str) -> dict[str, Any]: ...
 
     @abstractmethod
-    def retry_self_hosted_gateway_provision(
-        self, operation_id: UUID, actor: str,
-    ) -> dict[str, Any]: ...
+    def finish_apim_onboarding_operation(
+        self, operation_id: UUID, worker_id: str, credential_ciphertext: bytes,
+        credential_hint: str, configuration_sha256: str,
+        fixed_publication: GatewayPublication | None = None,
+    ) -> dict[str, Any] | None: ...
 
-    @abstractmethod
-    def upsert_gateway_instance_observation(
-        self, observation: GatewayInstanceObservation,
-    ) -> dict[str, Any]: ...
-
-    @abstractmethod
-    def list_gateway_instance_observations(
-        self, deployment_id: UUID, *, limit: int = 100,
-    ) -> Sequence[dict[str, Any]]: ...
-
-    @abstractmethod
-    def upsert_gateway_deployment_inventory(
-        self, inventory: GatewayDeploymentInventory,
-    ) -> dict[str, Any]: ...
-
-    @abstractmethod
-    def get_gateway_deployment_inventory(self, deployment_id: UUID) -> dict[str, Any] | None: ...
-
-    @abstractmethod
-    def list_gateway_deployment_inventories(
-        self, deployment_ids: Sequence[UUID],
-    ) -> Sequence[dict[str, Any]]: ...
-
-    @abstractmethod
-    def upsert_gateway_deployment(
-        self, deployment: GatewayDeployment, *, preserve_display_name: bool = False,
-        retiring_deployment: GatewayDeployment | None = None,
-    ) -> dict[str, Any]: ...
-
-    @abstractmethod
-    def rename_gateway_deployment(self, deployment_id: UUID, display_name: str) -> bool: ...
-
-    @abstractmethod
-    def get_gateway_deployment(self, deployment_id: UUID) -> dict[str, Any] | None: ...
-
-    @abstractmethod
-    def list_gateway_deployments(
-        self, apim_target_id: UUID, *, include_retired: bool = False,
-    ) -> Sequence[dict[str, Any]]: ...
-
-    @abstractmethod
-    def list_gateway_deployments_for_targets(
-        self, apim_target_ids: Sequence[UUID], *, include_retired: bool = False,
-    ) -> Sequence[dict[str, Any]]: ...
-
-    @abstractmethod
-    def upsert_apim_target_route_binding(
-        self, binding: ApimTargetRouteBinding,
-    ) -> dict[str, Any]: ...
-
-    @abstractmethod
-    def get_apim_target_route_binding(self, binding_id: UUID) -> dict[str, Any] | None: ...
-
-    @abstractmethod
-    def list_apim_target_route_bindings(
-        self, *, logical_model_id: UUID | None = None, apim_target_id: UUID | None = None,
-        apim_target_ids: Sequence[UUID] | None = None,
-    ) -> Sequence[dict[str, Any]]: ...
-
-    @abstractmethod
-    def upsert_apim_target(self, target: ApimTarget) -> dict[str, Any]: ...
-
-    @abstractmethod
-    def get_apim_target(self, gateway_profile_id: UUID) -> dict[str, Any] | None: ...
-
-    @abstractmethod
-    def list_apim_targets(self) -> Sequence[dict[str, Any]]: ...
-
-    @abstractmethod
-    def renew_gateway_publication_lease(
-        self,
-        publication_id: UUID,
-        worker_id: str,
-        lease_seconds: int,
-    ) -> bool: ...
-
-    @abstractmethod
-    def renew_gateway_release_operation_lease(
-        self,
-        operation_id: UUID,
-        worker_id: str,
-        lease_seconds: int,
-    ) -> bool: ...
-
-    @abstractmethod
-    def begin_billable_request(self, plan: BillableRequestPlan) -> BillableRequestAttempt: ...
-
-    @abstractmethod
-    def finish_billable_request(
-        self,
-        request_id: UUID,
-        *,
-        actual_tokens: int | None,
-        correlation_id: str | None,
-        evidence: dict[str, Any],
-    ) -> None: ...
-
-    @abstractmethod
-    def pending_billable_requests(self) -> list[dict[str, Any]]: ...
-
-    @abstractmethod
-    def settled_billable_requests(
-        self,
-        request_ids: list[str],
-        scope_type: str,
-        scope_id: str | None,
-    ) -> set[str]: ...
-
-    @abstractmethod
-    def budget_evidence_effective_at(self) -> datetime | None: ...
-
-    @abstractmethod
-    def register_budget_reservations(self, items: Sequence[BudgetReservationAdmission]) -> None: ...
-
-    @abstractmethod
-    def reservation_evidence_correlations(
-        self,
-        scope_type: str,
-        scope_id: str,
-        request_ids: Sequence[str],
-    ) -> Mapping[str, str]: ...
+    def enroll_apim_onboarding_budget_target(
+        self, operation_id: UUID, worker_id: str,
+    ) -> dict[str, Any]:
+        raise NotImplementedError("APIM initialization requires durable budget execution metadata")
 
     @abstractmethod
     def write_token_usage(
@@ -228,6 +122,8 @@ class QueryRepository(ABC):
         record: TokenUsageRecord,
         application: UsageApplicationAttribution | None = None,
         *,
+        gateway: UsageGatewayAttribution | None = None,
+        terminal_observation: dict[str, Any] | None = None,
         execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
         usage_complete: bool = False,
         gateway_profile_id: UUID | None = None,
@@ -294,7 +190,12 @@ class QueryRepository(ABC):
 
     @abstractmethod
     def list_usage_requests(
-        self, from_: datetime, to: datetime, filters: UsageFilters, limit: int
+        self,
+        from_: datetime,
+        to: datetime,
+        filters: UsageFilters,
+        limit: int,
+        after: tuple[datetime, str] | None = None,
     ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
@@ -324,6 +225,32 @@ class QueryRepository(ABC):
 
     @abstractmethod
     def delete_anomaly_rule(self, rule_id: UUID) -> bool: ...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     @abstractmethod
     def list_pinned_reports(self, owner_id: str) -> Sequence[dict[str, Any]]: ...
@@ -390,7 +317,9 @@ class QueryRepository(ABC):
     def list_conversations(self, owner_id: str, limit: int) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
-    def get_conversation(self, conversation_id: UUID, owner_id: str) -> dict[str, Any] | None: ...
+    def get_conversation(
+        self, conversation_id: UUID, owner_id: str
+    ) -> dict[str, Any] | None: ...
 
     @abstractmethod
     def append_conversation_turn(
@@ -472,9 +401,18 @@ class QueryRepository(ABC):
         scope_type: str,
         scope_id: str,
         parent_scope_id: str | None,
-        token_limit: int,
+        token_limit: int | None,
         warning_threshold_percent: int,
         changed_by: str,
+        *,
+        budget_mode: str = "tokens",
+        usd_limit: Any = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def switch_organization_budget(
+        self, period_start: date, organization_id: str, budget_mode: str,
+        amount: int | Decimal, warning_threshold_percent: int, changed_by: str,
     ) -> None: ...
 
     @abstractmethod
@@ -493,7 +431,9 @@ class QueryRepository(ABC):
     ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
-    def list_user_model_policies(self, user_ids: Sequence[str]) -> Sequence[dict[str, Any]]: ...
+    def list_user_model_policies(
+        self, user_ids: Sequence[str]
+    ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
     def list_user_model_access_audit(
@@ -526,11 +466,22 @@ class QueryRepository(ABC):
     ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
+    def budget_evidence_effective_at(self) -> datetime | None: ...
+
+    @abstractmethod
+    def register_budget_reservations(self, items: Sequence[BudgetReservationAdmission]) -> None: ...
+
+    @abstractmethod
+    def reservation_evidence_correlations(
+        self, scope_type: str, scope_id: str, request_ids: Sequence[str],
+    ) -> Mapping[str, str]: ...
+
+    @abstractmethod
     def settled_reservation_correlations(
         self,
         correlation_ids: Sequence[str],
         *,
-        scope_type: LedgerScopeType | None = None,
+        scope_type: str,
         scope_id: str | None = None,
     ) -> set[str]: ...
 
@@ -539,45 +490,33 @@ class QueryRepository(ABC):
         self,
         correlation_ids: Sequence[str],
         *,
-        scope_type: LedgerScopeType,
-        scope_id: str,
+        scope_type: str,
+        scope_id: str | None = None,
     ) -> set[str]: ...
 
     @abstractmethod
     def save_budget_reservation_finalizations(
-        self,
-        items: Sequence[BudgetReservationFinalization],
+        self, items: Sequence[BudgetReservationFinalization]
     ) -> int: ...
 
     @abstractmethod
+    def reservation_finalization_kind(
+        self, scope_type: str, scope_id: str, correlation_id: str
+    ) -> str | None: ...
+
+    @abstractmethod
     def reservation_finalization_kinds(
-        self,
-        scope_type: LedgerScopeType,
-        scope_id: str,
-        correlation_ids: Sequence[str],
-    ) -> dict[str, str]: ...
+        self, scope_type: str, scope_id: str, correlation_ids: Sequence[str]
+    ) -> Mapping[str, str]: ...
 
     @abstractmethod
     def budget_scope_confirmed_tokens(
         self,
-        scope_type: LedgerScopeType,
+        scope_type: str,
         scope_id: str,
         period_start: date,
         period_end: date,
     ) -> int: ...
-
-    @abstractmethod
-    def save_gateway_application_ledger_states(
-        self,
-        states: Sequence[GatewayApplicationLedgerState],
-    ) -> None: ...
-
-    @abstractmethod
-    def list_gateway_application_ledger_states(
-        self,
-        period_start: date,
-        application_ids: Sequence[UUID],
-    ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
     def model_access_ledger_snapshot(
@@ -594,10 +533,11 @@ class QueryRepository(ABC):
         self,
         period_start: date,
         department_id: str,
-        entries: Sequence[tuple[str, int]],
+        entries: Sequence[tuple[str, Any]],
         warning_threshold_percent: int,
         changed_by: str,
         *,
+        budget_mode: str = "tokens",
         selected_user_ids: Sequence[str] | None = None,
         model_ids: Sequence[UUID] | None = None,
     ) -> None: ...
@@ -622,31 +562,93 @@ class QueryRepository(ABC):
     ) -> dict[str, Any] | None: ...
 
     @abstractmethod
-    def apply_model_price_sync(self, updates: Sequence[Mapping[str, Any]]) -> int:
-        """Record what a price sync decided.
-
-        Separate from `update_registry_item` because the sync writes fields no client may set:
-        the outcome of the last run is something the system observed, not something a caller
-        asserts. Returns how many rows had their charged rates actually changed.
-        """
-
-    @abstractmethod
     def delete_runtime_if_empty(self, runtime_id: UUID) -> bool: ...
 
     @abstractmethod
     def delete_gateway_if_unused(self, gateway_id: UUID) -> bool: ...
 
     @abstractmethod
-    def create_multi_target_rollout(
-        self, rollout_id: UUID, rollout_kind: str, logical_model_id: UUID | None,
-        request_sha256: str, created_by: str, children: Sequence[Mapping[str, Any]],
+    def upsert_apim_target(self, target: ApimTarget) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_apim_target(self, gateway_profile_id: UUID) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_apim_targets(self) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def upsert_gateway_deployment(
+        self, deployment: GatewayDeployment, *, preserve_display_name: bool = False,
+        retiring_deployment: GatewayDeployment | None = None,
     ) -> dict[str, Any]: ...
 
     @abstractmethod
-    def get_multi_target_rollout(self, rollout_id: UUID) -> dict[str, Any] | None: ...
+    def rename_gateway_deployment(self, deployment_id: UUID, display_name: str) -> bool: ...
 
     @abstractmethod
-    def list_multi_target_rollouts(self, limit: int = 50) -> Sequence[dict[str, Any]]: ...
+    def get_gateway_deployment(self, deployment_id: UUID) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_gateway_deployments(
+        self, apim_target_id: UUID, *, include_retired: bool = False
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def list_gateway_deployments_for_targets(
+        self, apim_target_ids: Sequence[UUID], *, include_retired: bool = False
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def upsert_gateway_instance_observation(
+        self, observation: GatewayInstanceObservation
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def list_gateway_instance_observations(
+        self, deployment_id: UUID
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def upsert_gateway_deployment_inventory(
+        self, inventory: GatewayDeploymentInventory
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_gateway_deployment_inventory(
+        self, deployment_id: UUID
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_gateway_deployment_inventories(
+        self, deployment_ids: Sequence[UUID]
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def upsert_apim_target_route_binding(
+        self, binding: ApimTargetRouteBinding
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_apim_target_route_binding(
+        self, binding_id: UUID
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_apim_target_route_bindings(
+        self,
+        *,
+        logical_model_id: UUID | None = None,
+        apim_target_id: UUID | None = None,
+        apim_target_ids: Sequence[UUID] | None = None,
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def upsert_usage_gateway_attribution(
+        self, attribution: UsageGatewayAttribution
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_usage_gateway_attribution(self, usage_id: str) -> dict[str, Any] | None: ...
 
     @abstractmethod
     def create_gateway_publication(
@@ -658,6 +660,7 @@ class QueryRepository(ABC):
         created_by: str,
         credential_ciphertext: bytes | None = None,
         expected_base_release_id: UUID | None = None,
+        initial_manifest: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     @abstractmethod
@@ -668,8 +671,7 @@ class QueryRepository(ABC):
         credential_ciphertext: bytes | None,
         desired_spec: Mapping[str, Any] | None = None,
         desired_spec_sha256: str | None = None,
-        *,
-        image_probe_authorization: Mapping[str, Any] | None = None,
+        *, image_probe_authorization: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     @abstractmethod
@@ -691,7 +693,28 @@ class QueryRepository(ABC):
     ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
-    def all_gateway_publications(self, gateway_profile_id: UUID) -> Sequence[dict[str, Any]]: ...
+    def archive_gateway_publication(self, publication_id: UUID, actor: str) -> None: ...
+
+    @abstractmethod
+    def all_gateway_publications(
+        self, gateway_profile_id: UUID
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def active_model_route_publications(
+        self, gateway_profile_id: UUID
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def record_managed_program_initialization(
+        self, descriptor: Mapping[str, Any], expected_config_sha256: str,
+    ) -> None: ...
+
+    @abstractmethod
+    def record_fixed_program_upgrade(
+        self, descriptor: Mapping[str, Any], expected_config_sha256: str,
+        *, before_record: Callable[[], None] | None = None,
+    ) -> None: ...
 
     @abstractmethod
     def get_gateway_publication(self, publication_id: UUID) -> dict[str, Any] | None: ...
@@ -703,17 +726,28 @@ class QueryRepository(ABC):
 
     @abstractmethod
     def get_gateway_profiles(
+        self, gateway_profile_ids: Sequence[UUID] | None = None
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def list_gateway_publication_audit(
+        self, publication_id: UUID
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def effective_gateway_publication(
+        self, gateway_profile_id: UUID
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def effective_gateway_publications(
         self, gateway_profile_ids: Sequence[UUID]
     ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
-    def list_gateway_publication_audit(self, publication_id: UUID) -> Sequence[dict[str, Any]]: ...
-
-    @abstractmethod
-    def effective_gateway_publication(self, gateway_profile_id: UUID) -> dict[str, Any] | None: ...
-
-    @abstractmethod
-    def get_gateway_release_protection(self, publication_id: UUID) -> dict[str, Any] | None: ...
+    def get_gateway_release_protection(
+        self, publication_id: UUID
+    ) -> dict[str, Any] | None: ...
 
     @abstractmethod
     def list_gateway_release_protections(
@@ -757,11 +791,18 @@ class QueryRepository(ABC):
     def delete_gateway_release_operation_secret(self, operation_id: UUID) -> None: ...
 
     @abstractmethod
-    def get_gateway_release_operation(self, operation_id: UUID) -> dict[str, Any] | None: ...
+    def get_gateway_release_operation(
+        self, operation_id: UUID
+    ) -> dict[str, Any] | None: ...
 
     @abstractmethod
     def list_gateway_release_operations(
         self, gateway_profile_id: UUID, limit: int = 100
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def list_gateway_release_operations_for_gateways(
+        self, gateway_profile_ids: Sequence[UUID], limit: int = 100
     ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
@@ -777,12 +818,23 @@ class QueryRepository(ABC):
         status: str,
         updates: Mapping[str, Any],
         actor: str,
+        *, keep_lease: bool = False,
     ) -> dict[str, Any] | None: ...
 
     @abstractmethod
     def list_gateway_release_operation_audit(
         self, operation_id: UUID
     ) -> Sequence[dict[str, Any]]: ...
+
+    def enqueue_gateway_configuration_rollback(
+        self, operation_id: UUID, actor: str,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def complete_gateway_configuration_rollback(
+        self, operation_id: UUID, actor: str,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
 
     @abstractmethod
     def complete_gateway_release_rollback(
@@ -827,7 +879,9 @@ class QueryRepository(ABC):
     ) -> dict[str, Any]: ...
 
     @abstractmethod
-    def get_gateway_release_gc_plan(self, operation_id: UUID) -> dict[str, Any] | None: ...
+    def get_gateway_release_gc_plan(
+        self, operation_id: UUID
+    ) -> dict[str, Any] | None: ...
 
     @abstractmethod
     def sync_gateway_applications(
@@ -863,7 +917,9 @@ class QueryRepository(ABC):
     ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
-    def get_gateway_application_avatar(self, application_id: UUID) -> dict[str, Any] | None: ...
+    def get_gateway_application_avatar(
+        self, application_id: UUID
+    ) -> dict[str, Any] | None: ...
 
     @abstractmethod
     def update_gateway_application_avatar(
@@ -884,6 +940,13 @@ class QueryRepository(ABC):
     ) -> dict[str, Any] | None: ...
 
     @abstractmethod
+    def update_gateway_application_organization(
+        self, application_id: UUID, organization_id: str | None, actor: str,
+        *, department_id: str | None = None, update_department: bool = False,
+        owner_id: str | None = None, update_owner: bool = False,
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
     def update_gateway_application_model_access(
         self,
         application_id: UUID,
@@ -901,6 +964,32 @@ class QueryRepository(ABC):
     def list_gateway_application_budgets(
         self, period_start: date, application_ids: Sequence[UUID]
     ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def get_effective_gateway_application_budget(
+        self, application_id: UUID, period_start: date,
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_gateway_application_ledger_states(
+        self, period_start: date, application_ids: Sequence[UUID]
+    ) -> Sequence[dict[str, Any]]: ...
+
+    @abstractmethod
+    def save_gateway_application_ledger_states(
+        self, items: Sequence[GatewayApplicationLedgerState]
+    ) -> None: ...
+
+    @abstractmethod
+    def save_gateway_application_ledger_finalization_states(
+        self, items: Sequence[Mapping[str, Any]]
+    ) -> None: ...
+
+    @abstractmethod
+    def save_gateway_application_ledger_snapshot(
+        self, states: Sequence[GatewayApplicationLedgerState],
+        sidecars: Sequence[Mapping[str, Any]],
+    ) -> None: ...
 
     @abstractmethod
     def list_gateway_application_model_access(
@@ -965,12 +1054,125 @@ class QueryRepository(ABC):
     ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
-    def roll_forward_gateway_application_budgets(self, period_start: date, actor: str) -> int: ...
+    def roll_forward_gateway_application_budgets(
+        self, period_start: date, actor: str
+    ) -> int: ...
+
+    @abstractmethod
+    def create_multi_target_rollout(
+        self,
+        rollout_id: UUID,
+        rollout_kind: str,
+        logical_model_id: UUID | None,
+        request_sha256: str,
+        created_by: str,
+        children: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def get_multi_target_rollout(
+        self, rollout_id: UUID
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def list_multi_target_rollouts(
+        self, limit: int = 50
+    ) -> Sequence[dict[str, Any]]: ...
 
     @abstractmethod
     def claim_gateway_publication(
         self, worker_id: str, lease_seconds: int
     ) -> dict[str, Any] | None: ...
+
+    def renew_gateway_publication_lease(
+        self, publication_id: UUID, worker_id: str, lease_seconds: int,
+    ) -> bool:
+        raise NotImplementedError
+
+    def reserve_gateway_publication_probe(
+        self, publication_id: UUID, worker_id: str, request_limit: int,
+        method: str, endpoint_sha256: str,
+    ) -> bool:
+        raise NotImplementedError
+
+    def checkpoint_gateway_publication_probes(
+        self, publication_id: UUID, worker_id: str,
+        expected: Mapping[str, Any] | None, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def checkpoint_gateway_publication_activation(
+        self, publication_id: UUID, worker_id: str,
+        expected: Mapping[str, Any] | None, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def checkpoint_gateway_publication_writer(
+        self, publication_id: UUID, worker_id: str,
+        expected: Mapping[str, Any] | None, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def checkpoint_gateway_publication_dependencies(
+        self, publication_id: UUID, worker_id: str,
+        expected: Mapping[str, Any] | None, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def checkpoint_gateway_publication_credentials(
+        self, publication_id: UUID, worker_id: str,
+        expected: Mapping[str, Any] | None, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def checkpoint_gateway_publication_preparation(
+        self, publication_id: UUID, worker_id: str,
+        expected: Mapping[str, Any] | None, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def checkpoint_gateway_publication_approval(
+        self, publication_id: UUID, worker_id: str,
+        expected: Mapping[str, Any] | None, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def checkpoint_gateway_program_promotion(
+        self, publication_id: UUID, worker_id: str,
+        expected: Mapping[str, Any] | None, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        raise NotImplementedError
+
+    def reserve_gateway_release_operation_probe(
+        self, operation_id: UUID, worker_id: str, request_limit: int,
+        method: str, endpoint_sha256: str,
+    ) -> bool:
+        raise NotImplementedError
+
+    def renew_gateway_release_operation_lease(
+        self, operation_id: UUID, worker_id: str, lease_seconds: int,
+    ) -> bool:
+        raise NotImplementedError
+
+    def begin_billable_request(self, plan: BillableRequestPlan) -> BillableRequestAttempt:
+        raise NotImplementedError
+
+    def recover_billable_request(self, plan: BillableRequestPlan) -> BillableRequestAttempt:
+        raise NotImplementedError
+
+    def finish_billable_request(
+        self, request_id: UUID, *, actual_tokens: int | None,
+        correlation_id: str | None, evidence: dict[str, Any],
+    ) -> None:
+        raise NotImplementedError
+
+    def pending_billable_requests(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    def settled_billable_requests(
+        self, request_ids: list[str], scope_type: str, scope_id: str | None,
+    ) -> set[str]:
+        raise NotImplementedError
 
     @abstractmethod
     def cancel_unstarted_gateway_publication(
@@ -988,12 +1190,18 @@ class QueryRepository(ABC):
     ) -> dict[str, Any] | None: ...
 
     @abstractmethod
-    def activate_gateway_publication(self, publication_id: UUID, actor: str) -> dict[str, Any]: ...
+    def activate_gateway_publication(
+        self, publication_id: UUID, actor: str,
+        *, validate_model_activation: Callable[
+            [Mapping[str, Any], Mapping[str, Any] | None, Mapping[str, Any] | None], None,
+        ] | None = None,
+    ) -> dict[str, Any]: ...
 
     @abstractmethod
     def invocation_route(
         self, runtime_id: UUID | None, model_id: UUID | None,
-        *, gateway_profile_id: UUID | None = None, gateway_deployment_id: UUID | None = None,
+        *, gateway_profile_id: UUID | None = None,
+        gateway_deployment_id: UUID | None = None,
     ) -> dict[str, Any] | None: ...
 
     @abstractmethod
@@ -1015,3 +1223,12 @@ class QueryRepository(ABC):
     def finish_runtime_diagnostic(
         self, runtime_id: UUID, marker: str, status: str, message: str, checked_at: datetime,
     ) -> bool: ...
+
+    @abstractmethod
+    def apply_model_price_sync(self, updates: Sequence[Mapping[str, Any]]) -> int:
+        """Record what a price sync decided.
+
+        Separate from `update_registry_item` because the sync writes fields no client may set:
+        the outcome of the last run is something the system observed, not something a caller
+        asserts. Returns how many rows had their charged rates actually changed.
+        """

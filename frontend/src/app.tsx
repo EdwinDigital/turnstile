@@ -46,6 +46,7 @@ import {
   UserRoundX,
   UsersRound,
   WalletCards,
+  Workflow,
   X,
   Zap, LogOut,} from "lucide-react";
 import { TurnstileMark } from "./components/turnstile-logo";
@@ -1066,7 +1067,6 @@ export function App() {
     url.searchParams.set("page", next);
     url.searchParams.delete("runtime");
     url.searchParams.delete("tab");
-    url.searchParams.delete("router");
     url.searchParams.delete("application");
     if (next !== "pinned-report") url.searchParams.delete("chart");
     // The open thread belongs to the assistant page alone. Leaving it in the URL would
@@ -1137,9 +1137,9 @@ export function App() {
       page === "apim-native-routes"
         ? "APIM 后端池"
         : page === "gateway-releases"
-          ? "网关发布"
+          ? "发布管理"
         : page === "applications"
-          ? "订阅"
+          ? "订阅管理"
         : page === "settings"
           ? "设置"
           : "模型管理",
@@ -1179,8 +1179,8 @@ export function App() {
       items: [
         { label: "模型管理", icon: Cpu, page: "models" },
         { label: "APIM 后端池", icon: Network, page: "apim-native-routes" },
-        { label: "网关发布", icon: History, page: "gateway-releases" },
-        { label: "订阅", icon: KeyRound, page: "applications" },
+        { label: "发布历史", icon: History, page: "gateway-releases" },
+        { label: "订阅管理", icon: KeyRound, page: "applications" },
       ],
     });
   }
@@ -1278,7 +1278,8 @@ export function App() {
             </li>
             {selectedDataSource === "apim" && <li className="sidebar-menu-item">
               <button
-                className="sidebar-menu-button sidebar-quick-action"
+                className={`sidebar-menu-button sidebar-quick-action ${page === "finops-invoke" ? "active" : ""}`}
+                aria-current={page === "finops-invoke" ? "page" : undefined}
                 type="button"
                 onClick={() => {
                   navigatePage("finops-invoke");
@@ -1395,8 +1396,10 @@ export function App() {
                         <li className="sidebar-menu-item" key={item.label}>
                           <button
                             className={`sidebar-menu-button ${item.page === page ? "active" : ""}`}
+                            aria-current={item.page === page ? "page" : undefined}
                             onMouseEnter={() => prefetchNavigation(item.page)}
                             onFocus={() => prefetchNavigation(item.page)}
+                            data-page={item.page}
                             onClick={() => {
                               navigatePage(item.page);
                               setSidebarOpenMobile(false);
@@ -1486,7 +1489,7 @@ export function App() {
                 <PanelLeft size={16} />
               </Button>
               {selectedDataSource === "apim" && page === "apim-native-routes" && <Button type="button" variant="ghost" size="icon-sm" aria-label="打开 APIM 后端池列表" title="打开 APIM 后端池列表" onClick={() => setNativeRouteDrawerOpen(true)}><List size={16} /></Button>}
-              {selectedDataSource === "apim" && page === "gateway-releases" && <Button type="button" variant="ghost" size="icon-sm" aria-label="打开网关发布列表" title="打开网关发布列表" onClick={() => setGatewayReleaseDrawerOpen(true)}><List size={16} /></Button>}
+              {selectedDataSource === "apim" && page === "gateway-releases" && <Button type="button" variant="ghost" size="icon-sm" aria-label="打开发布列表" title="打开发布列表" onClick={() => setGatewayReleaseDrawerOpen(true)}><List size={16} /></Button>}
             </div>
             <strong>{pageInfo.label}</strong>
             <div id="mobile-topbar-end-actions" className="settings-mobile-topbar-end-actions">

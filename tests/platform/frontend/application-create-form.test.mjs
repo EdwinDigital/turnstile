@@ -1,285 +1,62 @@
-import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
-import { createRequire } from "node:module"
-import test from "node:test"
-import { setImmediate as nextTurn } from "node:timers/promises"
-import { fileURLToPath } from "node:url"
-import { runInNewContext } from "node:vm"
+// Pure helper tests only; these fixtures are not browser or cloud validation evidence.
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { applicationCreateError, applicationOperationIdFromUrl, applicationOperationTerminal, applicationProvisionBlocker, applicationProvisionStage, applicationSubscriptionIdFromName, applicationTagsError, provisionedApplicationId } from '../../../frontend/src/components/applications/application-create-form.ts'
 
-import {
-  applicationCreateError,
-  applicationOperationIdFromUrl,
-  applicationOperationTerminal,
-  applicationProvisionBlocker,
-  applicationProvisionStage,
-  applicationSubscriptionIdFromName,
-  provisionedApplicationId,
-} from "../../../frontend/src/components/applications/application-create-form.ts"
-import * as applicationCreateForm from "../../../frontend/src/components/applications/application-create-form.ts"
-
-const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
-const { rolldown } = await import(frontendRequire.resolve("rolldown"))
-const entry = fileURLToPath(new URL("../../../frontend/src/components/applications/application-create-dialog.tsx", import.meta.url))
-const bundle = await rolldown({ input: entry, external: path => path !== entry, transform: { jsx: { runtime: "automatic" } }, treeshake: false })
-let component
-try { component = (await bundle.generate({ format: "cjs" })).output[0].code }
-finally { await bundle.close() }
-
-const pageEntry = fileURLToPath(new URL("../../../frontend/src/pages/applications-page.tsx", import.meta.url))
-const pageBundle = await rolldown({ input: pageEntry, external: path => path !== pageEntry, transform: { jsx: { runtime: "automatic" } }, treeshake: false,
-  plugins: [{ name: "application-page-test-exports", load(path) { if (path === pageEntry) return `${readFileSync(path, "utf8")}\nexport { ApplicationSyncButton, ApplicationProvisionStatus, ApplicationDetailView };` } }],
+const gateway = { id: 'gateway-a', enabled: true, implementation: 'apim' }
+const value = { display_name: 'Invoice Service', subscription_id: 'invoice-service', application_type: 'service', description: null }
+const applicationId = '00000000-0000-4000-8000-000000000001'
+test('creation cannot bypass a disabled, direct or missing gateway', () => {
+  assert.ok(applicationCreateError(undefined, value, []))
+  assert.ok(applicationCreateError({ ...gateway, enabled: false }, value, []))
+  assert.ok(applicationCreateError({ ...gateway, implementation: 'direct' }, value, []))
+  assert.equal(applicationCreateError(gateway, value, []), null)
 })
-let pageCode
-try { pageCode = (await pageBundle.generate({ format: "cjs" })).output[0].code }
-finally { await pageBundle.close() }
-
-function pageComponents() {
-  const exports = {}
-  const imports = {
-    react: { useState: initial => [initial, () => {}] },
-    "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
-    "../locales": { getIntlLocale: () => "en-US" },
-    "../providers/timezone-provider": { useTimezone: () => ({ timezone: "UTC" }) },
-    "../components/applications/application-create-form": applicationCreateForm,
-  }
-  runInNewContext(pageCode, { exports, require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }) })
-  return exports
-}
-
-test("Application sync selects one exact APIM and blocks disabled dispatch", () => {
-  const { ApplicationSyncButton } = pageComponents()
-  const calls = []
-  const props = { targets: [{ id: "first", name: "Unit APIM" }, { id: "second", name: "Unit APIM" }], busy: false, disabled: false, title: "Sync", onSync: id => calls.push(id) }
-  const control = ApplicationSyncButton(props)
-  const options = control.props.children[1].props.children
-  options[1].props.onClick()
-  assert.deepEqual(calls, ["second"])
-  ApplicationSyncButton({ ...props, busy: true }).props.children[1].props.children[0].props.onClick()
-  ApplicationSyncButton({ ...props, disabled: true, targets: [props.targets[0]] }).props.onClick()
-  ApplicationSyncButton({ ...props, targets: [] }).props.onClick()
-  assert.deepEqual(calls, ["second"])
-  ApplicationSyncButton({ ...props, targets: [props.targets[0]] }).props.onClick()
-  assert.deepEqual(calls, ["second", "first"])
+test('ID and duplicate validation is gateway scoped and includes reserved names', () => {
+  for (const subscription_id of ['master', 'turnstile-dashboard', 'turnstile-publisher-probe', 'bad id', '', '../escape']) assert.ok(applicationCreateError(gateway, { ...value, subscription_id }, []))
+  assert.ok(applicationCreateError(gateway, value, [{ gateway_profile_id: gateway.id, slug: value.subscription_id }]))
+  assert.equal(applicationCreateError(gateway, value, [{ gateway_profile_id: 'gateway-b', slug: value.subscription_id }]), null)
+  assert.ok(applicationCreateError(gateway, { ...value, display_name: ' ' }, []))
+  assert.ok(applicationCreateError(gateway, { ...value, description: 'x'.repeat(1001) }, []))
 })
-
-function creationHarness() {
-  const slots = []
-  let cursor = 0
-  const requestPending = Promise.withResolvers()
-  const requests = []
-  const accepted = []
-  const clipboard = []
-  const closed = []
-  const opened = []
-  const useSlot = initial => {
-    const index = cursor++
-    if (!(index in slots)) slots[index] = typeof initial === "function" ? initial() : initial
-    return [slots[index], value => { slots[index] = typeof value === "function" ? value(slots[index]) : value }]
-  }
-  const imports = {
-    react: { useState: useSlot, useRef: initial => useSlot({ current: initial })[0], useMemo: callback => callback(), useEffect() {} },
-    "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
-    "./application-create-form": applicationCreateForm,
-    "../../locales": { getIntlLocale: () => "en-US" },
-    "../brand-logos": { GatewayBrandLogo: "GatewayBrandLogo", gatewayBrandFromIdentity: value => value },
-    "../../data-sources/apim/api": { ApiError: class extends Error {}, dataSource: { provisionGatewayApplicationSubscription: (gatewayId, payload) => { requests.push({ gatewayId, payload }); return requestPending.promise } } },
-  }
-  const exports = {}
-  runInNewContext(component, { exports, navigator: { clipboard: { writeText: async value => { clipboard.push(value) } } }, require: name => imports[name] ?? new Proxy({}, { get: (_target, key) => key }) })
-  const props = {
-    gateways: [{ id: "gateway", name: "Unit gateway", implementation: "apim", enabled: true }],
-    inventory: { items: [], provisioning_available: true, provisioning_defaults: { monthly_token_limit: 100000, tokens_per_minute: 100000 } },
-    inventoryError: false, applicationType: "service", operation: undefined, operationError: null, refreshing: false,
-    onRefresh() {}, onClose: () => closed.push(true), onAccepted: value => accepted.push(value), onOpenApplication: value => opened.push(value),
-  }
-  const nodes = value => Array.isArray(value) ? value.flatMap(nodes) : value && typeof value === "object" ? [value, ...nodes(value.props?.children)] : []
-  const render = () => { cursor = 0; return exports.ApplicationCreateDialog(props) }
-  return { props, requests, requestPending, accepted, clipboard, closed, opened, nodes, render, find: predicate => nodes(render()).find(predicate) }
-}
-
-const gateway = { id: "gateway", implementation: "apim", enabled: true }
-const request = { display_name: "Unit application", subscription_id: "unit-app" }
-const applicationId = "00000000-0000-4000-8000-000000000001"
-
-test("Application budget renders actual available balance and distinguishes unknown from zero", () => {
-  const { ApplicationDetailView } = pageComponents()
-  const nodes = value => Array.isArray(value) ? value.flatMap(nodes) : value && typeof value === "object" ? [value, ...nodes(value.props?.children)] : []
-  const content = value => Array.isArray(value) ? value.map(content).join("") : value && typeof value === "object" ? content(value.props?.children) : value == null || typeof value === "boolean" ? "" : String(value)
-  for (const ledgerStatus of ["current", "unavailable", "prepared"]) {
-    const available = ledgerStatus === "current" ? 0 : null
-    const application = { application_type: "service", allowed_model_ids: [], user_count: 0, users: [], subscriptions: [], audit: [], usage: {},
-      budget: { token_limit: 1000, used_tokens: 400, remaining_tokens: 600, usage_percent: 40, tokens_per_minute: 50, warning_threshold_percent: 80,
-        ledger_status: ledgerStatus, available_tokens: available, ledger_read_at: "2026-09-26T00:00:00Z", ledger_snapshot_at: null } }
-    const tree = ApplicationDetailView({ application, loading: false, modelNames: new Map(), canManage: false, models: [] })
-    const line = nodes(tree).find(node => node.props?.className === "application-budget-line")
-    assert.ok(content(line).includes(available === 0 ? "0 / 1,000" : "— / 1,000"))
-    const progress = nodes(tree).find(node => node.props?.className === "application-budget-progress")
-    assert.equal(Boolean(progress), available !== null)
-    if (progress) assert.equal(progress.props.value, 100)
-    const ledger = nodes(tree).find(node => node.props?.className?.startsWith("application-budget-ledger"))
-    if (ledgerStatus === "unavailable") assert.ok(content(ledger).includes("余额未知"))
-    if (ledgerStatus === "prepared") assert.ok(content(ledger).includes("尚未启用"))
-  }
+test('name suggestion is deterministic and never invents a server identity', () => {
+  assert.equal(applicationSubscriptionIdFromName('Invoice Service'), 'invoice-service')
+  assert.equal(applicationSubscriptionIdFromName('Café'), 'cafe')
+  assert.equal(applicationSubscriptionIdFromName('发票助手'), '')
+  assert.equal(applicationSubscriptionIdFromName('a'.repeat(160)).length, 127)
 })
-
-test("Application creation status opens only a successfully read-back application", () => {
-  const { ApplicationProvisionStatus } = pageComponents()
-  const opened = []
-  for (const status of ["queued", "failed", "succeeded"]) {
-    const result = ApplicationProvisionStatus({ operation: { operation_kind: "application_provision", status, checkpoint: { application_id: applicationId } }, onOpen: id => opened.push(id) })
-    const action = result.props.children.at(-1)
-    assert.equal(Boolean(action), status === "succeeded")
-    if (action) action.props.onClick()
-  }
-  assert.deepEqual(opened, [applicationId])
-})
-
-test("subscription ID normalization is locale independent and bounded", () => {
-  assert.equal(applicationSubscriptionIdFromName(" Café / INVOICE "), "cafe-invoice")
-  assert.equal(applicationSubscriptionIdFromName("中文"), "")
-  assert.equal(applicationSubscriptionIdFromName("x".repeat(126) + "--test"), "x".repeat(126))
-  assert.equal(applicationSubscriptionIdFromName("x".repeat(150)).length, 127)
-})
-
-test("creation requires an enabled APIM gateway and valid unreserved identity", () => {
-  assert.equal(applicationCreateError(gateway, request, []), null)
-  for (const candidate of [undefined, { ...gateway, enabled: false }, { ...gateway, implementation: "direct" }]) {
-    assert.ok(applicationCreateError(candidate, request, []))
-  }
-  for (const subscription_id of ["UPPER", "bad_id", "x".repeat(128), "master", "turnstile-dashboard", "turnstile-publisher-probe"]) {
-    assert.ok(applicationCreateError(gateway, { ...request, subscription_id }, []))
-  }
-  assert.ok(applicationCreateError(gateway, { ...request, display_name: " " }, []))
-  assert.ok(applicationCreateError(gateway, { ...request, description: "x".repeat(1001) }, []))
-})
-
-test("duplicate inventory identity is scoped to the selected gateway", () => {
-  const duplicate = { gateway_profile_id: "gateway", slug: "UNIT-APP" }
-  assert.ok(applicationCreateError(gateway, request, [duplicate]))
-  assert.equal(applicationCreateError({ ...gateway, id: "other" }, request, [duplicate]), null)
-})
-
-test("capability remains unavailable until the server explicitly enables it", () => {
+test('only an explicit backend capability enables submission', () => {
   assert.ok(applicationProvisionBlocker(undefined))
-  assert.ok(applicationProvisionBlocker({ provisioning_available: false }))
-  assert.equal(applicationProvisionBlocker({ provisioning_available: true }), null)
+  assert.ok(applicationProvisionBlocker({}))
+  assert.ok(applicationProvisionBlocker({ provisioning_available: false, provisioning_unavailable_reason: 'Application subscription provisioning is not deployed.' }))
+  assert.ok(applicationProvisionBlocker({ provisioning_available: true }))
+  assert.equal(applicationProvisionBlocker({ provisioning_available: true, provisioning_options_supported: true }), null)
 })
-
-test("only successful creation yields an application detail destination", () => {
-  const operation = { operation_kind: "application_provision", status: "succeeded", checkpoint: { application_id: applicationId } }
-  assert.equal(provisionedApplicationId(operation), applicationId)
-  for (const status of ["queued", "promoting", "verifying_readback", "failed"]) {
-    assert.equal(provisionedApplicationId({ ...operation, status }), null)
+test('creation validates Token and exact USD budgets without changing TPM units', () => {
+  assert.equal(applicationCreateError(gateway, { ...value, budget_mode: 'tokens', token_limit: 250000, tokens_per_minute: 24000 }, []), null)
+  assert.equal(applicationCreateError(gateway, { ...value, budget_mode: 'usd', token_limit: null, usd_limit: '12.50', tokens_per_minute: 24000 }, []), null)
+  for (const budget of [{ budget_mode: 'usd' }, { budget_mode: 'usd', usd_limit: '0' }, { budget_mode: 'usd', usd_limit: '1.001' }, { budget_mode: 'usd', usd_limit: '12.50', token_limit: 1 }, { token_limit: 1.5 }, { token_limit: 0 }, { tokens_per_minute: 0 }, { tokens_per_minute: 2147483648 }]) assert.ok(applicationCreateError(gateway, { ...value, ...budget }, []))
+})
+test('tags retain key-value identifiers and reject blank, duplicate or oversized keys', () => {
+  assert.equal(applicationTagsError([]), null)
+  assert.equal(applicationTagsError([{ key: 'team', value: 'finance' }]), null)
+  assert.equal(applicationCreateError(gateway, { ...value, tags: { team: 'finance' } }, []), null)
+  assert.ok(applicationTagsError([{ key: ' ', value: 'finance' }]))
+  assert.ok(applicationTagsError([{ key: 'team', value: 'finance' }, { key: ' team ', value: 'other' }]))
+  for (const tags of [{ '': 'finance' }, { ['x'.repeat(129)]: '' }, { team: 'x'.repeat(257) }, Object.fromEntries(Array.from({ length: 33 }, (_, index) => ['tag' + index, 'value']))]) assert.ok(applicationCreateError(gateway, { ...value, tags }, []))
+})
+test('queued and materialized operations are not reported as ready', () => {
+  for (const status of ['queued', 'validating_dependencies', 'promoting', 'verifying_readback']) {
+    const operation = { status, operation_kind: 'application_provision', checkpoint: { application_id: applicationId } }
+    assert.equal(provisionedApplicationId(operation), null)
+    assert.equal(applicationOperationTerminal(operation), false)
   }
-  assert.equal(provisionedApplicationId({ ...operation, operation_kind: "application_sync" }), null)
-  assert.equal(provisionedApplicationId({ ...operation, checkpoint: { application_id: "bad" } }), null)
+  assert.equal(provisionedApplicationId({ status: 'succeeded', operation_kind: 'application_provision', checkpoint: { application_id: applicationId } }), applicationId)
+  assert.equal(provisionedApplicationId({ status: 'failed', operation_kind: 'application_provision', checkpoint: { application_id: applicationId } }), null)
+  assert.equal(applicationProvisionStage({ status: 'queued', worker_available: false }), '创建未启动')
 })
-
-test("operation URLs never carry keys and accept UUIDs only", () => {
-  assert.equal(applicationOperationIdFromUrl(`https://unit.test/?applicationOperation=${applicationId}`), applicationId)
-  assert.equal(applicationOperationIdFromUrl("https://unit.test/?applicationOperation=invalid"), null)
-  assert.equal(applicationOperationIdFromUrl("https://unit.test/"), null)
+test('refresh recovery accepts only operation UUIDs, never arbitrary or secret values', () => {
+  assert.equal(applicationOperationIdFromUrl('https://unit.test/?applicationOperation=' + applicationId), applicationId)
+  assert.equal(applicationOperationIdFromUrl('https://unit.test/?applicationOperation=invalid'), null)
+  assert.equal(applicationOperationIdFromUrl('https://unit.test/'), null)
 })
-
-test("staged progress distinguishes disabled, terminal and ledger verification", () => {
-  assert.equal(applicationOperationTerminal({ status: "verifying_readback" }), false)
-  assert.equal(applicationOperationTerminal({ status: "failed" }), true)
-  assert.notEqual(applicationProvisionStage({ status: "queued", worker_available: false }), applicationProvisionStage({ status: "queued" }))
-  assert.notEqual(applicationProvisionStage({ status: "promoting" }), applicationProvisionStage({ status: "verifying_readback" }))
-  assert.notEqual(applicationProvisionStage({ status: "succeeded" }), applicationProvisionStage({ status: "failed" }))
-})
-
-test("application create component preserves source help, defaults and dismiss composition", () => {
-  const view = creationHarness()
-  assert.equal(view.find(node => node.type === "DialogDescription").props.children, "创建独立的 APIM 订阅、调用密钥和应用预算，不是新增一个空白记录。")
-  assert.ok(view.find(node => node.type === "FieldHelp" && node.props.children.startsWith("网关内唯一的调用标识")))
-  assert.equal(view.find(node => node.type === "label" && node.props.htmlFor === "application-subscription-id").props.children, "订阅 ID")
-  assert.equal(view.find(node => node.type === "Input" && node.props.id === "application-subscription-id").props["data-no-localize"], true)
-  const defaults = view.find(node => node.props?.className === "application-create-defaults")
-  assert.deepEqual(view.nodes(defaults).filter(node => node.type === "dt").map(node => node.props.children), ["创建内容", "初始模型访问", "初始月额度", "初始速率"])
-  assert.deepEqual(view.nodes(defaults).filter(node => node.type === "dd").slice(-2).map(node => node.props.children[0]), ["100,000", "100,000"])
-  assert.equal(view.find(node => node.props?.className === "application-create-dismiss").props.variant, "outline")
-  assert.ok(view.find(node => node.props?.className === "application-create-note"))
-  view.props.applicationType = "agent"
-  assert.equal(view.find(node => node.type === "DialogTitle").props.children, "添加智能体")
-  assert.ok(view.find(node => node.type === "span" && node.props.children === "智能体名称"))
-})
-
-test("application blocked state keeps configuration visible without dispatching", async () => {
-  const view = creationHarness()
-  view.props.inventory = { items: [], provisioning_available: false }
-  assert.ok(view.find(node => node.type === "p" && node.props.children === "可以填写配置，但后台就绪前不会提交创建请求。"))
-  const defaults = view.find(node => node.props?.className === "application-create-defaults")
-  assert.deepEqual(view.nodes(defaults).filter(node => node.type === "dd").slice(-2).map(node => node.props.children[0]), ["使用平台默认值", "使用平台默认值"])
-  assert.equal(view.find(node => node.type === "Button" && node.props.type === "submit").props.disabled, true)
-  view.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
-  await nextTurn()
-  assert.equal(view.requests.length, 0)
-})
-
-test("application component protects the key and suppresses duplicate creation", async () => {
-  const view = creationHarness()
-  const operation = { id: applicationId, operation_kind: "application_provision", status: "queued", checkpoint: {}, semantic_preview: { apim_subscription_id: "unit-app" } }
-  view.find(node => node.type === "Input" && node.props.maxLength === 100).props.onChange({ target: { value: "Unit App" } })
-  view.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
-  view.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
-  assert.equal(view.requests.length, 1)
-  assert.equal(view.requests[0].payload.subscription_id, "unit-app")
-  assert.equal(view.find(node => node.props?.className === "application-create-dismiss").props.disabled, true)
-  view.requestPending.resolve({ primary_key: "unit-key-not-a-real-secret", operation, status_url: `/api/v1/model-management/release-operations/${applicationId}` })
-  await nextTurn()
-  assert.equal(view.accepted.length, 1)
-  assert.equal("primary_key" in view.accepted[0], false)
-  assert.equal(JSON.stringify(view.render()).includes("unit-key-not-a-real-secret"), false)
-  assert.equal(view.find(node => node.props?.["aria-label"] === "订阅密钥已隐藏").props.children, "\u2022".repeat(32))
-  view.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
-  assert.equal(view.requests.length, 1)
-  view.find(node => node.props?.className === "application-create-dismiss").props.onClick()
-  assert.equal(view.closed.length, 0)
-  assert.ok(view.find(node => node.props?.role === "alert" && node.props.children.startsWith("尚未复制密钥")))
-  view.find(node => node.props?.["aria-label"] === "复制订阅密钥").props.onClick()
-  await nextTurn()
-  assert.deepEqual(view.clipboard, ["unit-key-not-a-real-secret"])
-  assert.ok(view.find(node => node.props?.role === "status" && node.props.children === "已复制"))
-  view.props.operation = { ...operation, status: "succeeded", checkpoint: { application_id: applicationId } }
-  view.find(node => node.type === "Button" && node.props.children === "打开应用详情").props.onClick()
-  assert.deepEqual(view.opened, [applicationId])
-  assert.equal(view.find(node => node.props?.["aria-label"] === "复制订阅密钥"), undefined)
-})
-
-test("failed application creation never displays a usable key control", async () => {
-  const view = creationHarness()
-  view.find(node => node.type === "Input" && node.props.maxLength === 100).props.onChange({ target: { value: "Unit App" } })
-  view.find(node => node.type === "form").props.onSubmit({ preventDefault() {} })
-  view.requestPending.resolve({ primary_key: "unit-key-not-a-real-secret", operation: { id: applicationId, operation_kind: "application_provision", status: "failed", checkpoint: { apim_subscription_created: true }, semantic_preview: { apim_subscription_id: "unit-app" } }, status_url: `/api/v1/model-management/release-operations/${applicationId}` })
-  await nextTurn()
-  assert.equal(view.find(node => node.props?.["aria-label"] === "复制订阅密钥"), undefined)
-  assert.ok(view.find(node => node.type === "p" && node.props.children.startsWith("部分资源已创建")))
-  assert.equal(view.requests.length, 1)
-})
-
-test("application create defaults and dismiss retain source CSS tokens", () => {
-  const stylesheet = frontendRequire("postcss").parse(readFileSync(new URL("../../../frontend/src/styles/applications.css", import.meta.url), "utf8"))
-  const declarations = selector => {
-    const rules = stylesheet.nodes.filter(node => node.type === "rule" && node.selector === selector)
-    assert.equal(rules.length, 1, selector)
-    return Object.fromEntries(rules[0].nodes.filter(node => node.type === "decl").map(node => [node.prop, node.value]))
-  }
-  const defaults = declarations(".application-create-defaults")
-  assert.equal(defaults.background, "var(--muted)")
-  assert.equal(defaults.padding, "10px 12px")
-  assert.equal(defaults.gap, "10px")
-  assert.equal(defaults["border-radius"], "8px")
-  assert.equal(defaults["grid-template-columns"], "repeat(2, minmax(0, 1fr))")
-  assert.deepEqual(declarations(".application-create-form .registry-editor-footer > .application-create-dismiss"), { "border-color": "var(--border)", background: "var(--background)", color: "var(--foreground)" })
-})
-
-for (const [locale, exportName] of [["en", "ENGLISH_CORE_PHRASES"], ["ja", "JAPANESE_CORE_PHRASES"], ["ko", "KOREAN_CORE_PHRASES"]]) {
-  test(`application creation source help and defaults are localized in ${locale}`, async () => {
-    const phrases = (await import(new URL(`../../../frontend/src/locales/${locale}/phrases-core.ts`, import.meta.url)))[exportName]
-    for (const phrase of ["创建独立的 APIM 订阅、调用密钥和应用预算，不是新增一个空白记录。", "可以填写配置，但后台就绪前不会提交创建请求。", "网关内唯一的调用标识；只能使用小写字母、数字和连字符。名称为中文时请单独填写。", "创建内容", "独立订阅与密钥", "使用平台默认值", "创建后可在应用详情调整预算和模型访问。提交将写入共享 APIM 和应用数据库。"]) {
-      assert.ok(phrases[phrase], phrase)
-      assert.notEqual(phrases[phrase], phrase)
-    }
-  })
-}

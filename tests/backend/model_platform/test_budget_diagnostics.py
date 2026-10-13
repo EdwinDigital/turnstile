@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from pydantic import HttpUrl, SecretStr, ValidationError
 
 from backend.api import app
+from backend.http.service_dependencies import runtime_service
 from backend.http.session import require_authenticated_session
 from backend.services.budget_diagnostics import BudgetDiagnostics
 from backend.services.runtime_service import ModelRuntimeService
@@ -89,9 +90,9 @@ def test_budget_owner_endpoints_bind_session_identity_and_disable_caching(
 ) -> None:
     owner = app.dependency_overrides[require_authenticated_session]()
     base = f"/api/v1/model-management/gateways/{TARGET}"
-    with patch("backend.http.model_platform.BudgetDiagnostics") as factory:
-        service = factory.return_value
-        service.readiness.return_value = BudgetDelegationReadiness(
+    service = MagicMock()
+    with patch.dict(app.dependency_overrides, {runtime_service: lambda: service}):
+        service.check_budget_delegation.return_value = BudgetDelegationReadiness(
             gateway_profile_id=TARGET,
             native_gateway_id="managed",
             revision="candidate",
@@ -99,7 +100,7 @@ def test_budget_owner_endpoints_bind_session_identity_and_disable_caching(
             ready=False,
             checks=[],
         )
-        service.execute.return_value = BudgetExecutionVerification(
+        service.check_budget_execution.return_value = BudgetExecutionVerification(
             gateway_profile_id=TARGET,
             native_gateway_id="managed",
             revision="candidate",
@@ -113,7 +114,7 @@ def test_budget_owner_endpoints_bind_session_identity_and_disable_caching(
         client = TestClient(app)
         result = client.post(base + "/budget-readiness", json={})
         assert result.status_code == 200 and result.headers["cache-control"] == "no-store"
-        service.readiness.assert_called_once_with(TARGET, owner.email)
+        service.check_budget_delegation.assert_called_once_with(TARGET, owner.email)
         assert client.post(base + "/budget-execution-verification", json={}).status_code == 422
         result = client.post(
             base + "/budget-execution-verification",
@@ -123,7 +124,7 @@ def test_budget_owner_endpoints_bind_session_identity_and_disable_caching(
             },
         )
         assert result.status_code == 200 and result.headers["cache-control"] == "no-store"
-        assert service.execute.call_args.args[2] == owner.email
+        assert service.check_budget_execution.call_args.args[2] == owner.email
         with patch.dict(
             app.dependency_overrides,
             {
@@ -337,7 +338,7 @@ def test_execution_records_single_bounded_call_and_does_not_invent_settlement(
     assert requests[0].headers["ocp-apim-subscription-key"] == "unit-candidate-key"
     assert requests[0].headers["x-turnstile-delegation-token"] == "Bearer valid"
     assert len(result.scopes) == 2 and all(item.attempt is None for item in result.scopes)
-    assert repository.invocation_attempts[result.request_id].application_id == write.application_id
+    assert repository.invocation_attempts[result.request_id].application_id is None
     assert not repository.usage_records
 
 

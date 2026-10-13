@@ -1,4 +1,4 @@
-import { LoaderCircle, Plug, Save, TriangleAlert, X } from "lucide-react"
+import { CircleAlert, LoaderCircle, Plug, Save, X } from "lucide-react"
 import { useState } from "react"
 
 import type {
@@ -6,9 +6,10 @@ import type {
   BrandKey,
   ModelConnectionCreate,
   ModelConnectionUpdate,
+  ModelVendorKey,
+  ModelProvider,
   ModelRegistry,
   ModelRuntime,
-  ModelVendorKey,
 } from "../../data-sources/apim/types"
 import { apimGatewayProfiles } from "../../lib/gateway-topology"
 import {
@@ -41,20 +42,58 @@ import {
   type FoundryAuthMode,
 } from "./foundry-auth-mode-switch"
 import { FieldHelp } from "./field-help"
-import { ModelVendorSelect } from "./model-vendor-select"
+import {
+  ModelVendorSelect,
+  modelVendorFromMetadata,
+  modelVendorLabel,
+} from "./model-vendor-select"
 import { isDatabricksWorkspaceUrl } from "./model-publication-connections"
-import { isOpenAICompatibleBaseUrl, modelVendorFromMetadata } from "./openai-compatible"
+import { isOpenAICompatibleBaseUrl } from "./openai-compatible"
 
 type ConnectionProviderOption = {
   value: string
   name: string
   brandKey: BrandKey
+  providerKind: ModelProvider["provider_kind"]
   existingId?: string
-  openaiCompatible?: boolean
+  template?: NonNullable<ModelConnectionCreate["provider"]["template"]>
 }
+
+const connectionProviderTemplates: Array<Omit<ConnectionProviderOption, "value">> = [
+  {
+    name: "Microsoft Foundry",
+    brandKey: "microsoft_foundry",
+    providerKind: "microsoft_foundry",
+    template: "microsoft_foundry",
+  },
+  {
+    name: "Amazon Bedrock",
+    brandKey: "amazon_bedrock",
+    providerKind: "anthropic",
+    template: "amazon_bedrock",
+  },
+  {
+    name: "Azure Databricks",
+    brandKey: "azure_databricks",
+    providerKind: "anthropic",
+    template: "azure_databricks",
+  },
+  {
+    name: "OpenAI-compatible API",
+    brandKey: "generic",
+    providerKind: "openai_compatible",
+    template: "openai_compatible",
+  },
+]
 
 function providerOptionBrand(option: ConnectionProviderOption) {
   return providerBrandFromMetadata(option.brandKey, option.name)
+}
+
+function ConnectionOptionLogo({ option }: { option: ConnectionProviderOption }) {
+  return option.template === "openai_compatible"
+    ? <Plug size={15} aria-hidden="true" />
+    : <ProviderBrandLogo brand={providerOptionBrand(option)} size={15} />
 }
 
 function isFoundryProjectEndpoint(value: string) {
@@ -105,9 +144,9 @@ function isBedrockRuntimeUrl(value: string) {
 
 export function ConnectionDialog({
   registry,
-  topology = null,
-  topologyLoading = false,
-  topologyError = null,
+  topology,
+  topologyLoading,
+  topologyError,
   runtime,
   busy,
   error,
@@ -117,9 +156,9 @@ export function ConnectionDialog({
   onAdopt,
 }: {
   registry: ModelRegistry
-  topology?: ApimTargetTopologyList | null
-  topologyLoading?: boolean
-  topologyError?: string | null
+  topology: ApimTargetTopologyList | null
+  topologyLoading: boolean
+  topologyError: string | null
   runtime?: ModelRuntime
   busy: boolean
   error: string | null
@@ -137,30 +176,30 @@ export function ConnectionDialog({
     ? [runtimeProvider]
     : registry.providers.filter(
         (provider) => provider.enabled
-          && (["microsoft_foundry", "amazon_bedrock", "azure_databricks"].includes(provider.brand_key)
-            || provider.provider_kind === "openai_compatible"),
+          && ["microsoft_foundry", "amazon_bedrock", "azure_databricks"].includes(provider.brand_key),
       )
   const providerOptions: ConnectionProviderOption[] = [
     ...providers.map((provider) => ({
       value: provider.id,
-      name: provider.name,
+      name: provider.provider_kind === "openai_compatible" && runtime
+        ? modelVendorLabel(modelVendorFromMetadata(
+            runtime.config,
+            `${runtime.name} ${runtime.provider_name}`,
+          ))
+        : provider.name,
       brandKey: provider.brand_key as ConnectionProviderOption["brandKey"],
+      providerKind: provider.provider_kind,
       existingId: provider.id,
-      openaiCompatible: provider.provider_kind === "openai_compatible",
     })),
-    ...(runtime ? [] : (["microsoft_foundry", "amazon_bedrock", "azure_databricks"] as const)
-      .filter((brandKey) => !providers.some((provider) => provider.brand_key === brandKey))
-      .map((brandKey) => ({
-        value: `template:${brandKey}`,
-        name: brandKey === "microsoft_foundry" ? "Microsoft Foundry" : brandKey === "azure_databricks" ? "Azure Databricks" : "Amazon Bedrock",
-        brandKey,
+    ...(runtime ? [] : connectionProviderTemplates
+      .filter((template) => !providers.some(
+        (provider) => template.template !== "openai_compatible"
+          && provider.brand_key === template.brandKey,
+      ))
+      .map((template) => ({
+        ...template,
+        value: `template:${template.template}`,
       }))),
-    ...(runtime ? [] : [{
-      value: "template:openai_compatible",
-        name: "OpenAI-compatible API",
-      brandKey: "generic" as const,
-      openaiCompatible: true,
-    }]),
   ]
   const runtimeGateway = runtime
     ? registry.gateways.find((gateway) => gateway.id === runtime.gateway_profile_id)
@@ -175,7 +214,7 @@ export function ConnectionDialog({
       ?? "",
   )
   const [selectedGatewayId, setGatewayId] = useState<string | null>(runtime?.gateway_profile_id ?? null)
-  const gatewayId = selectedGatewayId ?? gateways.find(gateway => gateway.is_default)?.id ?? gateways[0]?.id ?? ""
+  const gatewayId = selectedGatewayId ?? gateways.find((gateway) => gateway.is_default)?.id ?? gateways[0]?.id ?? ""
   const [foundryAuthMode, setFoundryAuthMode] = useState<FoundryAuthMode>(
     runtime?.config.auth_strategy === "named_value_api_key"
       ? "api_key"
@@ -194,13 +233,13 @@ export function ConnectionDialog({
   const [bedrockRuntimeUrl, setBedrockRuntimeUrl] = useState(
     typeof runtime?.config.backend_url === "string" ? runtime.config.backend_url : "",
   )
-  const [openaiBaseUrl, setOpenaiBaseUrl] = useState(
+  const [openAIBaseUrl, setOpenAIBaseUrl] = useState(
     typeof runtime?.config.base_url === "string" ? runtime.config.base_url : "",
   )
-  const [modelVendor, setModelVendor] = useState<ModelVendorKey>(() =>
-    modelVendorFromMetadata(runtime?.config ?? runtimeProvider?.config, runtime?.name ?? ""),
-  )
-  const [connectionName, setConnectionName] = useState(runtime?.name ?? "")
+  const [modelVendor, setModelVendor] = useState<ModelVendorKey>(() => modelVendorFromMetadata(
+    runtime?.config,
+    `${runtime?.name ?? ""} ${runtime?.provider_name ?? ""}`,
+  ))
   const [workspaceUrl, setWorkspaceUrl] = useState(
     typeof runtime?.config.workspace_url === "string" ? runtime.config.workspace_url : "",
   )
@@ -212,8 +251,8 @@ export function ConnectionDialog({
     return oauth && typeof oauth === "object" && "client_id" in oauth
       && typeof oauth.client_id === "string" ? oauth.client_id : ""
   })
+  const [connectionName, setConnectionName] = useState(runtime?.name ?? "")
   const [enabled, setEnabled] = useState(runtime?.enabled ?? true)
-  // Kept as a string so an empty box stays empty rather than becoming a zero discount.
   const [discountPercent, setDiscountPercent] = useState(
     runtime?.price_discount_percent?.toString() ?? "",
   )
@@ -223,11 +262,11 @@ export function ConnectionDialog({
   const gateway = gateways.find((item) => item.id === gatewayId)
   const topologyBlocked = !editing && registry.apim_target_topology_available === true
     && (topologyLoading || Boolean(topologyError) || !topology)
-  const openaiCompatible = provider?.openaiCompatible === true
-  const foundry = provider?.brandKey === "microsoft_foundry"
+  const foundry = provider?.providerKind === "microsoft_foundry"
     || runtime?.runtime_kind === "foundry"
   const bedrock = provider?.brandKey === "amazon_bedrock"
   const databricks = provider?.brandKey === "azure_databricks"
+  const openAICompatible = provider?.providerKind === "openai_compatible"
   const legacyDatabricks = databricks && runtime && runtime.config.control_plane_managed !== true
   const databricksUnavailable = databricks && (!editing || adopting)
     && (registry.databricks_connections_supported !== true
@@ -264,14 +303,9 @@ export function ConnectionDialog({
       })
       return
     }
-    if (topologyBlocked) return setFormError(topologyError ?? "加载资源拓扑")
+    if (registry.apim_target_topology_available && (topologyLoading || topologyError || !topology)) return setFormError(topologyError ?? "加载资源拓扑")
     if (!provider) return setFormError("请选择提供方。")
-    const templateBrand = openaiCompatible ? "openai_compatible" : provider.brandKey === "microsoft_foundry"
-      || provider.brandKey === "amazon_bedrock"
-      || provider.brandKey === "azure_databricks"
-      ? provider.brandKey
-      : null
-    if (!templateBrand) {
+    if (!provider.existingId && !provider.template) {
       return setFormError("此提供方不支持托管连接创建。")
     }
     if (!gateway) return setFormError("没有可用的 Azure API Management 网关。")
@@ -288,8 +322,8 @@ export function ConnectionDialog({
     if (bedrock && !isBedrockRuntimeUrl(bedrockRuntimeUrl)) {
       return setFormError("请输入有效的 Bedrock Runtime URL。")
     }
-    if (openaiCompatible && !isOpenAICompatibleBaseUrl(openaiBaseUrl)) {
-      return setFormError("请输入不含凭据、查询参数或片段的 HTTPS Base URL。")
+    if (openAICompatible && !isOpenAICompatibleBaseUrl(openAIBaseUrl)) {
+      return setFormError("请输入有效的 HTTPS API Base URL。")
     }
     if (databricks) {
       if (databricksUnavailable) return setFormError("后端尚未支持所选 Databricks 认证方式。")
@@ -303,15 +337,15 @@ export function ConnectionDialog({
       gateway_profile_id: gateway.id,
       provider: provider.existingId
         ? { existing_id: provider.existingId }
-        : { template: templateBrand },
+        : { template: provider.template! },
       auth_mode: databricks ? databricksAuthMode : foundry ? foundryAuthMode : undefined,
       foundry_project_endpoint: foundry ? projectEndpoint.trim() : undefined,
       foundry_inference_endpoint: foundry && foundryAuthMode === "api_key"
         ? inferenceEndpoint.trim()
         : undefined,
       bedrock_runtime_url: bedrock ? bedrockRuntimeUrl.trim() : undefined,
-      openai_base_url: openaiCompatible ? openaiBaseUrl.trim() : undefined,
-      model_vendor: openaiCompatible ? modelVendor : undefined,
+      openai_base_url: openAICompatible ? openAIBaseUrl.trim() : undefined,
+      model_vendor: openAICompatible ? modelVendor : undefined,
       databricks_workspace_url: databricks ? workspaceUrl.trim() : undefined,
       oauth_client_id: databricks && databricksAuthMode === "oauth_m2m" ? oauthClientId.trim() : undefined,
     })
@@ -326,29 +360,23 @@ export function ConnectionDialog({
         <button type="button" className="registry-editor-close" onClick={onClose} disabled={busy} aria-label="关闭"><X size={16} /></button>
 
         <div className="registry-editor-body connection-dialog-body">
-          {topologyBlocked && <div className={`simple-target-state${topologyError ? " error" : ""}`} role={topologyError ? "alert" : "status"}>{topologyError ? <TriangleAlert size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{topologyError ?? "加载资源拓扑"}</span></div>}
+          {topologyBlocked && <div className={`simple-target-state${topologyError ? " error" : ""}`} role={topologyError ? "alert" : "status"}>{topologyError ? <CircleAlert size={15} /> : <LoaderCircle size={15} className="spin" />}<span>{topologyError ?? "加载资源拓扑"}</span></div>}
           <div className="form-grid">
             <div className="registry-field">
               <span className="registry-field-label-row"><span className="registry-field-label">{editing ? "API 服务商" : "接入类型"}</span>{editing && <FieldHelp>提供方、APIM 网关、Endpoint 和认证方式共同定义已发布路由。要更换连接身份，请添加新连接并迁移模型。</FieldHelp>}</span>
-              <Select value={providerValue} onValueChange={(value) => {
-                if (!value) return
-                setProviderValue(value)
-                const selected = registry.providers.find((item) => item.id === value)
-                setModelVendor(modelVendorFromMetadata(selected?.config, selected?.name ?? ""))
-                setFormError(null)
-              }} disabled={busy || editing}>
+              <Select value={providerValue} onValueChange={(value) => { if (value) { setProviderValue(value); setFormError(null) } }} disabled={busy || editing}>
                 <SelectTrigger className="registry-select-trigger" aria-label={editing ? "API 服务商" : "接入类型"}>
-                  <SelectValue>{provider ? <span className="registry-option">{provider.openaiCompatible ? <Plug size={15} /> : <ProviderBrandLogo brand={providerOptionBrand(provider)} size={15} />}<span>{provider.name}</span></span> : "选择接入类型"}</SelectValue>
+                  <SelectValue>{provider ? <span className="registry-option"><ConnectionOptionLogo option={provider} /><span>{provider.name}</span></span> : "选择接入类型"}</SelectValue>
                 </SelectTrigger>
                 <SelectContent align="start" alignItemWithTrigger={false}>
-                  {providerOptions.map((item) => <SelectItem key={item.value} value={item.value}><span className="registry-option">{item.openaiCompatible ? <Plug size={15} /> : <ProviderBrandLogo brand={providerOptionBrand(item)} size={15} />}<span>{item.name}</span></span></SelectItem>)}
+                  {providerOptions.map((item) => <SelectItem key={item.value} value={item.value}><span className="registry-option"><ConnectionOptionLogo option={item} /><span>{item.name}</span></span></SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
             <div className="registry-field">
-              <span className="registry-field-label">APIM 实例</span>
-              {editing && !runtimeGateway ? <Input value="本地 CLI / 直连" disabled /> : <Select value={gatewayId} items={gateways.map(item => ({ value: item.id, label: item.name }))} onValueChange={(value) => { if (value) { setGatewayId(value); setFormError(null) } }} disabled={busy || editing || topologyBlocked}>
-                <SelectTrigger className="registry-select-trigger" aria-label="APIM 实例">
+              <span className="registry-field-label">APIM 网关</span>
+              {editing && !runtimeGateway ? <Input value="本地 CLI / 直连" disabled /> : <Select value={gatewayId} onValueChange={(value) => { if (value) { setGatewayId(value); setFormError(null) } }} disabled={busy || editing}>
+                <SelectTrigger className="registry-select-trigger" aria-label="APIM 网关">
                   <SelectValue>{gateway ? <span className="registry-option"><GatewayBrandLogo brand={gatewayBrandFromIdentity(`${gateway.name} ${gateway.implementation}`)} size={15} /><span>{gateway.name}</span></span> : "选择 APIM 网关"}</SelectValue>
                 </SelectTrigger>
                 <SelectContent align="start" alignItemWithTrigger={false}>
@@ -361,7 +389,7 @@ export function ConnectionDialog({
           {editing && !adopting && <label className="registry-field"><span className="registry-field-label">连接名称</span><Input value={connectionName} onChange={(event) => setConnectionName(event.target.value)} disabled={busy} /></label>}
 
           {databricks && <>
-            <label className="registry-field"><span className="registry-field-label">Workspace URL</span><Input type="url" value={workspaceUrl} onChange={(event) => setWorkspaceUrl(event.target.value)} disabled={busy || editing && !adopting} placeholder={legacyDatabricks && !adopting ? "尚未接管" : "https://adb-example.1.azuredatabricks.net"} /></label>
+            <label className="registry-field"><span className="registry-field-label">Workspace URL</span><Input type="url" value={workspaceUrl} onChange={(event) => setWorkspaceUrl(event.target.value)} disabled={busy || editing && !adopting} placeholder={legacyDatabricks && !adopting ? "尚未接管" : "https://adb-1234567890123456.7.azuredatabricks.net"} /></label>
             <div className="registry-field">
               <span className="registry-field-label-row"><span className="registry-field-label">认证方式</span><FieldHelp>{databricksAuthMode === "oauth_m2m" ? "使用目标 Databricks 账户的服务主体。首个模型发布时提供 OAuth Secret，不是 Entra 应用密钥或 PAT。" : "APIM 托管身份需要同租户的 Workspace 访问和目标模型查询权限。"}</FieldHelp></span>
               <DatabricksAuthModeSwitch value={databricksAuthMode} disabled={busy || editing} oauthSupported={registry.databricks_oauth_supported === true} onChange={setDatabricksAuthMode} />
@@ -374,7 +402,7 @@ export function ConnectionDialog({
           {foundry && <>
             <label className="registry-field"><span className="registry-field-label">Project Endpoint</span><Input type="url" value={projectEndpoint} onChange={(event) => setProjectEndpoint(event.target.value)} disabled={busy || editing} placeholder="https://contoso-ai.services.ai.azure.com/api/projects/finops" /></label>
             <div className="registry-field">
-              <span className="registry-field-label-row"><span className="registry-field-label">认证方式</span><FieldHelp>{foundryAuthMode === "api_key" ? "此处不收 API Key。添加首个模型时只需提供一次，后续模型复用此连接无需重复提供。" : "使用 Managed Identity 前，请先在目标 Foundry 资源（承载该 Project 的 Foundry Account）的 Access control (IAM) 中，将当前所选 APIM 的 Managed Identity 授予 Cognitive Services User。仅位于同一租户不会自动获得访问权限。连接可先保存；添加首个模型时会验证权限。若缺少权限，发布会暂停并显示 APIM Principal ID 和目标资源，完成授权后再继续验证。"}</FieldHelp></span>
+              <span className="registry-field-label-row"><span className="registry-field-label">认证方式</span><FieldHelp>{foundryAuthMode === "api_key" ? "此处不收 API Key。添加首个模型时只需提供一次，后续模型复用此连接无需重复提供。" : "新连接将显示为等待首次模型验证；添加首个模型时通过候选 Revision 完成验证。"}</FieldHelp></span>
               <FoundryAuthModeSwitch value={foundryAuthMode} disabled={busy || editing} onChange={chooseFoundryAuthMode} />
             </div>
             {foundryAuthMode === "api_key" && <label className="registry-field"><span className="registry-field-label">Inference Endpoint</span><Input type="url" value={inferenceEndpoint} onChange={(event) => setInferenceEndpoint(event.target.value)} disabled={busy || editing} placeholder="https://contoso-ai.openai.azure.com/openai/v1" /></label>}
@@ -384,18 +412,12 @@ export function ConnectionDialog({
             <div className="registry-field"><span className="registry-field-label-row"><label className="registry-field-label" htmlFor="bedrock-runtime-url">Bedrock Runtime URL</label><FieldHelp>首次为此连接添加模型时，再提供一次性 API Key。</FieldHelp></span><Input id="bedrock-runtime-url" type="url" value={bedrockRuntimeUrl} onChange={(event) => setBedrockRuntimeUrl(event.target.value)} disabled={busy || editing} placeholder="https://bedrock-runtime.ap-southeast-2.amazonaws.com" /></div>
           </>}
 
-          {openaiCompatible && <div className="openai-compatible-identity-grid">
-            <div className="registry-field"><span className="registry-field-label-row"><span className="registry-field-label">API 服务商</span><FieldHelp>选择提供此 API 的服务商，而不是模型原厂。此选项用于连接身份和品牌展示，不会改变 API 协议。</FieldHelp></span>
-              <ModelVendorSelect value={modelVendor} onChange={setModelVendor} disabled={busy || editing} />
+          {openAICompatible && <>
+            <div className="openai-compatible-identity-grid">
+              <div className="registry-field"><span className="registry-field-label-row"><span className="registry-field-label">API 服务商</span><FieldHelp>选择提供此 API 的服务商，而不是模型原厂。此选项用于连接身份和品牌展示，不会改变 API 协议。</FieldHelp></span><ModelVendorSelect value={modelVendor} onChange={setModelVendor} disabled={busy || editing} /></div>
+              <div className="registry-field"><span className="registry-field-label-row"><label className="registry-field-label" htmlFor="openai-base-url">API Base URL</label><FieldHelp>填写提供方的 HTTPS API Base URL。首次为此连接发布模型时，再提供一次性 API Key。</FieldHelp></span><Input id="openai-base-url" type="url" value={openAIBaseUrl} onChange={(event) => setOpenAIBaseUrl(event.target.value)} disabled={busy || editing} placeholder="https://api.example.com/v1" /></div>
             </div>
-            <div className="registry-field"><span className="registry-field-label-row">
-              <label className="registry-field-label" htmlFor="openai-base-url">API Base URL</label>
-              <FieldHelp>填写提供方的 HTTPS API Base URL。首次为此连接发布模型时，再提供一次性 API Key。</FieldHelp>
-            </span><Input id="openai-base-url" type="url" value={openaiBaseUrl}
-              onChange={(event) => setOpenaiBaseUrl(event.target.value)} disabled={busy || editing}
-              placeholder="https://api.example.com/v1" />
-            </div>
-          </div>}
+          </>}
 
           {editing && !adopting && <div className="form-switches"><div className="registry-checkbox-field"><Checkbox id="connection-enabled" checked={enabled} onCheckedChange={(checked) => setEnabled(checked === true)} disabled={busy} /><label htmlFor="connection-enabled">启用</label></div></div>}
           {editing && !adopting && <div className="registry-field">
@@ -412,13 +434,13 @@ export function ConnectionDialog({
               placeholder="留空则不打折" onChange={(event) => setDiscountPercent(event.target.value)} />
           </div>}
 
-          {(formError || error) && <div className="registry-error" role="alert">{formError ?? error}</div>}
+          {(formError || error) && <div className="registry-error">{formError ?? error}</div>}
         </div>
 
         <DialogFooter className="registry-editor-footer">
-          {legacyDatabricks && !adopting && onAdopt && <Button type="button" variant="outline" className="connection-adopt-action" onClick={() => setAdopting(true)} disabled={busy || registry.databricks_connections_supported !== true}>接管连接</Button>}
+          {legacyDatabricks && !adopting && onAdopt && <Button type="button" variant="outline" className="connection-adopt-action" onClick={() => { setDatabricksAuthMode("managed_identity"); setAdopting(true); setFormError(null) }} disabled={busy || !runtime.enabled || registry.databricks_connections_supported !== true}><Plug size={14} />接管连接</Button>}
           <Button type="button" variant="outline" onClick={onClose} disabled={busy}>取消</Button>
-          <Button type="button" onClick={submit} disabled={busy || topologyBlocked || databricksUnavailable || !providerOptions.length || (!editing && !gateway)}>{editing && !adopting && <Save size={14} />}{busy ? "正在保存" : adopting ? "验证并接管" : editing ? "保存更改" : "添加连接"}</Button>
+          <Button type="button" onClick={submit} disabled={busy || topologyBlocked || databricksUnavailable || !providerOptions.length || (!editing && !gateways.length)}>{editing && <Save size={14} />}{busy ? "正在保存" : adopting ? "验证并接管" : editing ? "保存更改" : "添加连接"}</Button>
         </DialogFooter>
       </div>
     </DialogContent>

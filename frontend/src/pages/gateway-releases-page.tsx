@@ -5,6 +5,8 @@ import {
   Box,
   CheckCircle2,
   ChevronRight,
+  ChevronsDown,
+  ChevronsUp,
   CircleDashed,
   History,
   KeyRound,
@@ -38,20 +40,21 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, Di
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select"
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuTrigger,
 } from "../components/ui/dropdown-menu"
 import { useIsMobile } from "../hooks/use-mobile"
 import { ApiError, dataSource } from "../data-sources/apim/api"
 import { finopsKeys, finopsQueries } from "../data-sources/apim/queries"
 import type {
-  GatewayPublicationFailure,
   GatewayReleaseChangeSet,
   GatewayReleaseDetail,
+  GatewayReleaseRollbackPreview,
   GatewayReleaseRole,
   GatewayReleaseOperation,
   GatewayReleaseSummary,
+  GatewayPublicationFailure,
 } from "../data-sources/apim/types"
 import { useResizablePane } from "../components/ui/use-resizable-pane"
 import { useTimezone } from "../providers/timezone-provider"
@@ -65,8 +68,18 @@ const RELEASE_PANE_MAX = 460
 
 type ReleaseFilter = "all" | GatewayReleaseRole
 
+const rollbackBlockerLabels: Record<string, string> = {
+  model_release_not_gateway_rollback_target: "单模型发布不能作为网关配置回滚目标",
+  gateway_program_mismatch: "目标版本的网关程序与当前安装程序不一致",
+  release_is_current: "目标已是当前网关基线",
+  release_was_not_promoted: "目标尚未完成发布",
+  recorded_dependencies_incomplete: "目标依赖记录不完整",
+  live_dependency_check_required: "尚未确认目标依赖一致性",
+  release_marked_invalid_for_rollback: "目标已被标记为不可回滚",
+}
+
 const roleLabels: Record<GatewayReleaseRole, string> = {
-  current: "当前版本",
+  current: "当前基线",
   immediate_rollback: "立即回滚版本",
   pinned: "已固定",
   superseded: "历史版本",
@@ -193,13 +206,30 @@ function ReleaseListRow({ release, selected, onSelect }: {
   selected: boolean
   onSelect: () => void
 }) {
+  const statusLabel = releaseIndicatorRoles.has(release.role) ? roleLabels[release.role] : undefined
   return <button type="button" className={`gateway-release-list-row ${selected ? "active" : ""}`} onClick={onSelect}>
-    <span className="gateway-release-list-leading"><History size={15} /><ReleaseStatusDot role={release.role} labelled /></span>
+    <span className="gateway-release-list-leading" data-role={release.role} role={statusLabel ? "img" : undefined} aria-label={statusLabel} title={statusLabel}><History size={15} aria-hidden="true" /></span>
     <span className="gateway-release-list-copy">
-      <span><b>Generation {release.generation}</b></span>
-      <small title={`${publicationKindLabels[release.publication_kind]} · ${release.display_name}`}><span>{publicationKindLabels[release.publication_kind]}</span><i>·</i><span>{release.display_name}</span></small>
+      <span><b>{publicationKindLabels[release.publication_kind]} <span data-no-localize>#{release.generation}</span></b></span>
+      <small title={release.display_name}><span data-no-localize>{release.display_name}</span></small>
     </span>
   </button>
+}
+
+function RollbackConfirmationHeader({ preview }: { preview: GatewayReleaseRollbackPreview | undefined }) {
+  const modelRelease = preview?.rollback_blockers.includes("model_release_not_gateway_rollback_target")
+  const programMismatch = preview?.rollback_blockers.includes("gateway_program_mismatch")
+  const configurationRelease = Boolean(preview?.dependencies.route_configuration_sha256)
+  const title = !preview ? "确认回滚" : modelRelease || programMismatch ? "无法回滚网关配置"
+    : configurationRelease ? "确认路由配置回滚" : "确认网关版本回滚"
+  const description = !preview ? "正在确认回滚范围与依赖状态。"
+    : modelRelease ? rollbackBlockerLabels.model_release_not_gateway_rollback_target
+    : programMismatch ? rollbackBlockerLabels.gateway_program_mismatch
+    : configurationRelease ? "仅恢复路由配置，不修改网关 Policy 或切换 Revision。依赖检查与生效验证通过后完成回滚。"
+    : "控制平面会重新检查依赖、探测候选 Revision、提升并再次探测；失败时自动恢复当前版本。"
+  return <AlertDialogHeader>
+    <div className="gateway-release-rollback-heading"><span><RotateCcw size={18} /></span><div><AlertDialogTitle>{title}</AlertDialogTitle><AlertDialogDescription>{description}</AlertDialogDescription></div></div>
+  </AlertDialogHeader>
 }
 
 function ChangeColumn({ title, added, removed, changed, planned }: {
@@ -259,7 +289,9 @@ function PublicationFailureNotice({ failure, publicationId }: {
     publisher_authorization_failed: "Azure 拒绝了 Publisher 的 APIM 管理请求。请核对发布身份的授权。",
     parent_policy_changed: "APIM 父策略与排队时的快照不一致，请核对变化后再重试。",
     credential_source_missing: "APIM 凭据资源尚未创建，请重新提供 API Key 后重试。",
-    apim_infrastructure_upgrade_required: "网关基础设施需要升级，请联系部署管理员。",
+    deployment_not_found: "选定连接中不存在该部署，请使用实际部署名称而不是模型名称。",
+    deployment_metadata_unavailable: "无法读取部署目录，请核对连接认证和目录权限。",
+    upstream_request_failed: "模型验证请求失败，请核对部署名称、接口路径和 HTTP 状态。",
     publication_failed: "发布未完成，请使用任务 ID 查询诊断记录。",
   }
   return <div className="gateway-publication-failure" role="alert">
@@ -291,24 +323,37 @@ function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, o
   showMobileActions: boolean
 }) {
   const { timezone } = useTimezone()
-  if (loading) return <div className="gateway-release-detail-state"><RefreshCw className="spin" size={20} />加载网关发布详情</div>
-  if (!release) return <div className="gateway-release-detail-state"><History size={24} />选择一个网关发布版本</div>
+  if (loading) return <div className="gateway-release-detail-state"><RefreshCw className="spin" size={20} />加载发布详情</div>
+  if (!release) return <div className="gateway-release-detail-state"><History size={24} />选择一条发布记录</div>
   const changes = release.diff_from_base.changes
   const plannedChanges = release.status !== "active" && release.status !== "superseded"
     && !release.audit.some(event => event.to_status === "active")
   const failure = release.status === "failed" ? release.failure ?? {
-    code: "publication_failed" as const, message: "",
+    code: "publication_failed" as const,
+    message: "",
     stage: [...release.audit].reverse().find(event => event.to_status === "failed")?.from_status ?? null,
-    request_id: null, http_status: null, missing_actions: [],
+    request_id: null,
+    http_status: null,
+    missing_actions: [],
   } : null
   const isCurrentRelease = release.role === "current"
+  const isModelRelease = release.rollback_blockers.includes("model_release_not_gateway_rollback_target")
+  const isConfigurationRelease = Boolean(release.dependencies.route_configuration_sha256)
   const liveStatus = release.dependencies.live_status
-  const readinessTitle = isCurrentRelease ? "线上配置状态" : "回滚就绪状态"
-  const readinessStatus = isCurrentRelease
+  const readinessTitle = isModelRelease ? "模型依赖状态" : isCurrentRelease ? "线上配置状态" : "回滚就绪状态"
+  const readinessStatus = isCurrentRelease || isModelRelease
     ? liveStatus === "healthy" ? "一致" : liveStatus === "not_checked" ? "未检查" : "发现漂移"
     : liveStatus === "healthy" ? release.rollback_eligible ? "可回滚" : "受阻"
     : liveStatus === "not_checked" ? "需要检查" : "不可回滚"
-  const readinessMessage = isCurrentRelease
+  const readinessMessage = isModelRelease
+    ? liveStatus === "healthy" ? "模型路由依赖与此发布记录一致。"
+    : liveStatus === "not_checked" ? "模型路由依赖尚未检查。"
+    : "模型路由依赖与此发布记录不一致。"
+    : isCurrentRelease && isConfigurationRelease
+    ? liveStatus === "healthy" ? "当前网关程序与 Storage 路由配置符合此发布记录。"
+    : liveStatus === "not_checked" ? "当前网关程序与 Storage 路由配置尚未检查。"
+    : "当前网关程序或 Storage 路由配置与此发布记录不一致。"
+    : isCurrentRelease
     ? liveStatus === "healthy" ? "当前 APIM 配置与此 Release 的记录一致。"
     : liveStatus === "not_checked" ? "运行检查以比较当前 APIM 配置与此 Release 的记录。"
     : "当前 APIM 配置与此 Release 的记录不同。当前流量不一定受影响，但需要协调配置漂移。"
@@ -317,11 +362,11 @@ function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, o
       : "当前 Azure 资源与此 Release 的记录一致，但仍有其他条件阻止回滚。"
     : liveStatus === "not_checked" ? "使用此 Release 回滚前，先运行 Azure 实时检查。"
     : "当前 Azure 资源与此 Release 的记录不同，修复差异前不能安全回滚。"
-  const issueLabel = isCurrentRelease ? "配置差异" : "回滚阻塞项"
-  const renderReleaseActions = (variant: "mobile" | "rail") => canManage ? <div className={`gateway-release-actions gateway-release-actions-${variant}`} role="group" aria-label="网关发布操作">
-    <button type="button" className="gateway-release-action" disabled={busy} onClick={onPin} title={release.pinned ? "取消固定" : "固定此版本"}>{release.pinned ? <PinOff size={13} /> : <Pin size={13} />}<span>{release.pinned ? "取消固定" : "固定"}</span></button>
+  const issueLabel = isModelRelease ? "模型依赖差异" : isCurrentRelease ? "配置差异" : "回滚阻塞项"
+  const renderReleaseActions = (variant: "mobile" | "rail") => canManage ? <div className={`gateway-release-actions gateway-release-actions-${variant}`} role="group" aria-label="发布操作">
+    <button type="button" className="gateway-release-action" disabled={busy} onClick={onPin} title={release.pinned ? "取消固定" : "保留此发布记录"}>{release.pinned ? <PinOff size={13} /> : <Pin size={13} />}<span>{release.pinned ? "取消固定" : "固定"}</span></button>
     <button type="button" className="gateway-release-action" disabled={busy || !operationsEnabled} onClick={onCheck} title={operationsEnabled ? "重新检查 Azure 依赖" : "Release Worker 未部署"}><ShieldCheck size={13} /><span>检查依赖</span></button>
-    {release.role !== "current" && <button type="button" className="gateway-release-action rollback" disabled={busy || !operationsEnabled} onClick={onRollback} title={operationsEnabled ? "预览并请求回滚" : "Release Worker 未部署"}><RotateCcw size={13} /><span>回滚</span></button>}
+    {!isModelRelease && release.role !== "current" && <button type="button" className="gateway-release-action rollback" disabled={busy || !operationsEnabled} onClick={onRollback} title={operationsEnabled ? "预览并请求回滚" : "Release Worker 未部署"}><RotateCcw size={13} /><span>{isConfigurationRelease ? "回滚配置" : "回滚版本"}</span></button>}
   </div> : null
   return <div className="gateway-release-detail-scroll">
     <div className="gateway-release-detail-grid">
@@ -329,14 +374,15 @@ function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, o
         <section className="gateway-release-summary-card">
           <header className="gateway-release-detail-head">
             <div className="gateway-release-identity">
-              <div className="gateway-release-identity-line"><h2>Generation {release.generation}</h2><ReleaseRole role={release.role} status={release.status} /></div>
+              <div className="gateway-release-identity-line"><h2>{publicationKindLabels[release.publication_kind]} <span data-no-localize>#{release.generation}</span></h2><ReleaseRole role={release.role} status={release.status} hideSuperseded={isModelRelease} /></div>
             </div>
           </header>
           <dl className="gateway-release-facts">
-            <div><dt>APIM REVISION</dt><dd>{release.apim_revision ? <code data-no-localize>{release.apim_revision}</code> : <span>尚未创建</span>}</dd></div>
+            <div><dt>影响对象</dt><dd data-no-localize title={release.display_name}>{release.display_name}</dd></div>
             <div><dt>发布类型</dt><dd>{publicationKindLabels[release.publication_kind]}</dd></div>
             <div><dt>{release.completed_at ? "完成时间" : "创建时间"}</dt><dd>{formatTimestamp(release.completed_at ?? release.created_at, timezone)}</dd></div>
             <div><dt>操作者</dt><dd>{release.created_by}</dd></div>
+            <div className="gateway-release-scope"><dt>回滚范围</dt><dd>{isModelRelease ? "单模型发布，非网关回滚快照" : isConfigurationRelease ? "网关路由配置" : "网关版本"}</dd></div>
           </dl>
           {showMobileActions && renderReleaseActions("mobile")}
           {failure && <PublicationFailureNotice failure={failure} publicationId={release.id} />}
@@ -369,9 +415,12 @@ function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, o
             <summary><span>技术证据</span></summary>
             <div className="gateway-release-evidence">
               <dl className="gateway-release-hashes">
+                <div><dt>APIM REVISION</dt><dd><code title={release.apim_revision ?? undefined} data-no-localize>{release.apim_revision ?? "—"}</code></dd></div>
                 <div><dt>BASE POLICY SHA</dt><dd><code title={release.dependencies.parent_policy_sha256 ?? undefined}>{shortHash(release.dependencies.parent_policy_sha256)}</code></dd></div>
                 <div><dt>COMPILED POLICY SHA</dt><dd><code title={release.dependencies.compiled_policy_sha256 ?? undefined}>{shortHash(release.dependencies.compiled_policy_sha256)}</code></dd></div>
                 <div><dt>DESIRED SPEC SHA</dt><dd><code title={release.desired_spec_sha256}>{shortHash(release.desired_spec_sha256)}</code></dd></div>
+                {release.dependencies.route_configuration_sha256 && <div><dt>ROUTE CONFIG SHA</dt><dd><code title={release.dependencies.route_configuration_sha256}>{shortHash(release.dependencies.route_configuration_sha256)}</code></dd></div>}
+                {release.dependencies.route_head_sha256 && <div><dt>ROUTE HEAD SHA</dt><dd><code title={release.dependencies.route_head_sha256}>{shortHash(release.dependencies.route_head_sha256)}</code></dd></div>}
               </dl>
               <div className="gateway-release-dependency-grid">
                 <DependencyList icon={Box} title="Backends" values={release.dependencies.backends} />
@@ -401,130 +450,6 @@ function ReleaseDetail({ release, loading, canManage, operationsEnabled, busy, o
   </div>
 }
 
-function BudgetVerificationDialog({ gatewayId, onClose }: { gatewayId: string; onClose: () => void }) {
-  const { user } = useAuth()
-  const owner = user?.role === "owner"
-  const [targetId, setTargetId] = useState(gatewayId)
-  const [execution, setExecution] = useState(false)
-  const [applicationId, setApplicationId] = useState("")
-  const [modelId, setModelId] = useState("")
-  const [sent, setSent] = useState(false)
-  const sending = useRef(false)
-  const registry = useQuery({ ...finopsQueries.registry(), enabled: owner })
-  const applications = useQuery({ ...finopsQueries.gatewayApplications(), enabled: owner && execution })
-  const readiness = useMutation({ mutationFn: (id: string) => dataSource.checkBudgetDelegation(id), retry: false })
-  const invocation = useMutation({ mutationFn: () => dataSource.verifyBudgetExecution(targetId, applicationId, modelId), retry: false })
-  const targets = (registry.data?.gateways ?? []).filter(target => target.enabled && target.implementation === "apim")
-  const result = readiness.data?.gateway_profile_id === targetId ? readiness.data : undefined
-  const verification = result?.ready && result.protocol_mode === "paused" ? result.verification : null
-  const applicationOptions = (applications.data?.items ?? []).filter(application =>
-    application.id === verification?.application_id && application.gateway_profile_id === targetId
-    && application.status === "active" && !application.system_managed)
-  const selectedApplication = applicationOptions.find(application => application.id === applicationId)
-  const modelOptions = (registry.data?.models ?? []).filter(model =>
-    verification?.model_ids.includes(model.id) && model.enabled && !model.capabilities.includes("image_generation")
-    && registry.data?.runtimes.some(runtime => runtime.id === model.runtime_id && runtime.enabled && runtime.gateway_profile_id === targetId)
-    && selectedApplication && (!selectedApplication.model_policy_configured || selectedApplication.allowed_model_ids.includes(model.id)))
-  const busy = readiness.isPending || invocation.isPending
-  const canCheck = owner && !busy && targets.some(target => target.id === targetId)
-  const canSend = owner && !busy && !sent && Boolean(selectedApplication) && modelOptions.some(model => model.id === modelId)
-  const error = registry.error ?? (execution ? applications.error ?? invocation.error : readiness.error)
-  const check = async () => {
-    if (!canCheck || sending.current) return
-    sending.current = true
-    try { await readiness.mutateAsync(targetId) } catch {}
-    finally { sending.current = false }
-  }
-  const send = async () => {
-    if (!canSend || sending.current) return
-    sending.current = true
-    setSent(true)
-    try { await invocation.mutateAsync() } catch {}
-    finally { sending.current = false }
-  }
-  const cases = { valid_identity: "有效身份", wrong_audience: "错误受众", missing_person: "缺少人员身份", current_fenced: "当前路径围栏", candidate_fenced: "候选路径围栏" }
-  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}>
-    <DialogContent className="gateway-budget-dialog">
-      <DialogHeader><DialogTitle>{execution ? "联合账本验证" : "预算委托验证"}</DialogTitle><DialogDescription className="sr-only">{execution ? "候选双作用域账本" : "候选身份验证结果"}</DialogDescription></DialogHeader>
-      {!execution ? <>
-        <label className="registry-field gateway-budget-target"><span className="registry-field-label">网关</span>
-          <Select value={targets.some(target => target.id === targetId) ? targetId : null} items={targets.map(target => ({ value: target.id, label: target.name }))} disabled={busy || !owner || !targets.length} onValueChange={value => { if (!busy && value) { setTargetId(value); readiness.reset() } }}>
-            <SelectTrigger aria-label="网关"><SelectValue placeholder="选择网关" /></SelectTrigger>
-            <SelectContent align="start" alignItemWithTrigger={false}>{targets.map(target => <SelectItem key={target.id} value={target.id}><span data-no-localize>{target.name}</span></SelectItem>)}</SelectContent>
-          </Select>
-        </label>
-        {readiness.isPending && <div className="gateway-budget-state" role="status"><RefreshCw size={15} className="spin" /><span>正在验证身份</span></div>}
-        {result && <div className="gateway-budget-preview">
-          <div className={`gateway-budget-state ${result.ready ? "success" : "error"}`} role="status">{result.ready ? <CheckCircle2 size={15} /> : <XCircle size={15} />}<span>{result.protocol_mode === "paused" ? result.ready ? "围栏验证通过" : "围栏验证未通过" : result.ready ? "身份验证通过" : "身份验证未通过"}</span></div>
-          <p>HTTP 实际 / 预期</p>
-          <dl><div><dt>Revision</dt><dd><code data-no-localize>{result.revision}</code></dd></div><div><dt>网关</dt><dd><code data-no-localize>{result.native_gateway_id}</code></dd></div>
-            {result.checks.map(item => <div key={`${item.native_gateway_id}:${item.case}`}><dt>{cases[item.case]}</dt><dd>{item.actual_status ?? "—"} / {item.expected_status}{item.expected_error_code && <><br /><code>{item.native_gateway_id}</code><br /><code>{item.actual_error_code ?? "—"}</code></>}</dd></div>)}
-            <div><dt>UTC</dt><dd>{result.checked_at}</dd></div>
-          </dl>
-        </div>}
-      </> : <div className="gateway-budget-fields">
-        <span className="gateway-budget-gateway" data-no-localize>{targets.find(target => target.id === targetId)?.name}</span>
-        <label className="registry-field"><span className="registry-field-label">Application</span>
-          <Select value={selectedApplication?.id ?? null} items={applicationOptions.map(application => ({ value: application.id, label: application.display_name }))} disabled={busy || sent || !applicationOptions.length} onValueChange={value => { setApplicationId(value ?? ""); setModelId("") }}>
-            <SelectTrigger aria-label="Application"><SelectValue placeholder={applications.isLoading ? "正在加载应用" : applicationOptions.length ? "选择应用" : "暂无可用应用"} /></SelectTrigger>
-            <SelectContent align="start" alignItemWithTrigger={false}>{applicationOptions.map(application => <SelectItem key={application.id} value={application.id}><span data-no-localize>{application.display_name}</span></SelectItem>)}</SelectContent>
-          </Select>
-        </label>
-        <label className="registry-field"><span className="registry-field-label">模型</span>
-          <Select value={modelOptions.some(model => model.id === modelId) ? modelId : null} items={modelOptions.map(model => ({ value: model.id, label: model.display_name }))} disabled={busy || sent || !modelOptions.length} onValueChange={value => setModelId(value ?? "")}>
-            <SelectTrigger aria-label="模型"><SelectValue placeholder={modelOptions.length ? "选择模型" : "暂无可用模型"} /></SelectTrigger>
-            <SelectContent align="start" alignItemWithTrigger={false}>{modelOptions.map(model => <SelectItem key={model.id} value={model.id}><span data-no-localize>{model.display_name}</span></SelectItem>)}</SelectContent>
-          </Select>
-        </label>
-        <div className="gateway-budget-limit"><span>最大输出 Tokens</span><strong>32</strong></div>
-        {invocation.isPending && <div className="gateway-budget-state" role="status"><RefreshCw size={15} className="spin" /><span>正在验证账本</span></div>}
-        {invocation.data && <div className="gateway-budget-results">
-          <div role="status">HTTP {invocation.data.actual_status} · {invocation.data.settled ? "结算完成" : "尚未确认结算"}</div><code data-no-localize>{invocation.data.request_id}</code>
-          {invocation.data.scopes.map(scope => <section className="gateway-budget-scope" key={scope.before.scope.scope_type}>
-            <strong>{scope.before.scope.scope_type === "person" ? "Person" : "Application"}</strong><code data-no-localize>{scope.before.scope.scope_id}</code>
-            <dl><div><dt>调用前已确认</dt><dd>{scope.before.confirmed_tokens}</dd></div><div><dt>调用后已确认</dt><dd>{scope.after?.confirmed_tokens ?? "—"}</dd></div><div><dt>待结算 Tokens</dt><dd>{scope.after?.active_reserved_tokens ?? "—"}</dd></div><div><dt>实际 Tokens</dt><dd>{scope.attempt?.actual_tokens ?? "—"}</dd></div><div><dt>状态</dt><dd>{scope.attempt?.state ?? "—"}</dd></div><div><dt>账本版本</dt><dd>{scope.after?.version ?? "—"}</dd></div></dl>
-          </section>)}
-        </div>}
-      </div>}
-      {registry.isLoading && <div className="gateway-budget-state" role="status"><RefreshCw className="spin" size={15} /><span>正在加载调用配置</span></div>}
-      {error && <div className="gateway-budget-state error" role="alert"><AlertTriangle size={15} /><span>{String(error)}</span></div>}
-      <DialogFooter>
-        {!execution ? <><Button variant="outline" disabled={!canCheck} onClick={() => void check()}><ShieldCheck size={13} />验证预算委托</Button><Button variant="outline" disabled={busy || !verification?.model_ids.length} title={!verification?.model_ids.length ? "仅限已验证的隔离候选" : undefined} onClick={() => { if (!busy && verification?.model_ids.length) setExecution(true) }}><Layers3 size={13} />联合账本验证</Button></> : <Button variant="outline" disabled={!canSend} onClick={() => void send()}><Send size={13} />发送验证请求</Button>}
-        <Button variant="outline" disabled={busy} onClick={onClose}>关闭</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
-}
-
-function GatewayReleaseGroups({ items, selectedId, collapsedGatewayIds, onToggle, onSelect, location }: {
-  items: GatewayReleaseSummary[]
-  selectedId: string | null
-  collapsedGatewayIds: ReadonlySet<string>
-  onToggle: (gatewayId: string) => void
-  onSelect: (releaseId: string) => void
-  location: "drawer" | "rail"
-}) {
-  const groups = new Map<string, { name: string; releases: GatewayReleaseSummary[] }>()
-  for (const release of items) {
-    const group = groups.get(release.gateway_profile_id)
-    if (group) group.releases.push(release)
-    else groups.set(release.gateway_profile_id, { name: release.gateway_name, releases: [release] })
-  }
-  return <>{[...groups].map(([gatewayId, group]) => {
-    const collapsed = collapsedGatewayIds.has(gatewayId)
-    const contentId = `gateway-release-group-${location}-${gatewayId}`
-    return <section className="gateway-release-group" aria-label={group.name} key={gatewayId}>
-      <button type="button" className="gateway-release-group-trigger" aria-expanded={!collapsed} aria-controls={contentId} onClick={() => onToggle(gatewayId)}>
-        <ChevronRight className="gateway-release-group-caret" size={13} aria-hidden="true" />
-        <span title={group.name} data-no-localize>{group.name}</span><i aria-hidden="true" /><small>{group.releases.length}</small>
-      </button>
-      <div id={contentId} className="gateway-release-group-content" role="group" hidden={collapsed}>
-        {group.releases.map(release => <div role="listitem" key={release.id}><ReleaseListRow release={release} selected={release.id === selectedId} onSelect={() => onSelect(release.id)} /></div>)}
-      </div>
-    </section>
-  })}</>
-}
-
 export function GatewayReleasesPage({
   releaseDrawerOpen,
   onReleaseDrawerOpenChange,
@@ -543,7 +468,41 @@ export function GatewayReleasesPage({
   const [collapsedGatewayIds, setCollapsedGatewayIds] = useState(() => new Set<string>())
   const [rollbackId, setRollbackId] = useState<string | null>(null)
   const [activeOperationId, setActiveOperationId] = useState<string | null>(null)
-  const [budgetGatewayId, setBudgetGatewayId] = useState<string | null>(null)
+  const [readinessOpen, setReadinessOpen] = useState(false)
+  const [readinessGateway, setReadinessGateway] = useState("")
+  const [executionOpen, setExecutionOpen] = useState(false)
+  const [executionApplication, setExecutionApplication] = useState("")
+  const [executionModel, setExecutionModel] = useState("")
+  const readinessMutation = useMutation({
+    mutationFn: (gatewayId: string) => dataSource.checkBudgetDelegation(gatewayId),
+    retry: false,
+  })
+  const verification = readinessMutation.data?.ready
+    && readinessMutation.data.gateway_profile_id === readinessGateway
+    && readinessMutation.data.protocol_mode === "paused"
+    ? readinessMutation.data.verification : null
+  const readinessRegistry = useQuery({
+    ...finopsQueries.registry(),
+    enabled: (readinessOpen || executionOpen) && user?.role === "owner",
+  })
+  const readinessOptions = (readinessRegistry.data?.gateways ?? [])
+    .filter(gateway => gateway.enabled && gateway.implementation === "apim")
+    .map(gateway => ({value: gateway.id, label: gateway.name}))
+  const executionApplications = useQuery({
+    ...finopsQueries.gatewayApplications(),
+    enabled: executionOpen && user?.role === "owner",
+  })
+  const applicationOptions = (executionApplications.data?.items ?? [])
+    .filter(application => application.id === verification?.application_id
+      && application.gateway_profile_id === readinessGateway && application.status === "active" && !application.system_managed)
+    .map(application => ({value: application.id, label: application.display_name}))
+  const selectedApplication = executionApplications.data?.items.find(application => application.id === executionApplication)
+  const modelOptions = (readinessRegistry.data?.models ?? [])
+    .filter(model => verification?.model_ids.includes(model.id)
+      && model.enabled && !model.capabilities?.includes("image_generation")
+      && readinessRegistry.data?.runtimes.some(runtime => runtime.id === model.runtime_id && runtime.enabled && runtime.gateway_profile_id === readinessGateway)
+      && selectedApplication && (!selectedApplication.model_policy_configured || selectedApplication.allowed_model_ids.includes(model.id)))
+    .map(model => ({value: model.id, label: model.display_name}))
   const {
     width,
     minWidth,
@@ -564,13 +523,35 @@ export function GatewayReleasesPage({
     return items.filter((release) => (filter === "all" || release.role === filter)
       && (!normalized || `${release.apim_revision ?? ""} ${release.display_name} ${release.model_key} ${release.created_by}`.toLocaleLowerCase().includes(normalized)))
   }, [filter, items, search])
+  const releaseGroups = useMemo(() => {
+    const groups = new Map<string, { gatewayId: string; gatewayName: string; releases: GatewayReleaseSummary[] }>()
+    visible.forEach((release) => {
+      const group = groups.get(release.gateway_profile_id)
+      if (group) group.releases.push(release)
+      else groups.set(release.gateway_profile_id, {
+        gatewayId: release.gateway_profile_id,
+        gatewayName: release.gateway_name,
+        releases: [release],
+      })
+    })
+    return [...groups.values()]
+  }, [visible])
+  const toggleGatewayGroup = (gatewayId: string) => {
+    setCollapsedGatewayIds((current) => {
+      const next = new Set(current)
+      if (next.has(gatewayId)) next.delete(gatewayId)
+      else next.add(gatewayId)
+      return next
+    })
+  }
+  const expandAllGatewayGroups = () => setCollapsedGatewayIds(new Set())
+  const collapseAllGatewayGroups = () => setCollapsedGatewayIds(new Set(items.map((release) => release.gateway_profile_id)))
   useEffect(() => {
-    if (!releases.isSuccess) return
     if (selectedId && items.some((release) => release.id === selectedId)) return
     const next = items.find((release) => release.role === "current")?.id ?? items[0]?.id ?? null
     setSelectedId(next)
     setReleaseInUrl(next)
-  }, [items, selectedId, releases.isSuccess])
+  }, [items, selectedId])
   useEffect(() => {
     const sync = () => setSelectedId(releaseFromUrl())
     window.addEventListener("popstate", sync)
@@ -611,6 +592,24 @@ export function GatewayReleasesPage({
     mutationFn: (gatewayId: string) => dataSource.requestGatewayReleaseGcPlan(gatewayId),
     onSuccess: (accepted) => setActiveOperationId(accepted.operation.id),
   })
+  const executionMutation = useMutation({
+    mutationFn: ({ gatewayId, applicationId, modelId }: { gatewayId: string; applicationId: string; modelId: string }) =>
+      dataSource.verifyBudgetExecution(gatewayId, applicationId, modelId),
+    retry: false,
+  })
+  const canVerifyExecution = !executionMutation.isPending
+    && applicationOptions.some(option => option.value === executionApplication)
+    && modelOptions.some(option => option.value === executionModel)
+  const verifyExecution = () => {
+    if (!canVerifyExecution) return
+    executionMutation.mutate({ gatewayId: readinessGateway, applicationId: executionApplication, modelId: executionModel })
+  }
+  const checkReadiness = () => {
+    if (!selectedGatewayId) return
+    setReadinessGateway(selectedGatewayId)
+    setReadinessOpen(true)
+    readinessMutation.reset()
+  }
   const operationsEnabled = releases.data?.operations_enabled === true
   const operationTerminal = operation.data && ["succeeded", "failed", "restored"].includes(operation.data.status)
   const gatewayOperation = operation.data?.operation_kind === "gc_plan" ? operation.data : undefined
@@ -623,12 +622,6 @@ export function GatewayReleasesPage({
     setReleaseInUrl(id)
     if (closeDrawer) onReleaseDrawerOpenChange(false)
   }
-  const toggleGatewayGroup = (gatewayId: string) => setCollapsedGatewayIds(current => {
-    const next = new Set(current)
-    if (next.has(gatewayId)) next.delete(gatewayId)
-    else next.add(gatewayId)
-    return next
-  })
   const apiMissing = releases.error instanceof ApiError && releases.error.status === 404
   const busy = protectionMutation.isPending || integrityMutation.isPending || rollbackMutation.isPending || gcMutation.isPending || Boolean(operation.data?.worker_available && !operationTerminal)
   const releaseActionError = protectionMutation.error ?? integrityMutation.error ?? rollbackMutation.error
@@ -636,45 +629,65 @@ export function GatewayReleasesPage({
   const secondaryFilters: GatewayReleaseRole[] = ["immediate_rollback", "in_progress", "pinned", "failed", "rolled_back", "expired", "superseded"]
   const releaseListContent = (closeOnSelect: boolean) => <>
     <div className="gateway-release-list-controls">
-      <label className="smh-search"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 Revision、模型或操作者..." aria-label="搜索网关发布" /></label>
-      <div className="gateway-release-filters" role="group" aria-label="网关发布状态筛选">
-        {primaryFilters.filter((value) => value === "all" || items.some((release) => release.role === value)).map((value) => <button type="button" key={value} className={filter === value ? "active" : ""} aria-pressed={filter === value} onClick={() => setFilter(value)}>{value !== "all" && <ReleaseStatusDot role={value} />}<span>{value === "all" ? "全部" : roleLabels[value]}</span><small>{value === "all" ? items.length : items.filter((release) => release.role === value).length}</small></button>)}
-        <DropdownMenu>
-          <DropdownMenuTrigger render={<button type="button" className={filter !== "all" && filter !== "current" ? "gateway-release-filter-more active" : "gateway-release-filter-more"} aria-label="更多状态" title="更多状态" />}><ListFilter size={13} /></DropdownMenuTrigger>
-          <DropdownMenuContent portalContainer={closeOnSelect ? releaseDrawerPortalRef : undefined} align="start">
-            {secondaryFilters.filter((value) => items.some((release) => release.role === value)).map((value) => <DropdownMenuItem key={value} onClick={() => setFilter(value)}><ReleaseStatusDot role={value} reserve /><span>{roleLabels[value]}</span><small className="gateway-release-filter-count">{items.filter((release) => release.role === value).length}</small></DropdownMenuItem>)}
-          </DropdownMenuContent>
-        </DropdownMenu>
+      <label className="smh-search"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 Revision、模型或操作者..." aria-label="搜索发布记录" /></label>
+      <div className="gateway-release-filter-row">
+        <div className="gateway-release-filters" role="group" aria-label="发布状态筛选">
+          {primaryFilters.filter((value) => value === "all" || items.some((release) => release.role === value)).map((value) => <button type="button" key={value} className={filter === value ? "active" : ""} aria-pressed={filter === value} onClick={() => setFilter(value)}>{value !== "all" && <ReleaseStatusDot role={value} />}<span>{value === "all" ? "全部" : roleLabels[value]}</span><small>{value === "all" ? items.length : items.filter((release) => release.role === value).length}</small></button>)}
+          <DropdownMenu>
+            <DropdownMenuTrigger render={<button type="button" className={filter !== "all" && filter !== "current" ? "gateway-release-filter-more active" : "gateway-release-filter-more"} aria-label="更多状态" title="更多状态" />}><ListFilter size={13} /></DropdownMenuTrigger>
+            <DropdownMenuContent portalContainer={closeOnSelect ? releaseDrawerPortalRef : undefined} align="start">
+              {secondaryFilters.filter((value) => items.some((release) => release.role === value)).map((value) => <DropdownMenuCheckboxItem key={value} className="gateway-release-filter-item" checked={filter === value} closeOnClick onCheckedChange={(checked) => setFilter(checked ? value : "all")}><ReleaseStatusDot role={value} reserve /><span>{roleLabels[value]}</span><small className="gateway-release-filter-count">{items.filter((release) => release.role === value).length}</small></DropdownMenuCheckboxItem>)}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+        <div className="gateway-release-list-actions" role="group" aria-label="网关分组操作">
+          <button type="button" className="gateway-release-filter-action" aria-label="全部展开" onClick={expandAllGatewayGroups}><ChevronsDown size={13} /></button>
+          <button type="button" className="gateway-release-filter-action" aria-label="全部折叠" onClick={collapseAllGatewayGroups}><ChevronsUp size={13} /></button>
+        </div>
       </div>
     </div>
-    <div className="gateway-release-list" role="list" aria-label="网关发布列表">
-      <GatewayReleaseGroups items={visible} selectedId={selectedId} collapsedGatewayIds={collapsedGatewayIds} onToggle={toggleGatewayGroup} onSelect={id => chooseRelease(id, closeOnSelect)} location={closeOnSelect ? "drawer" : "rail"} />
-      {!visible.length && <div className="gateway-release-list-empty">没有匹配的网关发布</div>}
+    <div className="gateway-release-list" role="list" aria-label="发布列表">
+      {releaseGroups.map((group) => {
+        const collapsed = collapsedGatewayIds.has(group.gatewayId)
+        const contentId = `gateway-release-group-${closeOnSelect ? "drawer" : "rail"}-${group.gatewayId}`
+        return <section className="gateway-release-group" aria-label={group.gatewayName} key={group.gatewayId}>
+          <button type="button" className="gateway-release-group-trigger" aria-expanded={!collapsed} aria-controls={contentId} onClick={() => toggleGatewayGroup(group.gatewayId)}>
+            <ChevronRight className="gateway-release-group-caret" size={13} aria-hidden="true" />
+            <span title={group.gatewayName} data-no-localize>{group.gatewayName}</span>
+            <i aria-hidden="true" />
+            <small>{group.releases.length}</small>
+          </button>
+          <div id={contentId} className="gateway-release-group-content" role="group" hidden={collapsed}>
+            {group.releases.map((release) => <div role="listitem" key={release.id}><ReleaseListRow release={release} selected={release.id === selectedId} onSelect={() => chooseRelease(release.id, closeOnSelect)} /></div>)}
+          </div>
+        </section>
+      })}
+      {!visible.length && <div className="gateway-release-list-empty">没有匹配的发布记录</div>}
     </div>
-    <footer>{`${visible.length} 个网关发布`}</footer>
+    <footer>{visible.length} <span>条发布记录</span></footer>
   </>
 
   return <div className="smh-workspace gateway-releases-workspace">
     <header className="smh-page-header gateway-releases-header">
-      <div><span className="smh-header-icon"><History size={17} /></span><h1>网关发布</h1><span>{releases.isLoading ? "—" : items.length}</span></div>
+      <div><span className="smh-header-icon"><History size={17} /></span><h1>发布管理</h1><span>{releases.isLoading ? "—" : items.length}</span></div>
       <div className="smh-header-actions">
-        {user?.role === "owner" && selectedGatewayId && <Button variant="outline" onClick={() => setBudgetGatewayId(selectedGatewayId)}><ShieldCheck size={13} />验证预算委托</Button>}
+        {user?.role === "owner" && selectedGatewayId && <Button variant="outline" disabled={readinessMutation.isPending} onClick={checkReadiness}><ShieldCheck size={13} />验证预算委托</Button>}
         {releases.data && !operationsEnabled && <span className="gateway-release-worker-state" title="检查依赖、回滚和清理计划暂不可用。"><AlertTriangle size={13} />Release Worker 未部署</span>}
         {user?.role === "owner" && detail.data ? <Button variant="outline" disabled={busy || !operationsEnabled} onClick={() => gcMutation.mutate(detail.data!.gateway_profile_id)} title={operationsEnabled ? "扫描整个 Gateway 的闲置 APIM 资源" : "Release Worker 未部署"}><ScanSearch size={13} />扫描闲置资源</Button> : <span className="gateway-releases-readonly"><ShieldAlert size={13} />只读</span>}
       </div>
     </header>
     {isMobile && user?.role === "owner" && selectedGatewayId && <div className="gateway-release-mobile-maintenance">
-      <Button variant="outline" onClick={() => setBudgetGatewayId(selectedGatewayId)}><ShieldCheck size={13} />验证预算委托</Button>
+      <Button variant="outline" disabled={readinessMutation.isPending} onClick={checkReadiness}><ShieldCheck size={13} />验证预算委托</Button>
       {detail.data && <Button variant="outline" disabled={busy || !operationsEnabled} onClick={() => gcMutation.mutate(detail.data!.gateway_profile_id)} title={operationsEnabled ? "扫描整个 Gateway 的闲置 APIM 资源" : "Release Worker 未部署"}><ScanSearch size={13} />扫描闲置资源</Button>}
     </div>}
     {gcMutation.error && <div className="gateway-release-gateway-error" role="alert"><AlertTriangle size={14} /><span>{String(gcMutation.error)}</span></div>}
     {gatewayOperation && <GatewayCleanupStatus operation={gatewayOperation} />}
-    {releases.isLoading ? <div className="registry-loading"><RefreshCw className="spin" />加载网关发布</div>
-      : releases.error ? <div className="registry-error">{apiMissing ? "当前环境尚未部署网关发布 API。" : `无法加载网关发布：${String(releases.error)}`}</div>
-      : !items.length ? <div className="smh-empty"><History size={28} /><b>还没有网关发布记录</b><span>模型或后端池首次发布后会显示在这里。</span></div>
+    {releases.isLoading ? <div className="registry-loading"><RefreshCw className="spin" />加载发布记录</div>
+      : releases.error ? <div className="registry-error">{apiMissing ? "当前环境尚未部署发布管理 API。" : <><span>无法加载发布记录：</span>{String(releases.error)}</>}</div>
+      : !items.length ? <div className="smh-empty"><History size={28} /><b>还没有发布记录</b><span>模型或后端池首次发布后会显示在这里。</span></div>
       : <div className="gateway-release-layout" style={{ "--gateway-release-pane-width": `${width}px` } as React.CSSProperties}>
         {!isMobile && <aside className="gateway-release-list-pane">{releaseListContent(false)}</aside>}
-        <button className="runtime-pane-handle" type="button" role="separator" aria-label="调整网关发布列表宽度" aria-orientation="vertical" aria-valuemin={minWidth} aria-valuemax={maxWidth} aria-valuenow={width} onPointerDown={startResize} onKeyDown={resizeWithKeyboard} onDoubleClick={resetWidth} />
+        <button className="runtime-pane-handle" type="button" role="separator" aria-label="调整发布列表宽度" aria-orientation="vertical" aria-valuemin={minWidth} aria-valuemax={maxWidth} aria-valuenow={width} onPointerDown={startResize} onKeyDown={resizeWithKeyboard} onDoubleClick={resetWidth} />
         <main className="gateway-release-detail">
           {releaseActionError && <div className="gateway-release-action-error" role="alert"><AlertTriangle size={14} /><span>{String(releaseActionError)}</span></div>}
           <ReleaseDetail release={detail.data} loading={detail.isLoading} canManage={user?.role === "owner"} operationsEnabled={operationsEnabled} busy={busy} operation={releaseOperation} onPin={() => detail.data && protectionMutation.mutate(detail.data)} onCheck={() => detail.data && integrityMutation.mutate(detail.data.id)} onRollback={() => detail.data && setRollbackId(detail.data.id)} showMobileActions={isMobile} />
@@ -682,22 +695,117 @@ export function GatewayReleasesPage({
       </div>}
     {isMobile && releases.data && items.length > 0 && <Dialog open={releaseDrawerOpen} onOpenChange={onReleaseDrawerOpenChange}>
       <DialogContent className="apim-native-route-drawer gateway-release-drawer" finalFocus={false}>
-        <DialogHeader className="apim-native-route-drawer-header"><DialogTitle>网关发布</DialogTitle><DialogDescription className="sr-only">选择一个网关发布版本</DialogDescription><DialogClose render={<Button type="button" variant="ghost" size="icon-sm" className="apim-native-route-drawer-close" />}><X size={16} /><span className="sr-only">关闭</span></DialogClose></DialogHeader>
+        <DialogHeader className="apim-native-route-drawer-header"><DialogTitle>发布管理</DialogTitle><DialogDescription className="sr-only">选择一条发布记录</DialogDescription><DialogClose render={<Button type="button" variant="ghost" size="icon-sm" className="apim-native-route-drawer-close" />}><X size={16} /><span className="sr-only">关闭</span></DialogClose></DialogHeader>
         <aside className="gateway-release-list-pane gateway-release-drawer-list">{releaseListContent(true)}</aside>
         <div ref={releaseDrawerPortalRef} className="gateway-release-drawer-portals" />
       </DialogContent>
     </Dialog>}
-    {budgetGatewayId && user?.role === "owner" && <BudgetVerificationDialog gatewayId={budgetGatewayId} onClose={() => setBudgetGatewayId(null)} />}
+    <Dialog open={readinessOpen} onOpenChange={setReadinessOpen}>
+      <DialogContent className="gateway-budget-dialog">
+        <DialogHeader>
+          <DialogTitle>预算委托验证</DialogTitle>
+          <DialogDescription className="sr-only">候选身份验证结果</DialogDescription>
+        </DialogHeader>
+        <label className="registry-field gateway-budget-target">
+          <span className="registry-field-label">Gateway</span>
+          <Select value={readinessOptions.some(option => option.value === readinessGateway) ? readinessGateway : null} items={readinessOptions} disabled={readinessMutation.isPending || !readinessOptions.length} onValueChange={value => {
+            if (value) {
+              setReadinessGateway(value)
+              readinessMutation.reset()
+            }
+          }}>
+            <SelectTrigger aria-label="Gateway" title={readinessOptions.find(option => option.value === readinessGateway)?.label}><SelectValue placeholder="选择 Gateway" /></SelectTrigger>
+            <SelectContent align="start" alignItemWithTrigger={false}>{readinessOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+          </Select>
+        </label>
+        {readinessRegistry.isLoading && <div className="gateway-budget-state" role="status"><RefreshCw className="spin" size={15} /><span>正在加载调用配置</span></div>}
+        {readinessRegistry.error && <div className="gateway-budget-state error" role="alert"><AlertTriangle size={15} /><span>{String(readinessRegistry.error)}</span></div>}
+        {readinessMutation.isPending ? <div className="gateway-budget-state" role="status"><RefreshCw className="spin" size={15} /><span>正在验证身份</span></div>
+          : readinessMutation.error ? <div className="gateway-budget-state error" role="alert"><AlertTriangle size={15} /><span>{String(readinessMutation.error)}</span></div>
+          : readinessMutation.data && <div className="gateway-budget-preview">
+            <div className={`gateway-budget-state ${readinessMutation.data.ready ? "success" : "error"}`} role="status">{readinessMutation.data.ready ? <><CheckCircle2 size={15} /><span>{readinessMutation.data.protocol_mode === "paused" ? "围栏验证通过" : "身份验证通过"}</span></> : <><XCircle size={15} /><span>{readinessMutation.data.protocol_mode === "paused" ? "围栏验证未通过" : "身份验证未通过"}</span></>}</div>
+            <p>HTTP 实际 / 预期</p>
+            <dl>
+              <div><dt>Revision</dt><dd><code>{readinessMutation.data.revision}</code></dd></div>
+              <div><dt>Gateway</dt><dd><code>{readinessMutation.data.native_gateway_id}</code></dd></div>
+              {readinessMutation.data.checks.map(check => <div key={`${check.native_gateway_id ?? ""}:${check.case}`}>
+                <dt>{({valid_identity: "有效身份", wrong_audience: "错误受众", missing_person: "缺少人员身份", current_fenced: "当前路径围栏", candidate_fenced: "候选路径围栏"})[check.case]}</dt>
+                <dd>{check.actual_status ?? "—"} / {check.expected_status}{check.expected_error_code && <><br /><code>{check.native_gateway_id}</code><br /><code>{check.actual_error_code ?? "—"}</code></>}</dd>
+              </div>)}
+              <div><dt>UTC</dt><dd>{new Date(readinessMutation.data.checked_at).toISOString()}</dd></div>
+            </dl>
+          </div>}
+        <DialogFooter>
+          <Button variant="outline" disabled={readinessMutation.isPending || !readinessOptions.some(option => option.value === readinessGateway)} onClick={() => readinessMutation.mutate(readinessGateway)}><ShieldCheck size={13} />验证预算委托</Button>
+          <Button variant="outline" disabled={readinessMutation.isPending || !verification?.model_ids.length} title={!verification?.model_ids.length ? "仅限已验证的隔离候选" : undefined} onClick={() => {
+            setReadinessOpen(false)
+            setExecutionApplication("")
+            setExecutionModel("")
+            executionMutation.reset()
+            setExecutionOpen(true)
+          }}><Layers3 size={13} />联合账本验证</Button>
+          <DialogClose render={<Button variant="outline" />}>关闭</DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={executionOpen} onOpenChange={open => { if (!executionMutation.isPending) setExecutionOpen(open) }}>
+      <DialogContent className="gateway-budget-dialog">
+        <DialogHeader><DialogTitle>联合账本验证</DialogTitle><DialogDescription className="sr-only">候选双作用域账本</DialogDescription></DialogHeader>
+        <div className="gateway-budget-fields">
+          <span className="gateway-budget-gateway">{readinessOptions.find(option => option.value === readinessGateway)?.label}</span>
+          <label className="registry-field"><span className="registry-field-label">Application</span>
+            <Select value={executionApplication || null} items={applicationOptions} disabled={executionMutation.isPending || executionApplications.isLoading || !applicationOptions.length} onValueChange={value => {
+              setExecutionApplication(value ?? "")
+              setExecutionModel("")
+              executionMutation.reset()
+            }}>
+              <SelectTrigger aria-label="Application" title={selectedApplication?.display_name}><SelectValue placeholder={executionApplications.isLoading ? "正在加载应用" : applicationOptions.length ? "选择应用" : "暂无可用应用"} /></SelectTrigger>
+              <SelectContent align="start" alignItemWithTrigger={false}>{applicationOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+            </Select>
+          </label>
+          <label className="registry-field"><span className="registry-field-label">模型</span>
+            <Select value={executionModel || null} items={modelOptions} disabled={executionMutation.isPending || !executionApplication || !modelOptions.length} onValueChange={value => {
+              setExecutionModel(value ?? "")
+              executionMutation.reset()
+            }}>
+              <SelectTrigger aria-label="模型" title={modelOptions.find(option => option.value === executionModel)?.label}><SelectValue placeholder={!executionApplication || modelOptions.length ? "选择模型" : "暂无可用模型"} /></SelectTrigger>
+              <SelectContent align="start" alignItemWithTrigger={false}>{modelOptions.map(option => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+            </Select>
+          </label>
+          <div className="gateway-budget-limit"><span>最大输出 Tokens</span><strong>32</strong></div>
+          {(executionApplications.error || readinessRegistry.error || executionMutation.error) && <div role="alert" className="gateway-budget-state error"><AlertTriangle size={15} /><span>{String(executionApplications.error || readinessRegistry.error || executionMutation.error)}</span></div>}
+          {executionMutation.isPending && <div role="status" className="gateway-budget-state"><RefreshCw size={15} className="spin" /><span>正在验证账本</span></div>}
+          {executionMutation.data && <div className="gateway-budget-results">
+            <div role="status">HTTP {executionMutation.data.actual_status} · {executionMutation.data.settled ? "结算完成" : "尚未确认结算"}</div>
+            <code>{executionMutation.data.request_id}</code>
+            {executionMutation.data.scopes.map(scope => <section key={scope.before.scope.scope_type} className="gateway-budget-scope">
+              <strong>{scope.before.scope.scope_type === "person" ? "Person" : "Application"}</strong>
+              <code>{scope.before.scope.scope_id}</code>
+              <dl>
+                <div><dt>调用前已确认</dt><dd>{scope.before.confirmed_tokens}</dd></div>
+                <div><dt>调用后已确认</dt><dd>{scope.after?.confirmed_tokens ?? "—"}</dd></div>
+                <div><dt>待结算 Tokens</dt><dd>{scope.after?.active_reserved_tokens ?? "—"}</dd></div>
+                <div><dt>实际 Tokens</dt><dd>{scope.attempt?.actual_tokens ?? "—"}</dd></div>
+                <div><dt>状态</dt><dd>{scope.attempt?.state ?? "—"}</dd></div>
+                <div><dt>账本版本</dt><dd>{scope.after?.version ?? "—"}</dd></div>
+              </dl>
+            </section>)}
+          </div>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" disabled={!canVerifyExecution} onClick={verifyExecution}><Send size={13} />发送验证请求</Button>
+          <DialogClose render={<Button variant="outline" disabled={executionMutation.isPending} />}>关闭</DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     <AlertDialog open={Boolean(rollbackId)} onOpenChange={(open) => { if (!open && !rollbackMutation.isPending) setRollbackId(null) }}>
       <AlertDialogContent className="gateway-release-rollback-dialog">
-        <AlertDialogHeader>
-          <div className="gateway-release-rollback-heading"><span><RotateCcw size={18} /></span><div><AlertDialogTitle>确认网关回滚</AlertDialogTitle><AlertDialogDescription>控制平面会重新检查依赖、探测候选 Revision、提升并再次探测；失败时自动恢复当前版本。</AlertDialogDescription></div></div>
-        </AlertDialogHeader>
+        <RollbackConfirmationHeader preview={rollbackPreview.data} />
         {rollbackPreview.isLoading ? <div className="gateway-release-rollback-state"><RefreshCw className="spin" size={15} />生成语义预览</div>
           : rollbackPreview.error ? <div className="gateway-release-rollback-state error"><AlertTriangle size={15} />{String(rollbackPreview.error)}</div>
           : rollbackPreview.data && <div className="gateway-release-rollback-preview">
             <dl><div><dt>目标版本</dt><dd><code>{rollbackPreview.data.target_release_id.slice(0, 8)}</code></dd></div><div><dt>当前版本</dt><dd><code>{rollbackPreview.data.current_release_id.slice(0, 8)}</code></dd></div><div><dt>语义变更</dt><dd data-no-localize>{changeCount(rollbackPreview.data.changes).toLocaleString(getIntlLocale())}</dd></div></dl>
-            {rollbackPreview.data.rollback_blockers.length > 0 && <div className="gateway-release-rollback-blockers">{rollbackPreview.data.rollback_blockers.map((blocker) => <code key={blocker}>{blocker}</code>)}</div>}
+            {rollbackPreview.data.rollback_blockers.length > 0 && <div className="gateway-release-rollback-blockers">{rollbackPreview.data.rollback_blockers.map((blocker) => rollbackBlockerLabels[blocker] ? <span key={blocker}>{rollbackBlockerLabels[blocker]}</span> : <code key={blocker}>{blocker}</code>)}</div>}
           </div>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={rollbackMutation.isPending}>取消</AlertDialogCancel>

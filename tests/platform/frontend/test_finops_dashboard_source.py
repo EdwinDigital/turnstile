@@ -22,12 +22,14 @@ def test_centered_page_loading_states_share_one_visual_scale() -> None:
     assert "flex: 0 0 18px" in icon_rule
 
 
-def test_invocation_console_includes_and_defaults_to_the_signed_in_owner() -> None:
+def test_invocation_console_preserves_owner_directory_and_current_selection() -> None:
     source = read_apim_dashboard_source()
 
     assert "const { user: sessionUser } = useAuth();" in source
     assert "person.id === sessionUser.email" in source
-    assert "useState(sessionUser?.email ?? users[0]?.id" in source
+    assert 'sessionUser.role === "owner"' in source
+    assert 'useState(sessionUser?.email ?? users[0]?.id ?? "")' in source
+    assert "if (users.some((person) => person.id === userId)) return" in source
     assert "assignedModelRouters" not in source
     assert 'items={users}' in source
 
@@ -37,8 +39,11 @@ def test_invocation_and_request_trace_use_direct_models() -> None:
 
     assert "runtime_id: explicitGateway ? undefined : model.runtime_id" in source
     assert "model_id: model.id" in source
-    assert "gateway_profile_id: gatewaySelection.targetId" in source
-    assert "gateway_deployment_id: gatewaySelection.deploymentId" in source
+    assert "gateway_profile_id: explicitGateway ? gatewaySelection.targetId! : undefined" in source
+    assert (
+        "gateway_deployment_id: explicitGateway ? gatewaySelection.deploymentId! : undefined"
+        in source
+    )
     assert "assignedModelRouters" not in source
     assert "router_id" not in source
 
@@ -65,7 +70,7 @@ def test_request_trace_kpis_are_diagnostic_not_executive_duplicates() -> None:
     assert '<RequestLatencyChart totals={totals} percentage />' in request_trace
     assert "<RequestHealthChart" not in request_trace
     assert (
-        "const firstRequestId = query.data?.[0] ? requestTraceId(query.data[0]) : null"
+        "const firstRequestId = requestRows[0] ? requestTraceId(requestRows[0]) : null"
         in request_trace
     )
     assert "if (!selected && firstRequestId) setSelected(firstRequestId)" in request_trace
@@ -78,15 +83,17 @@ def test_request_trace_selects_attempts_without_losing_the_caller_id() -> None:
     )[0]
     trace_row = source.split("function TraceRow(", 1)[1]
 
-    assert "selectedTraceId = detail.data ? requestTraceId(detail.data) : selected" in request_trace
+    assert (
+        "const requestRows = query.data?.pages.flatMap((page) => page.items) ?? []"
+        in request_trace
+    )
     assert "key={requestTraceId(item)}" in request_trace
-    assert "active={selectedTraceId === requestTraceId(item)}" in request_trace
+    assert "active={selected === requestTraceId(item)}" in request_trace
     assert "onClick={() => setSelected(requestTraceId(item))}" in request_trace
     assert "key={item.request_id}" not in request_trace
     assert "attemptsByRequest.get(item.request_id)" in request_trace
     assert "attemptPositions.set(requestTraceId(item)" in request_trace
-    assert "Date.parse(left.timestamp) - Date.parse(right.timestamp)" in request_trace
-    assert "requestTraceId(left).localeCompare(requestTraceId(right))" in request_trace
+    assert "left.timestamp.localeCompare(right.timestamp)" in request_trace
     assert "attempt={attemptPositions.get(requestTraceId(item))}" in request_trace
     assert 'Correlation ID: ${item.correlation_id ?? "未知"}' in trace_row
     assert "#${attempt.index}/${attempt.total}" in trace_row
@@ -114,7 +121,9 @@ def test_request_trace_cost_formula_uses_the_recorded_request() -> None:
     assert "models" not in calculation
     assert 'role="math"' in calculation
     assert "calculation.matchesRecordedCost" in calculation
-    assert "当前后端未提供历史单价" in calculation
+    assert (
+        'if (!calculation) return <span className="trace-cost-unavailable"></span>' in calculation
+    )
     css = read_frontend_styles()
     assert ".trace-cost-expression { display: flex; flex-wrap: wrap;" in css
     assert ".trace-cost-numerator { display: flex; flex-wrap: wrap;" in css
@@ -166,7 +175,7 @@ def test_member_governance_views_hide_owner_only_controls() -> None:
     assert 'className="budget-enforcement-state"' in budget_source
     assert "data-mode={enforcement.mode}" in budget_source
     assert 'className="budget-progress-cell" data-label="已使用"' in budget_source
-    assert "minWidths={[180, 100, 140, 100, 110, 94, 88, 52]}" in budget_source
+    assert "minWidths={[180, 100, 140, 160, 160, 94, 88, 52]}" in budget_source
     assert ".budget-table-row > .budget-status-cell { grid-column: 1 / 3;" in finops_styles
     assert "{canManage && <DropdownMenu>" in budget_source
     assert "{canManage && bulkOpen && people.data" in budget_source

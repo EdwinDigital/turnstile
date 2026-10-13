@@ -58,7 +58,11 @@ def conditional_batch(
             or values.get("RowKey", row_key) != row_key
         ):
             raise ValueError("All transaction entities must use the bound partition and row key")
-        address = entity_url(endpoint, table, partition, row_key) if etag else f"{endpoint}/{table}"
+        address = (
+            entity_url(endpoint, table, partition, row_key)
+            if etag is not None
+            else f"{endpoint}/{table}"
+        )
         document = json.dumps(
             {**values, "PartitionKey": partition, "RowKey": row_key}, separators=(",", ":")
         )

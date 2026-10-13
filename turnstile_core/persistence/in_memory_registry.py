@@ -16,16 +16,29 @@ class InMemoryRegistryRepositoryMixin:
     models: list[dict[str, Any]]
     gateway_publications: list[dict[str, Any]]
     effective_gateway_releases: dict[UUID, UUID]
+    apim_targets: dict[UUID, dict[str, Any]]
+    apim_target_route_bindings: dict[UUID, dict[str, Any]]
 
     def _published_image_profile(self, model: Mapping[str, Any]) -> object:
         runtime = next((row for row in self.runtimes if row["id"] == model["runtime_id"]), None)
         gateway_id = runtime.get("gateway_profile_id") if runtime else None
-        if gateway_id is None:
+        if gateway_id is None or runtime is None:
             return None
         publication_id = self.effective_gateway_releases.get(gateway_id)
+        route = next((row for row in self.apim_target_route_bindings.values()
+                      if row["logical_model_id"] == model["id"]
+                      and row["apim_target_id"] == gateway_id and row["runtime_id"] == runtime["id"]
+                      and row["enabled"] and row["is_default_serving"]), None)
+        if route is not None:
+            publication_id = route.get("current_publication_id")
         publication = next(
             (row for row in self.gateway_publications if row["id"] == publication_id), None
         )
+        if route is not None and (
+            publication is None or publication["status"] != "active"
+            or publication["gateway_profile_id"] != gateway_id
+        ):
+            return None
         for binding in publication["desired_spec"]["bindings"] if publication else []:
             if binding["model"]["model_key"].casefold() == model["model_key"].casefold():
                 return binding["model"].get("image_profile")
@@ -50,22 +63,6 @@ class InMemoryRegistryRepositoryMixin:
                 return apply_databricks_adoption(runtime, binding["runtime_config"])
         return runtime
 
-    def _effective_discount(self, model: dict[str, Any]) -> float | None:
-        """The discount that actually applies: the model's own, else its connection's.
-
-        The SQL repository resolves this in the query. Resolving it here too keeps the two
-        implementations answering the same question -- without it the fake charges list price
-        for every model whose discount is set on the connection, and the tests would agree
-        with it.
-        """
-        own = model.get("price_discount_percent")
-        if own is not None:
-            return cast(float, own)
-        runtime = next(
-            (row for row in self.runtimes if row["id"] == model.get("runtime_id")), None
-        )
-        return cast("float | None", runtime.get("price_discount_percent") if runtime else None)
-
     def registry(self) -> dict[str, Sequence[dict[str, Any]]]:
         return {
             "gateways": self.gateways,
@@ -80,75 +77,6 @@ class InMemoryRegistryRepositoryMixin:
                 for model in self.models
             ],
         }
-
-    def apply_model_price_sync(self, updates: Sequence[Mapping[str, Any]]) -> int:
-        charged = (
-            "input_cost_per_million",
-            "output_cost_per_million",
-            "cached_cost_per_million",
-            "cache_write_cost_per_million",
-        )
-        listed = (
-            "list_input_cost_per_million",
-            "list_output_cost_per_million",
-            "list_cached_cost_per_million",
-            "list_cache_write_cost_per_million",
-        )
-        now = datetime.now(UTC)
-        written = 0
-        by_id = {model.get("id"): model for model in self.models}
-        for update in updates:
-            model = by_id.get(update.get("model_id"))
-            if model is None:
-                continue
-
-            # Same guard the SQL repository applies. Without it here, every test that reaches a
-            # sync through the fake would agree that a stale result may land on a model whose
-            # pricing changed underneath it -- and the database would disagree in production.
-            current = (
-                str(model.get("price_source") or "manual"),
-                model.get("price_reference"),
-                self._effective_discount(model),
-                model.get("context_price_tiers") or [],
-                {column: model.get(column) for column in listed},
-            )
-            planned = (
-                str(update.get("expected_source")),
-                update.get("expected_reference"),
-                update.get("expected_discount_percent"),
-                update.get("expected_context_price_tiers") or [],
-                update.get("expected_list_prices") or {column: None for column in listed},
-            )
-            if current != planned:
-                model["price_sync_status"] = "superseded"
-                model["price_sync_message"] = (
-                    "同步期间该模型的计价配置被改动，本次结果已作废，未写入"
-                )
-                model["price_synced_at"] = now
-                continue
-
-            if update.get("writes"):
-                # The accepted baseline moves only when the price is accepted.
-                for column in listed:
-                    if update.get(column) is not None:
-                        model[column] = update[column]
-                for column in charged:
-                    model[column] = update.get(column)
-                model["pending_list_price"] = None
-                if update.get("context_price_tiers") is not None:
-                    model["context_price_tiers"] = update["context_price_tiers"]
-                model["pending_context_price_tiers"] = None
-                model["updated_at"] = now
-                written += 1
-            elif update.get("pending_list_price") is not None:
-                model["pending_list_price"] = update["pending_list_price"]
-            if not update.get("writes") and update.get("pending_context_price_tiers") is not None:
-                model["pending_context_price_tiers"] = update["pending_context_price_tiers"]
-
-            model["price_sync_status"] = update.get("status")
-            model["price_sync_message"] = update.get("message")
-            model["price_synced_at"] = now
-        return written
 
     def create_registry_item(self, kind: str, values: Mapping[str, Any]) -> dict[str, Any]:
         now = datetime.now(UTC)
@@ -221,18 +149,28 @@ class InMemoryRegistryRepositoryMixin:
         if workspace_url and any(
             runtime.get("gateway_profile_id") == runtime_values["gateway_profile_id"]
             and str((runtime.get("config") or {}).get("workspace_url") or "")
-            .rstrip("/").casefold() == workspace_url.casefold()
+            .rstrip("/")
+            .casefold()
+            == workspace_url.casefold()
             for runtime in self.registry()["runtimes"]
         ):
             raise ValueError("This connection already exists")
         provider_count = len(self.providers)
         if provider_values is not None:
+            provider_config = dict(provider_values.get("config") or {})
+            provider_vendor = str(provider_config.get("model_vendor") or "generic")
             provider = next(
                 (
                     row
                     for row in self.providers
                     if row["enabled"]
-                    and row.get("brand_key") == provider_values["brand_key"]
+                    and (
+                        str(row.get("provider_kind")) == "openai_compatible"
+                        and str((row.get("config") or {}).get("model_vendor") or "generic")
+                        == provider_vendor
+                        if str(provider_values.get("provider_kind")) == "openai_compatible"
+                        else row.get("brand_key") == provider_values["brand_key"]
+                    )
                 ),
                 None,
             )
@@ -259,6 +197,10 @@ class InMemoryRegistryRepositoryMixin:
         row = self._find(target, item_id)
         if row is None:
             return None
+        if kind == "gateway" and set(values) == {"name"} and any(
+            item["id"] != item_id and item["name"] == values["name"] for item in target
+        ):
+            raise ValueError("Gateway display name is already in use")
         if kind == "model" and "enabled" in values and values["enabled"] != row["enabled"]:
             raise ModelAvailabilityConflict(
                 "Change model availability through the versioned availability command"
@@ -331,6 +273,9 @@ class InMemoryRegistryRepositoryMixin:
         runtime = self._find(self.runtimes, runtime_id)
         if runtime is None or any(
             model["runtime_id"] == runtime_id for model in self.models
+        ) or any(
+            binding["runtime_id"] == runtime_id
+            for binding in self.apim_target_route_bindings.values()
         ):
             return False
         self.runtimes.remove(runtime)
@@ -347,6 +292,7 @@ class InMemoryRegistryRepositoryMixin:
                 for publication in self.gateway_publications
             )
             or gateway_id in self.effective_gateway_releases
+            or gateway_id in self.apim_targets
         ):
             return False
         self.gateways.remove(gateway)
@@ -375,3 +321,88 @@ class InMemoryRegistryRepositoryMixin:
         if item is None:
             raise ValueError(f"Unknown {label}: {item_id}")
         return item
+
+    def _effective_discount(self, model: dict[str, Any]) -> float | None:
+        """The discount that actually applies: the model's own, else its connection's.
+
+        The SQL repository resolves this in the query. Resolving it here too keeps the two
+        implementations answering the same question -- without it the fake charges list price
+        for every model whose discount is set on the connection, and the tests would agree
+        with it.
+        """
+        own = model.get("price_discount_percent")
+        if own is not None:
+            return cast(float, own)
+        runtime = next(
+            (row for row in self.runtimes if row["id"] == model.get("runtime_id")), None
+        )
+        return cast("float | None", runtime.get("price_discount_percent") if runtime else None)
+
+    def apply_model_price_sync(self, updates: Sequence[Mapping[str, Any]]) -> int:
+        charged = (
+            "input_cost_per_million",
+            "output_cost_per_million",
+            "cached_cost_per_million",
+            "cache_write_cost_per_million",
+        )
+        listed = (
+            "list_input_cost_per_million",
+            "list_output_cost_per_million",
+            "list_cached_cost_per_million",
+            "list_cache_write_cost_per_million",
+        )
+        now = datetime.now(UTC)
+        written = 0
+        by_id = {model.get("id"): model for model in self.models}
+        for update in updates:
+            model = by_id.get(update.get("model_id"))
+            if model is None:
+                continue
+
+            # Same guard the SQL repository applies. Without it here, every test that reaches a
+            # sync through the fake would agree that a stale result may land on a model whose
+            # pricing changed underneath it -- and the database would disagree in production.
+            current = (
+                str(model.get("price_source") or "manual"),
+                model.get("price_reference"),
+                self._effective_discount(model),
+                model.get("context_price_tiers") or [],
+                {field: model.get(field) for field in listed},
+            )
+            planned = (
+                str(update.get("expected_source")),
+                update.get("expected_reference"),
+                update.get("expected_discount_percent"),
+                update.get("expected_context_price_tiers") or [],
+                update.get("expected_list_prices") or {field: None for field in listed},
+            )
+            if current != planned:
+                model["price_sync_status"] = "superseded"
+                model["price_sync_message"] = (
+                    "同步期间该模型的计价配置被改动，本次结果已作废，未写入"
+                )
+                model["price_synced_at"] = now
+                continue
+
+            if update.get("writes"):
+                # The accepted baseline moves only when the price is accepted.
+                for column in listed:
+                    if update.get(column) is not None:
+                        model[column] = update[column]
+                for column in charged:
+                    model[column] = update.get(column)
+                model["pending_list_price"] = None
+                if update.get("context_price_tiers") is not None:
+                    model["context_price_tiers"] = update["context_price_tiers"]
+                model["pending_context_price_tiers"] = None
+                model["updated_at"] = now
+                written += 1
+            elif update.get("pending_list_price") is not None:
+                model["pending_list_price"] = update["pending_list_price"]
+            if not update.get("writes") and update.get("pending_context_price_tiers") is not None:
+                model["pending_context_price_tiers"] = update["pending_context_price_tiers"]
+
+            model["price_sync_status"] = update.get("status")
+            model["price_sync_message"] = update.get("message")
+            model["price_synced_at"] = now
+        return written

@@ -48,6 +48,7 @@ var eventHubName = 'token-usage'
 var workspaceName = 'log-${resourcePrefix}-${suffix}'
 var appInsightsName = 'appi-${resourcePrefix}-${suffix}'
 var keyVaultName = 'kv-${resourcePrefix}-${take(suffix, 8)}'
+var credentialVaultName = 'kv-${resourcePrefix}-rt-${take(suffix, 6)}'
 var planName = 'plan-${resourcePrefix}-${suffix}'
 var telemetryPlanName = 'plan-${resourcePrefix}-telemetry-${suffix}'
 var apiName = 'api-${resourcePrefix}-${suffix}'
@@ -110,6 +111,29 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     networkAcls: {
       bypass: 'AzureServices'
       defaultAction: 'Allow'
+      ipRules: []
+      virtualNetworkRules: []
+    }
+    accessPolicies: []
+  }
+}
+
+resource credentialVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
+  name: credentialVaultName
+  location: location
+  properties: {
+    tenantId: subscription().tenantId
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    enableRbacAuthorization: true
+    enableSoftDelete: true
+    softDeleteRetentionInDays: 7
+    publicNetworkAccess: 'Enabled'
+    networkAcls: {
+      bypass: 'AzureServices'
+      defaultAction: 'Deny'
       ipRules: []
       virtualNetworkRules: []
     }
@@ -298,6 +322,11 @@ resource ledgerTableService 'Microsoft.Storage/storageAccounts/tableServices@202
 resource ledgerTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
   parent: ledgerTableService
   name: ledgerTableName
+}
+
+resource routeTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
+  parent: ledgerTableService
+  name: 'ModelRoutes'
 }
 
 var ledgerTableEndpoint = ledgerStorage.properties.primaryEndpoints.table
@@ -588,6 +617,46 @@ module keyVaultPrivateEndpoint 'key-vault-private-endpoint.bicep' = {
   }
 }
 
+resource vaultPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' existing = {
+  name: keyVaultPrivateEndpoint.outputs.privateDnsZoneName
+}
+
+resource credentialVaultPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+  name: 'pe-${credentialVaultName}-vault'
+  location: location
+  properties: {
+    subnet: {
+      id: privateEndpointSubnet.id
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'route-credentials'
+        properties: {
+          privateLinkServiceId: credentialVault.id
+          groupIds: [
+            'vault'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource credentialVaultPrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+  parent: credentialVaultPrivateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'vault'
+        properties: {
+          privateDnsZoneId: vaultPrivateDnsZone.id
+        }
+      }
+    ]
+  }
+}
+
 resource apiPlan 'Microsoft.Web/serverfarms@2024-11-01' = {
   name: planName
   location: location
@@ -838,6 +907,36 @@ resource apiLedgerContributor 'Microsoft.Authorization/roleAssignments@2022-04-0
   }
 }
 
+resource apiRouteReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(routeTable.id, api.id, 'route-table-reader')
+  scope: routeTable
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '76199698-9eea-4c19-bc75-cec21354c6b6')
+  }
+}
+
+resource apimRouteReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(routeTable.id, apimPrincipalId, 'route-table-reader')
+  scope: routeTable
+  properties: {
+    principalId: apimPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '76199698-9eea-4c19-bc75-cec21354c6b6')
+  }
+}
+
+resource apimRouteCredentialReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(credentialVault.id, apimPrincipalId, 'route-credential-reader')
+  scope: credentialVault
+  properties: {
+    principalId: apimPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+  }
+}
+
 resource telemetryLedgerContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(ledgerTable.id, functionApp.id, 'table-data-contributor')
   scope: ledgerTable
@@ -878,7 +977,11 @@ output applicationInsightsName string = appInsights.name
 output applicationInsightsConnectionString string = appInsights.properties.ConnectionString
 output ledgerStorageName string = ledgerStorage.name
 output ledgerTableEndpoint string = ledgerTableEndpoint
+output ledgerTableResourceId string = ledgerTable.id
+output routeTableResourceId string = routeTable.id
 output keyVaultName string = keyVault.name
+output credentialVaultName string = credentialVault.name
+output credentialVaultResourceId string = credentialVault.id
 output databaseUrlSecretUri string = databaseUrlSecret.properties.secretUri
 output apimSubscriptionKeySecretUri string = apimKeySecret.properties.secretUri
 output apimProbeSubscriptionKeySecretUri string = apimProbeKeySecret.properties.secretUri

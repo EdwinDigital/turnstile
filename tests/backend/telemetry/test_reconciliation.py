@@ -199,7 +199,7 @@ def test_terminal_evidence_client_batches_and_does_not_accept_partial_http_succe
     import json
 
     query = json.loads(requests[0].content)["query"]
-    assert 'let api_id = "api\\"name";' in query
+    assert '| where ApiId == "api\\"name"' in query
     assert 'dynamic(["first", "second"])' in query
 
 

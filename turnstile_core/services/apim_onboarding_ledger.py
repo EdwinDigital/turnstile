@@ -29,7 +29,7 @@ from ..integrations.apim_control_plane_contract import (
 )
 from ..integrations.apim_policy_components import parse_policy, validate_parent_policy
 from ..integrations.ledger import TableStorageLedger
-from ..persistence.repository_contract import QueryRepository
+from ..persistence.repository import QueryRepository
 from .application_access import ApplicationAccessService
 from .application_provisioning_ledger import prepare_application_ledger
 
@@ -49,6 +49,7 @@ def project_onboarding_ledger(
     operation = repository.get_gateway_release_operation(operation_id)
     if operation is None:
         raise PolicyCompilationError("APIM initialization operation disappeared")
+    actor = str(operation["created_by"])
     subscriptions: tuple[tuple[str, Literal["service", "system"]], ...] = (
         (plan.dashboard_subscription_id, "service"),
         (plan.probe_subscription_id, "system"),
@@ -63,7 +64,7 @@ def project_onboarding_ledger(
             or str(application["gateway_profile_id"]) != str(plan.gateway_profile_id)
         ):
             raise PolicyCompilationError(
-                "A staged system application changed outside initialization"
+                "A staged system application was changed outside initialization"
             )
     service = ApplicationAccessService(
         repository,
@@ -89,7 +90,7 @@ def project_onboarding_ledger(
                 for identifier, kind in subscriptions
             ],
         ),
-        str(operation["created_by"]),
+        actor,
     )
     for identifier, kind in subscriptions:
         application_id = application_id_for(plan.gateway_profile_id, identifier)
@@ -117,7 +118,9 @@ def project_onboarding_ledger(
     except ValueError as error:
         raise PolicyCompilationError("The new APIM budget fence has an invalid document") from error
     if document != fence:
-        raise PolicyCompilationError("The APIM budget fence exists with another configuration")
+        raise PolicyCompilationError(
+            "The APIM budget fence already exists with another configuration"
+        )
 
 
 def enroll_self_hosted_gateway_protocol(
@@ -129,25 +132,16 @@ def enroll_self_hosted_gateway_protocol(
     canonical_parent: str,
     *,
     before_write: Callable[[], None] | None = None,
+    verify_fixed_program: Callable[[], None] | None = None,
 ) -> tuple[str, ...]:
     target = repository.get_apim_target(inventory.gateway_profile_id)
-    identity_fields = (
-        "gateway_profile_id",
-        "arm_resource_id",
-        "subscription_id",
-        "resource_group",
-        "service_name",
-        "api_id",
-        "principal_id",
-    )
-    if (
-        target is None
-        or any(
-            str(target.get(name, "")).casefold() != str(getattr(inventory, name)).casefold()
-            for name in identity_fields
+    if target is None or any(
+        str(target.get(name, "")).casefold() != str(getattr(inventory, name)).casefold()
+        for name in (
+            "gateway_profile_id", "arm_resource_id", "subscription_id", "resource_group",
+            "service_name", "api_id", "principal_id",
         )
-        or target.get("api_path") != inventory.api_path
-    ):
+    ) or target.get("api_path") != inventory.api_path:
         raise PolicyCompilationError("Gateway protocol registration target identity changed")
     if (
         target.get("drift_state") != "in_sync"
@@ -162,12 +156,11 @@ def enroll_self_hosted_gateway_protocol(
     retiring: set[str] = set()
     expected_gateways = expected_fence.get("gateways")
     for row in repository.list_gateway_deployments(
-        inventory.gateway_profile_id,
-        include_retired=True,
+        inventory.gateway_profile_id, include_retired=True,
     ):
-        deployment = GatewayDeployment.model_validate(
-            {name: row[name] for name in GatewayDeployment.model_fields if name in row}
-        )
+        deployment = GatewayDeployment.model_validate({
+            name: row[name] for name in GatewayDeployment.model_fields if name in row
+        })
         if deployment.kind is not GatewayDeploymentKind.SELF_HOSTED:
             continue
         if deployment.retired_at is not None:
@@ -185,7 +178,8 @@ def enroll_self_hosted_gateway_protocol(
         gateway = discovered.get(deployment.native_gateway_id.casefold())
         if gateway is None or deployment.declared_state is not GatewayDeclaredState.PRESENT:
             raise RetryablePublicationError(
-                "The configured Gateway is missing from Azure inventory"
+                "The configured Gateway is missing from Azure inventory; "
+                "verify Publisher Gateway read access and synchronize again"
             )
         if inventory.api_id.casefold() not in {
             name.casefold() for name in gateway.associated_api_ids
@@ -208,23 +202,32 @@ def enroll_self_hosted_gateway_protocol(
     revision, policy = client.current_api_policy()
     if revision != inventory.api_revision:
         raise RetryablePublicationError(
-            "The current API revision changed during Gateway registration"
+            "The current API Revision changed during Gateway registration"
         )
-    validate_parent_policy(policy, canonical_parent)
+    fixed = parse_policy(policy).find(".//set-variable[@name='routeProgram']")
+    if fixed is not None:
+        if verify_fixed_program is None:
+            raise PolicyCompilationError(
+                "Gateway registration requires complete fixed program evidence",
+            )
+        verify_fixed_program()
+    else:
+        validate_parent_policy(policy, canonical_parent)
     version = parse_policy(policy).find("./inbound/set-variable[@name='budgetExecutionVersion']")
     if version is None or version.get("value") != "@(2)":
         raise PolicyCompilationError("Gateway registration requires the budget execution policy")
+
     service_name = inventory.service_name.lower()
-    service_hash = hashlib.sha256(service_name.encode()).hexdigest()
-    partition = f"budget-protocol|{service_hash}|{inventory.api_id}"
+    partition = (
+        f"budget-protocol|{hashlib.sha256(service_name.encode()).hexdigest()}|{inventory.api_id}"
+    )
     try:
         epoch = UUID(str(expected_fence.get("epoch", "")))
     except ValueError as error:
         raise PolicyCompilationError("Gateway protocol registration has no valid epoch") from error
     if (
         type(expected_fence.get("protocol_version")) is not int
-        or expected_fence.get("protocol_version") != 2
-        or expected_fence.get("mode") != "active"
+        or expected_fence.get("protocol_version") != 2 or expected_fence.get("mode") != "active"
         or expected_fence.get("gateway_profile_id") != str(inventory.gateway_profile_id)
         or expected_fence.get("apim_service_id") != service_name
         or expected_fence.get("api_id") != inventory.api_id
@@ -233,10 +236,9 @@ def enroll_self_hosted_gateway_protocol(
         raise PolicyCompilationError(
             "Gateway protocol registration requires its active target fence"
         )
-    protected = json.dumps(
-        {name: value for name, value in expected_fence.items() if name != "gateways"},
-        sort_keys=True,
-    )
+    protected = json.dumps({
+        name: value for name, value in expected_fence.items() if name != "gateways"
+    }, sort_keys=True)
     preserved_gateways = expected_fence.get("gateways")
     if not isinstance(preserved_gateways, dict):
         raise PolicyCompilationError("The Gateway budget protocol enrollment is invalid")
@@ -257,28 +259,20 @@ def enroll_self_hosted_gateway_protocol(
         if (
             not isinstance(fence, dict)
             or fence.get("epoch") != str(epoch)
-            or json.dumps(
-                {name: value for name, value in fence.items() if name != "gateways"}, sort_keys=True
-            )
-            != protected
+            or json.dumps({
+                name: value for name, value in fence.items() if name != "gateways"
+            }, sort_keys=True) != protected
         ):
             raise PolicyCompilationError(
                 "The Gateway budget protocol changed; registration is blocked"
             )
         gateways = fence.get("gateways")
-        if (
-            not isinstance(gateways, dict)
-            or not gateways
-            or any(
-                not isinstance(name, str)
-                or not name.strip()
-                or not isinstance(revisions, list)
-                or not revisions
-                or any(not isinstance(value, str) or not value.strip() for value in revisions)
-                for name, revisions in gateways.items()
-            )
-            or len({name.casefold() for name in gateways}) != len(gateways)
-        ):
+        if not isinstance(gateways, dict) or not gateways or any(
+            not isinstance(name, str) or not name.strip()
+            or not isinstance(revisions, list) or not revisions
+            or any(not isinstance(value, str) or not value.strip() for value in revisions)
+            for name, revisions in gateways.items()
+        ) or len({name.casefold() for name in gateways}) != len(gateways):
             raise PolicyCompilationError("The Gateway budget protocol enrollment is invalid")
         if any(
             gateways.get(name) != revisions and not (name in retiring and name not in gateways)
@@ -299,22 +293,16 @@ def enroll_self_hosted_gateway_protocol(
         if attempt == 3:
             break
         if client.current_revision() != revision:
-            raise RetryablePublicationError("The API revision changed before Gateway registration")
-        if repository.get_apim_target(inventory.gateway_profile_id) != target:
+            raise RetryablePublicationError("The API Revision changed before Gateway registration")
+        current_target = repository.get_apim_target(inventory.gateway_profile_id)
+        if current_target != target:
             raise RetryablePublicationError("The APIM target changed before Gateway registration")
         for deployment_id, original in configured.items():
             current_deployment = repository.get_gateway_deployment(deployment_id)
-            if (
-                current_deployment is None
-                or GatewayDeployment.model_validate(
-                    {
-                        name: current_deployment[name]
-                        for name in GatewayDeployment.model_fields
-                        if name in current_deployment
-                    }
-                )
-                != original
-            ):
+            if current_deployment is None or GatewayDeployment.model_validate({
+                name: current_deployment[name]
+                for name in GatewayDeployment.model_fields if name in current_deployment
+            }) != original:
                 raise RetryablePublicationError(
                     "The Gateway association changed before registration"
                 )
@@ -324,12 +312,12 @@ def enroll_self_hosted_gateway_protocol(
         }
         if not updated_gateways:
             raise PolicyCompilationError("Gateway synchronization cannot remove every registration")
-        document = json.dumps({**fence, "gateways": updated_gateways}, sort_keys=True)
+        updated = {**fence, "gateways": updated_gateways}
+        document = json.dumps(updated, sort_keys=True)
         if len(document.encode("utf-16-le")) > 60_000:
             raise PolicyCompilationError("Gateway protocol registration exceeds its document limit")
         replacement = {
-            name: value
-            for name, value in entity.items()
+            name: value for name, value in entity.items()
             if name not in {"Timestamp", "Document"} and not name.startswith("odata.")
         }
         replacement["Document"] = document
@@ -337,9 +325,10 @@ def enroll_self_hosted_gateway_protocol(
             before_write()
         try:
             if ledger.replace_if_match(partition, "F", replacement, etag):
-                preserved_gateways = dict(updated_gateways)
+                preserved_gateways = dict(updated["gateways"])
         except httpx.TransportError:
             uncertain_write = True
+            continue
     raise RetryablePublicationError(
         "Gateway protocol registration requires a fresh conditional retry"
     )

@@ -41,8 +41,162 @@ def test_migration_chain_preserves_clean_install_and_adds_attempt_identity() -> 
         "014_self_hosted_gateway_provisioning.up.sql",
         "015_platform_invocation_trace.up.sql",
         "016_model_availability.up.sql",
+        "017_budget_terminal_observation.up.sql",
+        "018_budget_reservation_resolution.up.sql",
+        "019_runtime_display_name.up.sql",
+        "020_failed_publication_spec.up.sql",
+        "021_usd_budget_reservations.up.sql",
+        "022_subscription_tags.up.sql",
+        "023_usd_reservation_resolution.up.sql",
+        "024_gateway_usage_attribution.up.sql",
+        "025_usage_cost_component_prices.up.sql",
+        "026_invocation_trace_service_identity.up.sql",
+        "027_product_schema_alignment.up.sql",
+        "028_product_index_alignment.up.sql",
     ]
     assert not list(MIGRATIONS.glob("*.down.sql"))
+
+
+def test_final_product_indexes_keep_source_keys_and_do_not_rewrite_history() -> None:
+    sql = (MIGRATIONS / "028_product_index_alignment.up.sql").read_text()
+    assert "ON pinned_chart (owner_id, position, created_at)" in sql
+    assert "CREATE UNIQUE INDEX pinned_chart_owner_query_idx" in sql
+    assert "ON pinned_chart (owner_id, (chart->'query'))" in sql
+    assert "scope_type, scope_id, period_start, reservation_created_at DESC" in sql
+    assert "ON gateway_release_operation ((semantic_preview->>'request_id'))" in sql
+    assert "WHERE operation_kind = 'self_hosted_gateway_provision'" in sql
+    assert not re.search(r"^\s*(UPDATE|DELETE FROM|TRUNCATE|DROP|ALTER|INSERT INTO)\b",
+                         sql, re.MULTILINE)
+    assert "model_router" not in sql
+
+
+def test_final_product_schema_alignment_adds_missing_sidecars_without_rewriting_history() -> None:
+    sql = (MIGRATIONS / "027_product_schema_alignment.up.sql").read_text()
+    assert table_names(sql) == {
+        "gateway_application_usage_recovery",
+        "gateway_application_ledger_finalization_state",
+        "gateway_deployment_provisioning",
+    }
+    assert "BEFORE UPDATE OR DELETE ON gateway_application_usage_recovery" in sql
+    assert "evidence_at >= occurred_at" in sql
+    assert "PRIMARY KEY (application_id, correlation_id)" in sql
+    assert "finalized_upper_bound_tokens >= 0" in sql
+    assert "FOREIGN KEY (operation_id, apim_target_id)" in sql
+    assert "FOREIGN KEY (deployment_id, apim_target_id)" in sql
+    assert "ON DELETE RESTRICT" in sql and "model_router" not in sql
+    assert "CREATE OR REPLACE VIEW budget_reservation_finalization_effective" in sql
+    assert "FROM gateway_application_usage_recovery recovery" in sql
+    assert "SELECT DISTINCT ON (scope_type, scope_id, correlation_id)" in sql
+    assert "recovery.recovered_at AS finalized_at" in sql
+    assert "CREATE OR REPLACE VIEW invocation_request_trace" in sql
+    assert "gateway.native_instance_id, gateway.is_managed, gateway.apim_region" in sql
+    assert "LEFT JOIN token_usage_gateway_attribution gateway ON gateway.usage_id = usage.id" in sql
+    assert "LEFT JOIN platform_invocation_usage_match matched ON matched.usage_id = usage.id" in sql
+    assert not re.search(r"^\s*(UPDATE|DELETE FROM|TRUNCATE|DROP|ALTER|INSERT INTO)\b",
+                         sql, re.MULTILINE)
+
+
+def test_current_snapshot_cost_and_trace_upgrades_do_not_rewrite_usage_history() -> None:
+    cost = (MIGRATIONS / "025_usage_cost_component_prices.up.sql").read_text()
+    trace = (MIGRATIONS / "026_invocation_trace_service_identity.up.sql").read_text()
+    assert "CREATE OR REPLACE FUNCTION budget_usage_usd_cost" in cost
+    assert "RETURNS NUMERIC(30,14)" in cost
+    assert "WHEN is_estimated IS DISTINCT FROM FALSE THEN NULL" in cost
+    assert "WHEN stored_cost IS NOT NULL THEN stored_cost::NUMERIC(30,14)" in cost
+    assert "(input_tokens = 0 OR input_rate IS NOT NULL)" in cost
+    assert "(output_tokens = 0 OR output_rate IS NOT NULL)" in cost
+    assert "input_tokens * COALESCE(input_rate, 0)" in cost
+    assert "CREATE OR REPLACE VIEW public.platform_invocation_usage_match" in trace
+    assert "attempt.completion->>'gateway_correlation_id' IS NOT NULL" in trace
+    assert "usage.correlation_id = attempt.completion->>'gateway_correlation_id'" in trace
+    assert "gateway.apim_target_id::text = attempt.snapshot->>'apim_target_id'" in trace
+    assert (
+        "gateway.gateway_deployment_id::text = attempt.snapshot->>'gateway_deployment_id'" in trace
+    )
+    assert "lower(gateway.apim_service_id)" in trace and "regexp_replace(" in trace
+    assert "usage.runtime =" not in trace
+    assert "HAVING count(*) = 1" in trace
+    for sql in (cost, trace):
+        assert not re.search(
+            r"^\s*(UPDATE|DELETE FROM|TRUNCATE|DROP|INSERT INTO)\b", sql, re.MULTILINE,
+        )
+        assert "model_router" not in sql
+
+
+def test_terminal_observation_and_resolution_are_immutable_admission_bound_records() -> None:
+    observation = (MIGRATIONS / "017_budget_terminal_observation.up.sql").read_text()
+    resolution = (MIGRATIONS / "018_budget_reservation_resolution.up.sql").read_text()
+    assert table_names(observation) == {"budget_execution_observation"}
+    assert table_names(resolution) == {"budget_execution_resolution"}
+    for sql in (observation, resolution):
+        assert "REFERENCES budget_execution_attempt" in sql
+        assert "reject_budget_reservation_finalization_mutation()" in sql
+        assert "BEFORE UPDATE OR DELETE" in sql
+        assert not re.search(r"^\s*(UPDATE|DELETE FROM|TRUNCATE|INSERT INTO)\b", sql, re.MULTILINE)
+    assert "octet_length(observation::text) <= 4096" in observation
+    assert "document->>'decision' = 'release_unverified'" in resolution
+    assert "document #>> '{receipt,identity,scope,scope_id}' = scope_id" in resolution
+    assert "UNIQUE (scope_type, scope_id, period_start, attempt_key)" in resolution
+
+
+def test_gateway_usage_sidecar_is_forward_only_and_preserves_old_attempt_identity() -> None:
+    sql = (MIGRATIONS / "024_gateway_usage_attribution.up.sql").read_text()
+    assert table_names(sql) == {"token_usage_gateway_attribution"}
+    assert "usage_id TEXT PRIMARY KEY REFERENCES token_usage(id) ON DELETE RESTRICT" in sql
+    assert "REFERENCES gateway_deployment(id, apim_target_id) ON DELETE RESTRICT" in sql
+    assert "event_schema_version >= 2" in sql
+    assert "lower(native_gateway_id) = 'managed'" in sql
+    assert "'eventhub', 'observer', 'reconciliation', 'backfill'" in sql
+    assert "CREATE INDEX token_usage_gateway_attribution_target_idx" in sql
+    assert not re.search(r"^\s*(UPDATE|DELETE FROM|TRUNCATE|DROP|INSERT INTO)\b", sql, re.MULTILINE)
+    assert "guard_apim_usage_identity" not in sql and "model_router" not in sql
+
+
+def test_runtime_display_names_and_failed_publication_identity_keep_other_constraints() -> None:
+    names = (MIGRATIONS / "019_runtime_display_name.up.sql").read_text()
+    publications = (MIGRATIONS / "020_failed_publication_spec.up.sql").read_text()
+    assert names.strip() == "ALTER TABLE model_runtime DROP CONSTRAINT model_runtime_name_key;"
+    assert "model_runtime_gateway_foundry_project_unique_idx" not in names
+    assert "WHERE status NOT IN ('failed', 'superseded', 'rolled_back')" in publications
+    assert not re.search(r"^\s*(UPDATE|DELETE FROM|TRUNCATE|INSERT INTO)\b", publications,
+                         re.MULTILINE)
+
+
+def test_subscription_tags_are_separate_and_cannot_delete_application_history() -> None:
+    sql = (MIGRATIONS / "022_subscription_tags.up.sql").read_text()
+    assert table_names(sql) == {"gateway_application_tags"}
+    assert "application_id UUID PRIMARY KEY" in sql
+    assert "REFERENCES gateway_application(id) ON DELETE RESTRICT" in sql
+    assert "jsonb_typeof(tags) = 'object'" in sql
+    assert "token_usage" not in sql and "gateway_application_budget" not in sql
+
+
+def test_usd_upgrade_keeps_exact_price_evidence_and_public_legacy_snapshot_balance() -> None:
+    sql = (MIGRATIONS / "021_usd_budget_reservations.up.sql").read_text()
+    assert "budget_mode TEXT NOT NULL DEFAULT 'tokens'" in sql
+    assert "NUMERIC(30,14)" in sql and "price_snapshot JSONB" in sql
+    assert "budget_execution_attempt_mode_evidence_check" in sql
+    assert "CREATE FUNCTION budget_usage_usd_cost" in sql
+    assert "GREATEST(cached_tokens - cache_write_tokens, 0) * cache_read_rate" in sql
+    assert "WHEN count(*) FILTER (WHERE usd_cost IS NULL) > 0 THEN NULL" in sql
+    assert "usage.usd_price_sha256 = admitted_price->>'price_sha256'" in sql
+    assert "DROP CONSTRAINT gateway_application_ledger_state_available_tokens_check" in sql
+    assert "- finalized_upper_bound_tokens, 0" in sql
+    assert "WHERE EXCLUDED.evidence_rank > stored.evidence_rank" in sql
+    assert "UPDATE token_usage" not in sql and "DELETE FROM token_usage" not in sql
+    assert "model_router" not in sql
+
+
+def test_usd_resolution_retains_immutable_approval_and_unknown_actual_cost() -> None:
+    sql = (MIGRATIONS / "023_usd_reservation_resolution.up.sql").read_text()
+    assert "source_key LIKE 'resolution:%'" in sql
+    assert "resolution.document->>'decision' = 'release_unverified'" in sql
+    assert "resolution.document #> '{receipt,identity}' = execution.identity" in sql
+    assert "resolution.document #> '{receipt,price_snapshot}' = admitted_price" in sql
+    assert "= execution.reserved_usd" in sql
+    assert "actual_usd := NULL" in sql
+    assert "WHERE EXCLUDED.evidence_rank > stored.evidence_rank" in sql
+    assert "UPDATE token_usage" not in sql and "DELETE FROM" not in sql
 
 
 def test_availability_migration_guards_versioned_writes_and_retains_identities() -> None:

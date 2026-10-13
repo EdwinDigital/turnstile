@@ -22,6 +22,36 @@ git diff --check
 
 ## Database validation
 
+New forward-only product upgrades are `017_budget_terminal_observation`,
+`018_budget_reservation_resolution`, `019_runtime_display_name`,
+`020_failed_publication_spec`, `021_usd_budget_reservations`, `022_subscription_tags`,
+`023_usd_reservation_resolution`, `024_gateway_usage_attribution`,
+`025_usage_cost_component_prices`, `026_invocation_trace_service_identity`,
+`027_product_schema_alignment` and `028_product_index_alignment`. They preserve applied migration
+bytes and existing usage, financial/audit history and routing identities. The first two add
+immutable admission-bound observations and explicit Owner approval records; elapsed time or
+an HTTP failure alone is not permission to refund unknown usage. Display names no longer
+define Connection identity, while endpoint/target uniqueness remains. Failed publication specs
+may be submitted as a new task without erasing the failed record. Tags are separate metadata.
+
+Run the migration-source and schema-documentation tests locally. On an accurately authorized
+PostgreSQL target, additionally verify parsing, unchanged old checksums/rows, immutable/FK
+constraints, same-approval idempotency, concurrent claims and the ordinary API outcomes.
+SQL source checks do not prove applied migrations, isolation, request attribution or refunds.
+Do not initialize a shared database or import model intelligent-routing schema.
+
+USD upgrades add exact `NUMERIC(30,14)` reservations, immutable admission prices and formal
+price-bound charges. Missing/estimated prices remain unknown, not zero. Owner-approved releases
+retain unknown actual Tokens/USD and their original receipt; later formal usage still settles
+once. Public legacy Token snapshots keep their separate upper-bound deduction. On the approved
+database, verify all seven new upgrades together, unchanged 001-016 checksums/history, exact
+cache-read/write buckets, same-approval idempotency, lost responses, late formal evidence and
+both Person/Application scopes before claiming financial acceptance. The later upgrades add
+Gateway-bound usage metadata, immutable component-price calculation, actual correlation-based
+Trace matching and the current product's required side tables and indexes. Static schema or
+migration tests do not prove that these upgrades have been applied or that existing history
+has been preserved in a real database.
+
 Migration `016_model_availability` adds retained model identities, immutable commands/audit,
 capability and node-enrollment evidence, and a leased projection outbox. It preserves existing
 model states, prices, defaults and financial history. Local checks are:
@@ -30,8 +60,8 @@ model states, prices, defaults and financial history. Local checks are:
 uv run --frozen --no-sync pytest -q tests/backend/model_platform/test_model_availability.py \
 	tests/platform/contracts/test_migrations.py tests/platform/api/test_model_management_api.py \
 	tests/platform/deployment/test_control_plane_function.py
-node --test tests/platform/frontend/model-availability.test.mjs \
-	tests/platform/frontend/model-edit-form.test.mjs tests/platform/frontend/gateway-topology.test.mjs
+node --experimental-strip-types --test tests/platform/frontend/model-edit-form.test.mjs \
+	tests/platform/frontend/model-publication-connections.test.mjs
 ```
 
 The existing C# policy suite also compiles and runs native availability expressions. On an

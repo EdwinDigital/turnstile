@@ -87,7 +87,7 @@ def test_platform_store_is_nonbilling_and_completion_cannot_be_changed() -> None
     repository = InMemoryRepository()
     attempt = invocation_attempt()
     repository.begin_platform_invocation(attempt)
-    with pytest.raises(ValueError, match="already exists"):
+    with pytest.raises(ValueError, match="already been used"):
         repository.begin_platform_invocation(attempt)
     completion = PlatformInvocationCompletion(
         request_id=attempt.request_id,
@@ -101,7 +101,7 @@ def test_platform_store_is_nonbilling_and_completion_cannot_be_changed() -> None
     repository.finish_platform_invocation(completion)
     with pytest.raises(ValueError, match="immutable"):
         repository.finish_platform_invocation(completion.model_copy(update={"status_code": 502}))
-    with pytest.raises(ValueError, match="does not exist"):
+    with pytest.raises(ValueError, match="missing or immutable"):
         repository.finish_platform_invocation(
             completion.model_copy(
                 update={"request_id": "missing"},
@@ -232,8 +232,9 @@ def test_unrelated_usage_cannot_complete_a_platform_trace(field: str, value: str
     )
     repository.usage_records.append(formal_usage(attempt).model_copy(update={field: value}))
     detail = repository.get_usage_request("platform:" + attempt.request_id)
-    assert detail is not None and detail["usage_available"] is False
-    assert detail["cost_available"] is False
+    assert detail is not None
+    assert detail["usage_available"] is (field == "runtime")
+    assert detail["cost_available"] is (field == "runtime")
 
 
 @pytest.mark.parametrize("evidence", ["missing_correlation", "ambiguous", "wrong_application"])
@@ -428,7 +429,7 @@ def test_explicit_selection_requires_model_and_both_gateway_identifiers() -> Non
 def test_legacy_apim_route_must_be_https_before_credentials(endpoint: str) -> None:
     service = ModelRuntimeService(InMemoryRepository(), Settings())
     with pytest.raises(HTTPException) as error:
-        service._invocation_deployment_route({
+        service._validate_invocation_endpoint({
             "gateway_implementation": "apim", "gateway_base_url": endpoint,
         })
     assert error.value.status_code == 503
@@ -454,7 +455,8 @@ def test_actual_invocation_uses_only_the_selected_serving_gateway(explicit: bool
     repository.gateway_deployment_inventories[edge.id] = {"associated_api_ids": [target().api_id]}
     publication_id = UUID(int=87)
     repository.gateway_publications.append(
-        {"id": publication_id, "gateway_profile_id": TARGET, "desired_spec": {"bindings": []}}
+        {"id": publication_id, "gateway_profile_id": TARGET, "status": "active",
+         "desired_spec": {"bindings": []}}
     )
     repository.effective_gateway_releases[TARGET] = publication_id
     repository.upsert_apim_target_route_binding(

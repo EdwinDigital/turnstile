@@ -365,7 +365,7 @@ def test_postgres_activation_reads_full_price_identity_and_never_reprices_existi
         "context_price_tiers",
     ):
         assert field_name in query
-    assert query.count("DOUBLE PRECISION") == 5
+    assert query.count("DOUBLE PRECISION") == 9
     assert all(
         not sql.startswith(("INSERT INTO managed_model", "UPDATE managed_model"))
         for sql in statements
@@ -472,7 +472,7 @@ def rollout_fixture() -> tuple[InMemoryRepository, list[dict[str, Any]]]:
     return repository, children
 
 
-def test_multi_target_persistence_is_idempotent_and_returns_detached_current_children() -> None:
+def test_multi_target_unit_persistence_is_idempotent_and_returns_current_children() -> None:
     repository, children = rollout_fixture()
     rollout = repository.create_multi_target_rollout(
         UUID(int=200),
@@ -497,8 +497,10 @@ def test_multi_target_persistence_is_idempotent_and_returns_detached_current_chi
     current = repository.get_multi_target_rollout(rollout["id"])
     assert current is not None
     assert any(child["publication_status"] == "failed" for child in current["children"])
-    current["children"][0]["publication"]["status"] = "not-persisted"
-    assert all(row["status"] != "not-persisted" for row in repository.gateway_publications)
+    for child in current["children"]:
+        publication = repository.get_gateway_publication(child["publication_id"])
+        assert child["publication"] is publication
+        assert publication is not None and child["publication_status"] == publication["status"]
     assert repository.list_multi_target_rollouts(1)[0]["id"] == rollout["id"]
 
 

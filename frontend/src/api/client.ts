@@ -65,6 +65,19 @@ export const request = async <T,>(
   return response.json() as Promise<T>
 }
 
+export async function requestSensitiveJson<T>(path: string, init: RequestInit): Promise<T> {
+  const response = await fetch(apiUrl(path), {
+    ...init, credentials: "include", cache: "no-store", redirect: "error",
+  })
+  if (!response.ok || !response.headers.get("cache-control")?.includes("no-store")
+    || !response.headers.get("content-type")?.includes("application/json")) {
+    await response.body?.cancel()
+    throw new ApiError(response.status, "Sensitive configuration unavailable")
+  }
+  try { return await response.json() as T }
+  catch { throw new ApiError(response.status, "Sensitive configuration unavailable") }
+}
+
 export const writeJson = <T,>(path: string, value: unknown, method = "POST") => request<T>(path, {
   method,
   headers: { "content-type": "application/json" },

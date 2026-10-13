@@ -67,9 +67,7 @@ def image_usage(payload: Mapping[str, Any]) -> InvocationUsage | None:
 
 
 def _decode_generated_image(
-    payload: Mapping[str, Any],
-    output_format: str | None = None,
-    expected_size: str | None = None,
+    payload: Mapping[str, Any], output_format: str | None = None, expected_size: str | None = None,
 ) -> tuple[GeneratedImage, str]:
     data = payload.get("data")
     if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
@@ -82,7 +80,9 @@ def _decode_generated_image(
     except (binascii.Error, ValueError) as error:
         raise ValueError("Invalid generated image encoding") from error
     explicit_size = re.fullmatch(r"([0-9]+)x([0-9]+)", expected_size or "")
-    dimensions = tuple(int(edge) for edge in explicit_size.groups()) if explicit_size else None
+    expected_dimensions = (
+        tuple(int(edge) for edge in explicit_size.groups()) if explicit_size else None
+    )
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -90,7 +90,7 @@ def _decode_generated_image(
                 if decoded.format not in ("PNG", "JPEG", "WEBP"):
                     raise ValueError("Generated image format cannot be previewed safely")
                 if (output_format is not None and decoded.format != output_format.upper()) or (
-                    dimensions is not None and decoded.size != dimensions
+                    expected_dimensions is not None and decoded.size != expected_dimensions
                 ):
                     raise ValueError("Generated image does not match the requested format and size")
                 if getattr(decoded, "n_frames", 1) != 1:
@@ -101,10 +101,7 @@ def _decode_generated_image(
             with Image.open(BytesIO(content)) as decoded:
                 decoded.load()
     except (
-        OSError,
-        SyntaxError,
-        Image.DecompressionBombError,
-        Image.DecompressionBombWarning,
+        OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning,
     ) as error:
         raise ValueError("Generated image could not be decoded safely") from error
     media_type = cast(Literal["image/png", "image/jpeg", "image/webp"], f"image/{decoded_format}")
@@ -112,11 +109,9 @@ def _decode_generated_image(
 
 
 def generated_image(
-    payload: Mapping[str, Any],
-    output_format: str | None = None,
-    expected_size: str | None = None,
+    payload: Mapping[str, Any], output_format: str | None = None, expected_size: str | None = None,
 ) -> GeneratedImage:
-    image, _size = _decode_generated_image(payload, output_format, expected_size)
+    image, _ = _decode_generated_image(payload, output_format, expected_size)
     return image
 
 
@@ -155,7 +150,7 @@ class OpenAIImageGatewayAdapter(OpenAICompatibleGatewayAdapter):
             body = request.provider_payload(str(route["model_key"]), profile)
         except ValueError as error:
             raise GatewayInvocationError(str(error), status_code=409) from error
-        headers: dict[str, str] = {}
+        response_headers: dict[str, str] = {}
         measured_usage: InvocationUsage | None = None
         try:
             with self._client.stream(
@@ -165,7 +160,7 @@ class OpenAIImageGatewayAdapter(OpenAICompatibleGatewayAdapter):
                 json=body,
                 timeout=profile.timeout_seconds,
             ) as response:
-                headers = {
+                response_headers = {
                     name: response.headers[name]
                     for name in ("x-request-id", "x-correlation-id", "retry-after")
                     if name in response.headers
@@ -174,7 +169,7 @@ class OpenAIImageGatewayAdapter(OpenAICompatibleGatewayAdapter):
                     raise GatewayInvocationError(
                         f"Image gateway request failed (HTTP {response.status_code})",
                         status_code=response.status_code,
-                        headers=headers,
+                        headers=response_headers,
                     )
                 content = bytearray()
                 for chunk in response.iter_bytes():
@@ -192,19 +187,19 @@ class OpenAIImageGatewayAdapter(OpenAICompatibleGatewayAdapter):
             raise GatewayInvocationError(
                 "Image generation timed out; it was not retried",
                 status_code=504,
-                headers=headers,
+                headers=response_headers,
             ) from error
         except (ValueError, httpx.HTTPError) as error:
             raise GatewayInvocationError(
                 "The image gateway returned an invalid or incomplete response",
-                headers=headers,
+                headers=response_headers,
                 usage=measured_usage,
             ) from error
         quality = payload.get("quality", request.quality)
         return ImageGatewayResult(
             image=image,
             usage=measured_usage,
-            correlation_id=headers.get("x-correlation-id"),
+            correlation_id=response_headers.get("x-correlation-id"),
             size=size,
             quality=quality if isinstance(quality, str) else None,
         )

@@ -14,9 +14,7 @@ from ..domain.model_availability import (
 )
 from .apim_control_plane_contract import PolicyCompilationError
 from .apim_policy_components import (
-    _matches_component as _matches_policy_component,
-)
-from .apim_policy_components import (
+    _matches_policy_component,
     component_digest,
     expression_tokens,
     parse_policy,
@@ -28,7 +26,7 @@ AVAILABILITY_PROBE_PREFIX = "availability-probe-"
 RESOLVE_MODEL = r"""@{
   try {
     var body = context.Request.Body.As<JObject>(preserveContent: true);
-    if (body["model"]?.Type != JTokenType.String) { return ""; }
+    if (body["model"] == null || body["model"].Type != JTokenType.String) { return ""; }
     var alias = ((string)body["model"]).Trim();
     var routes = JArray.Parse((string)context.Variables["availabilityRoutes"]);
     var matches = routes.OfType<JObject>().Where(route =>
@@ -47,12 +45,12 @@ BINDING_VALID = r"""@{
   Guid modelId;
   var value = context.Variables.GetValueOrDefault<string>("availabilityModelId", "");
   return Guid.TryParseExact(value, "D", out modelId) && modelId.ToString() == value
-    && context.Variables.GetValueOrDefault<string>("availabilityTargetId", "")
-      == "__GATEWAY_PROFILE_ID__"
-    && context.Variables.GetValueOrDefault<string>("availabilityApiId", "")
-      == context.Api.Id.Split(';')[0]
-    && context.Variables.GetValueOrDefault<string>("availabilityApiRevision", "")
-      == context.Api.Revision;
+        && context.Variables.GetValueOrDefault<string>("availabilityTargetId", "")
+            == "__GATEWAY_PROFILE_ID__"
+        && context.Variables.GetValueOrDefault<string>("availabilityApiId", "")
+            == context.Api.Id.Split(';')[0]
+        && context.Variables.GetValueOrDefault<string>("availabilityApiRevision", "")
+            == context.Api.Revision;
 }"""
 
 STATE_URL = r"""@{
@@ -81,96 +79,104 @@ READ_STATE = r"""@{
       || (long)entity["Revision"] > 2147483647 || entity["Enabled"]?.Type != JTokenType.Boolean
       || entity["Lifecycle"]?.Type != JTokenType.String) { throw new Exception(); }
     var lifecycle = (string)entity["Lifecycle"];
-    if (lifecycle != "active" && lifecycle != "staged" && lifecycle != "deleted") {
-      throw new Exception();
-    }
+        if (lifecycle != "active" && lifecycle != "staged" && lifecycle != "deleted") {
+            throw new Exception();
+        }
     if (lifecycle == "deleted" && (bool)entity["Enabled"]) { throw new Exception(); }
     return new JObject(new JProperty("outcome", (bool)entity["Enabled"] ? "enabled" : "disabled"),
       new JProperty("revision", (int)entity["Revision"])).ToString(Newtonsoft.Json.Formatting.None);
-  } catch { return "{\"outcome\":\"unavailable\"}"; }
+  } catch {
+    return "{\"outcome\":\"unavailable\"}";
+  }
 }"""
 
 PROBE_NONCE = r"""@{
-  try {
-    var nonce = context.Request.Headers.GetValueOrDefault("x-turnstile-availability-probe", "");
-    Guid parsed;
-    if (nonce.Length != 32 || !Guid.TryParseExact(nonce, "N", out parsed)
-      || parsed.ToString("N") != nonce) { return ""; }
-    var kind = context.Variables.GetValueOrDefault<string>("availabilitySurfaceKind", "");
-    if (context.Request.Method == "GET" && kind == "catalog") { return nonce; }
+    try {
+        var nonce = context.Request.Headers.GetValueOrDefault("x-turnstile-availability-probe", "");
+        Guid parsed;
+        if (nonce.Length != 32 || !Guid.TryParseExact(nonce, "N", out parsed)
+            || parsed.ToString("N") != nonce) { return ""; }
+        var kind = context.Variables.GetValueOrDefault<string>("availabilitySurfaceKind", "");
+        if (context.Request.Method == "GET" && kind == "catalog") { return nonce; }
         if (context.Request.Method != "HEAD" || (kind != "inference" && kind != "catalog")
-      || !context.Operation.Id.StartsWith("availability-probe-", StringComparison.Ordinal)) {
-      return "";
-    }
-    return nonce;
-  } catch { return ""; }
+            || !context.Operation.Id.StartsWith("availability-probe-", StringComparison.Ordinal)) {
+            return "";
+        }
+        return nonce;
+    } catch { return ""; }
 }"""
 
 NODE_ROW_KEY = r"""@{
-  var identity = new JArray(context.Api.Revision, context.Deployment.Gateway.Id,
-    context.Deployment.Gateway.InstanceId).ToString(Newtonsoft.Json.Formatting.None);
-  using (var algorithm = System.Security.Cryptography.SHA256.Create()) {
-    return BitConverter.ToString(algorithm.ComputeHash(Encoding.UTF8.GetBytes(identity)))
-      .Replace("-", "").ToLowerInvariant();
-  }
+    var identity = new JArray(context.Api.Revision, context.Deployment.Gateway.Id,
+        context.Deployment.Gateway.InstanceId).ToString(Newtonsoft.Json.Formatting.None);
+    using (var algorithm = System.Security.Cryptography.SHA256.Create()) {
+        return BitConverter.ToString(algorithm.ComputeHash(Encoding.UTF8.GetBytes(identity)))
+            .Replace("-", "").ToLowerInvariant();
+    }
 }"""
 
 NODE_URL = r"""@{
-  var partition = "model-availability-nodes|v1|"
-    + (string)context.Variables["availabilityTargetId"] + "|" + context.Api.Id.Split(';')[0];
-  return ((string)context.Variables["availabilityTableEndpoint"]).TrimEnd('/') + "/"
-    + (string)context.Variables["availabilityTableName"] + "(PartitionKey='"
-    + Uri.EscapeDataString(partition) + "',RowKey='"
-    + Uri.EscapeDataString((string)context.Variables["availabilityNodeKey"]) + "')";
+    var partition = "model-availability-nodes|v1|"
+        + (string)context.Variables["availabilityTargetId"] + "|" + context.Api.Id.Split(';')[0];
+    return ((string)context.Variables["availabilityTableEndpoint"]).TrimEnd('/') + "/"
+        + (string)context.Variables["availabilityTableName"] + "(PartitionKey='"
+        + Uri.EscapeDataString(partition) + "',RowKey='"
+        + Uri.EscapeDataString((string)context.Variables["availabilityNodeKey"]) + "')";
 }"""
 
 READ_NODE = r"""@{
-  try {
-    var reply = (IResponse)context.Variables["availabilityNodeRead"];
-    if (reply == null || reply.StatusCode != 200) { return false; }
-    var etag = reply.Headers.GetValueOrDefault("ETag", "");
-    if (string.IsNullOrWhiteSpace(etag) || etag == "*" || etag.IndexOf('\r') >= 0
-      || etag.IndexOf('\n') >= 0) { return false; }
-    var text = reply.Body.As<string>(preserveContent: true);
-    if (Encoding.UTF8.GetByteCount(text) > 4096) { return false; }
-    var entity = JObject.Parse(text);
-    var expected = new Dictionary<string, string> {
-      { "PartitionKey", "model-availability-nodes|v1|"
-        + (string)context.Variables["availabilityTargetId"] + "|" + context.Api.Id.Split(';')[0] },
-      { "RowKey", (string)context.Variables["availabilityNodeKey"] },
-      { "TargetId", (string)context.Variables["availabilityTargetId"] },
-      { "ApiId", context.Api.Id.Split(';')[0] }, { "ApiRevision", context.Api.Revision },
-      { "NativeGatewayId", context.Deployment.Gateway.Id },
-      { "InstanceId", context.Deployment.Gateway.InstanceId },
-      { "CapabilityDigest", (string)context.Variables["availabilityCapabilityDigest"] }
-    };
-    foreach (var field in expected) {
-      if (entity[field.Key]?.Type != JTokenType.String
-        || (string)entity[field.Key] != field.Value) { return false; }
-    }
-    if (entity["SchemaVersion"]?.Type != JTokenType.Integer
-      || (long)entity["SchemaVersion"] != 1 || entity["IssuedEpoch"]?.Type != JTokenType.String
-      || entity["ExpiresEpoch"]?.Type != JTokenType.String) { return false; }
-    long issued, expires;
-    var issueText = (string)entity["IssuedEpoch"];
-    var expiryText = (string)entity["ExpiresEpoch"];
-    if (issueText.Length > 12 || expiryText.Length > 12
-      || !long.TryParse(issueText, out issued) || !long.TryParse(expiryText, out expires)
-      || JsonConvert.SerializeObject(issued) != issueText
-      || JsonConvert.SerializeObject(expires) != expiryText) { return false; }
-    var now = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc))
-      .TotalSeconds;
-    return issued <= now && now < expires && expires > issued && expires - issued <= 120;
-  } catch { return false; }
+    try {
+        var reply = (IResponse)context.Variables["availabilityNodeRead"];
+        if (reply == null || reply.StatusCode != 200) { return false; }
+        var etag = reply.Headers.GetValueOrDefault("ETag", "");
+        if (string.IsNullOrWhiteSpace(etag) || etag == "*" || etag.IndexOf('\r') >= 0
+            || etag.IndexOf('\n') >= 0) { return false; }
+        var text = reply.Body.As<string>(preserveContent: true);
+        if (Encoding.UTF8.GetByteCount(text) > 4096) { return false; }
+        var entity = JObject.Parse(text);
+        var expected = new Dictionary<string, string> {
+            { "PartitionKey", "model-availability-nodes|v1|"
+                + (string)context.Variables["availabilityTargetId"]
+                + "|" + context.Api.Id.Split(';')[0] },
+            { "RowKey", (string)context.Variables["availabilityNodeKey"] },
+            { "TargetId", (string)context.Variables["availabilityTargetId"] },
+            { "ApiId", context.Api.Id.Split(';')[0] }, { "ApiRevision", context.Api.Revision },
+            { "NativeGatewayId", context.Deployment.Gateway.Id },
+            { "InstanceId", context.Deployment.Gateway.InstanceId },
+            { "CapabilityDigest", (string)context.Variables["availabilityCapabilityDigest"] }
+        };
+        foreach (var field in expected) {
+            if (entity[field.Key]?.Type != JTokenType.String
+                || (string)entity[field.Key] != field.Value) {
+                return false;
+            }
+        }
+        if (entity["SchemaVersion"]?.Type != JTokenType.Integer
+            || (long)entity["SchemaVersion"] != 1
+            || entity["IssuedEpoch"]?.Type != JTokenType.String
+            || entity["ExpiresEpoch"]?.Type != JTokenType.String) { return false; }
+        long issued, expires;
+        var issueText = (string)entity["IssuedEpoch"];
+        var expiryText = (string)entity["ExpiresEpoch"];
+        if (issueText.Length > 12 || expiryText.Length > 12
+            || !long.TryParse(issueText, out issued) || !long.TryParse(expiryText, out expires)
+            || JsonConvert.SerializeObject(issued) != issueText
+            || JsonConvert.SerializeObject(expires) != expiryText) {
+            return false;
+        }
+        var now = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc))
+            .TotalSeconds;
+        return issued <= now && now < expires && expires > issued && expires - issued <= 120;
+    } catch { return false; }
 }"""
 
 STORE_IDENTITY = r"""@{
-  var identity = ((string)context.Variables["availabilityTableEndpoint"]).TrimEnd('/')
-    + "|" + (string)context.Variables["availabilityTableName"];
-  using (var algorithm = System.Security.Cryptography.SHA256.Create()) {
-    return BitConverter.ToString(algorithm.ComputeHash(Encoding.UTF8.GetBytes(identity)))
-      .Replace("-", "").ToLowerInvariant();
-  }
+    var identity = ((string)context.Variables["availabilityTableEndpoint"]).TrimEnd('/')
+        + "|" + (string)context.Variables["availabilityTableName"];
+    using (var algorithm = System.Security.Cryptography.SHA256.Create()) {
+        return BitConverter.ToString(algorithm.ComputeHash(Encoding.UTF8.GetBytes(identity)))
+            .Replace("-", "").ToLowerInvariant();
+    }
 }"""
 
 CATALOG_URL = r"""@{
@@ -179,10 +185,10 @@ CATALOG_URL = r"""@{
     + (string)context.Variables["availabilityTableName"] + "()?$filter="
     + Uri.EscapeDataString("PartitionKey eq 'model-availability|v1'")
     + "&$top=1000&$select=PartitionKey,RowKey,SchemaVersion,ModelId,Revision,Enabled,Lifecycle";
-  if (page["next_partition"]?.Type == JTokenType.String) {
+  if (page["next_partition"] != null && page["next_partition"].Type == JTokenType.String) {
     url += "&NextPartitionKey=" + Uri.EscapeDataString((string)page["next_partition"]);
   }
-  if (page["next_row"]?.Type == JTokenType.String) {
+  if (page["next_row"] != null && page["next_row"].Type == JTokenType.String) {
     url += "&NextRowKey=" + Uri.EscapeDataString((string)page["next_row"]);
   }
   return url;
@@ -214,21 +220,22 @@ CATALOG_PAGE = r"""@{
         || (long)entity["Revision"] > 2147483647 || entity["Enabled"]?.Type != JTokenType.Boolean
         || entity["Lifecycle"]?.Type != JTokenType.String) { throw new Exception(); }
       var lifecycle = (string)entity["Lifecycle"];
-      if (lifecycle != "active" && lifecycle != "staged" && lifecycle != "deleted") {
-        throw new Exception();
-      }
+            if (lifecycle != "active" && lifecycle != "staged" && lifecycle != "deleted") {
+                throw new Exception();
+            }
       if (lifecycle == "deleted" && (bool)entity["Enabled"]) { throw new Exception(); }
       var key = modelId.ToString();
       if (states.Property(key) != null) { throw new Exception(); }
       states[key] = new JObject(new JProperty("revision", (int)entity["Revision"]),
         new JProperty("enabled", (bool)entity["Enabled"]));
     }
-    var nextPartition = reply.Headers.GetValueOrDefault("x-ms-continuation-NextPartitionKey", "");
+        var nextPartition = reply.Headers.GetValueOrDefault(
+            "x-ms-continuation-NextPartitionKey", "");
     var nextRow = reply.Headers.GetValueOrDefault("x-ms-continuation-NextRowKey", "");
     if (nextPartition.Length > 1024 || nextRow.Length > 1024
-      || string.IsNullOrEmpty(nextPartition) && !string.IsNullOrEmpty(nextRow)) {
-      throw new Exception();
-    }
+            || string.IsNullOrEmpty(nextPartition) && !string.IsNullOrEmpty(nextRow)) {
+            throw new Exception();
+        }
         return new JObject(new JProperty("ok", true),
             new JProperty("pages", (int)previous["pages"] + 1),
       new JProperty("states", states),
@@ -242,9 +249,9 @@ FILTER_CATALOG = r"""@{
   try {
     var page = JObject.Parse((string)context.Variables["availabilityCatalogPage"]);
     if ((bool?)page["ok"] != true || page["next_partition"]?.Type != JTokenType.Null
-      || page["next_row"]?.Type != JTokenType.Null || (int)page["pages"] < 1) {
-      throw new Exception();
-    }
+            || page["next_row"]?.Type != JTokenType.Null || (int)page["pages"] < 1) {
+            throw new Exception();
+        }
     var states = (JObject)page["states"];
     var models = JArray.Parse((string)context.Variables["availabilityCatalogScope"]);
     if (models.Count > 500) { throw new Exception(); }
@@ -256,7 +263,7 @@ FILTER_CATALOG = r"""@{
       var observed = states[id] as JObject;
       if (observed == null || !aliases.Add((string)model["id"])) { throw new Exception(); }
       var enabled = (bool)observed["enabled"];
-      revisions[id] = id + ":" + JsonConvert.SerializeObject((int)observed["revision"])
+        revisions[id] = id + ":" + JsonConvert.SerializeObject((int)observed["revision"])
         + ":" + (enabled ? "1" : "0");
       if (enabled) {
         var entry = (JObject)model.DeepClone();
@@ -267,8 +274,8 @@ FILTER_CATALOG = r"""@{
     string digest;
     using (var algorithm = System.Security.Cryptography.SHA256.Create()) {
       digest = BitConverter.ToString(algorithm.ComputeHash(Encoding.UTF8.GetBytes(
-        string.Join("|", revisions.OrderBy(item => item.Key, StringComparer.Ordinal)
-          .Select(item => item.Value))))).Replace("-", "").ToLowerInvariant();
+                string.Join("|", revisions.OrderBy(item => item.Key, StringComparer.Ordinal)
+                    .Select(item => item.Value))))).Replace("-", "").ToLowerInvariant();
     }
     var body = new JObject(new JProperty("data", data), new JProperty("has_more", false),
       new JProperty("first_id", data.Count == 0 ? JValue.CreateNull() : data[0]["id"]),
@@ -291,8 +298,8 @@ RESOLVE_FIXED_MODEL = r'''@{
         if (matches.Length != 1) { return ""; }
         Guid modelId;
         var value = (string)matches[0]["model_id"];
-        return Guid.TryParseExact(value, "D", out modelId) && modelId.ToString() == value
-            ? value : "";
+                return Guid.TryParseExact(value, "D", out modelId) && modelId.ToString() == value
+                    ? value : "";
     } catch { return ""; }
 }'''
 
@@ -302,8 +309,52 @@ INHERITED_OPERATION_POLICY = (
 )
 
 
-def _variable(parent: ET.Element, name: str, value: str) -> ET.Element:
-    return ET.SubElement(parent, "set-variable", {"name": name, "value": value})
+def _variable(parent: ET.Element, name: str, expression: str) -> ET.Element:
+    return ET.SubElement(parent, "set-variable", {"name": name, "value": expression})
+
+
+def availability_kernel_digest() -> str:
+    return hashlib.sha256(
+        "|".join(
+            (
+                RESOLVE_MODEL,
+                RESOLVE_FIXED_MODEL,
+                BINDING_VALID,
+                READ_STATE,
+                PROBE_NONCE,
+                NODE_ROW_KEY,
+                NODE_URL,
+                READ_NODE,
+                STORE_IDENTITY,
+                CATALOG_URL,
+                CATALOG_PAGE,
+                FILTER_CATALOG,
+                component_digest(admission_guard()),
+                component_digest(availability_probe_guard()),
+            )
+        ).encode()
+    ).hexdigest()
+
+
+def availability_capability_digest(
+    snapshot: ModelAvailabilityPublication | ModelAvailabilityPolicyAdoption,
+) -> str:
+    source = json.dumps(
+        snapshot.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256((availability_kernel_digest() + source).encode()).hexdigest()
+
+
+def availability_operation_digest(root: ET.Element) -> str:
+    source = deepcopy(root)
+    inbound = source.find("inbound")
+    if inbound is None:
+        raise PolicyCompilationError("Availability operation inbound is missing")
+    for marker in inbound.findall("set-variable[@name='availabilitySurfaceDigest']"):
+        inbound.remove(marker)
+    return component_digest(source)
 
 
 def _header(parent: ET.Element, name: str, value: str) -> None:
@@ -329,12 +380,9 @@ def _storage_read(parent: ET.Element, name: str, url: str) -> None:
     )
     ET.SubElement(request, "set-url").text = url
     ET.SubElement(request, "set-method").text = "GET"
-    for header, value in (
-        ("x-ms-version", "2020-12-06"),
-        ("Accept", "application/json;odata=nometadata"),
-        ("Cache-Control", "no-cache"),
-    ):
-        _header(request, header, value)
+    _header(request, "x-ms-version", "2020-12-06")
+    _header(request, "Accept", "application/json;odata=nometadata")
+    _header(request, "Cache-Control", "no-cache")
     ET.SubElement(
         request,
         "authentication-managed-identity",
@@ -361,24 +409,23 @@ def availability_denial(*, disabled: bool = False) -> ET.Element:
         response,
         "x-request-id",
         '@(context.Variables.GetValueOrDefault<string>("callerRequestId", '
-        'context.RequestId.ToString()))',
+        "context.RequestId.ToString()))",
     )
     _header(response, "x-correlation-id", "@(context.RequestId.ToString())")
     if not disabled:
         _header(response, "Retry-After", "1")
-    ET.SubElement(response, "set-body").text = json.dumps(
-        {
-            "type": "error",
-            "error": {
-                "type": "permission_error" if disabled else "api_error",
-                "code": code,
-                "param": "model",
-                "message": "The requested model is disabled"
-                if disabled
-                else "Model availability could not be verified",
-            },
-        },
-        separators=(",", ":"),
+    ET.SubElement(response, "set-body").text = (
+        '{"type":"error","error":{"type":"'
+        + ("permission_error" if disabled else "api_error")
+        + '","code":"'
+        + code
+        + '","param":"model","message":"'
+        + (
+            "The requested model is disabled"
+            if disabled
+            else "Model availability could not be verified"
+        )
+        + '"}}'
     )
     return response
 
@@ -398,14 +445,12 @@ def node_admission_guard() -> ET.Element:
     _variable(branch, "availabilityNodeKey", NODE_ROW_KEY)
     _storage_read(branch, "availabilityNodeRead", NODE_URL)
     _variable(branch, "availabilityNodeAllowed", READ_NODE)
-    rejected = ET.SubElement(
+    denied = ET.SubElement(
         ET.SubElement(branch, "choose"),
         "when",
-        {
-            "condition": '@(!(bool)context.Variables["availabilityNodeAllowed"])',
-        },
+        {"condition": '@(!(bool)context.Variables["availabilityNodeAllowed"])'},
     )
-    rejected.append(availability_denial())
+    denied.append(availability_denial())
     return root
 
 
@@ -438,7 +483,7 @@ def availability_probe_guard() -> ET.Element:
     ):
         _header(response, "x-turnstile-availability-" + header, value)
     branch.append(response)
-    invalid = ET.SubElement(
+    invalid_method = ET.SubElement(
         root,
         "when",
         {
@@ -455,27 +500,24 @@ def availability_probe_guard() -> ET.Element:
     status.set("code", "405")
     status.set("reason", "Method Not Allowed")
     _header(denied, "Allow", "POST")
-    invalid.append(denied)
+    invalid_method.append(denied)
     return root
 
 
-def admission_guard() -> ET.Element:
+def admission_guard(*, native_gateway_scope: bool = False) -> ET.Element:
     root = ET.Element("choose")
-    operations = (
-        "chat-completions",
-        "responses",
-        "responses-compact",
-        "anthropic-messages",
-        "anthropic-count-tokens",
-        "images-generations",
-    )
     branch = ET.SubElement(
         root,
         "when",
         {
-            "condition": '@(context.Request.Method == "POST" || '
-            + " || ".join(f'context.Operation.Id == "{name}"' for name in operations)
-            + ")"
+            "condition": (
+                '@(context.Request.Method == "POST" || context.Operation.Id == "chat-completions"'
+                ' || context.Operation.Id == "responses"'
+                ' || context.Operation.Id == "responses-compact"'
+                ' || context.Operation.Id == "anthropic-messages"'
+                ' || context.Operation.Id == "anthropic-count-tokens"'
+                ' || context.Operation.Id == "images-generations")'
+            )
         },
     )
     _variable(branch, "availabilityBindingValid", BINDING_VALID)
@@ -490,13 +532,14 @@ def admission_guard() -> ET.Element:
     _storage_read(branch, "availabilityRead", STATE_URL)
     _variable(branch, "availabilityDecision", READ_STATE)
     outcomes = ET.SubElement(branch, "choose")
-    for outcome in ("disabled", "unavailable"):
+    for outcome, disabled in (("disabled", True), ("unavailable", False)):
         rejected = ET.SubElement(
             outcomes,
             "when",
             {
                 "condition": (
-                    '@((string)JObject.Parse((string)context.Variables["availabilityDecision"])["outcome"]'
+                    "@((string)JObject.Parse((string)context.Variables"
+                    '["availabilityDecision"])["outcome"]'
                     f' == "{outcome}")'
                 )
             },
@@ -510,7 +553,7 @@ def admission_guard() -> ET.Element:
             },
         )
         ET.SubElement(trace, "message").text = (
-            "model_disabled" if outcome == "disabled" else "model_availability_unavailable"
+            "model_disabled" if disabled else "model_availability_unavailable"
         )
         ET.SubElement(trace, "metadata", {"name": "provider_dispatched", "value": "false"})
         ET.SubElement(
@@ -521,46 +564,10 @@ def admission_guard() -> ET.Element:
                 "value": "@(context.RequestId.ToString())",
             },
         )
-        rejected.append(availability_denial(disabled=outcome == "disabled"))
-    branch.append(node_admission_guard())
+        rejected.append(availability_denial(disabled=disabled))
+    if not native_gateway_scope:
+        branch.append(node_admission_guard())
     return root
-
-
-def availability_kernel_digest() -> str:
-    parts = (
-        RESOLVE_MODEL,
-        RESOLVE_FIXED_MODEL,
-        BINDING_VALID,
-        READ_STATE,
-        PROBE_NONCE,
-        NODE_ROW_KEY,
-        NODE_URL,
-        READ_NODE,
-        STORE_IDENTITY,
-        CATALOG_URL,
-        CATALOG_PAGE,
-        FILTER_CATALOG,
-        component_digest(admission_guard()),
-        component_digest(availability_probe_guard()),
-    )
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()
-
-
-def availability_capability_digest(
-    snapshot: ModelAvailabilityPublication | ModelAvailabilityPolicyAdoption,
-) -> str:
-    content = json.dumps(snapshot.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256((availability_kernel_digest() + content).encode()).hexdigest()
-
-
-def availability_operation_digest(root: ET.Element) -> str:
-    source = deepcopy(root)
-    inbound = source.find("inbound")
-    if inbound is None:
-        raise PolicyCompilationError("Availability operation inbound is missing")
-    for marker in inbound.findall("set-variable[@name='availabilitySurfaceDigest']"):
-        inbound.remove(marker)
-    return component_digest(source)
 
 
 def _legacy_authenticated_branches(root: ET.Element) -> list[tuple[ET.Element, ET.Element]]:
@@ -597,19 +604,18 @@ def _legacy_authenticated_branches(root: ET.Element) -> list[tuple[ET.Element, E
 
 
 def _admission_locations(root: ET.Element) -> list[tuple[ET.Element, ET.Element]]:
+    locations = []
     inbound = root.find("inbound")
     if inbound is None:
         raise PolicyCompilationError("Availability requires a parent inbound policy")
-    locations = [
-        (branch, node)
-        for parent in inbound
-        if parent.tag == "choose"
-        for branch in parent
-        for node in branch
-        if node.tag == "choose"
-        and (condition := node.find("when")) is not None
-        and "selectedModelKnown" in condition.get("condition", "")
-    ]
+    for parent in inbound:
+        if parent.tag != "choose":
+            continue
+        for branch in parent:
+            for node in branch:
+                condition = node.find("when") if node.tag == "choose" else None
+                if condition is not None and "selectedModelKnown" in condition.get("condition", ""):
+                    locations.append((branch, node))
     legacy_markers = root.findall(".//set-variable[@name='availabilityLegacyAuthenticated']")
     if legacy_markers:
         if locations or len(legacy_markers) != 2:
@@ -621,10 +627,8 @@ def _admission_locations(root: ET.Element) -> list[tuple[ET.Element, ET.Element]
             marker = branch.find("set-variable[@name='availabilityLegacyAuthenticated']")
             if marker is None or marker not in legacy_markers or marker.get("value") != "@(true)":
                 raise PolicyCompilationError("Legacy authentication marker is invalid")
-            preceding = [
-                node for node in list(branch)[:list(branch).index(marker)]
-                if isinstance(node.tag, str)
-            ]
+            preceding = [node for node in list(branch)[:list(branch).index(marker)]
+                         if isinstance(node.tag, str)]
             if preceding != [authenticated] and (
                 len(preceding) != 2 or preceding[0] is not authenticated or (
                     component_digest(preceding[1]) != component_digest(availability_probe_guard())
@@ -635,13 +639,224 @@ def _admission_locations(root: ET.Element) -> list[tuple[ET.Element, ET.Element]
     if len(locations) != 2:
         raise PolicyCompilationError("Availability requires both authenticated admission paths")
     for parent, anchor in locations:
+        earlier = list(parent)[: list(parent).index(anchor)]
         if any(
             child.tag in {"llm-token-limit", "rate-limit-by-key", "send-request"}
-            for node in list(parent)[: list(parent).index(anchor)]
+            for node in earlier
             for child in node.iter()
         ):
             raise PolicyCompilationError("Availability must precede counting and reservations")
     return locations
+
+
+def compose_availability_parent(source: str) -> str:
+    root = parse_policy(source)
+    if any(
+        node.tag in {"cache-lookup", "cache-store", "cache-lookup-value", "cache-store-value"}
+        for node in root.iter()
+    ):
+        raise PolicyCompilationError("Availability requires uncached admission and discovery")
+    if root.find(".//set-variable[@name='availabilityProtocolVersion']") is not None:
+        validate_availability_parent(root)
+        return source
+    inbound = root.find("inbound")
+    assert inbound is not None
+    if not any(
+        "selectedModelKnown" in node.get("condition", "")
+        for node in inbound.iter("when")
+    ):
+        legacy = _legacy_authenticated_branches(root)
+        if len(legacy) != 2:
+            raise PolicyCompilationError("Availability requires both authenticated admission paths")
+        for branch, authenticated in legacy:
+            branch.insert(list(branch).index(authenticated) + 1, ET.Element("set-variable", {
+                "name": "availabilityLegacyAuthenticated", "value": "@(true)",
+            }))
+    for parent, anchor in _admission_locations(root):
+        parent.insert(list(parent).index(anchor), availability_probe_guard())
+        parent.insert(list(parent).index(anchor) + 1, admission_guard())
+    inbound.insert(
+        0,
+        ET.Element(
+            "set-variable",
+            {
+                "name": "availabilityProtocolVersion",
+                "value": "@(1)",
+            },
+        ),
+    )
+    inbound.insert(
+        1,
+        ET.Element(
+            "set-variable",
+            {
+                "name": "availabilityTableEndpoint",
+                "value": "__LEDGER_TABLE_ENDPOINT__",
+            },
+        ),
+    )
+    inbound.insert(
+        2,
+        ET.Element(
+            "set-variable",
+            {
+                "name": "availabilityTableName",
+                "value": "__LEDGER_TABLE_NAME__",
+            },
+        ),
+    )
+    inbound.insert(
+        3,
+        ET.Element(
+            "set-variable",
+            {
+                "name": "availabilityKernelDigest",
+                "value": availability_kernel_digest(),
+            },
+        ),
+    )
+    inbound.insert(
+        4,
+        ET.Element(
+            "set-variable",
+            {
+                "name": "availabilityProbeNonce",
+                "value": PROBE_NONCE,
+            },
+        ),
+    )
+    validate_availability_parent(root)
+    return serialize_policy(root)
+
+
+def validate_availability_parent(root: ET.Element) -> None:
+    markers = root.findall(".//set-variable[@name='availabilityProtocolVersion']")
+    if (
+        len(markers) != 1
+        or markers[0] is not root.find("inbound/set-variable[@name='availabilityProtocolVersion']")
+        or markers[0].get("value") != "@(1)"
+    ):
+        raise PolicyCompilationError("Availability capability marker is missing or incompatible")
+    bindings: dict[str, str] = {}
+    for name, expected in (
+        ("availabilityKernelDigest", availability_kernel_digest()),
+        ("availabilityProbeNonce", PROBE_NONCE),
+    ):
+        nodes = root.findall(f".//set-variable[@name='{name}']")
+        if (
+            len(nodes) != 1
+            or nodes[0] is not root.find(f"inbound/set-variable[@name='{name}']")
+            or not _matches_policy_component(
+                nodes[0],
+                ET.Element("set-variable", {"name": name, "value": expected}),
+                bindings,
+            )
+        ):
+            raise PolicyCompilationError("Availability node protocol integrity changed")
+    for name, value in (
+        ("availabilityTableEndpoint", "__LEDGER_TABLE_ENDPOINT__"),
+        ("availabilityTableName", "__LEDGER_TABLE_NAME__"),
+    ):
+        nodes = root.findall(f".//set-variable[@name='{name}']")
+        if len(nodes) != 1 or nodes[0] is not root.find(f"inbound/set-variable[@name='{name}']"):
+            raise PolicyCompilationError("Availability store configuration is ambiguous")
+        expected_store = ET.Element("set-variable", {"name": name, "value": value})
+        if not _matches_policy_component(nodes[0], expected_store, bindings):
+            raise PolicyCompilationError("Availability store configuration is invalid")
+    guards = root.findall(".//set-variable[@name='availabilityBindingValid']")
+    if len(guards) != 2:
+        raise PolicyCompilationError("Availability guards are incomplete or duplicated")
+    locations = _admission_locations(root)
+    parents = {child: parent for parent in root.iter() for child in parent}
+    branches = {parents[parent] for parent, _ in locations}
+    inbound = root.find("inbound")
+    assert inbound is not None
+    if len(branches) != 1:
+        raise PolicyCompilationError("Availability admission paths are not exhaustive")
+    authentication = next(iter(branches))
+    if authentication not in list(inbound) or [
+        node.tag for node in authentication if isinstance(node.tag, str)
+    ] != ["when", "otherwise"]:
+        raise PolicyCompilationError("Availability admission paths are not exhaustive")
+    common_prefix = list(inbound)[: list(inbound).index(authentication)]
+    for node in (
+        child for item in common_prefix if not is_read_only_budget_fence(item)
+        for child in item.iter()
+    ):
+        if node.tag in {
+            "llm-token-limit",
+            "rate-limit",
+            "rate-limit-by-key",
+            "quota",
+            "quota-by-key",
+            "send-request",
+            "forward-request",
+            "include-fragment",
+        }:
+            raise PolicyCompilationError("Work cannot precede model availability admission")
+        if node.tag == "return-response" and not is_pre_admission_denial(root, node):
+            raise PolicyCompilationError("A response can bypass model availability")
+    expected_names = {
+        "availabilityProtocolVersion",
+        "availabilityTableEndpoint",
+        "availabilityTableName",
+        "availabilityBindingValid",
+        "availabilityDecision",
+        "availabilityKernelDigest",
+        "availabilityProbeNonce",
+        "availabilityNodeKey",
+        "availabilityNodeAllowed",
+        "availabilityLegacyAuthenticated",
+    }
+    if any(
+        node.get("name", "").startswith("availability") and node.get("name") not in expected_names
+        for node in root.iter("set-variable")
+    ):
+        raise PolicyCompilationError("Parent cannot shadow operation availability identity")
+    if len(root.findall(".//set-variable[@name='availabilityDecision']")) != 2:
+        raise PolicyCompilationError("Parent availability decisions are ambiguous")
+    for parent, anchor in locations:
+        probe_index = list(parent).index(anchor) - 1
+        if probe_index < 0 or not _matches_policy_component(
+            parent[probe_index],
+            availability_probe_guard(),
+            bindings,
+        ):
+            raise PolicyCompilationError("Availability probe integrity or placement changed")
+        index = list(parent).index(anchor) + 1
+        if index >= len(parent) or not _matches_policy_component(
+            parent[index],
+            admission_guard(),
+            bindings,
+        ):
+            raise PolicyCompilationError("Availability guard integrity or placement changed")
+
+
+def is_read_only_budget_fence(node: ET.Element) -> bool:
+    from .apim_budget_execution import budget_execution_fence
+
+    branches = list(node)
+    if node.tag != "choose" or len(branches) != 1 or branches[0].tag != "when":
+        return False
+    prefix = expression_tokens("@(JArray.Parse(")
+    suffix = expression_tokens(
+        ").Values<string>().Contains(context.Api.Id.Split(';')[0]))"
+    )
+    tokens = expression_tokens(branches[0].get("condition", ""))
+    if len(tokens) != len(prefix) + 1 + len(suffix) or (
+        tokens[:len(prefix)] != prefix or tokens[-len(suffix):] != suffix
+    ):
+        return False
+    try:
+        api_ids = json.loads(json.loads(tokens[len(prefix)]))
+        if not isinstance(api_ids, list) or not api_ids or any(
+            not isinstance(value, str) for value in api_ids
+        ):
+            return False
+        expected = budget_execution_fence(api_ids)
+    except (ValueError, TypeError):
+        return False
+    return _matches_policy_component(node, expected, {})
 
 
 def is_pre_admission_denial(root: ET.Element, response: ET.Element) -> bool:
@@ -694,160 +909,6 @@ def is_pre_admission_denial(root: ET.Element, response: ET.Element) -> bool:
     }
 
 
-def is_read_only_budget_fence(node: ET.Element) -> bool:
-    from .apim_budget_execution import budget_execution_fence
-
-    branches = list(node)
-    if node.tag != "choose" or len(branches) != 1 or branches[0].tag != "when":
-        return False
-    prefix = expression_tokens("@(JArray.Parse(")
-    suffix = expression_tokens(
-        ").Values<string>().Contains(context.Api.Id.Split(';')[0]))"
-    )
-    tokens = expression_tokens(branches[0].get("condition", ""))
-    if len(tokens) != len(prefix) + 1 + len(suffix) or (
-        tokens[:len(prefix)] != prefix or tokens[-len(suffix):] != suffix
-    ):
-        return False
-    try:
-        api_ids = json.loads(json.loads(tokens[len(prefix)]))
-        if not isinstance(api_ids, list) or not api_ids or any(
-            not isinstance(value, str) for value in api_ids
-        ):
-            return False
-        expected = budget_execution_fence(api_ids)
-    except (ValueError, TypeError):
-        return False
-    return _matches_policy_component(node, expected, {})
-
-
-def validate_availability_parent(root: ET.Element) -> None:
-    bindings: dict[str, str] = {}
-    inbound = root.find("inbound")
-    if inbound is None:
-        raise PolicyCompilationError("Availability requires a parent inbound policy")
-    for name, expected in (
-        ("availabilityProtocolVersion", "@(1)"),
-        ("availabilityKernelDigest", availability_kernel_digest()),
-        ("availabilityProbeNonce", PROBE_NONCE),
-        ("availabilityTableEndpoint", "__LEDGER_TABLE_ENDPOINT__"),
-        ("availabilityTableName", "__LEDGER_TABLE_NAME__"),
-    ):
-        nodes = root.findall(f".//set-variable[@name='{name}']")
-        if (
-            len(nodes) != 1
-            or nodes[0] not in list(inbound)
-            or not _matches_policy_component(
-                nodes[0],
-                ET.Element(
-                    "set-variable",
-                    {"name": name, "value": expected},
-                ),
-                bindings,
-            )
-        ):
-            raise PolicyCompilationError("Availability protocol integrity changed")
-    locations = _admission_locations(root)
-    parents = {child: parent for parent in root.iter() for child in parent}
-    branches = {parents[parent] for parent, _anchor in locations}
-    if len(branches) != 1:
-        raise PolicyCompilationError("Availability admission paths are not exhaustive")
-    authentication = next(iter(branches))
-    if authentication not in list(inbound) or [
-        node.tag for node in authentication if isinstance(node.tag, str)
-    ] != ["when", "otherwise"]:
-        raise PolicyCompilationError("Availability admission paths are not exhaustive")
-    for node in (
-        child
-        for item in list(inbound)[: list(inbound).index(authentication)]
-        if not is_read_only_budget_fence(item)
-        for child in item.iter()
-    ):
-        if node.tag in {
-            "llm-token-limit",
-            "rate-limit",
-            "rate-limit-by-key",
-            "quota",
-            "quota-by-key",
-            "send-request",
-            "forward-request",
-            "include-fragment",
-        }:
-            raise PolicyCompilationError("Work cannot precede model availability admission")
-        if node.tag == "return-response" and not is_pre_admission_denial(root, node):
-            raise PolicyCompilationError("A response can bypass model availability")
-    names = {
-        "availabilityProtocolVersion",
-        "availabilityTableEndpoint",
-        "availabilityTableName",
-        "availabilityBindingValid",
-        "availabilityDecision",
-        "availabilityKernelDigest",
-        "availabilityProbeNonce",
-        "availabilityNodeKey",
-        "availabilityNodeAllowed",
-        "availabilityLegacyAuthenticated",
-    }
-    if any(
-        node.get("name", "").startswith("availability") and node.get("name") not in names
-        for node in root.iter("set-variable")
-    ):
-        raise PolicyCompilationError("Parent cannot shadow operation availability identity")
-    if any(
-        len(root.findall(f".//set-variable[@name='{name}']")) != 2
-        for name in ("availabilityBindingValid", "availabilityDecision")
-    ):
-        raise PolicyCompilationError("Availability guards are incomplete or duplicated")
-    if any(isinstance(node.tag, str) and node.tag.startswith("cache-") for node in root.iter()):
-        raise PolicyCompilationError("Availability requires uncached admission and discovery")
-    for parent, anchor in locations:
-        index = list(parent).index(anchor)
-        if (
-            index < 1
-            or index + 1 >= len(parent)
-            or not _matches_policy_component(
-                parent[index - 1], availability_probe_guard(), bindings
-            )
-            or not _matches_policy_component(parent[index + 1], admission_guard(), bindings)
-        ):
-            raise PolicyCompilationError("Availability guard integrity or placement changed")
-
-
-def compose_availability_parent(source: str) -> str:
-    root = parse_policy(source)
-    if root.find(".//set-variable[@name='availabilityProtocolVersion']") is not None:
-        validate_availability_parent(root)
-        return source
-    inbound = root.find("inbound")
-    if inbound is None:
-        raise PolicyCompilationError("Availability requires a parent inbound policy")
-    if not any(
-        "selectedModelKnown" in node.get("condition", "") for node in inbound.iter("when")
-    ):
-        legacy = _legacy_authenticated_branches(root)
-        if len(legacy) != 2:
-            raise PolicyCompilationError("Availability requires both authenticated admission paths")
-        for branch, authenticated in legacy:
-            branch.insert(list(branch).index(authenticated) + 1, ET.Element("set-variable", {
-                "name": "availabilityLegacyAuthenticated", "value": "@(true)",
-            }))
-    for parent, anchor in _admission_locations(root):
-        parent.insert(list(parent).index(anchor), availability_probe_guard())
-        parent.insert(list(parent).index(anchor) + 1, admission_guard())
-    for index, (name, value) in enumerate(
-        (
-            ("availabilityProtocolVersion", "@(1)"),
-            ("availabilityTableEndpoint", "__LEDGER_TABLE_ENDPOINT__"),
-            ("availabilityTableName", "__LEDGER_TABLE_NAME__"),
-            ("availabilityKernelDigest", availability_kernel_digest()),
-            ("availabilityProbeNonce", PROBE_NONCE),
-        )
-    ):
-        inbound.insert(index, ET.Element("set-variable", {"name": name, "value": value}))
-    validate_availability_parent(root)
-    return serialize_policy(root)
-
-
 def without_availability_parent(root: ET.Element) -> ET.Element:
     validate_availability_parent(root)
     result = deepcopy(root)
@@ -858,8 +919,10 @@ def without_availability_parent(root: ET.Element) -> ET.Element:
             parent.remove(anchor)
     inbound = result.find("inbound")
     assert inbound is not None
+    marker = inbound.find("set-variable[@name='availabilityProtocolVersion']")
+    assert marker is not None
+    inbound.remove(marker)
     for name in (
-        "availabilityProtocolVersion",
         "availabilityTableEndpoint",
         "availabilityTableName",
         "availabilityKernelDigest",
@@ -882,9 +945,11 @@ def catalog_read() -> list[ET.Element]:
             "interval": "0",
             "first-fast-retry": "true",
             "condition": (
-                '@((bool?)JObject.Parse((string)context.Variables["availabilityCatalogPage"])["ok"]'
-                ' == true && JObject.Parse((string)context.Variables["availabilityCatalogPage"])'
-                '["next_partition"]?.Type == JTokenType.String)'
+                "@((bool?)JObject.Parse((string)context.Variables"
+                '["availabilityCatalogPage"])["ok"] == true'
+                " && JObject.Parse((string)context.Variables"
+                '["availabilityCatalogPage"])["next_partition"]'
+                "?.Type == JTokenType.String)"
             ),
         },
     )
@@ -967,11 +1032,10 @@ def compile_protocol_fenced_probe(source: str) -> str:
     base = inbound.find("base")
     assert base is not None
     prefix = list(inbound)[:list(inbound).index(base)]
-    if not any(
-        node.tag == "set-variable"
-        and node.get("name") in {"imageRequestValid", "dynamicImageModel"}
-        for node in prefix
-    ):
+    if not any(node.tag == "set-variable" and node.get("name") in {
+        "imageRequestValid", "dynamicImageModel",
+    }
+               for node in prefix):
         return source
     processing = [node for node in prefix if not (
         node.tag == "set-variable" and node.get("name", "").startswith("availability")
@@ -1069,10 +1133,8 @@ def _compile_availability_operation(
         _variable(nodes, "availabilityRoutes", json.dumps(routes, separators=(",", ":")))
         if fixed_model_alias is not None:
             _variable(nodes, "availabilityFixedModelAlias", fixed_model_alias)
-        _variable(
-            nodes, "availabilityModelId",
-            RESOLVE_FIXED_MODEL if fixed_model_alias is not None else RESOLVE_MODEL,
-        )
+        _variable(nodes, "availabilityModelId",
+                  RESOLVE_FIXED_MODEL if fixed_model_alias is not None else RESOLVE_MODEL)
     for index, node in enumerate(nodes):
         inbound.insert(index, node)
     ready = ET.Element("choose")
@@ -1086,10 +1148,9 @@ def _compile_availability_operation(
         },
     )
     missing.append(availability_denial())
-    index = list(inbound).index(base)
-    inbound.insert(index + 1, ready)
+    inbound.insert(list(inbound).index(base) + 1, ready)
     inbound.insert(
-        index + 2,
+        list(inbound).index(base) + 2,
         ET.Element(
             "set-header",
             {
@@ -1099,9 +1160,11 @@ def _compile_availability_operation(
         ),
     )
     if catalog:
-        inbound.insert(index + 3, node_admission_guard())
-        for response in list(root.iter("return-response")):
-            status, body = response.find("set-status"), response.find("set-body")
+        inbound.insert(list(inbound).index(base) + 3, node_admission_guard())
+        responses = list(root.iter("return-response"))
+        for response in responses:
+            status = response.find("set-status")
+            body = response.find("set-body")
             if status is None or status.get("code") != "200" or body is None:
                 continue
             payload = json.loads(body.text or "{}")
@@ -1125,8 +1188,8 @@ def _compile_availability_operation(
                 "when",
                 {
                     "condition": (
-                        '@((bool?)JObject.Parse((string)context.Variables["availabilityCatalogResult"])'
-                        '["ok"] != true)'
+                        "@((bool?)JObject.Parse((string)context.Variables"
+                        '["availabilityCatalogResult"])["ok"] != true)'
                     )
                 },
             )
@@ -1137,12 +1200,9 @@ def _compile_availability_operation(
                 '@(JObject.Parse((string)context.Variables["availabilityCatalogResult"])["body"]'
                 ".ToString(Newtonsoft.Json.Formatting.None))"
             )
-            for header, value in (
-                ("Cache-Control", "no-store, max-age=0"),
-                ("Pragma", "no-cache"),
-                ("x-turnstile-availability-version", "1"),
-            ):
-                _header(response, header, value)
+            _header(response, "Cache-Control", "no-store, max-age=0")
+            _header(response, "Pragma", "no-cache")
+            _header(response, "x-turnstile-availability-version", "1")
             for header, variable in (
                 ("probe", "availabilityProbeNonce"),
                 ("kernel", "availabilityKernelDigest"),
@@ -1154,26 +1214,31 @@ def _compile_availability_operation(
                     "x-turnstile-availability-" + header,
                     f'@((string)context.Variables["{variable}"])',
                 )
-            for header, value in (
-                ("store", STORE_IDENTITY),
+            _header(response, "x-turnstile-availability-store", STORE_IDENTITY)
+            _header(
+                response,
+                "x-turnstile-availability-digest",
                 (
-                    "digest",
-                    '@((string)JObject.Parse((string)context.Variables["availabilityCatalogResult"])["digest"])',
+                    "@((string)JObject.Parse((string)context.Variables"
+                    '["availabilityCatalogResult"])["digest"])'
                 ),
-                ("target", str(snapshot.target_id)),
-                ("revision", snapshot.revision),
-                ("gateway", "@(context.Deployment.Gateway.Id)"),
-                ("instance", "@(context.Deployment.Gateway.InstanceId)"),
-            ):
-                _header(response, "x-turnstile-availability-" + header, value)
-    inbound.insert(
-        0,
-        ET.Element(
-            "set-variable",
-            {
-                "name": "availabilitySurfaceDigest",
-                "value": availability_operation_digest(root),
-            },
-        ),
+            )
+            _header(response, "x-turnstile-availability-target", str(snapshot.target_id))
+            _header(response, "x-turnstile-availability-revision", snapshot.revision)
+            _header(
+                response, "x-turnstile-availability-gateway", "@(context.Deployment.Gateway.Id)"
+            )
+            _header(
+                response,
+                "x-turnstile-availability-instance",
+                "@(context.Deployment.Gateway.InstanceId)",
+            )
+    marker = ET.Element(
+        "set-variable",
+        {
+            "name": "availabilitySurfaceDigest",
+            "value": availability_operation_digest(root),
+        },
     )
+    inbound.insert(0, marker)
     return serialize_policy(root)

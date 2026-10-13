@@ -1,3 +1,4 @@
+# ruff: noqa: E501 - keep large SQL projections vertically aligned by selected column
 from __future__ import annotations
 
 import threading
@@ -14,6 +15,7 @@ from psycopg_pool import ConnectionPool
 
 from ..domain.anomaly_engine import evaluate_anomaly_rules
 from ..domain.application_access import UsageApplicationAttribution
+from ..domain.gateway_targets import UsageGatewayAttribution
 from ..domain.ledger import LedgerAdmissionReceipt
 from ..domain.models import (
     ApimCacheReadBucket,
@@ -67,21 +69,21 @@ _IDENTITY_CACHE_SECONDS = 60.0
 
 class PostgreSqlOpsDbProxy(
     PostgreSqlModelAvailabilityRepositoryMixin,
+    PostgreSqlBudgetExecutionMixin,
+    PostgreSqlBillableRequestRepositoryMixin,
     PostgreSqlAssistantRepositoryMixin,
     PostgreSqlApplicationRepositoryMixin,
     PostgreSqlBudgetRepositoryMixin,
-    PostgreSqlBudgetExecutionMixin,
-    PostgreSqlBillableRequestRepositoryMixin,
+    PostgreSqlGatewayTargetRepositoryMixin,
     PostgreSqlRegistryRepositoryMixin,
     PostgreSqlPublicationRepositoryMixin,
-    PostgreSqlGatewayTargetRepositoryMixin,
     QueryRepository,
 ):
     def begin_platform_invocation(self, attempt: PlatformInvocationAttempt) -> None:
         with self._connection() as connection:
             connection.execute(
-                "INSERT INTO platform_invocation_attempt (request_id, started_at, snapshot) "
-                "VALUES (%s, %s, %s)",
+                """INSERT INTO platform_invocation_attempt (request_id, started_at, snapshot)
+                   VALUES (%s, %s, %s)""",
                 (attempt.request_id, attempt.started_at, Jsonb(attempt.model_dump(mode="json"))),
             )
 
@@ -89,13 +91,20 @@ class PostgreSqlOpsDbProxy(
         document = Jsonb(completion.model_dump(mode="json"))
         with self._connection() as connection:
             row = connection.execute(
-                "UPDATE platform_invocation_attempt SET completion = %s "
-                "WHERE request_id = %s AND (completion IS NULL OR completion = %s) "
-                "RETURNING request_id",
+                """UPDATE platform_invocation_attempt SET completion = %s
+                   WHERE request_id = %s AND (completion IS NULL OR completion = %s)
+                   RETURNING request_id""",
                 (document, completion.request_id, document),
             ).fetchone()
         if row is None:
             raise ValueError("Platform invocation completion is missing or immutable")
+
+    def settled_reservation_correlations(
+        self, correlation_ids: Sequence[str], *, scope_type: str, scope_id: str | None = None,
+    ) -> set[str]:
+        return super().settled_reservation_correlations(
+            correlation_ids, scope_type=scope_type, scope_id=scope_id
+        ) | self.settled_billable_requests(list(correlation_ids), scope_type, scope_id)
 
     def gateway_application_usage_activity(
         self,
@@ -107,48 +116,97 @@ class PostgreSqlOpsDbProxy(
     ) -> Sequence[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute(
-                """SELECT
-                       date_trunc(
-                       %s, usage.ts AT TIME ZONE %s
-                       ) AT TIME ZONE %s AS bucket_start,
-                       'all' AS key,
-                       'all' AS label,
-                       jsonb_build_object(
-                       'et', COALESCE(SUM(usage.et), 0)::DOUBLE PRECISION,
-                       'total_tokens', SUM(
-                       usage.input_tokens + usage.cached_tokens
-                       + usage.output_tokens
-                       )::BIGINT,
-                       'input_tokens', SUM(usage.input_tokens)::BIGINT,
-                       'cached_tokens', SUM(usage.cached_tokens)::BIGINT,
-                       'cache_read_tokens', SUM(GREATEST(
-                       usage.cached_tokens - usage.cache_write_tokens, 0
-                       ))::BIGINT,
-                       'cache_write_tokens',
-                       SUM(usage.cache_write_tokens)::BIGINT,
-                       'output_tokens', SUM(usage.output_tokens)::BIGINT,
-                       'calls', COUNT(*)::BIGINT,
-                       'estimated_cost', COALESCE(
-                       SUM(usage.estimated_cost), 0
-                       )::DOUBLE PRECISION,
-                       'p95_latency_ms', COALESCE(
-                       percentile_cont(0.95) WITHIN GROUP (
-                       ORDER BY usage.latency_ms
-                       ), 0
-                       )::DOUBLE PRECISION,
-                       'failed_calls', COUNT(*) FILTER (
-                       WHERE usage.status_code >= 400
-                       )::BIGINT
-                       ) AS totals
-                       FROM token_usage usage
-                       JOIN token_usage_application_attribution attribution
-                       ON attribution.usage_id = usage.id
-                       WHERE usage.usage_domain = 'apim'
-                       AND attribution.application_id = %s
-                       AND usage.ts >= %s AND usage.ts < %s
+                                """WITH canonical_correlations AS (
+                                         SELECT DISTINCT attribution.application_id,
+                                                        usage.correlation_id
+                                         FROM token_usage_application_attribution attribution
+                                         JOIN token_usage usage ON usage.id = attribution.usage_id
+                                         WHERE usage.usage_domain = 'apim'
+                                     ), combined AS (
+                                              SELECT attribution.application_id,
+                                                  usage.correlation_id,
+                                                        usage.ts, usage.et, usage.input_tokens,
+                                                        usage.cached_tokens,
+                                                        usage.cache_write_tokens,
+                                                        usage.output_tokens, usage.estimated_cost,
+                                                        usage.latency_ms, usage.status_code
+                                         FROM token_usage_application_attribution attribution
+                                         JOIN token_usage usage ON usage.id = attribution.usage_id
+                                         WHERE attribution.application_id = %s
+                                             AND usage.ts >= %s AND usage.ts < %s
+                                             AND usage.usage_domain = 'apim'
+                                         UNION ALL
+                                         SELECT recovery.scope_id::UUID,
+                                                        recovery.correlation_id,
+                                                        recovery.reservation_created_at,
+                                                        recovery.total_tokens::DOUBLE PRECISION,
+                                                                                                                COALESCE(
+                                                                                                                    recovery.input_tokens,
+                                                                                                                    recovery.total_tokens
+                                                                                                                ),
+                                                                                                                0::BIGINT, 0::BIGINT,
+                                                                                                                COALESCE(recovery.output_tokens, 0),
+                                                                                                                0::DOUBLE PRECISION,
+                                                        0::BIGINT, recovery.status_code
+                                         FROM budget_reservation_finalization_effective recovery
+                                         WHERE recovery.scope_type = 'application'
+                                             AND recovery.finalization_kind
+                                                 <> 'unverified_upper_bound'
+                                             AND recovery.scope_id::UUID = %s
+                                             AND recovery.period_start = %s
+                                             AND NOT EXISTS (
+                                                 SELECT 1 FROM canonical_correlations canonical
+                                                 WHERE canonical.application_id =
+                                                       recovery.scope_id::UUID
+                                                   AND canonical.correlation_id =
+                                                       recovery.correlation_id
+                                             )
+                                     )
+                                     SELECT
+                                         date_trunc(
+                                             %s, ts AT TIME ZONE %s
+                                         ) AT TIME ZONE %s AS bucket_start,
+                                         'all' AS key,
+                                         'all' AS label,
+                                         jsonb_build_object(
+                                             'et', COALESCE(SUM(et), 0)::DOUBLE PRECISION,
+                                             'total_tokens', SUM(
+                                                 input_tokens + cached_tokens + output_tokens
+                                             )::BIGINT,
+                                             'input_tokens', SUM(input_tokens)::BIGINT,
+                                             'cached_tokens', SUM(cached_tokens)::BIGINT,
+                                             'cache_read_tokens', SUM(GREATEST(
+                                                 cached_tokens - cache_write_tokens, 0
+                                             ))::BIGINT,
+                                             'cache_write_tokens',
+                                                 SUM(cache_write_tokens)::BIGINT,
+                                             'output_tokens', SUM(output_tokens)::BIGINT,
+                                             'calls', COUNT(*)::BIGINT,
+                                             'estimated_cost', COALESCE(
+                                                 SUM(estimated_cost), 0
+                                             )::DOUBLE PRECISION,
+                                             'p95_latency_ms', COALESCE(
+                                                 percentile_cont(0.95) WITHIN GROUP (
+                                                     ORDER BY latency_ms
+                                                 ), 0
+                                             )::DOUBLE PRECISION,
+                                             'failed_calls', COUNT(*) FILTER (
+                                                 WHERE status_code >= 400
+                                             )::BIGINT
+                                         ) AS totals
+                             FROM combined
                              GROUP BY 1
                              ORDER BY 1""",
-                (interval, timezone, timezone, str(application_id), from_, to),
+                (
+                    application_id,
+                    from_,
+                    to,
+                    application_id,
+                    from_.date().replace(day=1),
+                    interval,
+                    timezone,
+                    timezone,
+                ),
             ).fetchall()
         return cast(Sequence[dict[str, Any]], rows)
 
@@ -158,7 +216,8 @@ class PostgreSqlOpsDbProxy(
         pool_min_size: int = 1,
         pool_max_size: int = 4,
         identity_cache_seconds: float = _IDENTITY_CACHE_SECONDS,
-        apim_api_id: str = "turnstile-llm",
+        apim_api_id: str = "finops-foundry-llm",
+        *, autocommit: bool = False,
     ) -> None:
         self._database_url = database_url
         # One connection per query meant a fresh TCP + TLS + auth handshake every time.
@@ -170,7 +229,7 @@ class PostgreSqlOpsDbProxy(
             database_url,
             min_size=pool_min_size,
             max_size=pool_max_size,
-            kwargs={"row_factory": dict_row},
+            kwargs={"row_factory": dict_row, "autocommit": autocommit},
             open=False,
         )
         self._pool_lock = threading.Lock()
@@ -202,33 +261,71 @@ class PostgreSqlOpsDbProxy(
         record: TokenUsageRecord,
         application: UsageApplicationAttribution | None = None,
         *,
+        gateway: UsageGatewayAttribution | None = None,
+        terminal_observation: dict[str, Any] | None = None,
         execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
         usage_complete: bool = False,
         gateway_profile_id: UUID | None = None,
         native_gateway_id: str | None = None,
         evidence_source: str = "apim",
     ) -> None:
+        if terminal_observation is not None and not execution_receipts:
+            raise ValueError("Terminal evidence must retain immutable admission receipts")
         values = record.model_dump()
+        values.setdefault("usd_cost", record.usd_cost)
+        values.setdefault("usd_price_sha256", record.usd_price_sha256)
+        values.setdefault("usd_price_updated_at", record.usd_price_updated_at)
         values["price_context_tier"] = record.price_context_tier
         snapshot = record.price_context_snapshot
         values["runtime_authoritative"] = record.runtime_authoritative
         values["user_ref"] = values.pop("user")
-        with self._connection() as connection:
+        with self._connection() as connection, connection.transaction():
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"budget-reservation:person:{record.user_id}:{record.correlation_id}",),
+            )
+            if application is not None:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"budget-reservation:application:{application.application_id}:"
+                     f"{record.correlation_id}",),
+                )
             if record.usage_domain == "apim":
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (f"apim-attempt:{record.correlation_id}",),
                 )
-                candidates = connection.execute(
-                          """SELECT id, correlation_id, usage_domain, user_id,
-                                        price_context_snapshot, price_context_tier,
-                                        input_price_per_million, cached_price_per_million,
-                                        cache_write_price_per_million, output_price_per_million,
-                                        estimated_cost FROM token_usage
-                       WHERE (usage_domain = 'apim' AND correlation_id = %s) OR id = %s
-                       ORDER BY id LIMIT 2 FOR UPDATE""",
-                    (record.correlation_id, record.id),
-                ).fetchall()
+                if gateway is not None:
+                    candidates = connection.execute(
+                        """SELECT usage.id, usage.correlation_id, usage.usage_domain, usage.user_id,
+                                  usage.price_context_snapshot, usage.price_context_tier,
+                                  usage.input_price_per_million, usage.cached_price_per_million,
+                                  usage.cache_write_price_per_million,
+                                  usage.output_price_per_million,
+                                  usage.estimated_cost FROM token_usage usage
+                           WHERE usage.id = %s OR (
+                             usage.usage_domain = 'apim' AND usage.correlation_id = %s
+                             AND EXISTS (
+                               SELECT 1 FROM token_usage_gateway_attribution attribution
+                               WHERE attribution.usage_id = usage.id
+                                 AND attribution.apim_target_id = %s
+                                 AND attribution.native_gateway_id = %s
+                             )
+                           ) ORDER BY usage.id LIMIT 2 FOR UPDATE OF usage""",
+                        (record.id, record.correlation_id, gateway.apim_target_id,
+                         gateway.native_gateway_id),
+                    ).fetchall()
+                else:
+                    candidates = connection.execute(
+                        """SELECT id, correlation_id, usage_domain, user_id,
+                                  price_context_snapshot, price_context_tier,
+                                  input_price_per_million, cached_price_per_million,
+                                  cache_write_price_per_million, output_price_per_million,
+                                  estimated_cost FROM token_usage
+                           WHERE (usage_domain = 'apim' AND correlation_id = %s) OR id = %s
+                           ORDER BY id LIMIT 2 FOR UPDATE""",
+                        (record.correlation_id, record.id),
+                    ).fetchall()
                 if len(candidates) > 1:
                     raise ValueError("APIM correlation identity is ambiguous")
                 if candidates:
@@ -256,7 +353,8 @@ class PostgreSqlOpsDbProxy(
                     workflow, run_id, turn_index, provider, model, model_id,
                     runtime, request_source, usage_domain, input_tokens, cached_tokens,
                     cache_write_tokens, output_tokens, et, et_coeff_m, latency_ms, status,
-                    status_code, estimated_cost, input_price_per_million,
+                    status_code, estimated_cost, usd_cost, usd_price_sha256,
+                    usd_price_updated_at, input_price_per_million,
                     cached_price_per_million, cache_write_price_per_million,
                     output_price_per_million,
                     price_context_tier, price_context_snapshot,
@@ -272,7 +370,8 @@ class PostgreSqlOpsDbProxy(
                     %(input_tokens)s, %(cached_tokens)s, %(cache_write_tokens)s,
                     %(output_tokens)s,
                     %(et)s, %(et_coeff_m)s, %(latency_ms)s, %(status)s,
-                    %(status_code)s, %(estimated_cost)s,
+                    %(status_code)s, %(estimated_cost)s, %(usd_cost)s,
+                    %(usd_price_sha256)s, %(usd_price_updated_at)s,
                     %(input_price_per_million)s, %(cached_price_per_million)s,
                     %(cache_write_price_per_million)s,
                     %(output_price_per_million)s, %(price_context_tier)s,
@@ -306,6 +405,12 @@ class PostgreSqlOpsDbProxy(
                         THEN EXCLUDED.status_code ELSE existing.status_code END,
                     estimated_cost = CASE WHEN existing.estimated
                         THEN EXCLUDED.estimated_cost ELSE existing.estimated_cost END,
+                    usd_cost = CASE WHEN existing.estimated
+                        THEN EXCLUDED.usd_cost ELSE existing.usd_cost END,
+                    usd_price_sha256 = CASE WHEN existing.estimated
+                        THEN EXCLUDED.usd_price_sha256 ELSE existing.usd_price_sha256 END,
+                    usd_price_updated_at = CASE WHEN existing.estimated
+                        THEN EXCLUDED.usd_price_updated_at ELSE existing.usd_price_updated_at END,
                     input_price_per_million = CASE WHEN existing.estimated
                         THEN EXCLUDED.input_price_per_million
                         ELSE existing.input_price_per_million END,
@@ -356,11 +461,17 @@ class PostgreSqlOpsDbProxy(
                 self._write_usage_application_attribution(
                     connection, values["id"], application
                 )
+            if gateway is not None:
+                if gateway.usage_id != record.id:
+                    raise ValueError("Gateway attribution must match the canonical usage ID")
+                self._write_usage_gateway_attribution(
+                    connection, gateway.model_copy(update={"usage_id": str(values["id"])}),
+                )
             if execution_receipts:
                 self._write_execution_receipts(
-                    connection, record, values["id"], application,
-                    gateway_profile_id, native_gateway_id, execution_receipts,
-                    usage_complete, evidence_source,
+                    connection, record, values["id"], application, gateway,
+                    execution_receipts, usage_complete,
+                    terminal_observation=terminal_observation,
                 )
 
     def model_prices(self) -> dict[str, ModelPrice]:
@@ -482,8 +593,8 @@ class PostgreSqlOpsDbProxy(
         with self._connection() as connection:
             row = connection.execute(
                 """SELECT MIN(ts) AS oldest FROM token_usage
-                   WHERE estimated AND reconciled_at IS NULL
-                     AND status_code < 400 AND ts >= %(since)s""",
+                                     WHERE estimated AND reconciled_at IS NULL
+                                         AND status_code < 400 AND ts >= %(since)s""",
                 {"since": since},
             ).fetchone()
         if row is None or row["oldest"] is None:
@@ -591,6 +702,25 @@ class PostgreSqlOpsDbProxy(
                         ),
                         u.estimated_cost
                     ),
+                    usd_cost = CASE
+                        WHEN v.cached_tokens IS NULL
+                          OR (u.price_context_snapshot IS NOT NULL AND v.tier_key IS NULL)
+                        THEN NULL
+                        ELSE COALESCE(
+                            ROUND(
+                                (v.input_tokens * v.input_price
+                                    + GREATEST(
+                                        COALESCE(v.cached_tokens, u.cached_tokens)
+                                        - u.cache_write_tokens,
+                                        0
+                                      ) * v.cached_price
+                                    + u.cache_write_tokens * v.write_price
+                                    + v.output_tokens * v.output_price) / 1000000,
+                                14
+                            ),
+                            u.usd_cost
+                        )
+                    END,
                     input_price_per_million = v.input_price,
                     cached_price_per_million = v.cached_price,
                     cache_write_price_per_million = v.write_price,
@@ -846,7 +976,9 @@ class PostgreSqlOpsDbProxy(
         return dict(row["payload"])
 
     @staticmethod
-    def _filter_sql(filters: UsageFilters, *, alias: str = "usage") -> tuple[str, list[Any]]:
+    def _filter_sql(
+        filters: UsageFilters, *, alias: str = "usage", trace: bool = False,
+    ) -> tuple[str, list[Any]]:
         clauses = [f"{alias}.usage_domain = 'apim'"]
         parameters: list[Any] = []
         for column, value in (
@@ -871,6 +1003,21 @@ class PostgreSqlOpsDbProxy(
                 continue
             clauses.append(f"{alias}.{column} = %s")
             parameters.append(value)
+        if filters.apim_target_id is not None:
+            clauses.append(
+                f"{alias}.apim_target_id = %s" if trace else
+                "EXISTS (SELECT 1 FROM token_usage_gateway_attribution gateway "
+                f"WHERE gateway.usage_id = {alias}.id AND gateway.apim_target_id = %s)"
+            )
+            parameters.append(filters.apim_target_id)
+        if filters.gateway_deployment_id is not None:
+            clauses.append(
+                f"{alias}.gateway_deployment_id = %s" if trace else
+                "EXISTS (SELECT 1 FROM token_usage_gateway_attribution gateway "
+                f"WHERE gateway.usage_id = {alias}.id "
+                "AND gateway.gateway_deployment_id = %s)"
+            )
+            parameters.append(filters.gateway_deployment_id)
         return (" AND " + " AND ".join(clauses), parameters)
 
     # Tail latency, the status split and the latency histogram, as one fragment so the
@@ -1054,9 +1201,12 @@ class PostgreSqlOpsDbProxy(
         return rows
 
     def list_usage_requests(
-        self, from_: datetime, to: datetime, filters: UsageFilters, limit: int
+        self, from_: datetime, to: datetime, filters: UsageFilters, limit: int,
+        after: tuple[datetime, str] | None = None,
     ) -> Sequence[dict[str, Any]]:
         filter_sql, filter_parameters = self._filter_sql(filters)
+        cursor_sql = " AND (usage.ts, usage.trace_id) < (%s, %s)" if after is not None else ""
+        cursor_parameters = list(after) if after is not None else []
         with self._connection() as connection:
             rows = connection.execute(
                 f"""SELECT
@@ -1085,10 +1235,10 @@ class PostgreSqlOpsDbProxy(
                              AND usage.output_price_per_million IS NOT NULL))) AS cost_available,
                         usage.error_message
                     FROM invocation_request_trace usage
-                    WHERE usage.ts >= %s AND usage.ts < %s{filter_sql}
+                    WHERE usage.ts >= %s AND usage.ts < %s{filter_sql}{cursor_sql}
                         AND usage.usage_domain = 'apim'
-                    ORDER BY usage.ts DESC LIMIT %s""",
-                [from_, to, *filter_parameters, limit],
+                    ORDER BY usage.ts DESC, usage.trace_id DESC LIMIT %s""",
+                [from_, to, *filter_parameters, *cursor_parameters, limit],
             ).fetchall()
         return cast(Sequence[dict[str, Any]], rows)
 

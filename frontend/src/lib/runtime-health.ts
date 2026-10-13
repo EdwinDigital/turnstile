@@ -33,8 +33,8 @@ export function runtimeDiagnostic(runtime: ModelRuntime): RuntimeHealth | null {
       ? JSON.parse(runtime.health_message.slice(runtimeDiagnosticPrefix.length)) as RuntimeHealth : null)
     if (!value || value.runtime_id !== runtime.id || !Number.isFinite(Date.parse(value.checked_at))
       || !["passed", "blocked", "configuration_error", "upstream_error", "inconclusive"].includes(value.outcome ?? "")) return null
-    const expected = value.outcome === "passed" ? "available" : value.outcome === "upstream_error" ? "unavailable" : "unknown"
-    if (value.status !== expected) return null
+    const expectedStatus = value.outcome === "passed" ? "available" : value.outcome === "upstream_error" ? "unavailable" : "unknown"
+    if (value.status !== expectedStatus) return null
     return runtime.diagnostic ? value : { ...value, configuration_status: "unverified", configuration_checked_at: null }
   } catch { return null }
 }
@@ -47,7 +47,8 @@ export function runtimeHealthState(runtime: ModelRuntime, now = Date.now()): Run
   }
   const diagnostic = runtimeDiagnostic(runtime)
   if (!diagnostic) return runtime.last_checked_at ? "inconclusive" : "unchecked"
-  if (Date.parse(diagnostic.checked_at) > now + 5_000) return "inconclusive"
+  const checked = Date.parse(diagnostic.checked_at)
+  if (checked > now + 5_000) return "inconclusive"
   if (diagnostic.configuration_status === "changed") return "changed"
   if (diagnostic.outcome === "passed") return "online"
   if (diagnostic.outcome === "blocked") return "blocked"

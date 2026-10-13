@@ -12,17 +12,16 @@ Row layout, one partition per person or application per month:
     RowKey  "C"                       ConfirmedUsed             written here
     RowKey  "M"                       Configured, Models        written here
     RowKey  "R|<iso ts>|<correlation>"  Reserved                  written by APIM
+             FinalizationKind on R       Unverified upper bound    written here
 
     used = C.ConfirmedUsed + sum(R.Reserved)
 
 The Function settles reservations by correlation ID, never by a shared time frontier. It
 writes the full stored usage total to C first, then deletes only reservations whose exact
-request is final in PostgreSQL. A partial failure can temporarily double-count usage but
-can never make usage disappear.
-
-Complete log queries can recover missing usage. After the configured grace, unresolved
-reservations are marked as upper bounds in place; their Reserved amount remains charged.
-Missing or incomplete log evidence never permits releasing that charge.
+request is final in PostgreSQL. If every telemetry path is silent beyond a bounded grace
+period, R is marked as an unverified upper bound without changing its Reserved value. It is
+terminal and auditable, but remains charged until stronger evidence arrives. A partial failure can
+double-count usage but can never make usage disappear.
 
 The M row rides the same partition deliberately: the policy already reads the whole
 partition in one filtered GET, so model access costs no additional round trip.
@@ -33,15 +32,17 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any, Protocol
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import httpx
 
-from ..domain.application_access import GatewayApplicationLedgerState
+from ..domain.application_access import GatewayApplicationLedgerState, application_organization
+from ..domain.enterprise import enterprise_catalog
 from ..domain.ledger import (
     BudgetReservationAdmission,
     BudgetReservationFinalization,
@@ -51,7 +52,6 @@ from ..domain.ledger import (
 from ..domain.models import ReconciledUsage, ReservationTerminalEvidence
 from ..persistence.repository import QueryRepository
 from .reconciliation import ManagedIdentityTokenProvider, ReservationTerminalLog
-from .table_batch import exact_etag
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ STORAGE_RESOURCE = "https://storage.azure.com/"
 TABLE_API_VERSION = "2020-12-06"
 RESERVATION_PREFIX = "R|"
 MODEL_ACCESS_ROW_KEY = "M"
+APPLICATION_RATE_LIMIT_ROW_KEY = "T"
 # Both ends are delimited so a membership test cannot match a prefix of a longer id.
 MODEL_DELIMITER = "|"
 # Table Storage caps a string property at 32k characters. A registry that large is not a
@@ -71,6 +72,7 @@ MODEL_PROPERTY_LIMIT = 30000
 ROLL_FORWARD_ACTOR = "system-budget-roll-forward"
 APPLICATION_PARTITION_PREFIX = "app|"
 APPLICATION_MAP_PARTITION_PREFIX = "app-map|"
+APPLICATION_RATE_LIMIT_PARTITION_PREFIX = "app-tpm|"
 RESERVATION_RECOVERY_LAG = timedelta(minutes=10)
 RESERVATION_FINALIZATION_LAG = timedelta(hours=24)
 
@@ -115,19 +117,28 @@ def application_map_partition_key(gateway_profile_id: UUID | str) -> str:
     return f"{APPLICATION_MAP_PARTITION_PREFIX}{gateway_profile_id}"
 
 
+def application_rate_limit_partition_key(application_id: UUID | str) -> str:
+    return f"{APPLICATION_RATE_LIMIT_PARTITION_PREFIX}{application_id}"
+
+
 def parse_budget_partition(partition: str) -> tuple[LedgerScopeType, str, date] | None:
-    scope_type: LedgerScopeType = "application" if partition.startswith("app|") else "person"
-    value = partition[4:] if scope_type == "application" else partition
+    scope_type: LedgerScopeType
+    value = partition
+    if value.startswith(APPLICATION_PARTITION_PREFIX):
+        scope_type = "application"
+        value = value[len(APPLICATION_PARTITION_PREFIX) :]
+    else:
+        scope_type = "person"
     scope_id, separator, period = value.rpartition("|")
     if not separator or not scope_id or not re.fullmatch(r"\d{4}-\d{2}", period):
         return None
     try:
-        start = date.fromisoformat(f"{period}-01")
+        period_start = date.fromisoformat(f"{period}-01")
         if scope_type == "application":
             UUID(scope_id)
     except ValueError:
         return None
-    return scope_type, scope_id, start
+    return scope_type, scope_id, period_start
 
 
 @dataclass(frozen=True)
@@ -144,14 +155,8 @@ class LedgerReservation:
     row_key: str
     correlation_id: str
     reserved_tokens: int
+    created_at: datetime
     finalization_kind: str | None = None
-
-    @property
-    def created_at(self) -> datetime:
-        created = datetime.fromisoformat(self.row_key.split("|", 2)[1].replace("Z", "+00:00"))
-        if created.utcoffset() is None:
-            raise ValueError("reservation timestamp must include a timezone")
-        return created.astimezone(UTC)
 
 
 @dataclass(frozen=True)
@@ -167,12 +172,17 @@ class LedgerApplication:
     tokens_per_minute: int
     confirmed_tokens: int
     enforce: bool
+    budget_mode: str = "tokens"
+    usd_limit: Decimal | None = None
+    confirmed_usd: Decimal | None = None
+    usd_cost_available: bool = True
 
 
 @dataclass(frozen=True)
 class LedgerApplicationModelAccess:
     application_id: str
     identifiers: tuple[str, ...]
+    configured: bool = True
 
 
 @dataclass(frozen=True)
@@ -184,11 +194,11 @@ class LedgerSyncOutcome:
     application_reservations_settled: int = 0
     application_model_policies: int = 0
     application_mappings: int = 0
+    stale_application_reservations: int = 0
     person_finalizations_written: int = 0
     application_finalizations_written: int = 0
     reservations_finalized_upper_bound: int = 0
     upper_bounds_settled: int = 0
-    stale_application_reservations: int = 0
 
 
 class LedgerStore(Protocol):
@@ -270,7 +280,9 @@ class TableStorageLedger:
         return response
 
     def upsert(self, partition: str, row_key: str, entity: dict[str, Any]) -> None:
-        response = self._request("PUT", self._entity_url(partition, row_key), json=entity)
+        response = self._request(
+            "PUT", self._entity_url(partition, row_key), json=entity
+        )
         response.raise_for_status()
 
     def insert_if_missing(self, partition: str, row_key: str, entity: dict[str, Any]) -> None:
@@ -295,22 +307,24 @@ class TableStorageLedger:
         if response.status_code == 404:
             return None
         response.raise_for_status()
-        return dict(response.json()), exact_etag(response.headers.get("ETag"))
+        etag = response.headers.get("ETag")
+        if not etag or not etag.strip() or etag == "*" or "\r" in etag or "\n" in etag:
+            raise ValueError("Table entity version is unavailable")
+        return dict(response.json()), etag
 
     def replace_if_match(
         self, partition: str, row_key: str, entity: dict[str, Any], etag: str | None,
     ) -> bool:
-        version = exact_etag(etag) if etag is not None else None
+        if etag is not None and (not etag.strip() or etag == "*" or "\r" in etag or "\n" in etag):
+            raise ValueError("A concrete Table entity version is required")
         response = self._request(
-            "POST" if version is None else "PUT",
-            f"{self._endpoint}/{self._table}" if version is None
+            "POST" if etag is None else "PUT",
+            f"{self._endpoint}/{self._table}" if etag is None
             else self._entity_url(partition, row_key),
-            {"If-Match": version} if version is not None else None,
+            {"If-Match": etag} if etag is not None else None,
             json={**entity, "PartitionKey": partition, "RowKey": row_key},
         )
-        if response.status_code in {409, 412} or (
-            version is not None and response.status_code == 404
-        ):
+        if response.status_code in {409, 412} or (etag is not None and response.status_code == 404):
             return False
         response.raise_for_status()
         return True
@@ -325,7 +339,7 @@ class TableStorageLedger:
         rows: list[dict[str, Any]] = []
         identities: set[str] = set()
         continuations: set[tuple[str, str]] = set()
-        for _page in range(max_pages):
+        for _ in range(max_pages):
             response = self._request(
                 "GET", f"{self._endpoint}/{self._table}()",
                 {"Cache-Control": "no-cache"}, params=params,
@@ -338,9 +352,11 @@ class TableStorageLedger:
             if not isinstance(values, list) or len(rows) + len(values) > max_entities:
                 raise ValueError("Table inventory is incomplete or exceeds its limit")
             for value in values:
-                if (not isinstance(value, dict) or value.get("PartitionKey") != partition
-                        or not isinstance(value.get("RowKey"), str) or not value["RowKey"]
-                        or value["RowKey"] in identities):
+                if (
+                    not isinstance(value, dict) or value.get("PartitionKey") != partition
+                    or not isinstance(value.get("RowKey"), str) or not value["RowKey"]
+                    or value["RowKey"] in identities
+                ):
                     raise ValueError("Table inventory identity is invalid or repeated")
                 identities.add(value["RowKey"])
                 rows.append(value)
@@ -349,8 +365,10 @@ class TableStorageLedger:
             if not next_partition and not next_row:
                 return rows
             continuation = (next_partition, next_row)
-            if (not next_partition or len(next_partition) > 1024 or len(next_row) > 1024
-                    or continuation in continuations):
+            if (
+                not next_partition or len(next_partition) > 1024 or len(next_row) > 1024
+                or continuation in continuations
+            ):
                 raise ValueError("Table inventory continuation is invalid or repeated")
             continuations.add(continuation)
             params["NextPartitionKey"] = next_partition
@@ -361,7 +379,7 @@ class TableStorageLedger:
         raise ValueError("Table inventory pagination did not complete")
 
     def list_reservations(self, partition: str) -> list[LedgerReservation]:
-        """List every reservation in one partition, following Table continuation tokens."""
+        """List every open or conservatively finalized reservation in a partition."""
         escaped_partition = partition.replace("'", "''")
         params: dict[str, str] = {
             "$filter": (
@@ -372,7 +390,9 @@ class TableStorageLedger:
         }
         reservations: list[LedgerReservation] = []
         while True:
-            response = self._request("GET", f"{self._endpoint}/{self._table}()", params=params)
+            response = self._request(
+                "GET", f"{self._endpoint}/{self._table}()", params=params
+            )
             response.raise_for_status()
             for row in response.json().get("value", []):
                 row_key = str(row.get("RowKey", ""))
@@ -381,20 +401,25 @@ class TableStorageLedger:
                     logger.warning("Malformed reservation row key skipped: %s", row_key)
                     continue
                 try:
-                    reservation = LedgerReservation(
+                    created_at = datetime.fromisoformat(
+                        parts[1].replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    logger.warning("Malformed reservation timestamp skipped: %s", row_key)
+                    continue
+                reservations.append(
+                    LedgerReservation(
                         row_key=row_key,
                         correlation_id=parts[2],
-                        reserved_tokens=int(row["Reserved"]),
-                        finalization_kind=row.get("FinalizationKind"),
+                        reserved_tokens=int(row.get("Reserved", 0)),
+                        created_at=created_at,
+                        finalization_kind=(
+                            str(row["FinalizationKind"])
+                            if row.get("FinalizationKind")
+                            else None
+                        ),
                     )
-                    _ = reservation.created_at
-                    if reservation.reserved_tokens < 0:
-                        raise ValueError("negative reservation")
-                except (KeyError, TypeError, ValueError):
-                    raise RuntimeError(
-                        "Ledger partition contains a malformed reservation"
-                    ) from None
-                reservations.append(reservation)
+                )
             next_partition = response.headers.get("x-ms-continuation-nextpartitionkey")
             if not next_partition:
                 break
@@ -407,12 +432,22 @@ class TableStorageLedger:
         return reservations
 
     def list_pending_partitions(self) -> list[str]:
-        params = {"$filter": "RowKey ge 'R|' and RowKey lt 'S'", "$select": "PartitionKey"}
+        """Discover every partition containing R rows, with continuation paging."""
+        params: dict[str, str] = {
+            "$filter": "RowKey ge 'R|' and RowKey lt 'S'",
+            "$select": "PartitionKey",
+        }
         partitions: set[str] = set()
         while True:
-            response = self._request("GET", f"{self._endpoint}/{self._table}()", params=params)
+            response = self._request(
+                "GET", f"{self._endpoint}/{self._table}()", params=params
+            )
             response.raise_for_status()
-            partitions.update(str(row["PartitionKey"]) for row in response.json()["value"])
+            partitions.update(
+                str(row["PartitionKey"])
+                for row in response.json().get("value", [])
+                if row.get("PartitionKey")
+            )
             next_partition = response.headers.get("x-ms-continuation-nextpartitionkey")
             if not next_partition:
                 break
@@ -424,16 +459,24 @@ class TableStorageLedger:
                 params.pop("NextRowKey", None)
         return sorted(partitions)
 
-    def mark_upper_bounds(self, partition: str, reservations: Sequence[LedgerReservation]) -> int:
+    def mark_upper_bounds(
+        self, partition: str, reservations: Sequence[LedgerReservation]
+    ) -> int:
+        """Mark R terminal without changing its admission charge or row identity."""
+        written = 0
         for reservation in reservations:
             response = self._request(
                 "MERGE",
                 self._entity_url(partition, reservation.row_key),
                 extra_headers={"If-Match": "*"},
-                json={"FinalizationKind": "unverified_upper_bound"},
+                json={
+                    "Reserved": reservation.reserved_tokens,
+                    "FinalizationKind": "unverified_upper_bound",
+                },
             )
             response.raise_for_status()
-        return len(reservations)
+            written += 1
+        return written
 
     @staticmethod
     def _batch_delete_body(
@@ -475,7 +518,9 @@ class TableStorageLedger:
         deleted = 0
         for offset in range(0, len(unique), 100):
             chunk = unique[offset : offset + 100]
-            batch, body = self._batch_delete_body(self._endpoint, self._table, partition, chunk)
+            batch, body = self._batch_delete_body(
+                self._endpoint, self._table, partition, chunk
+            )
             response = self._request(
                 "POST",
                 f"{self._endpoint}/$batch",
@@ -501,14 +546,223 @@ class LedgerSyncService:
         recovery_lag: timedelta = RESERVATION_RECOVERY_LAG,
         finalization_lag: timedelta = RESERVATION_FINALIZATION_LAG,
     ) -> None:
-        if recovery_lag <= timedelta(0) or finalization_lag <= recovery_lag:
-            raise ValueError("finalization grace must exceed the positive recovery lag")
         self._repository = repository
         self._store = store
         self._terminal_log = terminal_log
         self._recovery_lag = recovery_lag
         self._finalization_lag = finalization_lag
         self._evidence_effective_at: datetime | None = None
+
+    def _recover_reservations(
+        self,
+        scope_type: LedgerScopeType,
+        scope_id: str,
+        period_start: date,
+        reservations: Sequence[LedgerReservation],
+        moment: datetime,
+    ) -> tuple[int, int, int]:
+        stale = [
+            reservation
+            for reservation in reservations
+            if reservation.created_at <= moment - self._recovery_lag
+        ]
+        if not stale:
+            return 0, 0, 0
+        settled_before = self._repository.settled_reservation_correlations(
+            [reservation.correlation_id for reservation in stale],
+            scope_type=scope_type,
+            scope_id=scope_id,
+        )
+        unresolved = [
+            reservation
+            for reservation in stale
+            if reservation.correlation_id not in settled_before
+        ]
+        if not unresolved:
+            return 0, 0, 0
+        gateway_correlations = self._repository.reservation_evidence_correlations(
+            scope_type, scope_id, [row.correlation_id for row in unresolved],
+        )
+
+        def gateway_correlation(reservation: LedgerReservation) -> str:
+            return gateway_correlations.get(reservation.correlation_id, reservation.correlation_id)
+
+        existing_finalizations = self._repository.reservation_finalization_kinds(
+            scope_type,
+            scope_id,
+            [reservation.correlation_id for reservation in unresolved],
+        )
+        terminal_items: Sequence[ReservationTerminalEvidence] = []
+        safely_unobserved: set[str] = set()
+        if self._terminal_log is not None:
+            try:
+                terminal_items = self._terminal_log.fetch_correlations(
+                    [gateway_correlation(reservation) for reservation in unresolved],
+                    min(reservation.created_at for reservation in unresolved)
+                    - self._recovery_lag,
+                    moment - self._recovery_lag,
+                )
+                due_for_finalization = [
+                    reservation
+                    for reservation in unresolved
+                    if reservation.finalization_kind is None
+                    and reservation.created_at <= moment - self._finalization_lag
+                ]
+                if due_for_finalization:
+                    finalization_items = self._terminal_log.fetch_correlations(
+                        [
+                            gateway_correlation(reservation)
+                            for reservation in due_for_finalization
+                        ],
+                        min(
+                            reservation.created_at
+                            for reservation in due_for_finalization
+                        )
+                        - self._recovery_lag,
+                        moment,
+                    )
+                    by_correlation = {
+                        item.correlation_id: item for item in terminal_items
+                    }
+                    strict_correlations = {
+                        gateway_correlation(reservation) for reservation in due_for_finalization
+                        if strict_budget_evidence(
+                            reservation.created_at, self._evidence_effective_at,
+                        )
+                    }
+                    for window_evidence in finalization_items:
+                        if window_evidence.correlation_id not in strict_correlations:
+                            by_correlation[window_evidence.correlation_id] = window_evidence
+                            continue
+                        previous = by_correlation.get(window_evidence.correlation_id)
+                        if previous is None or (
+                            window_evidence.has_exact_usage and not previous.has_exact_usage
+                        ):
+                            by_correlation[window_evidence.correlation_id] = window_evidence
+                        elif (
+                            previous.has_exact_usage and window_evidence.has_exact_usage
+                            and previous.total_tokens != window_evidence.total_tokens
+                        ):
+                            logger.warning(
+                                "Conflicting terminal totals for %s %s correlation %s: "
+                                "%s versus %s; "
+                                "retaining the first complete result",
+                                scope_type, scope_id, window_evidence.correlation_id,
+                                previous.total_tokens, window_evidence.total_tokens,
+                            )
+                    terminal_items = list(by_correlation.values())
+                    safely_unobserved = {
+                        reservation.correlation_id
+                        for reservation in due_for_finalization
+                        if (
+                            (item := by_correlation.get(gateway_correlation(reservation)))
+                            is None
+                            or self._finalization_from_evidence(
+                                scope_type,
+                                scope_id,
+                                period_start,
+                                reservation,
+                                item,
+                                strict=strict_budget_evidence(
+                                    reservation.created_at, self._evidence_effective_at,
+                                ),
+                                evidence_correlation_id=gateway_correlation(reservation),
+                            )
+                            is None
+                        )
+                    }
+            except (httpx.HTTPError, RuntimeError, ValueError):
+                logger.exception(
+                    "%s reservation recovery query failed; reservations remain pending",
+                    scope_type.capitalize(),
+                )
+        evidence = {item.correlation_id: item for item in terminal_items}
+        self._repository.apply_reconciled_usage(
+            [
+                ReconciledUsage(
+                    correlation_id=item.correlation_id,
+                    input_tokens=item.prompt_tokens,
+                    output_tokens=item.completion_tokens,
+                    cached_tokens=None,
+                )
+                for item in terminal_items
+                if item.has_exact_usage
+                and item.prompt_tokens is not None
+                and item.completion_tokens is not None
+            ]
+        )
+        settled_after_reconciliation = self._repository.settled_reservation_correlations(
+            [reservation.correlation_id for reservation in unresolved],
+            scope_type=scope_type,
+            scope_id=scope_id,
+        )
+        existing = self._repository.existing_usage_correlations(
+            [reservation.correlation_id for reservation in unresolved],
+            scope_type=scope_type,
+            scope_id=scope_id,
+        )
+        finalizations: list[BudgetReservationFinalization] = []
+        upper_bound_correlations: set[str] = set()
+        for reservation in unresolved:
+            if reservation.correlation_id in settled_after_reconciliation:
+                continue
+            item = evidence.get(gateway_correlation(reservation))
+            finalization = (
+                self._finalization_from_evidence(
+                    scope_type, scope_id, period_start, reservation, item,
+                    strict=strict_budget_evidence(
+                        reservation.created_at, self._evidence_effective_at,
+                    ),
+                    evidence_correlation_id=gateway_correlation(reservation),
+                )
+                if item is not None
+                and (reservation.correlation_id not in existing
+                     or strict_budget_evidence(reservation.created_at, self._evidence_effective_at))
+                else None
+            )
+            if (
+                finalization is None
+                and reservation.finalization_kind == "unverified_upper_bound"
+            ):
+                continue
+            if (
+                finalization is None
+                and reservation.finalization_kind is None
+                and existing_finalizations.get(reservation.correlation_id)
+                == "unverified_upper_bound"
+            ):
+                continue
+            if (
+                finalization is None
+                and reservation.correlation_id in safely_unobserved
+                and reservation.finalization_kind is None
+                and reservation.created_at <= moment - self._finalization_lag
+            ):
+                finalization = self._upper_bound_finalization(
+                    scope_type,
+                    scope_id,
+                    period_start,
+                    reservation,
+                    reservation.created_at + self._finalization_lag,
+                )
+                upper_bound_correlations.add(reservation.correlation_id)
+            if finalization is not None:
+                finalizations.append(finalization)
+        written = self._repository.save_budget_reservation_finalizations(
+            finalizations
+        )
+        finalization_kinds = self._repository.reservation_finalization_kinds(
+            scope_type,
+            scope_id,
+            [reservation.correlation_id for reservation in unresolved],
+        )
+        finalized = {
+            reservation.correlation_id
+            for reservation in unresolved
+            if reservation.correlation_id in finalization_kinds
+        }
+        unresolved_after = len(unresolved) - len(finalized)
+        return written, unresolved_after, len(upper_bound_correlations & finalized)
 
     @staticmethod
     def _finalization_from_evidence(
@@ -523,169 +777,74 @@ class LedgerSyncService:
     ) -> BudgetReservationFinalization | None:
         if evidence.correlation_id != (evidence_correlation_id or reservation.correlation_id):
             return None
-        common = {
-            "scope_type": scope_type,
-            "scope_id": scope_id,
-            "period_start": period_start,
-            "correlation_id": reservation.correlation_id,
-            "reservation_created_at": reservation.created_at,
-            "reservation_tokens": reservation.reserved_tokens,
-            "evidence_at": max(evidence.observed_at, reservation.created_at),
-            "status_code": evidence.status_code,
-        }
         if evidence.has_exact_usage:
-            return BudgetReservationFinalization.model_validate(
-                {
-                    **common,
-                    "input_tokens": evidence.prompt_tokens,
-                    "output_tokens": evidence.completion_tokens,
-                    "total_tokens": evidence.total_tokens,
-                    "finalization_kind": "exact_usage",
-                    "source": "apim_gateway_llm_log",
-                }
+            assert evidence.prompt_tokens is not None
+            assert evidence.completion_tokens is not None
+            assert evidence.total_tokens is not None
+            return BudgetReservationFinalization(
+                scope_type=scope_type,
+                scope_id=scope_id,
+                correlation_id=reservation.correlation_id,
+                period_start=period_start,
+                reservation_created_at=reservation.created_at,
+                reservation_tokens=reservation.reserved_tokens,
+                evidence_at=max(evidence.observed_at, reservation.created_at),
+                status_code=evidence.status_code,
+                input_tokens=evidence.prompt_tokens,
+                output_tokens=evidence.completion_tokens,
+                total_tokens=evidence.total_tokens,
+                finalization_kind="exact_usage",
+                source="apim_gateway_llm_log",
             )
         if not strict and evidence.is_terminal_zero:
-            return BudgetReservationFinalization.model_validate(
-                {
-                    **common,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                    "finalization_kind": "terminal_zero",
-                    "source": "apim_gateway_log",
-                }
+            return BudgetReservationFinalization(
+                scope_type=scope_type,
+                scope_id=scope_id,
+                correlation_id=reservation.correlation_id,
+                period_start=period_start,
+                reservation_created_at=reservation.created_at,
+                reservation_tokens=reservation.reserved_tokens,
+                evidence_at=max(evidence.observed_at, reservation.created_at),
+                status_code=evidence.status_code,
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                finalization_kind="terminal_zero",
+                source="apim_gateway_log",
             )
         return None
 
-    def _recover_reservations(
-        self,
+    @staticmethod
+    def _upper_bound_finalization(
         scope_type: LedgerScopeType,
         scope_id: str,
         period_start: date,
-        reservations: Sequence[LedgerReservation],
+        reservation: LedgerReservation,
         moment: datetime,
-    ) -> int:
-        if self._terminal_log is None:
-            return 0
-        stale = [row for row in reservations if row.created_at <= moment - self._recovery_lag]
-        settled = self._repository.settled_reservation_correlations(
-            [row.correlation_id for row in stale], scope_type=scope_type, scope_id=scope_id
+    ) -> BudgetReservationFinalization:
+        return BudgetReservationFinalization(
+            scope_type=scope_type,
+            scope_id=scope_id,
+            period_start=period_start,
+            correlation_id=reservation.correlation_id,
+            reservation_created_at=reservation.created_at,
+            reservation_tokens=reservation.reserved_tokens,
+            evidence_at=moment,
+            status_code=None,
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=reservation.reserved_tokens,
+            finalization_kind="unverified_upper_bound",
+            source="reservation_timeout",
         )
-        unresolved = [row for row in stale if row.correlation_id not in settled]
-        if not unresolved:
-            return 0
-        correlations = self._repository.reservation_evidence_correlations(
-            scope_type, scope_id, [row.correlation_id for row in unresolved]
-        )
-
-        def gateway_correlation(row: LedgerReservation) -> str:
-            return correlations.get(row.correlation_id, row.correlation_id)
-
-        due = [row for row in unresolved if row.created_at <= moment - self._finalization_lag]
-        try:
-            evidence = list(
-                self._terminal_log.fetch_correlations(
-                    [gateway_correlation(row) for row in unresolved],
-                    min(row.created_at for row in unresolved) - self._recovery_lag,
-                    moment - self._recovery_lag,
-                )
-            )
-            if due:
-                evidence.extend(
-                    self._terminal_log.fetch_correlations(
-                        [gateway_correlation(row) for row in due],
-                        min(row.created_at for row in due) - self._recovery_lag,
-                        moment,
-                    )
-                )
-        except (httpx.HTTPError, RuntimeError, ValueError):
-            logger.exception(
-                "Reservation evidence unavailable; unresolved reservations remain charged"
-            )
-            return 0
-        by_correlation: dict[str, ReservationTerminalEvidence] = {}
-        strict_correlations = {
-            gateway_correlation(row)
-            for row in unresolved
-            if strict_budget_evidence(row.created_at, self._evidence_effective_at)
-        }
-        for item in evidence:
-            previous = by_correlation.get(item.correlation_id)
-            if item.correlation_id in strict_correlations:
-                if previous is None or (item.has_exact_usage and not previous.has_exact_usage):
-                    by_correlation[item.correlation_id] = item
-                elif (
-                    previous.has_exact_usage
-                    and item.has_exact_usage
-                    and (previous.total_tokens != item.total_tokens)
-                ):
-                    logger.warning("Conflicting terminal totals; retaining first complete evidence")
-            elif previous is None or (item.has_exact_usage, item.observed_at) > (
-                previous.has_exact_usage,
-                previous.observed_at,
-            ):
-                by_correlation[item.correlation_id] = item
-        self._repository.apply_reconciled_usage(
-            [
-                ReconciledUsage(
-                    correlation_id=item.correlation_id,
-                    input_tokens=int(item.prompt_tokens or 0),
-                    output_tokens=int(item.completion_tokens or 0),
-                    cached_tokens=None,
-                )
-                for item in by_correlation.values()
-                if item.has_exact_usage
-            ]
-        )
-        settled = self._repository.settled_reservation_correlations(
-            [row.correlation_id for row in unresolved], scope_type=scope_type, scope_id=scope_id
-        )
-        kinds = self._repository.reservation_finalization_kinds(
-            scope_type, scope_id, [row.correlation_id for row in unresolved]
-        )
-        finalizations = []
-        for row in unresolved:
-            if row.correlation_id in settled:
-                continue
-            row_evidence = by_correlation.get(gateway_correlation(row))
-            finalization = (
-                self._finalization_from_evidence(
-                    scope_type,
-                    scope_id,
-                    period_start,
-                    row,
-                    row_evidence,
-                    strict=strict_budget_evidence(row.created_at, self._evidence_effective_at),
-                    evidence_correlation_id=gateway_correlation(row),
-                )
-                if row_evidence is not None
-                else None
-            )
-            if (
-                finalization is None
-                and row in due
-                and row.finalization_kind != "unverified_upper_bound"
-                and kinds.get(row.correlation_id) != "unverified_upper_bound"
-            ):
-                finalization = BudgetReservationFinalization(
-                    scope_type=scope_type,
-                    scope_id=scope_id,
-                    period_start=period_start,
-                    correlation_id=row.correlation_id,
-                    reservation_created_at=row.created_at,
-                    reservation_tokens=row.reserved_tokens,
-                    total_tokens=row.reserved_tokens,
-                    evidence_at=row.created_at + self._finalization_lag,
-                    finalization_kind="unverified_upper_bound",
-                    source="reservation_timeout",
-                )
-            if finalization is not None:
-                finalizations.append(finalization)
-        return self._repository.save_budget_reservation_finalizations(finalizations)
 
     def _period_bounds(self, now: datetime) -> tuple[date, date, str]:
         start = period_start_for(now)
-        end = date(now.year + 1, 1, 1) if now.month == 12 else date(now.year, now.month + 1, 1)
+        end = (
+            date(now.year + 1, 1, 1)
+            if now.month == 12
+            else date(now.year, now.month + 1, 1)
+        )
         return start, end, f"{now.year:04d}-{now.month:02d}"
 
     def snapshot(self, now: datetime | None = None) -> list[LedgerPerson]:
@@ -703,7 +862,9 @@ class LedgerSyncService:
             for row in rows
         ]
 
-    def model_access(self, user_ids: Sequence[str] | None = None) -> list[LedgerModelAccess]:
+    def model_access(
+        self, user_ids: Sequence[str] | None = None
+    ) -> list[LedgerModelAccess]:
         rows = self._repository.model_access_ledger_snapshot(user_ids)
         return [
             LedgerModelAccess(
@@ -715,17 +876,30 @@ class LedgerSyncService:
             for row in rows
         ]
 
-    def application_snapshot(self, now: datetime | None = None) -> list[LedgerApplication]:
+    def application_snapshot(
+        self, now: datetime | None = None
+    ) -> list[LedgerApplication]:
         moment = now or datetime.now(UTC)
         period_start, period_end, _ = self._period_bounds(moment)
-        rows = self._repository.gateway_application_ledger_snapshot(period_start, period_end)
+        rows = self._repository.gateway_application_ledger_snapshot(
+            period_start, period_end
+        )
         return [
             LedgerApplication(
                 application_id=str(row["application_id"]),
-                token_limit=int(row["token_limit"]),
+                token_limit=(int(row["token_limit"]) if row.get("token_limit") is not None else 0),
                 tokens_per_minute=int(row["tokens_per_minute"]),
                 confirmed_tokens=int(row["confirmed_tokens"]),
                 enforce=bool(row["enforce"]),
+                budget_mode=str(row.get("budget_mode", "tokens")),
+                usd_limit=(
+                    Decimal(str(row["usd_limit"])) if row.get("usd_limit") is not None else None
+                ),
+                confirmed_usd=(
+                    Decimal(str(row["confirmed_usd"]))
+                    if row.get("confirmed_usd") is not None else None
+                ),
+                usd_cost_available=bool(row.get("usd_cost_available", True)),
             )
             for row in rows
             if str(row["status"]) != "retired"
@@ -738,6 +912,7 @@ class LedgerSyncService:
                 identifiers=tuple(
                     [*(row.get("model_uuids") or []), *(row.get("model_keys") or [])]
                 ),
+                configured=bool(row["configured"]),
             )
             for row in self._repository.gateway_application_model_ledger_snapshot()
         ]
@@ -791,14 +966,18 @@ class LedgerSyncService:
             self._store.upsert(
                 application_partition_key(policy.application_id, period),
                 MODEL_ACCESS_ROW_KEY,
-                {"Configured": True, "Models": value},
+                {"Configured": policy.configured, "Models": value},
             )
             written += 1
         return written
 
-    def project_application_mappings(self) -> int:
+    def project_application_mappings(self, application_id: UUID | None = None) -> int:
         written = 0
+        departments = {item.id: item.name for item in enterprise_catalog().departments}
         for mapping in self._repository.gateway_application_ledger_mappings():
+            if application_id is not None and str(mapping["application_id"]) != str(application_id):
+                continue
+            organization = application_organization(dict(mapping.get("tags") or {}))
             self._store.upsert(
                 application_map_partition_key(mapping["gateway_profile_id"]),
                 str(mapping["apim_subscription_id"]),
@@ -808,6 +987,12 @@ class LedgerSyncService:
                     "ApplicationName": str(mapping["application_name"]),
                     "ApplicationType": str(mapping["application_type"]),
                     "ApplicationStatus": str(mapping["application_status"]),
+                    "OrganizationId": organization.organization_id or "unattributed",
+                    "OrganizationName": organization.organization_name or "unattributed",
+                    "DepartmentId": str(mapping.get("department_id") or "unattributed"),
+                    "DepartmentName": departments.get(
+                        str(mapping.get("department_id")), "unattributed",
+                    ),
                     "SubscriptionState": str(mapping["subscription_state"]),
                     "ScopeExists": bool(mapping["scope_exists"]),
                 },
@@ -819,167 +1004,264 @@ class LedgerSyncService:
         moment = now or datetime.now(UTC)
         self._evidence_effective_at = self._repository.budget_evidence_effective_at()
         current_start = period_start_for(moment)
-        previous_moment = datetime.combine(current_start, time.min, tzinfo=UTC) - timedelta(
-            microseconds=1
-        )
+        previous_moment = datetime.combine(
+            current_start, time.min, tzinfo=UTC
+        ) - timedelta(microseconds=1)
 
-        partitions: dict[str, tuple[LedgerScopeType, str, date, list[LedgerReservation]]] = {}
-        written = {"person": 0, "application": 0}
+        people_count = 0
+        settled_count = 0
+        application_count = 0
+        application_settled_count = 0
+        stale_application_reservations = 0
+        person_finalizations_written = 0
+        application_finalizations_written = 0
+        reservations_finalized_upper_bound = 0
+        upper_bounds_settled = 0
+
         for request in self._repository.pending_billable_requests():
-            period = request["period_start"].strftime("%Y-%m")
             partition = (
-                partition_key(request["scope_id"], period)
+                partition_key(request["scope_id"], request["period_start"].strftime("%Y-%m"))
                 if request["scope_type"] == "person"
-                else application_partition_key(request["scope_id"], period)
+                else application_partition_key(
+                    request["scope_id"], request["period_start"].strftime("%Y-%m")
+                )
             )
-            entity: dict[str, Any] = {"Reserved": request["reserved_tokens"]}
+            entity = {"Reserved": request["reserved_tokens"]}
             if request.get("finalization_kind") == "unverified_upper_bound":
                 entity["FinalizationKind"] = "unverified_upper_bound"
             self._store.upsert(
                 partition, reservation_row_key(request["created_at"], str(request["id"])), entity
             )
+
+        pending_partitions: dict[
+            tuple[LedgerScopeType, str, date], tuple[str, list[LedgerReservation]]
+        ] = {}
         for partition in self._store.list_pending_partitions():
             parsed = parse_budget_partition(partition)
             if parsed is None:
-                logger.warning("Skipping an invalid ledger budget partition")
+                logger.warning("Malformed Ledger budget partition skipped: %s", partition)
                 continue
-            scope_type, scope_id, start = parsed
-            rows = list(self._store.list_reservations(partition))
-            partitions[partition] = (scope_type, scope_id, start, rows)
-        self._repository.register_budget_reservations(
-            [
-                BudgetReservationAdmission(
-                    scope_type=scope_type,
-                    scope_id=scope_id,
-                    correlation_id=row.correlation_id,
-                    created_at=row.created_at,
-                    reserved_tokens=row.reserved_tokens,
-                )
-                for scope_type, scope_id, _start, rows in partitions.values()
-                for row in rows
-            ]
-        )
-        for scope_type, scope_id, start, rows in partitions.values():
-            written[scope_type] += self._recover_reservations(
-                scope_type, scope_id, start, rows, moment
+            pending_partitions[parsed] = (
+                partition,
+                list(self._store.list_reservations(partition)),
             )
 
-        settled = {
-            partition: self._repository.settled_reservation_correlations(
-                [row.correlation_id for row in rows], scope_type=scope_type, scope_id=scope_id
+        self._repository.register_budget_reservations([
+            BudgetReservationAdmission(
+                scope_type=scope_type, scope_id=scope_id, correlation_id=row.correlation_id,
+                created_at=row.created_at, reserved_tokens=row.reserved_tokens,
             )
-            for partition, (scope_type, scope_id, _, rows) in partitions.items()
+            for (scope_type, scope_id, _period), (_partition, rows) in pending_partitions.items()
+            for row in rows
+        ])
+
+        for (scope_type, scope_id, period_start), (_, rows) in pending_partitions.items():
+            written, stale, upper_bounds = self._recover_reservations(
+                scope_type, scope_id, period_start, rows, moment
+            )
+            if scope_type == "person":
+                person_finalizations_written += written
+            else:
+                application_finalizations_written += written
+                stale_application_reservations += stale
+            reservations_finalized_upper_bound += upper_bounds
+
+        settled_before_projection = {
+            identity: self._repository.settled_reservation_correlations(
+                [reservation.correlation_id for reservation in rows],
+                scope_type=identity[0], scope_id=identity[1],
+            )
+            for identity, (_partition, rows) in pending_partitions.items()
         }
-        balances: dict[str, int] = {}
-        for partition, (scope_type, scope_id, start, _) in partitions.items():
-            start_moment = datetime.combine(start, time.min, tzinfo=UTC)
-            _, end, _ = self._period_bounds(start_moment)
-            _, following_end, following_period = self._period_bounds(
-                datetime.combine(end, time.min, tzinfo=UTC)
-            )
-            balances[partition] = self._repository.budget_scope_confirmed_tokens(
-                scope_type, scope_id, start, end
-            )
-            following = (
-                application_partition_key(scope_id, following_period)
-                if scope_type == "application"
-                else partition_key(scope_id, following_period)
-            )
-            balances[following] = self._repository.budget_scope_confirmed_tokens(
-                scope_type, scope_id, end, following_end
-            )
 
-        people_count = 0
-        application_count = 0
-        application_states: dict[str, tuple[date, LedgerApplication]] = {}
+        # Process every discovered pending partition, not just active rows in two months.
+        # This is the recovery path for removed people, retired Applications, and older
+        # periods. C is always projected before an R is marked or deleted.
+        for (scope_type, scope_id, period_start), (
+            partition,
+            rows,
+        ) in pending_partitions.items():
+            period_end = (
+                date(period_start.year + 1, 1, 1)
+                if period_start.month == 12
+                else date(period_start.year, period_start.month + 1, 1)
+            )
+            confirmed = self._repository.budget_scope_confirmed_tokens(
+                scope_type, scope_id, period_start, period_end
+            )
+            next_period_end = (
+                date(period_end.year + 1, 1, 1)
+                if period_end.month == 12
+                else date(period_end.year, period_end.month + 1, 1)
+            )
+            next_confirmed = self._repository.budget_scope_confirmed_tokens(
+                scope_type, scope_id, period_end, next_period_end
+            )
+            if next_confirmed:
+                next_partition = (
+                    application_partition_key(scope_id, period_end.strftime("%Y-%m"))
+                    if scope_type == "application"
+                    else partition_key(scope_id, period_end.strftime("%Y-%m"))
+                )
+                self._store.upsert(
+                    next_partition, "C", {"ConfirmedUsed": next_confirmed}
+                )
+            self._store.upsert(partition, "C", {"ConfirmedUsed": confirmed})
+            settled = settled_before_projection[(scope_type, scope_id, period_start)]
+            finalization_kinds = self._repository.reservation_finalization_kinds(
+                scope_type,
+                scope_id,
+                [reservation.correlation_id for reservation in rows],
+            )
+            upper_bound_rows = [
+                reservation
+                for reservation in rows
+                if reservation.finalization_kind is None
+                and finalization_kinds.get(reservation.correlation_id)
+                == "unverified_upper_bound"
+            ]
+            self._store.mark_upper_bounds(partition, upper_bound_rows)
+            for reservation in upper_bound_rows:
+                object.__setattr__(
+                    reservation,
+                    "finalization_kind",
+                    "unverified_upper_bound",
+                )
+            to_delete = [
+                reservation.row_key
+                for reservation in rows
+                if reservation.correlation_id in settled
+            ]
+            deleted = self._store.delete_reservations(partition, to_delete)
+            pending_partitions[(scope_type, scope_id, period_start)] = (
+                partition,
+                [reservation for reservation in rows if reservation.row_key not in to_delete],
+            )
+            upper_bounds_settled += sum(
+                reservation.finalization_kind == "unverified_upper_bound"
+                and reservation.row_key in to_delete
+                for reservation in rows
+            )
+            if scope_type == "person":
+                settled_count += deleted
+            else:
+                application_settled_count += deleted
+
+        # Current first: a request reserved just before midnight can land in the new
+        # month's usage. Writing the current C before deleting the previous R preserves
+        # conservative accounting if the Function fails between those two partitions.
         for period_moment in (moment, previous_moment):
-            start, end, period = self._period_bounds(period_moment)
+            period_start, _, period = self._period_bounds(period_moment)
+
             people = self.snapshot(period_moment)
             people_count += len(people)
             for person in people:
                 partition = partition_key(person.user_id, period)
                 self._store.upsert(
-                    partition, "Q", {"Limit": person.token_limit, "Enforce": person.enforce}
-                )
-                balances[partition] = person.confirmed_tokens
-            applications = self.application_snapshot(period_moment)
-            application_count += len(applications)
-            for application in applications:
-                partition = application_partition_key(application.application_id, period)
-                self._store.upsert(
                     partition,
                     "Q",
+                    {"Limit": person.token_limit, "Enforce": person.enforce},
+                )
+                self._store.upsert(
+                    partition,
+                    "C",
+                    {"ConfirmedUsed": person.confirmed_tokens},
+                )
+            applications = self.application_snapshot(period_moment)
+            application_count += len(applications)
+            application_states: list[GatewayApplicationLedgerState] = []
+            application_finalization_states: list[dict[str, Any]] = []
+            for application in applications:
+                partition = application_partition_key(
+                    application.application_id, period
+                )
+                application_id = UUID(application.application_id)
+                if application.budget_mode == "tokens":
+                    self._store.upsert(
+                        partition,
+                        "Q",
+                        {
+                            "Limit": application.token_limit,
+                            "TokensPerMinute": application.tokens_per_minute,
+                            "Enforce": application.enforce,
+                        },
+                    )
+                    self._store.upsert(
+                        partition,
+                        "C",
+                        {"ConfirmedUsed": application.confirmed_tokens},
+                    )
+                else:
+                    # USD reservations are authoritative in the budget2 S/A/D rows;
+                    # the legacy token partition must not publish a competing limit.
+                    continue
+                application_reservations = list(
+                    pending_partitions.get(
+                        ("application", application.application_id, period_start),
+                        (partition, []),
+                    )[1]
+                )
+                remaining_reservations = [
+                    reservation
+                    for reservation in application_reservations
+                    if reservation.finalization_kind != "unverified_upper_bound"
+                ]
+                pending_tokens = sum(
+                    reservation.reserved_tokens
+                    for reservation in remaining_reservations
+                )
+                finalized_upper_bound_rows = [
+                    reservation
+                    for reservation in application_reservations
+                    if (
+                        reservation.finalization_kind == "unverified_upper_bound"
+                    )
+                ]
+                application_finalization_states.append(
                     {
-                        "Limit": application.token_limit,
-                        "TokensPerMinute": application.tokens_per_minute,
-                        "Enforce": application.enforce,
-                    },
+                        "period_start": period_start,
+                        "application_id": application_id,
+                        "finalized_upper_bound_tokens": sum(
+                            reservation.reserved_tokens
+                            for reservation in finalized_upper_bound_rows
+                        ),
+                        "finalized_upper_bound_count": len(
+                            finalized_upper_bound_rows
+                        ),
+                        "snapshot_at": moment,
+                    }
                 )
-                balances[partition] = self._repository.budget_scope_confirmed_tokens(
-                    "application", application.application_id, start, end
+                application_states.append(
+                    GatewayApplicationLedgerState(
+                        period_start=period_start,
+                        application_id=application_id,
+                        token_limit=application.token_limit,
+                        confirmed_tokens=application.confirmed_tokens,
+                        pending_reserved_tokens=pending_tokens,
+                        pending_reservation_count=len(remaining_reservations),
+                        stale_reservation_count=sum(
+                            reservation.created_at <= moment - self._recovery_lag
+                            for reservation in remaining_reservations
+                        ),
+                        oldest_reservation_at=min(
+                            (
+                                reservation.created_at
+                                for reservation in remaining_reservations
+                            ),
+                            default=None,
+                        ),
+                        available_tokens=max(
+                            application.token_limit
+                            - application.confirmed_tokens
+                            - pending_tokens,
+                            0,
+                        ),
+                        snapshot_at=moment,
+                    )
                 )
-                application_states[partition] = (start, application)
-        for partition, confirmed in balances.items():
-            self._store.upsert(partition, "C", {"ConfirmedUsed": confirmed})
-
-        deleted_counts = {"person": 0, "application": 0}
-        marked_count = 0
-        upper_bounds_settled = 0
-        remaining: dict[str, list[LedgerReservation]] = {}
-        for partition, (scope_type, scope_id, _, rows) in partitions.items():
-            kinds = self._repository.reservation_finalization_kinds(
-                scope_type, scope_id, [row.correlation_id for row in rows]
+            self._repository.save_gateway_application_ledger_snapshot(
+                application_states, application_finalization_states,
             )
-            to_delete = [row for row in rows if row.correlation_id in settled[partition]]
-            to_mark = [
-                row
-                for row in rows
-                if row.correlation_id not in settled[partition]
-                and row.finalization_kind is None
-                and kinds.get(row.correlation_id) == "unverified_upper_bound"
-            ]
-            marked_count += self._store.mark_upper_bounds(partition, to_mark)
-            deleted_counts[scope_type] += self._store.delete_reservations(
-                partition, [row.row_key for row in to_delete]
-            )
-            upper_bounds_settled += sum(
-                row.finalization_kind == "unverified_upper_bound" for row in to_delete
-            )
-            remaining[partition] = [
-                replace(row, finalization_kind="unverified_upper_bound") if row in to_mark else row
-                for row in rows
-                if row not in to_delete
-            ]
-
-        states = []
-        for partition, (start, application) in application_states.items():
-            rows = remaining.get(partition, [])
-            pending = [row for row in rows if row.finalization_kind != "unverified_upper_bound"]
-            upper = [row for row in rows if row.finalization_kind == "unverified_upper_bound"]
-            pending_tokens = sum(row.reserved_tokens for row in pending)
-            upper_tokens = sum(row.reserved_tokens for row in upper)
-            confirmed = balances[partition]
-            states.append(
-                GatewayApplicationLedgerState(
-                    period_start=start,
-                    application_id=UUID(application.application_id),
-                    token_limit=application.token_limit,
-                    confirmed_tokens=confirmed,
-                    pending_reserved_tokens=pending_tokens,
-                    pending_reservation_count=len(pending),
-                    finalized_upper_bound_tokens=upper_tokens,
-                    finalized_upper_bound_count=len(upper),
-                    stale_reservation_count=sum(
-                        row.created_at <= moment - self._recovery_lag for row in pending
-                    ),
-                    oldest_reservation_at=min((row.created_at for row in pending), default=None),
-                    available_tokens=max(
-                        application.token_limit - confirmed - pending_tokens - upper_tokens, 0
-                    ),
-                    snapshot_at=moment,
-                )
-            )
-        self._repository.save_gateway_application_ledger_states(states)
         # Model policies are projected independently of budgets: a person may be restricted
         # to a model set without ever being given an allowance, so iterating budgets alone
         # would leave their policy unenforced.
@@ -990,21 +1272,15 @@ class LedgerSyncService:
         application_mappings = self.project_application_mappings()
         return LedgerSyncOutcome(
             people=people_count,
-            reservations_settled=deleted_counts["person"],
+            reservations_settled=settled_count,
             model_policies=policies,
             applications=application_count,
-            application_reservations_settled=deleted_counts["application"],
+            application_reservations_settled=application_settled_count,
             application_model_policies=application_policies,
             application_mappings=application_mappings,
-            person_finalizations_written=written["person"],
-            application_finalizations_written=written["application"],
-            reservations_finalized_upper_bound=marked_count,
+            stale_application_reservations=stale_application_reservations,
+            person_finalizations_written=person_finalizations_written,
+            application_finalizations_written=application_finalizations_written,
+            reservations_finalized_upper_bound=reservations_finalized_upper_bound,
             upper_bounds_settled=upper_bounds_settled,
-            stale_application_reservations=sum(
-                row.created_at <= moment - self._recovery_lag
-                and row.finalization_kind != "unverified_upper_bound"
-                for partition, rows in remaining.items()
-                if partition.startswith("app|")
-                for row in rows
-            ),
         )

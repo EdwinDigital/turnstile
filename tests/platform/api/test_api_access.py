@@ -106,7 +106,7 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         route for route in copilot_protected.routes if isinstance(route, APIRoute)
     ]
 
-    assert len(apim_routes) == 115
+    assert len(apim_routes) == 120
     availability_routes = [route for route in apim_routes if "availability" in route.path]
     assert len(availability_routes) == 5
     for route in availability_routes:
@@ -127,7 +127,7 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         assert any(dependency.call is require_owner_session
                    for dependency in route.dependant.dependencies)
     lifecycle_routes = [route for route in apim_routes if "self-hosted-gateway" in route.path]
-    assert len(lifecycle_routes) == 10
+    assert len(lifecycle_routes) == 11
     for route in lifecycle_routes:
         assert any(dependency.call is require_owner_session
                    for dependency in route.dependant.dependencies)
@@ -148,7 +148,7 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         ("/api/v1/model-management/apim-targets/{gateway_profile_id}", "GET"),
         ("/api/v1/model-management/apim-targets/{gateway_profile_id}", "DELETE"),
         ("/api/v1/model-management/apim-targets/{gateway_profile_id}/removal-preview", "GET"),
-        ("/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync", "POST"),
+        ("/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-syncs", "POST"),
         ("/api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways", "POST"),
         ("/api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions",
          "POST"),
@@ -261,7 +261,7 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
             )
         )
     ]
-    assert len(publication_routes) == 12
+    assert len(publication_routes) == 13
     rollout_routes = [route for route in publication_routes if "/rollouts" in route.path]
     assert {(route.path, method) for route in rollout_routes for method in route.methods or ()} == {
         ("/api/v1/model-management/rollouts", "GET"),

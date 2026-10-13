@@ -30,6 +30,8 @@ from turnstile_core.integrations.apim_target_client_factory import (
     AzureApimPublisherClientResolver,
     AzureApimTargetProbeCredentialResolver,
     CompatibilityTargetProbeCredentialResolver,
+    LegacySettingsApimTargetClientConfigResolver,
+    _identity_sha256,
     apim_target_client_config_resolver,
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
@@ -102,6 +104,38 @@ def registered() -> InMemoryRepository:
         )
     )
     return repository
+
+
+def test_route_target_identity_preserves_public_settings_wrapper_and_binds_ledger_only() -> None:
+    repository = registered()
+    settings = configured(ledger_table_endpoint="https://unitstore.table.core.windows.net",
+                          ledger_table_name="TurnstileLedger")
+    original = apim_target_client_config_resolver(repository, settings, None).resolve(
+        TARGET, include_probe_credentials=False,
+    )
+    assert original.route_target_identity_sha256 == _identity_sha256({
+        "target_identity_sha256": original.target_identity_sha256,
+        "ledger_table_endpoint": settings.ledger_table_endpoint,
+        "ledger_table_name": settings.ledger_table_name,
+    })
+    changed = apim_target_client_config_resolver(repository, settings.model_copy(update={
+        "ledger_table_name": "UnitOtherLedger",
+    }), None).resolve(TARGET, include_probe_credentials=False)
+    assert original.target_identity_sha256 == changed.target_identity_sha256
+    assert original.route_target_identity_sha256 != changed.route_target_identity_sha256
+    assert original.settings.ledger_table_name == "TurnstileLedger"
+    legacy_settings = settings.model_copy(update={"apim_gateway_profile_id": TARGET})
+    legacy = LegacySettingsApimTargetClientConfigResolver(legacy_settings).resolve(TARGET)
+    assert legacy.route_target_identity_sha256 == _identity_sha256({
+        "target_identity_sha256": legacy.target_identity_sha256,
+        "ledger_table_endpoint": settings.ledger_table_endpoint,
+        "ledger_table_name": settings.ledger_table_name,
+    })
+    hidden = LegacySettingsApimTargetClientConfigResolver(legacy_settings).resolve(
+        TARGET, include_probe_credentials=False,
+    )
+    assert hidden.route_target_identity_sha256 == legacy.route_target_identity_sha256
+    assert hidden.settings.apim_probe_subscription_key is None
 
 
 def test_bootstrap_management_resolver_never_reads_or_copies_model_subscription_keys() -> None:

@@ -44,6 +44,7 @@ class ApimTargetClientConfig:
     target_identity_sha256: str
     enforce_identity_snapshot: bool
     settings: Settings = field(repr=False)
+    route_target_identity_sha256: str | None = None
 
 
 class ApimTargetClientConfigResolver(Protocol):
@@ -232,6 +233,11 @@ class LegacySettingsApimTargetClientConfigResolver:
                     ),
                 }
             ),
+            route_target_identity_sha256=_identity_sha256({
+                "target_identity_sha256": _identity_sha256(identity),
+                "ledger_table_endpoint": self._settings.ledger_table_endpoint,
+                "ledger_table_name": self._settings.ledger_table_name,
+            }),
         )
 
 
@@ -343,6 +349,11 @@ class RepositoryApimTargetClientConfigResolver:
             _identity_sha256(identity),
             not legacy_target,
             scoped,
+            route_target_identity_sha256=_identity_sha256({
+                "target_identity_sha256": _identity_sha256(identity),
+                "ledger_table_endpoint": settings.ledger_table_endpoint,
+                "ledger_table_name": settings.ledger_table_name,
+            }),
         )
 
 
@@ -355,6 +366,14 @@ class AzureApimPublisherClientResolver:
         self._config_resolver = config_resolver
         self._builder = builder or AzureApimPublisherClient
         self._clients: dict[tuple[UUID, str, bool], ApimPublisherClient] = {}
+
+    def close(self) -> None:
+        clients = {id(client): client for client in self._clients.values()}
+        self._clients.clear()
+        for client in clients.values():
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
 
     def resolve(
         self, gateway_profile_id: UUID, *, include_probe_credentials: bool = True,
@@ -377,6 +396,13 @@ class AzureApimPublisherClientResolver:
                 config.settings.apim_usage_observer_key_named_value,
             ),
         )
+
+
+class AzureApimGatewayManagementClientResolver(AzureApimPublisherClientResolver):
+    def resolve(
+        self, gateway_profile_id: UUID, *, include_probe_credentials: bool = False,
+    ) -> ResolvedApimPublisherClient:
+        return super().resolve(gateway_profile_id, include_probe_credentials=False)
 
 
 class AzureApimSubscriptionKeyClientResolver:

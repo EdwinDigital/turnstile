@@ -87,7 +87,14 @@ class BudgetDiagnostics:
                 and str(route.get("gateway_id")) == str(gateway_id)
                 and route.get("gateway_implementation") == "apim"
             ):
-                route = self.runtime._invocation_deployment_route(route)
+                resolved = self.runtime._invocation_route(self._request(
+                    route, "system-budget-diagnostic", str(uuid4()),
+                ))
+                if resolved is None:
+                    raise HTTPException(
+                        status_code=409, detail="The diagnostic route is unavailable"
+                    )
+                route = resolved
                 self._endpoint(gateway_id, str(route.get("gateway_base_url") or ""))
                 return route
         raise HTTPException(status_code=409, detail="An enabled registered text route is required")
@@ -453,7 +460,6 @@ class BudgetDiagnostics:
                     route,
                     request_id,
                     timeout_ms=8000,
-                    application_id=write.application_id,
                 )
                 correlation = invocation.correlation_id
             except HTTPException as error:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -17,6 +17,13 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .domain.application_access import MAX_TOKENS_PER_MINUTE
+from .domain.budget_counting import (
+    ApprovedModelCountContract,
+    BudgetOperation,
+    ModelRequestPolicyBinding,
+    ProtocolRequestPolicy,
+)
 from .domain.budget_delegation import BudgetDelegationTarget, BudgetDelegationTrust
 from .domain.image_profiles import ImageGenerationLimits
 
@@ -62,9 +69,19 @@ class Settings(BaseSettings):
     ledger_sync_enabled: bool = False
     budget_execution_enabled: bool = False
     budget_execution_target_ids: list[UUID] = Field(default_factory=list)
+    budget_request_policies: dict[UUID, dict[BudgetOperation, ProtocolRequestPolicy]] = Field(
+        default_factory=dict,
+    )
+    budget_model_request_policies: dict[UUID, dict[UUID, ModelRequestPolicyBinding]] = Field(
+        default_factory=dict,
+    )
+    budget_approved_model_contracts: dict[UUID, dict[UUID, ApprovedModelCountContract]] = Field(
+        default_factory=dict,
+    )
     budget_delegation_targets: dict[UUID, BudgetDelegationTarget] = Field(default_factory=dict)
     budget_delegation_trust: dict[UUID, BudgetDelegationTrust] = Field(default_factory=dict)
     budget_settlement_enabled: bool = False
+    budget_reservation_resolution_enabled: bool = False
     ledger_table_endpoint: str | None = None
     ledger_table_name: str = "TurnstileLedger"
     ledger_reservation_recovery_lag_minutes: int = Field(default=10, ge=6, le=120)
@@ -121,6 +138,7 @@ class Settings(BaseSettings):
     apim_probe_subscription_key: SecretStr | None = None
     apim_probe_subscription_id: str = "turnstile-publisher-probe"
     apim_regression_model_key: str = ""
+    controlled_gateway_bootstrap_api_resources: tuple[str, ...] = Field(default=(), max_length=8)
     apim_usage_observer_url: str | None = None
     apim_usage_observer_key_named_value: str | None = None
     apim_usage_observers: dict[UUID, ApimUsageObserverConfig] = Field(default_factory=dict)
@@ -129,6 +147,9 @@ class Settings(BaseSettings):
     # A normal publication advances through six leased steps. Thirty leaves propagation
     # headroom while still bounding a pathological crash loop.
     control_plane_max_attempts: int = Field(default=30, ge=6, le=60)
+    control_plane_probe_request_limits: dict[
+        UUID, Annotated[int, Field(ge=1, le=10_000, strict=True)]
+    ] = Field(default_factory=dict)
     gateway_release_retention_count: int = Field(default=20, ge=2, le=1000)
     gateway_release_retention_days: int = Field(default=180, ge=1, le=3650)
     gateway_failed_release_retention_days: int = Field(default=30, ge=1, le=3650)
@@ -139,8 +160,18 @@ class Settings(BaseSettings):
         default=100_000, ge=1
     )
     gateway_application_default_tokens_per_minute: int = Field(
-        default=100_000, ge=1
+        default=100_000, ge=1, le=MAX_TOKENS_PER_MINUTE,
     )
+
+    @field_validator("gateway_application_default_tokens_per_minute", mode="before")
+    @classmethod
+    def validate_application_tpm_default(cls, value: object) -> object:
+        if type(value) is int or (
+            isinstance(value, str) and value.isascii() and value.isdecimal()
+        ):
+            return value
+        raise ValueError("Application TPM must be a positive integer")
+
     apim_subscription_agent_map: dict[str, dict[str, str]] = Field(
         default_factory=dict
     )
@@ -256,7 +287,22 @@ class Settings(BaseSettings):
             raise ValueError("Delegation trust must be bound to enabled execution targets")
         if selected and not self.budget_execution_enabled:
             raise ValueError("Budget execution targets require the execution reader gate")
-        if self.budget_settlement_enabled and (
+        if self.budget_request_policies and not self.budget_execution_enabled:
+            raise ValueError("Budget request policies require the execution reader gate")
+        if self.budget_model_request_policies and not self.budget_execution_enabled:
+            raise ValueError("Model request policies require the execution reader gate")
+        if self.budget_approved_model_contracts and not self.budget_execution_enabled:
+            raise ValueError("Approved model contracts require the execution reader gate")
+        if any(
+            model_id != approved.contract.model_id
+            for contracts in self.budget_approved_model_contracts.values()
+            for model_id, approved in contracts.items()
+        ):
+            raise ValueError("Approved model contract identity does not match its key")
+        if (selected and self.apim_legacy_target_compatibility_enabled
+            and self.apim_gateway_profile_id in selected):
+            raise ValueError("Budget execution requires a separately adopted schema-two target")
+        if (self.budget_settlement_enabled or self.budget_reservation_resolution_enabled) and (
             not self.budget_execution_enabled or not (self.ledger_table_endpoint or "").strip()
             or self.data_backend != "postgresql"
         ):

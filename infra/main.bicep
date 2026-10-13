@@ -311,6 +311,13 @@ module apimIntegration 'modules/apim-integration.bicep' = if (deployApimBootstra
     employeeTokensPerMinute: employeeTokensPerMinute
     ledgerTableEndpoint: dataPlane.outputs.ledgerTableEndpoint
     ledgerTableName: ledgerTableName
+    ledgerTableResourceId: dataPlane.outputs.ledgerTableResourceId
+    routeTableResourceId: dataPlane.outputs.routeTableResourceId
+    credentialVaultResourceId: dataPlane.outputs.credentialVaultResourceId
+    platformGovernanceReaderPrincipalIds: concat(
+      [dataPlane.outputs.apiPrincipalId],
+      provisionControlPlane ? [controlPlane!.outputs.principalId] : []
+    )
     employeeOrgId: employeeOrgId
     employeeOrgName: employeeOrgName
     employeeDepartmentMap: employeeDepartmentMap
@@ -332,6 +339,7 @@ module controlPlane 'modules/control-plane-function.bicep' = if (provisionContro
     virtualNetworkName: 'vnet-${resourcePrefix}-${suffix}'
     functionSubnetName: 'snet-flex-control'
     keyVaultName: dataPlane.outputs.keyVaultName
+    credentialVaultName: dataPlane.outputs.credentialVaultName
     databaseUrlSecretUri: dataPlane.outputs.databaseUrlSecretUri
     apimProbeSubscriptionKeySecretUri: dataPlane.outputs.apimProbeSubscriptionKeySecretUri
     credentialEncryptionKeySecretUri: dataPlane.outputs.credentialEncryptionKeySecretUri

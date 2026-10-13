@@ -3,14 +3,15 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, patch, sentinel
+from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from tests.backend.model_platform.control_plane_support import (
     GatewayControlPlaneService,
@@ -23,9 +24,26 @@ from turnstile_core.domain.application_access import (
     GatewayApplicationDiscoveryItem,
     UsageApplicationAttribution,
 )
+from turnstile_core.domain.budget_completion import normalize_terminal_rejection
 from turnstile_core.domain.control_plane import publication_model_id
-from turnstile_core.domain.ledger import LedgerAdmissionReceipt, LedgerAttemptIdentity, LedgerScope
-from turnstile_core.domain.models import ModelIdentity, ModelPrice, ModelPriceTier, TokenUsageRecord
+from turnstile_core.domain.gateway_targets import (
+    UsageGatewayAttribution,
+    UsageGatewayAttributionSource,
+    canonical_usage_id_v2,
+)
+from turnstile_core.domain.ledger import (
+    BudgetPriceProjection,
+    LedgerAdmissionReceipt,
+    LedgerAttemptIdentity,
+    LedgerScope,
+)
+from turnstile_core.domain.models import (
+    ModelIdentity,
+    ModelPrice,
+    ModelPriceTier,
+    TokenUsageRecord,
+    UsageEvent,
+)
 from turnstile_core.ingestion.processor import (
     CoefficientResolver,
     UsageProcessor,
@@ -34,6 +52,7 @@ from turnstile_core.ingestion.processor import (
 from turnstile_core.integrations.apim_publisher_client import AzureApimPublisherClient
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
+from turnstile_core.persistence.repository_budget_execution import PostgreSqlBudgetExecutionMixin
 from turnstile_core.services.application_access import ApplicationAccessService
 
 GATEWAY_ID = UUID("10000000-0000-4000-8000-000000000001")
@@ -47,6 +66,7 @@ class RecordingRepository:
     ) -> None:
         self.records: list[TokenUsageRecord] = []
         self.execution_writes: list[dict[str, Any]] = []
+        self.gateway_attributions: list[UsageGatewayAttribution] = []
         self.prices = prices or {}
         self.identities = identities or {}
         self.price_reads = 0
@@ -54,17 +74,22 @@ class RecordingRepository:
 
     def write_token_usage(
         self, record: TokenUsageRecord, application: object | None = None, *,
+        gateway: UsageGatewayAttribution | None = None,
+        terminal_observation: dict[str, Any] | None = None,
         execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
         usage_complete: bool = False, gateway_profile_id: UUID | None = None,
         native_gateway_id: str | None = None, evidence_source: str = "apim",
     ) -> None:
         assert application is None
         self.records.append(record)
+        if gateway is not None:
+            self.gateway_attributions.append(gateway)
         if execution_receipts:
             self.execution_writes.append({
                 "receipts": execution_receipts, "complete": usage_complete,
                 "gateway_profile_id": gateway_profile_id, "native_gateway_id": native_gateway_id,
                 "evidence_source": evidence_source,
+                "terminal_observation": terminal_observation,
             })
 
     def model_prices(self) -> dict[str, ModelPrice]:
@@ -113,6 +138,108 @@ def test_calculate_et() -> None:
     assert calculate_et(1000, 200, 100, 0.5) == 710
 
 
+def schema_two_event(**overrides: object) -> dict[str, object]:
+    correlation_id = "unit-correlation"
+    service_id = (
+        "/subscriptions/unit/resourceGroups/unit/providers/Microsoft.ApiManagement/service/unit"
+    )
+    usage_id = canonical_usage_id_v2(GATEWAY_ID, service_id, "managed", correlation_id)
+    value = event(
+        id=usage_id, usage_id=usage_id, event_schema_version=2, correlation_id=correlation_id,
+        gateway_profile_id=str(GATEWAY_ID), native_gateway_id="managed",
+        native_gateway_instance_id="managed", gateway_is_managed=True,
+        apim_service_id=service_id, apim_region="Unit Region", api_revision="1",
+    )
+    value.update(overrides)
+    return value
+
+
+@pytest.mark.parametrize("changes", [
+    {"usage_id": None}, {"id": "different"}, {"correlation_id": None},
+    {"native_gateway_id": None}, {"gateway_is_managed": False},
+    {"native_gateway_instance_id": "other"}, {"api_revision": None},
+])
+def test_gateway_schema_two_rejects_incomplete_or_conflicting_identity(
+    changes: dict[str, Any],
+) -> None:
+    with pytest.raises(ValidationError):
+        UsageEvent.model_validate(schema_two_event(**changes))
+
+
+def test_gateway_schema_two_canonical_identity_is_target_and_native_scoped() -> None:
+    value = schema_two_event()
+    parsed = UsageEvent.model_validate(value)
+    assert parsed.usage_id == value["id"]
+    assert canonical_usage_id_v2(GATEWAY_ID, " SERVICE ", " Managed ", " CORRELATION ") == (
+        canonical_usage_id_v2(GATEWAY_ID, "service", "managed", "correlation")
+    )
+    assert canonical_usage_id_v2(GATEWAY_ID, "service", "managed", "correlation") != (
+        canonical_usage_id_v2(GATEWAY_ID, "service", "unit-shgw", "correlation")
+    )
+    assert UsageEvent.model_validate(event()).event_schema_version == 1
+
+
+def test_gateway_sidecar_and_exact_usd_share_postgres_usage_transaction() -> None:
+    raw = schema_two_event()
+    price = ModelPrice(input_price_per_million=10, cached_price_per_million=1,
+                       cache_write_price_per_million=20, output_price_per_million=30)
+    record = UsageProcessor(RecordingRepository(prices={"gpt-4.1-mini": price}),
+                            CoefficientResolver({})).normalize(raw)
+    assert record is not None and record.usd_cost == Decimal("0.0132")
+    attribution = UsageGatewayAttribution.model_validate({
+        "usage_id": record.id, "apim_target_id": GATEWAY_ID, "native_gateway_id": "managed",
+        "is_managed": True, "apim_service_id": raw["apim_service_id"],
+        "apim_region": raw["apim_region"], "api_revision": "1",
+        "attribution_source": "eventhub", "observed_at": record.ts,
+    })
+    repository = PostgreSqlOpsDbProxy("postgresql://unused", pool_min_size=0)
+    with patch.object(repository, "_connection") as connect, \
+            patch.object(repository, "_write_usage_gateway_attribution") as sidecar:
+        connection = connect.return_value.__enter__.return_value
+        connection.execute.return_value.fetchall.return_value = []
+        repository.write_token_usage(record, gateway=attribution)
+        connection.transaction.assert_called_once()
+        sidecar.assert_called_once_with(connection, attribution)
+        upsert = next(call for call in connection.execute.call_args_list
+                      if "INSERT INTO token_usage AS existing" in call.args[0])
+        assert upsert.args[1]["usd_cost"] == Decimal("0.0132")
+        assert "ELSE existing.usd_cost END" in upsert.args[0]
+
+
+def test_gateway_sidecar_failure_restores_in_memory_usage_and_receipt_state() -> None:
+    record = UsageProcessor(RecordingRepository(), CoefficientResolver({})).normalize(
+        schema_two_event(),
+    )
+    assert record is not None
+    attribution = UsageGatewayAttribution.model_validate({
+        "usage_id": record.id, "apim_target_id": GATEWAY_ID, "native_gateway_id": "managed",
+        "is_managed": True, "apim_service_id": "unit-service", "apim_region": "unit",
+        "api_revision": "1", "attribution_source": "eventhub", "observed_at": record.ts,
+    })
+    repository = InMemoryRepository()
+    with pytest.raises(ValueError, match="Unknown APIM target"):
+        repository.write_token_usage(record, gateway=attribution)
+    assert not repository.usage_records
+    assert not repository.usage_gateway_attributions
+    assert not repository.budget_evidence_received_at
+
+
+def test_gateway_schema_two_reader_rejects_wrong_digest_and_passes_real_identity() -> None:
+    repository = RecordingRepository()
+    processor = UsageProcessor(repository, CoefficientResolver({}))
+    wrong_id = "turnstile-v2-" + "0" * 64
+    assert processor.process(schema_two_event(id=wrong_id, usage_id=wrong_id)) is False
+    assert not repository.records and not repository.gateway_attributions
+    assert processor.process(schema_two_event()) is True
+    attribution = repository.gateway_attributions[0]
+    assert attribution.usage_id == repository.records[0].id == schema_two_event()["id"]
+    assert attribution.apim_target_id == GATEWAY_ID
+    assert attribution.native_gateway_id == "managed" and attribution.is_managed is True
+    assert attribution.native_instance_id == "managed"
+    assert processor.process(event(id="legacy", correlation_id="legacy")) is True
+    assert len(repository.gateway_attributions) == 1
+
+
 def execution_event(**overrides: object) -> dict[str, object]:
     receipt = LedgerAdmissionReceipt(
         identity=LedgerAttemptIdentity(
@@ -123,7 +250,7 @@ def execution_event(**overrides: object) -> dict[str, object]:
             admitted_at=datetime(2026, 7, 17, tzinfo=UTC),
         ), epoch=UUID(int=1), reserved_tokens=2000,
     )
-    result = event(
+    result = schema_two_event(
         user_id="unit@example.com", model_id="unit-model", model="unit-model",
         correlation_id="unit-correlation", gateway_profile_id=str(GATEWAY_ID),
         native_gateway_id="managed", budget_execution=[receipt.model_dump(mode="json")],
@@ -145,7 +272,7 @@ def test_execution_usage_wakeup_runs_only_after_durable_write(source: str) -> No
     processor = UsageProcessor(repository, CoefficientResolver({}), execution_enabled=True,
                                settle_committed_usage=settle)
     assert processor.process(execution_event(usage_event_source=source))
-    assert completed == ["unit-correlation"]
+    assert completed == [schema_two_event()["id"]]
     assert repository.execution_writes[0]["complete"] is True
     assert repository.execution_writes[0]["evidence_source"] == source
 
@@ -164,7 +291,7 @@ def test_execution_incomplete_usage_never_becomes_strong_evidence(changes: dict[
 
 def test_execution_disabled_reader_and_in_memory_repository_refuse_receipts() -> None:
     repository = RecordingRepository()
-    with pytest.raises(RuntimeError, match="enabled execution reader"):
+    with pytest.raises(RuntimeError, match="enabled schema-2 reader"):
         UsageProcessor(repository, CoefficientResolver({})).process(execution_event())
     assert not repository.records
     memory = InMemoryRepository()
@@ -177,8 +304,7 @@ def test_execution_disabled_reader_and_in_memory_repository_refuse_receipts() ->
 
 @pytest.mark.parametrize("changes", [
     {"ingest_source": "copilot_cli"}, {"request_source": "copilot-assistant"},
-    {"usage_event_source": "backfill"}, {"native_gateway_id": None},
-    {"gateway_profile_id": None},
+    {"usage_event_source": "backfill"},
 ])
 def test_execution_rejects_untrusted_event_attribution_before_write(
     changes: dict[str, Any],
@@ -189,6 +315,112 @@ def test_execution_rejects_untrusted_event_attribution_before_write(
             execution_event(**changes)
         )
     assert not repository.records
+
+
+@pytest.mark.parametrize("changes", [{"native_gateway_id": None}, {"gateway_profile_id": None}])
+def test_execution_missing_schema_two_attribution_is_skipped_before_write(
+    changes: dict[str, Any],
+) -> None:
+    repository = RecordingRepository()
+    assert UsageProcessor(repository, CoefficientResolver({}), execution_enabled=True).process(
+        execution_event(**changes),
+    ) is False
+    assert not repository.records
+
+
+def test_execution_terminal_reader_retains_unknown_usage_and_observation() -> None:
+    rejection = normalize_terminal_rejection(
+        "microsoft-decision", 400, "application/json", {"error": {
+            "type": "invalid_request_error", "code": "question_invalid", "param": None,
+        }},
+    )
+    assert rejection is not None
+    observed = {"source": "apim", "observed_at": datetime(2026, 7, 17, tzinfo=UTC).isoformat(),
+                "rejection": rejection}
+    repository = RecordingRepository()
+    processor = UsageProcessor(repository, CoefficientResolver({}), execution_enabled=True)
+    assert processor.process(execution_event(
+        input_tokens=None, cached_tokens=None, cache_write_tokens=None, output_tokens=None,
+        tokens_consumed=None, estimated=True, usage_complete=False, status_code=400,
+        status="400", budget_terminal=observed,
+    )) is True
+    assert repository.records[0].usd_cost is None and repository.records[0].estimated is True
+    assert repository.execution_writes[0]["complete"] is False
+    assert repository.execution_writes[0]["terminal_observation"] == observed
+
+
+def test_execution_usd_admission_replay_cannot_change_reserved_amount() -> None:
+    model_id = UUID(int=77)
+    price = ModelPrice(input_price_per_million=10, cached_price_per_million=1,
+                       cache_write_price_per_million=20, output_price_per_million=30)
+    projection = BudgetPriceProjection.create(model_id, price, datetime(2026, 7, 17, tzinfo=UTC))
+    raw = execution_event(model_id=str(model_id))
+    receipts = cast(list[dict[str, Any]], raw["budget_execution"])
+    receipt = LedgerAdmissionReceipt.model_validate({
+        **receipts[0], "identity": {**receipts[0]["identity"], "model_id": str(model_id)},
+        "budget_mode": "usd", "reserved_usd": "0.5",
+        "price_snapshot": projection.model_dump(mode="json"),
+    })
+    record = UsageProcessor(RecordingRepository(), CoefficientResolver({})).normalize({
+        **raw, "budget_execution": [receipt.model_dump(mode="json")],
+    })
+    assert record is not None
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.side_effect = [
+        {"epoch": receipt.epoch, "state": "active", "admitted_after": receipt.identity.admitted_at},
+        {"identity": receipt.identity.model_dump(mode="json"), "epoch": receipt.epoch,
+         "reserved_tokens": receipt.reserved_tokens, "budget_mode": "usd",
+         "reserved_usd": Decimal("0.6"), "price_snapshot": projection.model_dump(mode="json")},
+    ]
+    gateway = UsageGatewayAttribution(
+        usage_id=record.id, apim_target_id=GATEWAY_ID, native_gateway_id="managed",
+        native_instance_id="managed", is_managed=True, apim_service_id="unit-service",
+        apim_region="unit-region", api_revision="1",
+        attribution_source=UsageGatewayAttributionSource.EVENT_HUB,
+        observed_at=record.ts,
+    )
+    with pytest.raises(ValueError, match="admission is immutable"):
+        PostgreSqlBudgetExecutionMixin._write_execution_receipts(
+            connection, record, record.id, None, gateway, [receipt], True,
+        )
+    assert not any("INSERT INTO budget_execution_attempt" in call.args[0]
+                   for call in connection.execute.call_args_list)
+
+
+def test_usd_normalization_preserves_admitted_price_instead_of_current_registry() -> None:
+    model_id = UUID(int=77)
+    price = ModelPrice(input_price_per_million=10, cached_price_per_million=1,
+                       cache_write_price_per_million=20, output_price_per_million=30)
+    projection = BudgetPriceProjection.create(model_id, price, datetime(2026, 7, 17, tzinfo=UTC))
+    raw = schema_two_event(model_id=str(model_id), model="unit-priced-model", input_tokens=100,
+                           cached_tokens=200, cache_write_tokens=50, output_tokens=100,
+                           tokens_consumed=400, usage_complete=True, usd_cost="0.00515",
+                           budget_price_projection=projection.model_dump(mode="json"))
+    repository = RecordingRepository(prices={str(model_id): ModelPrice(
+        input_price_per_million=999, cached_price_per_million=999,
+        cache_write_price_per_million=999, output_price_per_million=999,
+    )})
+    record = UsageProcessor(repository, CoefficientResolver({})).normalize(raw)
+    assert record is not None
+    assert record.id == raw["usage_id"] and record.usd_cost == Decimal("0.00515")
+    assert record.usd_price_sha256 == projection.price_sha256
+    assert record.usd_price_updated_at == projection.updated_at
+    assert record.input_price_per_million == 10
+    with pytest.raises(ValueError, match="admission price snapshot"):
+        UsageProcessor(repository, CoefficientResolver({})).normalize(
+            {**raw, "usd_cost": "0.00516"},
+        )
+
+
+@pytest.mark.parametrize("changes", [{"output_tokens": None}, {"input_tokens": True},
+                                    {"tokens_consumed": 999}, {"estimated": True}])
+def test_usd_unknown_or_contradictory_usage_keeps_amount_null(changes: dict[str, Any]) -> None:
+    repository = RecordingRepository(prices={"gpt-4.1-mini": ModelPrice(
+        input_price_per_million=10, cached_price_per_million=1,
+        cache_write_price_per_million=20, output_price_per_million=30,
+    )})
+    record = UsageProcessor(repository, CoefficientResolver({})).normalize(event(**changes))
+    assert record is not None and record.usd_cost is None
 
 
 def test_execution_failed_wakeup_keeps_committed_usage_for_outbox_retry(
@@ -660,7 +892,7 @@ def test_postgres_reuses_attempt_identity_for_usage_and_attribution(
         if existing_id is not None
         else []
     )
-    application = cast(UsageApplicationAttribution, sentinel.application)
+    application = cast(UsageApplicationAttribution, MagicMock(application_id=UUID(int=88)))
     expected_id = existing_id or record.id
     with (
         patch.object(repository, "_connection") as connect,
@@ -670,8 +902,14 @@ def test_postgres_reuses_attempt_identity_for_usage_and_attribution(
         repository.write_token_usage(record, application)
         attribute.assert_called_once_with(connection, expected_id, application)
 
-    assert connection.execute.call_count == 3
-    lock, lookup, write = connection.execute.call_args_list
+    assert connection.execute.call_count == 5
+    person_lock, application_lock, lock, lookup, write = connection.execute.call_args_list
+    assert person_lock.args[1] == (
+        f"budget-reservation:person:{record.user_id}:{record.correlation_id}",
+    )
+    assert application_lock.args[1] == (
+        f"budget-reservation:application:{application.application_id}:{record.correlation_id}",
+    )
     assert lock.args[1] == (f"apim-attempt:{record.correlation_id}",)
     assert "LIMIT 2 FOR UPDATE" in lookup.args[0]
     assert lookup.args[1] == (record.correlation_id, record.id)
@@ -766,7 +1004,7 @@ def test_postgres_runtime_authority_is_a_transient_bound_parameter(authoritative
     assert "runtime_authoritative" not in statement.split(") VALUES", 1)[0]
     assert "existing.runtime IS DISTINCT FROM EXCLUDED.runtime" in statement
     assert "input_tokens = CASE WHEN existing.estimated" in statement
-    assert connection.execute.call_count == 3
+    assert connection.execute.call_count == 4
 
 
 @pytest.mark.parametrize("failure", ["ambiguous", "identity", "attribution"])

@@ -1,3 +1,5 @@
+
+
 export type ChartKind = "bar" | "line" | "table" | "kpi"
 export type ChartSeries = { key: string; label: string }
 export type ChartQuery = { tool: string; arguments: Record<string, unknown> }
@@ -31,10 +33,15 @@ export type AssistantStep = {
 export type AssistantTurn = { role: "user" | "assistant"; content: string }
 export type AssistantSource = "apim" | "github-copilot"
 
+
+
+
+
 export type AssistantReply = {
   conversation_id: string
   message: string
   charts: ChartSpec[]
+
   steps: AssistantStep[]
   latency_ms: number
   model: string

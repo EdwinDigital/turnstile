@@ -14,7 +14,7 @@ def test_image_frontend_unit_cases() -> None:
             "--experimental-strip-types",
             "--test",
             str(Path(__file__).with_name("image-generation.test.mjs")),
-            str(Path(__file__).with_name("model-publication-dialog.test.mjs")),
+            str(Path(__file__).with_name("model-publication-connections.test.mjs")),
         ],
         cwd=REPOSITORY_ROOT,
         check=False,
@@ -31,7 +31,9 @@ def test_image_invocation_keeps_results_in_memory_and_excludes_text_models() -> 
     assert 'capabilities.includes("image_generation") === imageMode' in page
     assert "n: 1, stream: false" in page
     assert "image_configuration_schema_version === 4" in page
-    assert "setImageResult(null)" in page and 'setPrompt("")' in page
+    assert "setImageResult(null)" in page
+    assert 'setPrompt(next === "decision" ?' in page
+    assert 'DECISION_STATE_SAMPLE) : "")' in page
     assert "URL.createObjectURL" in result and "URL.revokeObjectURL" in result
     assert "naturalWidth" in result and "naturalHeight" in result
     for forbidden in (
@@ -50,12 +52,16 @@ def test_image_editor_requires_prices_and_preserves_operation() -> None:
         FRONTEND_SOURCE / "components/model-management/model-publication-dialog.tsx"
     ).read_text()
     assert "[draft.inputPrice, draft.cacheReadPrice, draft.outputPrice]" in editor
-    assert "if (imagePriceMissing) return" in editor
-    assert "disabled={busy || imageGeneration}" in editor
-    assert 'operation: imageGeneration ? "image_generation" : undefined' in publication
-    assert "[inputPrice, cacheReadPrice, outputPrice]" in publication
+    assert "if (busy || !dirty || validation || imagePriceMissing) return" in editor
+    assert "disabled={busy || imageGeneration || decision}" in editor
+    assert (
+        'operation: decision ? "decision" : imageGeneration ? "image_generation" : undefined'
+        in publication
+    )
+    assert "[inputPrice, outputPrice, cacheReadPrice]" in publication
     assert "context_window: imageGeneration ? null" in publication
     assert (
-        "cache_write_cost_per_million: imageGeneration || pricing.contextPricingPreview ? null"
+        "cache_write_cost_per_million: decision || imageGeneration || "
+        "pricing.contextPricingPreview ? null"
         in publication
     )

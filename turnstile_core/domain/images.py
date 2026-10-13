@@ -38,6 +38,7 @@ class ResolvedImageOptions(StrictModel):
 
 
 class ImageGenerationOptions(ResolvedImageOptions):
+
     @field_validator("n", mode="before")
     @classmethod
     def require_integer_count(cls, value: object) -> object:
@@ -54,11 +55,11 @@ class ImageGenerationOptions(ResolvedImageOptions):
 
     def resolve(self, value: object) -> ResolvedImageOptions:
         validate_image_profile(value)
-        return ResolvedImageOptions.model_validate(
-            self.model_dump(exclude={
+        return ResolvedImageOptions.model_validate(self.model_dump(
+            exclude={
                 "metadata", "model_id", "runtime_id", "gateway_profile_id", "gateway_deployment_id",
-            }, exclude_unset=True)
-        )
+            }, exclude_unset=True,
+        ))
 
 
 class ImageInvocationRequest(ImageGenerationOptions):
@@ -111,6 +112,9 @@ class ImageInvocationResponse(StrictModel):
     runtime: str
     model: str
     gateway: str
+    gateway_profile_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+    native_gateway_id: str | None = None
     latency_ms: int = Field(ge=0)
     data: list[GeneratedImage] = Field(min_length=1, max_length=1, repr=False)
     size: str

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from threading import Lock
+from threading import Event, Lock
 from time import monotonic
 from typing import Any
 from urllib.parse import quote
@@ -25,10 +25,12 @@ from ..domain.model_availability import (
     ModelAvailabilityCoverage,
     ModelAvailabilityNodeEnrollment,
     ModelAvailabilityNodeLease,
+    ModelAvailabilityStagedProgram,
     ModelAvailabilityState,
     ModelAvailabilityTargetResult,
     ModelAvailabilityUnavailable,
 )
+from ..domain.storage_routes import ProgramCapabilityProof, document_digest
 from .apim_model_availability import (
     AVAILABILITY_PROBE_PREFIX,
     FILTER_CATALOG,
@@ -72,18 +74,18 @@ def _verify_diagnostic_pairs(
     diagnostics: Mapping[str, tuple[str, str]],
 ) -> None:
     expected = {AVAILABILITY_PROBE_PREFIX + name: surface for name, surface in inference.items()}
-    if not expected or expected != diagnostics:
+    if not expected or diagnostics != expected:
         raise ModelAvailabilityUnavailable("Availability diagnostic surface coverage is incomplete")
 
 
 def _excludes_api(condition: str, api_id: str) -> bool:
     prefix = expression_tokens("@(JArray.Parse(")
-    suffix = expression_tokens(").Values<string>().Contains(context.Api.Id.Split(';')[0]))")
+    suffix = expression_tokens(
+        ").Values<string>().Contains(context.Api.Id.Split(';')[0]))",
+    )
     tokens = expression_tokens(condition)
-    if (
-        len(tokens) != len(prefix) + 1 + len(suffix)
-        or tokens[: len(prefix)] != prefix
-        or tokens[-len(suffix) :] != suffix
+    if len(tokens) != len(prefix) + 1 + len(suffix) or (
+        tokens[: len(prefix)] != prefix or tokens[-len(suffix) :] != suffix
     ):
         return False
     try:
@@ -104,32 +106,31 @@ def _excludes_api(condition: str, api_id: str) -> bool:
 def _no_bypass(root: ET.Element, api_id: str | None = None) -> None:
     if api_id is not None:
         root = deepcopy(root)
-        for choose in root.iter("choose"):
+        for choose in list(root.iter("choose")):
             for branch in list(choose):
                 if branch.tag == "when" and _excludes_api(branch.get("condition", ""), api_id):
                     choose.remove(branch)
     if root.tag == "policies":
-        if any(isinstance(node.tag, str) and node.tag.startswith("cache-") for node in root.iter()):
+        if any(node.tag.startswith("cache-") for node in root.iter() if isinstance(node.tag, str)):
             raise ModelAvailabilityUnavailable("Availability inheritance or cache is unverified")
         inbound = root.find("inbound")
         if inbound is None:
             raise ModelAvailabilityUnavailable("Inherited inbound policy is missing")
         root = inbound
-    prohibited = {
-        "cache-lookup",
-        "cache-store",
-        "cache-lookup-value",
-        "cache-store-value",
-        "include-fragment",
-        "forward-request",
-        "llm-token-limit",
-        "rate-limit-by-key",
-        "rate-limit",
-        "quota-by-key",
-        "quota",
-    }
     for node in root.iter():
-        if node.tag in prohibited:
+        if node.tag in {
+            "cache-lookup",
+            "cache-store",
+            "cache-lookup-value",
+            "cache-store-value",
+            "include-fragment",
+            "forward-request",
+            "llm-token-limit",
+            "rate-limit-by-key",
+            "rate-limit",
+            "quota-by-key",
+            "quota",
+        }:
             raise ModelAvailabilityUnavailable("Availability inheritance or cache is unverified")
         if node.tag == "return-response" and not is_pre_admission_denial(root, node):
             raise ModelAvailabilityUnavailable("Inherited policy can bypass availability")
@@ -157,39 +158,36 @@ def inspect_availability_operation(
         raise ModelAvailabilityUnavailable("Operation does not inherit its availability guard")
     base = inbound.find("base")
     assert base is not None
-    for name, value in (
+    for name, expected in (
         ("availabilityTargetId", str(target_id)),
         ("availabilityApiId", api_id),
         ("availabilityApiRevision", revision),
         ("availabilitySurfaceKind", "catalog" if catalog else "inference"),
     ):
         nodes = root.findall(f".//set-variable[@name='{name}']")
-        if (
-            len(nodes) != 1
-            or nodes[0] not in list(inbound)
-            or nodes[0].get("value") != value
-            or list(inbound).index(nodes[0]) > list(inbound).index(base)
-        ):
+        if len(nodes) != 1 or nodes[0] not in list(inbound) or nodes[0].get("value") != expected:
             raise ModelAvailabilityUnavailable("Operation availability identity does not match")
-    for name, expected in (
-        ("availabilitySurfaceDigest", availability_operation_digest(root)),
-        ("availabilityCapabilityDigest", None),
+        if list(inbound).index(nodes[0]) > list(inbound).index(base):
+            raise ModelAvailabilityUnavailable("Operation availability identity is too late")
+    surface = inbound.find("set-variable[@name='availabilitySurfaceDigest']")
+    capability = inbound.find("set-variable[@name='availabilityCapabilityDigest']")
+    if (
+        surface is None
+        or surface.get("value") != availability_operation_digest(root)
+        or capability is None
+        or re.fullmatch(r"[0-9a-f]{64}", capability.get("value", "")) is None
+        or list(inbound).index(capability) > list(inbound).index(base)
+        or list(inbound).index(surface) > list(inbound).index(base)
+        or len(root.findall(".//set-variable[@name='availabilitySurfaceDigest']")) != 1
+        or len(root.findall(".//set-variable[@name='availabilityCapabilityDigest']")) != 1
     ):
-        nodes = root.findall(f".//set-variable[@name='{name}']")
-        if (
-            len(nodes) != 1
-            or nodes[0] not in list(inbound)
-            or list(inbound).index(nodes[0]) > list(inbound).index(base)
-            or re.fullmatch(r"[0-9a-f]{64}", nodes[0].get("value", "")) is None
-            or expected is not None
-            and nodes[0].get("value") != expected
-        ):
-            raise ModelAvailabilityUnavailable("Operation capability evidence is inconsistent")
-    prefix = ET.Element("inbound")
+        raise ModelAvailabilityUnavailable("Operation capability evidence is inconsistent")
+    before_base = ET.Element("inbound")
     for node in list(inbound)[: list(inbound).index(base)]:
-        if node.tag != "set-variable" or not node.get("name", "").startswith("availability"):
-            prefix.append(node)
-    _no_bypass(prefix)
+        if node.tag == "set-variable" and node.get("name", "").startswith("availability"):
+            continue
+        before_base.append(node)
+    _no_bypass(before_base)
     if any(
         node.tag
         in {
@@ -210,14 +208,15 @@ def inspect_availability_operation(
             or list(inbound).index(fixed_models[0]) > list(inbound).index(base)
         ):
             raise ModelAvailabilityUnavailable("Fixed operation model identity is invalid")
-        resolver_expression = RESOLVE_FIXED_MODEL if fixed_models else RESOLVE_MODEL
-        resolver = root.findall(".//set-variable[@name='availabilityModelId']")
+        resolver = RESOLVE_FIXED_MODEL if fixed_models else RESOLVE_MODEL
+        variables = root.findall(".//set-variable[@name='availabilityModelId']")
         if (
-            len(resolver) != 1
-            or resolver[0] not in list(inbound)
-            or expression_tokens(resolver[0].get("value", ""))
-            != expression_tokens(resolver_expression)
-            or list(inbound).index(resolver[0]) > list(inbound).index(base)
+            len(variables) != 1
+            or variables[0] not in list(inbound)
+            or (
+                expression_tokens(variables[0].get("value", "")) != expression_tokens(resolver)
+                or list(inbound).index(variables[0]) > list(inbound).index(base)
+            )
         ):
             raise ModelAvailabilityUnavailable("Operation model identity resolver is unverified")
         routes = root.findall(".//set-variable[@name='availabilityRoutes']")
@@ -248,6 +247,7 @@ def inspect_availability_operation(
             ):
                 raise ModelAvailabilityUnavailable("Operation serving scope is invalid")
         return values
+    results = root.findall(".//set-variable[@name='availabilityCatalogResult']")
     node_guard = next(
         (
             node
@@ -263,9 +263,8 @@ def inspect_availability_operation(
         node_admission_guard()
     ):
         raise ModelAvailabilityUnavailable("Catalog node admission is unverified")
-    results = root.findall(".//set-variable[@name='availabilityCatalogResult']")
     scopes = root.findall(".//set-variable[@name='availabilityCatalogScope']")
-    if not results or len(results) != len(scopes):
+    if not results or len(scopes) != len(results):
         raise ModelAvailabilityUnavailable("Catalog is not availability-filtered")
     expected_read = ET.Element("inbound")
     expected_read.extend(catalog_read())
@@ -290,8 +289,10 @@ def inspect_availability_operation(
             and status.get("code") == "200"
             and (
                 "availabilityCatalogResult" not in (response.findtext("set-body") or "")
-                or response.findtext("set-header[@name='Cache-Control']/value")
-                != "no-store, max-age=0"
+                or (
+                    response.findtext("set-header[@name='Cache-Control']/value")
+                    != "no-store, max-age=0"
+                )
             )
         ):
             raise ModelAvailabilityUnavailable("Catalog can return stale or unfiltered results")
@@ -311,11 +312,54 @@ class ModelAvailabilityNodeVerifier:
         self._client, self._key, self._store = client, key, store
         self._before_request = before_request
         self._store_digest = hashlib.sha256(
-            (table_endpoint.rstrip("/") + "|" + table_name).encode()
+            (table_endpoint.rstrip("/") + "|" + table_name).encode(),
         ).hexdigest()
 
+    def verify(
+        self,
+        endpoint: str,
+        lease: ModelAvailabilityNodeLease,
+        surfaces: Mapping[str, str],
+        *, valid_until: datetime | None = None,
+    ) -> ModelAvailabilityNodeLease:
+        if self._store is None:
+            raise ModelAvailabilityUnavailable("Node lease store is unavailable")
+        self.attest(endpoint, {
+            "target": str(lease.target_id), "revision": lease.revision,
+            "gateway": lease.native_gateway_id, "instance": lease.instance_id,
+            "capability": lease.capability_digest,
+        }, surfaces)
+        now = datetime.now(UTC).replace(microsecond=0)
+        expires_at = now + timedelta(seconds=120)
+        if valid_until is not None:
+            expires_at = min(expires_at, valid_until.replace(microsecond=0))
+            if expires_at <= datetime.now(UTC):
+                raise ModelAvailabilityUnavailable("Node management evidence expired")
+        verified = lease.model_copy(
+            update={"issued_at": now, "expires_at": expires_at}
+        )
+        current = self._store.read_versioned_entity(verified.partition_key, verified.row_key)
+        if current is not None:
+            observed = ModelAvailabilityNodeLease.from_entity(current[0])
+            if observed.issued_at > lease.issued_at or (
+                observed.capability_digest != lease.capability_digest
+                and observed.expires_at > lease.issued_at
+            ):
+                raise ModelAvailabilityUnavailable("Node policy lease changed during verification")
+        if not self._store.replace_if_match(
+            verified.partition_key,
+            verified.row_key,
+            verified.entity(),
+            current[1] if current else None,
+        ):
+            raise ModelAvailabilityUnavailable("Node policy lease update lost its version")
+        readback = self._store.read_versioned_entity(verified.partition_key, verified.row_key)
+        if readback is None or ModelAvailabilityNodeLease.from_entity(readback[0]) != verified:
+            raise ModelAvailabilityUnavailable("Node policy lease readback changed")
+        return verified
+
     def attest(
-        self, endpoint: str, identity: Mapping[str, str], surfaces: Mapping[str, str]
+        self, endpoint: str, identity: Mapping[str, str], surfaces: Mapping[str, str],
     ) -> None:
         parsed = httpx.URL(endpoint)
         if (
@@ -333,7 +377,7 @@ class ModelAvailabilityNodeVerifier:
                 "Node probe endpoint or surface inventory is invalid"
             )
         for route, digest in surfaces.items():
-            if not route.startswith("/") or any(part in route for part in ("..", "?", "#", "{")):
+            if not route.startswith("/") or any(value in route for value in ("..", "?", "#", "{")):
                 raise ModelAvailabilityUnavailable("Node probe route is invalid")
             nonce = uuid4().hex
             request = httpx.Request(
@@ -342,8 +386,8 @@ class ModelAvailabilityNodeVerifier:
                 headers={
                     "Ocp-Apim-Subscription-Key": self._key.get_secret_value(),
                     "Cache-Control": "no-cache",
-                    "Content-Type": "application/json",
                     "x-turnstile-availability-probe": nonce,
+                    "Content-Type": "application/json",
                 },
                 json={
                     "model": "urn:turnstile:availability-probe:" + nonce,
@@ -351,7 +395,7 @@ class ModelAvailabilityNodeVerifier:
                 },
                 extensions={"timeout": {"connect": 2, "read": 5, "write": 2, "pool": 2}},
             )
-            if self._before_request:
+            if self._before_request is not None:
                 self._before_request()
             response = self._client.send(request, auth=None, follow_redirects=False)
             try:
@@ -375,52 +419,6 @@ class ModelAvailabilityNodeVerifier:
             finally:
                 response.close()
 
-    def verify(
-        self, endpoint: str, lease: ModelAvailabilityNodeLease, surfaces: Mapping[str, str],
-        *, valid_until: datetime | None = None,
-    ) -> ModelAvailabilityNodeLease:
-        if self._store is None:
-            raise ModelAvailabilityUnavailable("Node lease store is unavailable")
-        self.attest(
-            endpoint,
-            {
-                "target": str(lease.target_id),
-                "revision": lease.revision,
-                "gateway": lease.native_gateway_id,
-                "instance": lease.instance_id,
-                "capability": lease.capability_digest,
-            },
-            surfaces,
-        )
-        now = datetime.now(UTC).replace(microsecond=0)
-        expires_at = now + timedelta(seconds=120)
-        if valid_until is not None:
-            expires_at = min(expires_at, valid_until.replace(microsecond=0))
-            if expires_at <= datetime.now(UTC):
-                raise ModelAvailabilityUnavailable("Node management evidence expired")
-        verified = lease.model_copy(
-            update={"issued_at": now, "expires_at": expires_at}
-        )
-        current = self._store.read_versioned_entity(verified.partition_key, verified.row_key)
-        if current:
-            observed = ModelAvailabilityNodeLease.from_entity(current[0])
-            if observed.issued_at > lease.issued_at or (
-                observed.capability_digest != lease.capability_digest
-                and observed.expires_at > lease.issued_at
-            ):
-                raise ModelAvailabilityUnavailable("Node policy lease changed during verification")
-        if not self._store.replace_if_match(
-            verified.partition_key,
-            verified.row_key,
-            verified.entity(),
-            current[1] if current else None,
-        ):
-            raise ModelAvailabilityUnavailable("Node policy lease update lost its version")
-        readback = self._store.read_versioned_entity(verified.partition_key, verified.row_key)
-        if readback is None or ModelAvailabilityNodeLease.from_entity(readback[0]) != verified:
-            raise ModelAvailabilityUnavailable("Node policy lease readback changed")
-        return verified
-
 
 class ModelAvailabilityGatewayVerifier:
     def __init__(
@@ -443,6 +441,10 @@ class ModelAvailabilityGatewayVerifier:
         state_batch_reader: Callable[[Sequence[UUID]], dict[UUID, ModelAvailabilityState]]
         | None = None,
         before_proof: Callable[[], None] | None = None,
+        staged_programs: tuple[ModelAvailabilityStagedProgram, ...] = (),
+        staged_program_verifier: Callable[
+            [ModelAvailabilityStagedProgram], ProgramCapabilityProof
+        ] | None = None,
     ) -> None:
         self.target_id, self.api_id = target_id, api_id
         self.gateway_url = gateway_url.rstrip("/")
@@ -454,22 +456,76 @@ class ModelAvailabilityGatewayVerifier:
         self.resource_id = resource_id
         self.state_batch_reader = state_batch_reader
         self.before_proof = before_proof
+        self.staged_programs = staged_programs
+        self.staged_program_verifier = staged_program_verifier
         self.confirmation_plan: ModelAvailabilityConfirmationPlan | None = None
         self._catalog_checks: list[ModelAvailabilityCatalogCheck] = []
 
+    @staticmethod
+    def _require_staged_node_compatibility(
+        staged_programs: tuple[ModelAvailabilityStagedProgram, ...],
+        enrollments: tuple[ModelAvailabilityNodeEnrollment, ...],
+    ) -> None:
+        if enrollments and any(
+            not staged.installation.model_additions_enabled
+            or staged.installation.legacy_program_sha256 is not None
+            or staged.installation.program.scope.gateway_id != "managed"
+            or staged.installation.program.instance_id != "managed"
+            for staged in staged_programs
+        ):
+            raise ModelAvailabilityUnavailable("Staged programs require managed-only coverage")
+
+    def _verify_staged_programs(
+        self, staged_programs: tuple[ModelAvailabilityStagedProgram, ...],
+        before_request: Callable[[], None],
+    ) -> tuple[ProgramCapabilityProof, ...]:
+        if len(staged_programs) > 4 or len({
+            staged.installation.program.api_revision for staged in staged_programs
+        }) != len(staged_programs):
+            raise ModelAvailabilityUnavailable("Staged program inventory is not bounded and unique")
+        proofs = []
+        for staged in staged_programs:
+            installation = staged.installation
+            program = installation.program
+            if (
+                self.staged_program_verifier is None
+                or program.scope.target_id != str(self.target_id)
+                or program.scope.api_id != self.api_id or program.scope.gateway_id != "managed"
+                or program.instance_id != "managed"
+                or installation.gateway_endpoint != self.gateway_url
+                or staged.expected_current_revision == program.api_revision
+            ):
+                raise ModelAvailabilityUnavailable("Staged program approval or verifier is missing")
+            for _ in range(2 * len(installation.operation_contracts) + 8):
+                before_request()
+            proof = self.staged_program_verifier(staged)
+            before_request()
+            now = int(datetime.now(UTC).timestamp())
+            identity_matches = proof.identity == program
+            profiles_match = proof.supported_profiles == installation.supported_profiles
+            proof_is_current = proof.issued_epoch <= now < proof.expires_epoch
+            if not all((identity_matches, profiles_match, proof_is_current)):
+                raise ModelAvailabilityUnavailable("Staged program proof changed or expired")
+            proofs.append(proof)
+        return tuple(proofs)
+
     def _enrollments(
-        self, deployments: Sequence[Mapping[str, Any]], retired_deployments: Sequence[UUID] = (),
+        self,
+        deployments: Sequence[Mapping[str, Any]],
+        retired_deployments: Sequence[UUID] = (),
     ) -> tuple[ModelAvailabilityNodeEnrollment, ...]:
         excluded = set(retired_deployments)
         retired = {
-            UUID(str(item["id"])) for item in deployments
-            if item.get("kind") == "self_hosted" and item.get("retired_at") is not None
+            UUID(str(deployment["id"])) for deployment in deployments
+            if deployment.get("kind") == "self_hosted" and deployment.get("retired_at") is not None
         }
         if not excluded <= retired:
             raise ModelAvailabilityUnavailable("Retirement evidence does not match inventory")
         required = {
-            UUID(str(item["id"])): item for item in deployments
-            if item.get("kind") == "self_hosted" and UUID(str(item["id"])) not in excluded
+            UUID(str(deployment["id"])): deployment
+            for deployment in deployments
+            if deployment.get("kind") == "self_hosted"
+            and UUID(str(deployment["id"])) not in excluded
         }
         if not required:
             return ()
@@ -486,6 +542,7 @@ class ModelAvailabilityGatewayVerifier:
             required
         ):
             raise ModelAvailabilityUnavailable("self_hosted_node_coverage_unverified")
+        now = datetime.now(UTC)
         identities: set[tuple[str, str]] = set()
         for item in enrollments:
             deployment = required[item.deployment_id]
@@ -493,7 +550,7 @@ class ModelAvailabilityGatewayVerifier:
                 item.target_id != self.target_id
                 or item.api_id != self.api_id
                 or item.native_gateway_id != deployment.get("native_gateway_id")
-                or item.enrolled_at > datetime.now(UTC)
+                or item.enrolled_at > now
             ):
                 raise ModelAvailabilityUnavailable("Node enrollment does not match its target")
             for node in item.nodes:
@@ -506,8 +563,9 @@ class ModelAvailabilityGatewayVerifier:
     def _retired_deployments(
         self, deployments: Sequence[Mapping[str, Any]],
     ) -> tuple[UUID, ...]:
-        retired = [item for item in deployments
-                   if item.get("kind") == "self_hosted" and item.get("retired_at") is not None]
+        retired = [deployment for deployment in deployments
+                   if deployment.get("kind") == "self_hosted"
+                   and deployment.get("retired_at") is not None]
         if not retired:
             return ()
         gateways = self.list_resources("/gateways")
@@ -519,7 +577,6 @@ class ModelAvailabilityGatewayVerifier:
         excluded = []
         for deployment in retired:
             native = str(deployment["native_gateway_id"])
-            still_associated = False
             if native in names:
                 associations = self.list_resources("/gateways/" + quote(native, safe="") + "/apis")
                 for association in associations:
@@ -527,9 +584,8 @@ class ModelAvailabilityGatewayVerifier:
                     if not isinstance(api_name, str) or not api_name:
                         raise ModelAvailabilityUnavailable("Native API association is invalid")
                     if api_name.split(";rev=", 1)[0].casefold() == self.api_id.casefold():
-                        still_associated = True
-            if not still_associated:
-                excluded.append(UUID(str(deployment["id"])))
+                        raise ModelAvailabilityUnavailable("Retired Gateway still serves this API")
+            excluded.append(UUID(str(deployment["id"])))
         return tuple(sorted(excluded, key=str))
 
     def _catalog(
@@ -549,24 +605,18 @@ class ModelAvailabilityGatewayVerifier:
     ) -> None:
         model_ids = {}
         for model in models:
-            binding = routes_by_alias.get(str(model["id"]).casefold())
+            alias = str(model["id"]).casefold()
+            binding = routes_by_alias.get(alias)
             if binding is None or binding["model_id"] != model["logical_model_id"]:
                 raise ModelAvailabilityUnavailable("Catalog and inference identity differ")
             if binding["gateways"] is None or gateway_id in binding["gateways"]:
                 model_ids[model["id"]] = UUID(model["logical_model_id"])
-        check = ModelAvailabilityCatalogCheck.model_validate(
-            {
-                "endpoint_url": endpoint,
-                "revision": revision,
-                "route": route,
-                "gateway_id": gateway_id,
-                "instance_id": instance_id,
-                "models": model_ids,
-                "capability_digest": capability_digest,
-                "admission_surfaces": admission_surfaces,
-                "retired_surfaces": retired_surfaces,
-            }
-        )
+        check = ModelAvailabilityCatalogCheck.model_validate({
+            "endpoint_url": endpoint, "revision": revision, "route": route,
+            "gateway_id": gateway_id, "instance_id": instance_id, "models": model_ids,
+            "capability_digest": capability_digest, "admission_surfaces": admission_surfaces,
+            "retired_surfaces": retired_surfaces,
+        })
         self._catalog_checks.append(check)
 
     def _check_catalog(
@@ -575,20 +625,18 @@ class ModelAvailabilityGatewayVerifier:
         state_reader: Callable[[UUID], ModelAvailabilityState | None],
         before_request: Callable[[], None],
     ) -> None:
+        endpoint, revision, route = str(check.endpoint_url), check.revision, check.route
+        gateway_id, instance_id, model_ids = check.gateway_id, check.instance_id, check.models
         before = {}
-        for model_id in set(check.models.values()):
+        for model_id in set(model_ids.values()):
             current = state_reader(model_id)
             if current is None:
                 raise ModelAvailabilityUnavailable("Catalog includes an unknown model identity")
             before[model_id] = current
-        if self.key is None:
-            raise ModelAvailabilityUnavailable("Availability catalog authentication is unavailable")
+        assert self.key is not None
         request = httpx.Request(
             "GET",
-            str(check.endpoint_url).rstrip("/")
-            + ";rev="
-            + quote(check.revision, safe="")
-            + check.route,
+            endpoint.rstrip("/") + ";rev=" + quote(revision, safe="") + route,
             headers={
                 "Ocp-Apim-Subscription-Key": self.key.get_secret_value(),
                 "Cache-Control": "no-cache",
@@ -600,8 +648,8 @@ class ModelAvailabilityGatewayVerifier:
         try:
             if response.status_code != 200 or len(response.content) > 524288:
                 raise ModelAvailabilityUnavailable("Fresh catalog readback did not succeed")
-            aliases = sorted(
-                alias for alias, model_id in check.models.items() if before[model_id].enabled
+            expected_aliases = sorted(
+                alias for alias, model_id in model_ids.items() if before[model_id].enabled
             )
             body = response.json()
             data = body.get("data") if isinstance(body, dict) else None
@@ -611,19 +659,19 @@ class ModelAvailabilityGatewayVerifier:
                     not isinstance(item, dict) or not isinstance(item.get("id"), str)
                     for item in data
                 )
-                or sorted(item["id"] for item in data) != aliases
+                or sorted(item["id"] for item in data) != expected_aliases
             ):
                 raise ModelAvailabilityUnavailable("Fresh catalog availability does not match")
             canonical = "|".join(
-                f"{model_id}:{state.revision}:{int(state.enabled)}"
-                for model_id, state in sorted(before.items())
+                f"{model_id}:{current.revision}:{int(current.enabled)}"
+                for model_id, current in sorted(before.items())
             )
-            expected = {
+            expected_headers = {
                 "digest": hashlib.sha256(canonical.encode()).hexdigest(),
                 "target": str(self.target_id),
-                "revision": check.revision,
-                "gateway": check.gateway_id,
-                "instance": check.instance_id,
+                "revision": revision,
+                "gateway": gateway_id,
+                "instance": instance_id,
                 "version": "1",
                 "kernel": availability_kernel_digest(),
                 "store": hashlib.sha256(
@@ -633,19 +681,23 @@ class ModelAvailabilityGatewayVerifier:
             if (
                 any(
                     response.headers.get("x-turnstile-availability-" + name) != value
-                    for name, value in expected.items()
+                    for name, value in expected_headers.items()
                 )
                 or "no-store" not in response.headers.get("Cache-Control", "")
                 or response.headers.get("x-turnstile-availability-probe", "")
             ):
                 raise ModelAvailabilityUnavailable("Fresh catalog revision evidence does not match")
-            if any(state_reader(model_id) != state for model_id, state in before.items()):
+            if any(
+                state_reader(model_id) != expected for model_id, expected in before.items()
+            ):
                 raise ModelAvailabilityUnavailable("Availability changed during verification")
         finally:
             response.close()
 
     def _check_retired_surface(
-        self, check: ModelAvailabilityCatalogCheck, route: str,
+        self,
+        check: ModelAvailabilityCatalogCheck,
+        route: str,
         before_request: Callable[[], None],
     ) -> None:
         assert self.key is not None
@@ -677,11 +729,12 @@ class ModelAvailabilityGatewayVerifier:
             response.close()
 
     def _retired_checks(
-        self, catalogs: Sequence[ModelAvailabilityCatalogCheck],
+        self,
+        catalogs: Sequence[ModelAvailabilityCatalogCheck],
         before_request: Callable[[], None],
     ) -> list[Callable[[], None]]:
         checks: list[Callable[[], None]] = []
-        seen: set[tuple[str, str]] = set()
+        seen = set()
         for check in catalogs:
             for route in check.retired_surfaces:
                 identity = (check.surface_prefix, route)
@@ -700,19 +753,15 @@ class ModelAvailabilityGatewayVerifier:
         nonce = uuid4().hex
         request = httpx.Request(
             "HEAD", str(check.endpoint_url).rstrip("/") + ";rev=" + check.revision + route,
-            headers={
-                "Ocp-Apim-Subscription-Key": self.key.get_secret_value(),
-                "Cache-Control": "no-cache", "x-turnstile-availability-probe": nonce,
-            },
+            headers={"Ocp-Apim-Subscription-Key": self.key.get_secret_value(),
+                     "Cache-Control": "no-cache", "x-turnstile-availability-probe": nonce},
             extensions={"timeout": {"connect": 2, "read": 10, "write": 2, "pool": 2}},
         )
         before_request()
         response = self.client.send(request, auth=None, follow_redirects=False)
         try:
-            expected = {
-                "probe": nonce, "api": self.api_id, "revision": check.revision,
-                "gateway": check.gateway_id, "instance": check.instance_id,
-            }
+            expected = {"probe": nonce, "api": self.api_id, "revision": check.revision,
+                        "gateway": check.gateway_id, "instance": check.instance_id}
             if (
                 response.status_code != 503
                 or response.headers.get("x-turnstile-protocol-fenced") != "1"
@@ -749,17 +798,39 @@ class ModelAvailabilityGatewayVerifier:
         states: Mapping[UUID, ModelAvailabilityState], before_request: Callable[[], None],
     ) -> None:
         assert self.key is not None and self.node_store is not None
+        cancelled = Event()
+        failure_lock = Lock()
+        first_error: Exception | None = None
+
+        def before_check() -> None:
+            if cancelled.is_set():
+                raise ModelAvailabilityUnavailable("Confirmation cancelled after failed proof")
+            before_request()
+
+        def run_check(check: Callable[[], None]) -> None:
+            nonlocal first_error
+            if cancelled.is_set():
+                return
+            try:
+                check()
+            except Exception as error:
+                with failure_lock:
+                    if first_error is None:
+                        first_error = error
+                    cancelled.set()
+                raise
+
         attestor = ModelAvailabilityNodeVerifier(
             self.client, self.key, self.node_store, self.table_endpoint, self.table_name,
-            before_request=before_request,
+            before_request=before_check,
         )
-        checks = self._retired_checks(plan.catalogs, before_request)
-        checks.extend(self._protocol_fenced_checks(plan.catalogs, before_request))
+        checks: list[Callable[[], None]] = self._retired_checks(plan.catalogs, before_check)
+        checks.extend(self._protocol_fenced_checks(plan.catalogs, before_check))
         seen: set[str] = set()
         for check in plan.catalogs:
             if check.protocol_fenced:
                 continue
-            checks.append(partial(self._check_catalog, check, states.get, before_request))
+            checks.append(partial(self._check_catalog, check, states.get, before_check))
             if check.surface_prefix in seen:
                 continue
             seen.add(check.surface_prefix)
@@ -769,19 +840,22 @@ class ModelAvailabilityGatewayVerifier:
                 "capability": check.capability_digest,
             }
             for route, digest in check.admission_surfaces.items():
-                checks.append(partial(
-                    attestor.attest, str(check.endpoint_url), identity, {route: digest},
-                ))
+                checks.append(partial(attestor.attest, str(check.endpoint_url), identity,
+                                      {route: digest}))
         if len(checks) > _MAX_HTTP_READS:
             raise ModelAvailabilityUnavailable("Confirmation read budget exceeded")
         with ThreadPoolExecutor(max_workers=min(_MAX_CONCURRENT_READS, len(checks))) as executor:
-            futures = [executor.submit(check) for check in checks]
+            pending = [executor.submit(run_check, check) for check in checks]
             try:
-                for future in as_completed(futures, timeout=_VERIFICATION_DEADLINE_SECONDS + 10):
+                for future in as_completed(pending, timeout=_VERIFICATION_DEADLINE_SECONDS + 10):
                     future.result()
-            finally:
-                for future in futures:
+            except BaseException:
+                cancelled.set()
+                for future in pending:
                     future.cancel()
+                if first_error is not None:
+                    raise first_error from None
+                raise
 
     def renew(
         self, plan: ModelAvailabilityConfirmationPlan, inventory_digest: str,
@@ -789,11 +863,11 @@ class ModelAvailabilityGatewayVerifier:
         read_states: Callable[[Sequence[UUID]], dict[UUID, ModelAvailabilityState]],
     ) -> ModelAvailabilityCoverage:
         now = datetime.now(UTC)
-        context_key = ModelAvailabilityConfirmationPlan.context_key(
+        context = ModelAvailabilityConfirmationPlan.context_key(
             self.resource_id, self.api_id, self.gateway_url, self.table_endpoint, self.table_name,
         )
         if (
-            self.key is None or self.node_store is None or plan.row_key != context_key
+            self.key is None or self.node_store is None or plan.row_key != context
             or plan.coverage.target_id != self.target_id
             or plan.coverage.inventory_digest != inventory_digest
             or plan.management_verified_at is None
@@ -813,6 +887,8 @@ class ModelAvailabilityGatewayVerifier:
             if monotonic() >= deadline or datetime.now(UTC) >= management_expires:
                 raise ModelAvailabilityUnavailable("Renewal evidence deadline exceeded")
 
+        self._require_staged_node_compatibility(plan.staged_programs, plan.enrollments)
+        self._verify_staged_programs(plan.staged_programs, before_request)
         attestor = ModelAvailabilityNodeVerifier(
             self.client, self.key, self.node_store, self.table_endpoint, self.table_name,
             before_request=before_request,
@@ -857,11 +933,13 @@ class ModelAvailabilityGatewayVerifier:
                 ) != observed:
                     raise ModelAvailabilityUnavailable("An unverified renewed node lease is active")
         before_request()
+        staged_proofs = self._verify_staged_programs(plan.staged_programs, before_request)
         now = datetime.now(UTC)
-        expires = min([
-            now + timedelta(seconds=120), management_expires,
-            *(lease.expires_at for lease in leases),
-        ])
+        expirations = [now + timedelta(seconds=120), management_expires]
+        expirations.extend(lease.expires_at for lease in leases)
+        expirations.extend(datetime.fromtimestamp(proof.expires_epoch, UTC)
+                           for proof in staged_proofs)
+        expires = min(expirations)
         if expires <= now:
             raise ModelAvailabilityUnavailable("Renewed node evidence expired before completion")
         coverage = ModelAvailabilityCoverage.model_validate({
@@ -880,17 +958,11 @@ class ModelAvailabilityGatewayVerifier:
         deployments: Sequence[Mapping[str, Any]],
         read_states: Callable[[Sequence[UUID]], dict[UUID, ModelAvailabilityState]],
     ) -> ModelAvailabilityTargetResult:
-        context_key = ModelAvailabilityConfirmationPlan.context_key(
-            self.resource_id,
-            self.api_id,
-            self.gateway_url,
-            self.table_endpoint,
-            self.table_name,
+        expected_key = ModelAvailabilityConfirmationPlan.context_key(
+            self.resource_id, self.api_id, self.gateway_url, self.table_endpoint, self.table_name,
         )
         if (
-            self.key is None
-            or self.node_store is None
-            or plan.row_key != context_key
+            self.key is None or plan.row_key != expected_key
             or plan.coverage.target_id != self.target_id
             or not plan.coverage.current(datetime.now(UTC), inventory_digest)
             or plan.enrollments != self._enrollments(deployments, plan.retired_deployments)
@@ -898,22 +970,25 @@ class ModelAvailabilityGatewayVerifier:
         ):
             raise ModelAvailabilityUnavailable("Fresh matching confirmation coverage is required")
         model_ids = sorted(
-            {
-                projected.model_id,
-                *(model_id for check in plan.catalogs for model_id in check.models.values()),
-            },
+            {projected.model_id, *(model_id for check in plan.catalogs
+                                   for model_id in check.models.values())},
             key=str,
         )
         states = read_states(model_ids)
         if set(states) != set(model_ids) or states.get(projected.model_id) != projected:
             raise ModelAvailabilityUnavailable("Confirmation source state changed")
+
+        assert self.node_store is not None
         deadline = monotonic() + _VERIFICATION_DEADLINE_SECONDS
 
         def before_request() -> None:
             if monotonic() >= deadline:
                 raise ModelAvailabilityUnavailable("Confirmation request deadline exceeded")
 
+        self._require_staged_node_compatibility(plan.staged_programs, plan.enrollments)
+        self._verify_staged_programs(plan.staged_programs, before_request)
         self._confirm_catalogs(plan, states, before_request)
+        self._verify_staged_programs(plan.staged_programs, before_request)
         now = datetime.now(UTC)
         if (
             not plan.coverage.current(now, inventory_digest)
@@ -922,17 +997,16 @@ class ModelAvailabilityGatewayVerifier:
         ):
             raise ModelAvailabilityUnavailable("Confirmation evidence changed or expired")
         return ModelAvailabilityTargetResult(
-            target_id=self.target_id,
-            inventory_digest=inventory_digest,
-            policy_digest=plan.coverage.policy_digest,
-            status="verified",
-            observed_revision=projected.revision,
-            observed_enabled=projected.enabled,
+            target_id=self.target_id, inventory_digest=inventory_digest,
+            policy_digest=plan.coverage.policy_digest, status="verified",
+            observed_revision=projected.revision, observed_enabled=projected.enabled,
             verified_at=now,
         )
 
     def verify(
-        self, inventory_digest: str, deployments: Sequence[Mapping[str, Any]]
+        self,
+        inventory_digest: str,
+        deployments: Sequence[Mapping[str, Any]],
     ) -> ModelAvailabilityCoverage:
         self.confirmation_plan = None
         self._catalog_checks = []
@@ -958,56 +1032,32 @@ class ModelAvailabilityGatewayVerifier:
 
         policy_cache: dict[str, str | None] = {}
 
-        def policy(path: str, required: bool = True) -> str | None:
-            if path not in policy_cache:
-                before_request()
-                policy_cache[path] = self.read_policy(path)
+        def policy(path: str) -> str:
             source = policy_cache[path]
-            if source is None and required:
+            if source is None:
                 raise ModelAvailabilityUnavailable("Availability policy coverage is missing")
-            if source is not None:
-                observations.append(
-                    (path, component_digest(parse_policy(source), normalize_text_defaults=False))
-                )
+            observations.append(
+                (path, component_digest(parse_policy(source), normalize_text_defaults=False))
+            )
             return source
 
-        def inventory(path: str) -> list[dict[str, Any]]:
-            before_request()
-            return self.list_resources(path)
-
-        service = policy("/policies/policy", required=False)
-        if service is not None:
-            _no_bypass(parse_policy(service), self.api_id)
+        service_policy = self.read_policy("/policies/policy")
+        if service_policy is not None:
+            _no_bypass(parse_policy(service_policy), self.api_id)
+            observations.append(
+                ("/policies/policy", component_digest(parse_policy(service_policy)))
+            )
         api_path = "/apis/" + quote(self.api_id, safe="")
-        for product in inventory(api_path + "/products"):
+        products = self.list_resources(api_path + "/products")
+        for product in products:
             name = str(product.get("name") or "")
             if not name or "/" in name:
                 raise ModelAvailabilityUnavailable("API product inventory is invalid")
-            inherited = policy(
-                "/products/" + quote(name, safe="") + "/policies/policy", required=False
-            )
+            inherited = self.read_policy("/products/" + quote(name, safe="") + "/policies/policy")
             if inherited is not None:
                 _no_bypass(parse_policy(inherited), self.api_id)
-        revisions = inventory(api_path + "/revisions")
-        if not revisions:
-            for entry in inventory("/apis?includeRevisions=true"):
-                entry_name = entry.get("name")
-                if not isinstance(entry_name, str):
-                    raise ModelAvailabilityUnavailable("Availability API inventory is invalid")
-                parent_api_id, separator, named_revision = entry_name.partition(";rev=")
-                if parent_api_id.casefold() != self.api_id.casefold():
-                    continue
-                revision = _revision_name(entry)
-                api_properties = entry.get("properties")
-                expected_id = self.resource_id.rstrip("/") + "/apis/" + entry_name
-                if (
-                    not self.resource_id or not isinstance(api_properties, Mapping)
-                    or str(entry.get("id", "")).casefold() != expected_id.casefold()
-                    or (separator and named_revision != revision)
-                    or (not separator and api_properties.get("isCurrent") is not True)
-                ):
-                    raise ModelAvailabilityUnavailable("Retained API revision identity differs")
-                revisions.append(entry)
+                observations.append(("product:" + name, component_digest(parse_policy(inherited))))
+        revisions = self.list_resources(api_path + "/revisions")
         if not revisions or len(revisions) > 100:
             raise ModelAvailabilityUnavailable(
                 "Availability revision inventory is empty or too large"
@@ -1017,6 +1067,19 @@ class ModelAvailabilityGatewayVerifier:
             raise ModelAvailabilityUnavailable(
                 "Availability revision inventory repeats an identity"
             )
+        staged_revisions = {
+            staged.installation.program.api_revision for staged in self.staged_programs
+        }
+        if not staged_revisions <= set(revision_names):
+            raise ModelAvailabilityUnavailable("Staged program managed inventory is incomplete")
+        self._require_staged_node_compatibility(self.staged_programs, enrollments)
+        for revision_row in revisions:
+            if _revision_name(revision_row) in staged_revisions and revision_row.get(
+                "properties", revision_row,
+            ).get("isCurrent") is True:
+                raise ModelAvailabilityUnavailable("Staged program cannot be current")
+        self._verify_staged_programs(self.staged_programs, before_request)
+        legacy_revisions = [name for name in revision_names if name not in staged_revisions]
 
         def read_parent(revision: str) -> tuple[str, str]:
             path = api_path + ";rev=" + quote(revision, safe="") + "/policies/policy"
@@ -1028,23 +1091,27 @@ class ModelAvailabilityGatewayVerifier:
             return path, source
 
         with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_READS) as executor:
-            policy_cache.update(executor.map(read_parent, revision_names))
+            policy_cache.update(executor.map(read_parent, legacy_revisions))
 
         def operation_inventory(revision: str) -> tuple[str, list[dict[str, Any]]]:
-            values = inventory(api_path + ";rev=" + quote(revision, safe="") + "/operations")
+            before_request()
+            values = self.list_resources(
+                api_path + ";rev=" + quote(revision, safe="") + "/operations"
+            )
             if len(values) > 40:
                 raise ModelAvailabilityUnavailable("Availability operation inventory is too large")
             return revision, values
 
         with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_READS) as executor:
-            operations_by_revision = dict(executor.map(operation_inventory, revision_names))
+            operations_by_revision = dict(executor.map(operation_inventory, legacy_revisions))
         paths = []
         for revision, operations in operations_by_revision.items():
             revision_path = api_path + ";rev=" + quote(revision, safe="")
             for operation in operations:
                 operation_name = operation.get("name")
                 if (
-                    not isinstance(operation_name, str) or not operation_name
+                    not isinstance(operation_name, str)
+                    or not operation_name
                     or "/" in operation_name
                 ):
                     raise ModelAvailabilityUnavailable("Availability operation identity is invalid")
@@ -1055,12 +1122,12 @@ class ModelAvailabilityGatewayVerifier:
         if len(paths) > _MAX_HTTP_READS or len(paths) != len(set(paths)):
             raise ModelAvailabilityUnavailable("Availability policy inventory exceeds its bound")
 
-        def read_operation_policy(path: str) -> tuple[str, str | None]:
+        def read_policy(path: str) -> tuple[str, str | None]:
             before_request()
             return path, self.read_policy(path)
 
         with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_READS) as executor:
-            policy_cache.update(executor.map(read_operation_policy, paths))
+            policy_cache.update(executor.map(read_policy, paths))
         management_verified_at = datetime.now(UTC)
         if self.before_proof is not None:
             self.before_proof()
@@ -1069,120 +1136,148 @@ class ModelAvailabilityGatewayVerifier:
         seen_revisions: set[str] = set()
         for revision_row in revisions:
             revision = _revision_name(revision_row)
+            if revision in staged_revisions:
+                continue
             if revision in seen_revisions:
                 raise ModelAvailabilityUnavailable(
                     "Availability revision inventory repeats an identity"
                 )
             seen_revisions.add(revision)
             revision_path = api_path + ";rev=" + quote(revision, safe="")
-            parent_source = policy(revision_path + "/policies/policy")
-            assert parent_source is not None
-            parent = parse_policy(parent_source)
+            parent = parse_policy(policy(revision_path + "/policies/policy"))
             validate_availability_parent(parent)
             protocol_fenced = is_protocol_fenced_availability_operation(parent)
-            for name, expected in (
-                ("availabilityTableEndpoint", self.table_endpoint),
-                ("availabilityTableName", self.table_name),
+            table_endpoint = parent.find("inbound/set-variable[@name='availabilityTableEndpoint']")
+            table_name = parent.find("inbound/set-variable[@name='availabilityTableName']")
+            if (
+                table_endpoint is None
+                or table_name is None
+                or table_endpoint.get("value") != self.table_endpoint
+                or table_name.get("value") != self.table_name
             ):
-                node = parent.find(f"inbound/set-variable[@name='{name}']")
-                if node is None or node.get("value") != expected:
-                    raise ModelAvailabilityUnavailable(
-                        "Gateway availability store identity differs"
-                    )
+                raise ModelAvailabilityUnavailable("Gateway availability store identity differs")
+            guards = parent.findall(".//set-variable[@name='availabilityBindingValid']")
             if any(
-                json.dumps(str(self.target_id)) not in guard.get("value", "")
-                for guard in parent.findall(".//set-variable[@name='availabilityBindingValid']")
+                json.dumps(str(self.target_id)) not in guard.get("value", "") for guard in guards
             ):
                 raise ModelAvailabilityUnavailable("Gateway availability target identity differs")
+            operations = operations_by_revision[revision]
             catalogs = []
             route_maps = []
-            inference: dict[str, tuple[str, str]] = {}
+            inference_surfaces: dict[str, tuple[str, str]] = {}
             catalog_surfaces: dict[str, tuple[str, str]] = {}
             retired_operations: dict[str, tuple[str, str]] = {}
             retired_diagnostics: dict[str, tuple[str, str]] = {}
-            diagnostics: dict[str, tuple[str, str]] = {}
+            diagnostic_surfaces: dict[str, tuple[str, str]] = {}
             operation_ids: set[str] = set()
-            capabilities: set[str] = set()
+            capability_digests: set[str] = set()
             node_surfaces: dict[str, str] = {}
-            for operation in operations_by_revision[revision]:
-                name = str(operation.get("name") or "")
+            for operation in operations:
+                operation_id = str(operation.get("name") or "")
                 details = operation.get("properties")
-                if not name or not isinstance(details, dict) or name in operation_ids:
+                if (
+                    not operation_id
+                    or not isinstance(details, dict)
+                    or operation_id in operation_ids
+                ):
                     raise ModelAvailabilityUnavailable(
                         "Availability operation inventory is invalid"
                     )
-                operation_ids.add(name)
-                route, method = (
-                    str(details.get("urlTemplate") or ""),
-                    str(details.get("method") or ""),
+                operation_ids.add(operation_id)
+                route = str(details.get("urlTemplate") or "")
+                method = str(details.get("method") or "")
+                is_diagnostic = method == "HEAD" and operation_id.startswith(
+                    AVAILABILITY_PROBE_PREFIX
                 )
-                diagnostic = method == "HEAD" and name.startswith(AVAILABILITY_PROBE_PREFIX)
-                catalog = route in {"/models", "/v1/models"} and (method == "GET" or diagnostic)
+                is_catalog = route in {"/models", "/v1/models"} and (
+                    method == "GET" or is_diagnostic
+                )
                 source = policy(
-                    revision_path + "/operations/" + quote(name, safe="") + "/policies/policy"
+                    revision_path
+                    + "/operations/"
+                    + quote(operation_id, safe="")
+                    + "/policies/policy"
                 )
-                assert source is not None
-                root = parse_policy(source)
-                if is_retired_availability_operation(root):
-                    if method != "POST" and not diagnostic:
+                operation_root = parse_policy(source)
+                if is_retired_availability_operation(operation_root):
+                    if method != "POST" and not is_diagnostic:
                         raise ModelAvailabilityUnavailable("Retired route method is invalid")
-                    retired = retired_diagnostics if diagnostic else retired_operations
-                    retired[name] = (route, component_digest(root))
-                    surfaces.append(f"managed/{revision}/{name}")
+                    retired = retired_diagnostics if is_diagnostic else retired_operations
+                    retired[operation_id] = (route, component_digest(operation_root))
+                    surfaces.append(f"managed/{revision}/{operation_id}")
                     if len(surfaces) > _MAX_SURFACES:
                         raise ModelAvailabilityUnavailable("Retired surface inventory is too large")
                     continue
-                capability = root.find("inbound/set-variable[@name='availabilityCapabilityDigest']")
-                surface = root.find("inbound/set-variable[@name='availabilitySurfaceDigest']")
-                if capability is None or surface is None:
+                capability = operation_root.find(
+                    "inbound/set-variable[@name='availabilityCapabilityDigest']"
+                )
+                surface_digest = operation_root.find(
+                    "inbound/set-variable[@name='availabilitySurfaceDigest']"
+                )
+                if capability is None or surface_digest is None:
                     raise ModelAvailabilityUnavailable("Availability policy identity is missing")
-                capabilities.add(capability.get("value", ""))
+                capability_digests.add(capability.get("value", ""))
                 comparison_digest = component_digest(parse_policy(
                     compile_protocol_fenced_probe(source)
-                )) if not diagnostic else component_digest(root)
-                if catalog:
-                    if diagnostic:
-                        diagnostics[name] = (route, comparison_digest)
-                    else:
-                        values = inspect_availability_operation(
+                )) if not is_diagnostic else component_digest(operation_root)
+                if is_catalog:
+                    catalog_models = (
+                        [] if is_diagnostic else inspect_availability_operation(
                             source, self.target_id, self.api_id, revision, catalog=True,
                         )
-                        catalogs.append((route, values))
-                        catalog_surfaces[name] = (route, comparison_digest)
-                        node_surfaces[route] = surface.get("value", "")
+                    )
+                    if is_diagnostic:
+                        diagnostic_surfaces[operation_id] = (
+                            route, comparison_digest,
+                        )
+                    else:
+                        catalogs.append((route, catalog_models))
+                        catalog_surfaces[operation_id] = (route, comparison_digest)
+                        node_surfaces[route] = surface_digest.get("value", "")
                 else:
-                    original = name.removeprefix(AVAILABILITY_PROBE_PREFIX) if diagnostic else name
-                    if (method != "POST" and not diagnostic) or (original not in {
+                    original_id = (
+                        operation_id.removeprefix(AVAILABILITY_PROBE_PREFIX)
+                        if is_diagnostic
+                        else operation_id
+                    )
+                    if (method != "POST" and not is_diagnostic) or (original_id not in {
                         "chat-completions",
                         "responses",
                         "responses-compact",
                         "anthropic-messages",
                         "anthropic-count-tokens",
                         "images-generations",
-                    } and root.find(
+                    } and operation_root.find(
                         "inbound/set-variable[@name='availabilityFixedModelAlias']"
                     ) is None):
                         raise ModelAvailabilityUnavailable(
                             "An operation has unverified admission semantics"
                         )
-                    (diagnostics if diagnostic else inference)[name] = (
+                    selected_surfaces = diagnostic_surfaces if is_diagnostic else inference_surfaces
+                    selected_surfaces[operation_id] = (
                         route,
                         comparison_digest,
                     )
-                    if not diagnostic:
+                    if not is_diagnostic:
                         if route in node_surfaces:
                             raise ModelAvailabilityUnavailable("Inference paths are ambiguous")
-                        node_surfaces[route] = surface.get("value", "")
-                    if not diagnostic:
+                        node_surfaces[route] = surface_digest.get("value", "")
+                    if not is_diagnostic:
                         route_maps.extend(inspect_availability_operation(
-                            source, self.target_id, self.api_id, revision, catalog=False,
+                            source,
+                            self.target_id,
+                            self.api_id,
+                            revision,
+                            catalog=False,
                         ))
-                surfaces.append(f"managed/{revision}/{name}")
+                surfaces.append(f"managed/{revision}/{operation_id}")
                 if len(surfaces) > _MAX_SURFACES:
                     raise ModelAvailabilityUnavailable(
                         "Availability surface inventory exceeds its limit"
                     )
-            _verify_diagnostic_pairs({**inference, **catalog_surfaces}, diagnostics)
+            _verify_diagnostic_pairs(
+                {**inference_surfaces, **catalog_surfaces}, diagnostic_surfaces,
+            )
             if retired_operations or retired_diagnostics:
                 _verify_diagnostic_pairs(retired_operations, retired_diagnostics)
             retired_routes = tuple(sorted({value[0] for value in retired_operations.values()}))
@@ -1190,45 +1285,41 @@ class ModelAvailabilityGatewayVerifier:
                 node_surfaces
             ):
                 raise ModelAvailabilityUnavailable("Retired operation paths are ambiguous")
-            if len(capabilities) != 1 or not catalogs:
-                raise ModelAvailabilityUnavailable(
-                    "Availability catalog or capability identity is incomplete"
-                )
-            capability_digest = next(iter(capabilities))
+            if len(capability_digests) != 1:
+                raise ModelAvailabilityUnavailable("Protocols disagree about capability identity")
+            if not catalogs:
+                raise ModelAvailabilityUnavailable("Availability catalog endpoint is missing")
             if protocol_fenced:
                 endpoints = [("managed", "managed", self.gateway_url)]
                 for enrollment in enrollments:
                     observations.append((str(enrollment.enrollment_id), enrollment.digest()))
-                    for enrolled_node in enrollment.nodes:
-                        endpoints.append((
-                            enrollment.native_gateway_id, enrolled_node.instance_id,
-                            str(enrolled_node.endpoint_url),
-                        ))
+                    for node in enrollment.nodes:
+                        endpoints.append((enrollment.native_gateway_id, node.instance_id,
+                                          str(node.endpoint_url)))
                         surfaces.extend(
-                            f"{enrollment.native_gateway_id}/{enrolled_node.instance_id}"
-                            f"/{revision}/{name}"
-                            for name in operation_ids
+                            f"{enrollment.native_gateway_id}/{node.instance_id}/{revision}/{operation}"
+                            for operation in operation_ids
                         )
                 if len(surfaces) > _MAX_SURFACES:
                     raise ModelAvailabilityUnavailable("Fenced surface inventory exceeds its limit")
                 for gateway, instance, endpoint in endpoints:
-                    for route, _models in catalogs:
+                    for route, _ in catalogs:
                         self._catalog_checks.append(ModelAvailabilityCatalogCheck.model_validate({
                             "endpoint_url": endpoint, "revision": revision, "route": route,
                             "gateway_id": gateway, "instance_id": instance, "models": {},
-                            "capability_digest": capability_digest,
+                            "capability_digest": next(iter(capability_digests)),
                             "admission_surfaces": node_surfaces, "retired_surfaces": retired_routes,
                             "protocol_fenced": True,
                         }))
                 continue
             routes_by_alias: dict[str, dict[str, Any]] = {}
-            for mapping in route_maps:
-                alias = mapping["alias"].casefold()
-                if alias in routes_by_alias and routes_by_alias[alias] != mapping:
+            for route_map in route_maps:
+                alias = route_map["alias"].casefold()
+                if alias in routes_by_alias and routes_by_alias[alias] != route_map:
                     raise ModelAvailabilityUnavailable(
                         "Protocols disagree about logical model identity"
                     )
-                routes_by_alias[alias] = mapping
+                routes_by_alias[alias] = route_map
             for route, models in catalogs:
                 self._catalog(
                     self.gateway_url,
@@ -1238,7 +1329,7 @@ class ModelAvailabilityGatewayVerifier:
                     routes_by_alias,
                     gateway_id="managed",
                     instance_id="managed",
-                    capability_digest=capability_digest,
+                    capability_digest=next(iter(capability_digests)),
                     admission_surfaces=node_surfaces,
                     before_request=before_request,
                     retired_surfaces=retired_routes,
@@ -1249,7 +1340,8 @@ class ModelAvailabilityGatewayVerifier:
             )
             managed_identity = {
                 "target": str(self.target_id), "revision": revision,
-                "gateway": "managed", "instance": "managed", "capability": capability_digest,
+                "gateway": "managed", "instance": "managed",
+                "capability": next(iter(capability_digests)),
             }
             managed_checks.extend(
                 partial(
@@ -1268,38 +1360,38 @@ class ModelAvailabilityGatewayVerifier:
                     before_request=before_request,
                 )
                 observations.append((str(enrollment.enrollment_id), enrollment.digest()))
-                for runtime_node in enrollment.nodes:
+                for node in enrollment.nodes:
                     now = datetime.now(UTC).replace(microsecond=0)
                     lease = ModelAvailabilityNodeLease(
                             target_id=self.target_id,
                             api_id=self.api_id,
                             revision=revision,
                             native_gateway_id=enrollment.native_gateway_id,
-                            instance_id=runtime_node.instance_id,
-                            capability_digest=capability_digest,
+                            instance_id=node.instance_id,
+                            capability_digest=next(iter(capability_digests)),
                             issued_at=now,
                             expires_at=now + timedelta(seconds=120),
                     )
                     node_checks.append(partial(
-                        verifier.verify, str(runtime_node.endpoint_url), lease, node_surfaces,
+                        verifier.verify, str(node.endpoint_url), lease, node_surfaces,
                     ))
                     for route, models in catalogs:
                         self._catalog(
-                            str(runtime_node.endpoint_url),
+                            str(node.endpoint_url),
                             revision,
                             route,
                             models,
                             routes_by_alias,
                             gateway_id=enrollment.native_gateway_id,
-                            instance_id=runtime_node.instance_id,
-                            capability_digest=capability_digest,
+                            instance_id=node.instance_id,
+                            capability_digest=next(iter(capability_digests)),
                             admission_surfaces=node_surfaces,
                             before_request=before_request,
                             retired_surfaces=retired_routes,
                         )
                     surfaces.extend(
-                        f"{enrollment.native_gateway_id}/{runtime_node.instance_id}/{revision}/{name}"
-                        for name in operation_ids
+                        f"{enrollment.native_gateway_id}/{node.instance_id}/{revision}/{operation_id}"
+                        for operation_id in operation_ids
                     )
                     if len(surfaces) > _MAX_SURFACES:
                         raise ModelAvailabilityUnavailable(
@@ -1313,19 +1405,19 @@ class ModelAvailabilityGatewayVerifier:
         with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_READS) as executor:
             node_leases = list(executor.map(lambda check: check(), node_checks))
         with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_READS) as executor:
-            checks = [executor.submit(
+            catalog_checks = [executor.submit(
                 self._check_catalog, check,
                 state_snapshot.get if state_snapshot is not None else self.state_reader,
                 before_request,
             ) for check in self._catalog_checks if not check.protocol_fenced]
-            checks.extend(executor.submit(check) for check in managed_checks)
-            checks.extend(executor.submit(check) for check in self._retired_checks(
+            catalog_checks.extend(executor.submit(check) for check in managed_checks)
+            catalog_checks.extend(executor.submit(check) for check in self._retired_checks(
                 self._catalog_checks, before_request,
             ))
-            checks.extend(executor.submit(check) for check in self._protocol_fenced_checks(
+            catalog_checks.extend(executor.submit(check) for check in self._protocol_fenced_checks(
                 self._catalog_checks, before_request,
             ))
-            for future in as_completed(checks):
+            for future in as_completed(catalog_checks):
                 future.result()
         if self.state_batch_reader and self.state_batch_reader(state_ids) != state_snapshot:
             raise ModelAvailabilityUnavailable("Availability source changed during verification")
@@ -1333,9 +1425,19 @@ class ModelAvailabilityGatewayVerifier:
             raise ModelAvailabilityUnavailable("Native Gateway retirement evidence changed")
         if enrollments != self._enrollments(deployments, retired_deployments):
             raise ModelAvailabilityUnavailable("Node enrollment changed during verification")
+        staged_proofs = self._verify_staged_programs(self.staged_programs, before_request)
+        for staged in self.staged_programs:
+            revision = staged.installation.program.api_revision
+            surfaces.extend("managed/" + revision + "/" + name
+                            for name in staged.installation.operation_contracts)
+            staged_digest = document_digest(staged.model_dump(mode="json"))
+            observations.append(("staged/" + revision, staged_digest))
         now = datetime.now(UTC)
-        expires = min([now + timedelta(seconds=120), *(lease.expires_at for lease in node_leases)])
-        if expires <= now:
+        expires_at = min(
+            [now + timedelta(seconds=120), *(lease.expires_at for lease in node_leases),
+             *(datetime.fromtimestamp(proof.expires_epoch, UTC) for proof in staged_proofs)]
+        )
+        if expires_at <= now:
             raise ModelAvailabilityUnavailable("Node verification expired before completion")
         if self.node_store is not None and enrollments:
             known = {
@@ -1343,14 +1445,15 @@ class ModelAvailabilityGatewayVerifier:
                 for lease in node_leases
             }
             partition = f"{AVAILABILITY_NODE_PARTITION}|{self.target_id}|{self.api_id}"
-            for entity in self.node_store.list_partition_entities(partition):
-                observed = ModelAvailabilityNodeLease.from_entity(entity)
+            observed = self.node_store.list_partition_entities(partition)
+            for entity in observed:
+                lease = ModelAvailabilityNodeLease.from_entity(entity)
                 if (
-                    observed.current(now, observed.capability_digest)
+                    lease.current(now, lease.capability_digest)
                     and known.get(
-                        (observed.revision, observed.native_gateway_id, observed.instance_id)
+                        (lease.revision, lease.native_gateway_id, lease.instance_id),
                     )
-                    != observed
+                    != lease
                 ):
                     raise ModelAvailabilityUnavailable("An unverified node lease remains active")
             for lease in node_leases:
@@ -1368,21 +1471,16 @@ class ModelAvailabilityGatewayVerifier:
             serving_surfaces=tuple(surfaces),
             verified_surfaces=tuple(surfaces),
             verified_at=now,
-            expires_at=expires,
+            expires_at=expires_at,
         )
         if self.resource_id:
-            self.confirmation_plan = ModelAvailabilityConfirmationPlan.model_validate(
-                {
-                    "resource_id": self.resource_id,
-                    "api_id": self.api_id,
-                    "gateway_url": self.gateway_url,
-                    "table_endpoint": self.table_endpoint,
-                    "table_name": self.table_name,
-                    "coverage": coverage,
-                    "enrollments": enrollments,
-                    "catalogs": tuple(self._catalog_checks),
-                    "retired_deployments": retired_deployments,
-                    "management_verified_at": management_verified_at,
-                }
-            )
+            self.confirmation_plan = ModelAvailabilityConfirmationPlan.model_validate({
+                "resource_id": self.resource_id, "api_id": self.api_id,
+                "gateway_url": self.gateway_url, "table_endpoint": self.table_endpoint,
+                "table_name": self.table_name, "coverage": coverage,
+                "enrollments": enrollments, "catalogs": tuple(self._catalog_checks),
+                "retired_deployments": retired_deployments,
+                "management_verified_at": management_verified_at,
+                "staged_programs": self.staged_programs,
+            })
         return coverage

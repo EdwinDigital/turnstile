@@ -64,9 +64,9 @@ def test_budget_execution_is_default_off_and_settlement_timer_has_no_side_effect
     settings = Settings()
     assert not settings.budget_execution_enabled and not settings.budget_settlement_enabled
     with (
-        patch("turnstile_core.config.get_settings", return_value=settings),
-        patch("turnstile_core.persistence.factory.create_repository") as create,
-        patch("turnstile_core.integrations.atomic_ledger.AtomicTableLedger") as store,
+        patch("functions.telemetry.function_app.get_settings", return_value=settings),
+        patch("functions.telemetry.function_app.create_repository") as create,
+        patch("functions.telemetry.function_app.AtomicTableLedger") as store,
     ):
         settle_budget_requests.build().get_user_function()(None)
     create.assert_not_called()
@@ -92,16 +92,17 @@ def test_budget_settlement_timer_uses_durable_services_and_closes_resources(fail
                         ledger_table_endpoint="https://ledger.example.com")
     repository = PostgreSqlOpsDbProxy("postgresql://unused", pool_min_size=0)
     with (
-        patch("turnstile_core.config.get_settings", return_value=settings),
-        patch("turnstile_core.persistence.factory.create_repository", return_value=repository),
+        patch("functions.telemetry.function_app.get_settings", return_value=settings),
+        patch("functions.telemetry.function_app.create_repository", return_value=repository),
         patch.object(repository, "close") as close,
         patch.object(repository, "budget_settlement_health", return_value={
             "pending": 0, "oldest_seconds": 0, "repeatedly_failed": 0,
+            "unresolved": 0, "terminal_unresolved": 0, "oldest_unresolved_seconds": 0,
         }),
-        patch("turnstile_core.integrations.atomic_ledger.AtomicTableLedger") as store,
-        patch("turnstile_core.services.budget_settlement.BudgetScopeService") as scopes,
-        patch("turnstile_core.services.budget_settlement.BudgetRecoveryService") as recovery,
-        patch("turnstile_core.services.budget_settlement.BudgetSettlementService") as settlement,
+        patch("functions.telemetry.function_app.AtomicTableLedger") as store,
+        patch("functions.telemetry.function_app.BudgetScopeService") as scopes,
+        patch("functions.telemetry.function_app.BudgetRecoveryService") as recovery,
+        patch("functions.telemetry.function_app.BudgetSettlementService") as settlement,
     ):
         settlement.return_value.drain.return_value = 1
         if fails:
@@ -110,7 +111,7 @@ def test_budget_settlement_timer_uses_durable_services_and_closes_resources(fail
                 settle_budget_requests.build().get_user_function()(None)
         else:
             settle_budget_requests.build().get_user_function()(None)
-        scopes.assert_called_once_with(repository, store.return_value)
+        scopes.assert_called_once_with(repository, store.return_value.__enter__.return_value)
         scopes.return_value.prepare.assert_called_once_with()
         assert [call[0] for call in recovery.return_value.method_calls] == [
             "policies", "recover", "completions", "finalize_uncertain",
@@ -153,12 +154,12 @@ def test_ledger_timer_only_enables_evidence_when_configured(
     repository.roll_forward_budgets.return_value = None
     repository.roll_forward_gateway_application_budgets.return_value = 0
     with (
-        patch("turnstile_core.config.get_settings", return_value=settings),
-        patch("turnstile_core.persistence.factory.create_repository", return_value=repository),
-        patch("turnstile_core.integrations.ledger.TableStorageLedger") as store,
-        patch("turnstile_core.integrations.ledger.LedgerSyncService") as service,
+        patch("functions.telemetry.function_app.get_settings", return_value=settings),
+        patch("functions.telemetry.function_app.create_repository", return_value=repository),
+        patch("functions.telemetry.function_app.TableStorageLedger") as store,
+        patch("functions.telemetry.function_app.LedgerSyncService") as service,
         patch(
-            "turnstile_core.integrations.reconciliation.LogAnalyticsReservationTerminalLog"
+            "functions.telemetry.function_app.LogAnalyticsReservationTerminalLog"
         ) as log,
     ):
         if fails:
@@ -168,10 +169,10 @@ def test_ledger_timer_only_enables_evidence_when_configured(
         else:
             sync_budget_ledger.build().get_user_function()(None)
         repository.close.assert_called_once_with()
-        assert log.call_count == (1 if workspace and enabled else 0)
+        assert log.call_count == (1 if workspace else 0)
         assert service.call_args.args == (repository, store.return_value.__enter__.return_value)
         assert service.call_args.kwargs["terminal_log"] == (
-            log.return_value if workspace and enabled else None
+            log.return_value if workspace else None
         )
         assert service.call_args.kwargs["recovery_lag"] == timedelta(minutes=10)
         assert service.call_args.kwargs["finalization_lag"] == timedelta(hours=24)
@@ -186,8 +187,8 @@ def test_ledger_timer_closes_repository_on_early_return(
     repository.roll_forward_gateway_application_budgets.return_value = 0
     settings = Settings.model_construct(ledger_sync_enabled=enabled, ledger_table_endpoint=endpoint)
     with (
-        patch("turnstile_core.config.get_settings", return_value=settings),
-        patch("turnstile_core.persistence.factory.create_repository", return_value=repository),
+        patch("functions.telemetry.function_app.get_settings", return_value=settings),
+        patch("functions.telemetry.function_app.create_repository", return_value=repository),
     ):
         sync_budget_ledger.build().get_user_function()(None)
     repository.close.assert_called_once_with()
@@ -199,10 +200,14 @@ def test_event_batch_closes_repository_without_swallowing_processing_failure(fai
     event = MagicMock()
     event.get_body.return_value = b'{"model":"test"}'
     with (
-        patch("turnstile_core.config.get_settings", return_value=Settings.model_construct()),
-        patch("turnstile_core.persistence.factory.create_repository", return_value=repository),
-        patch("turnstile_core.ingestion.processor.UsageProcessor") as processor,
+        patch(
+            "functions.telemetry.function_app.get_settings",
+            return_value=Settings.model_construct(),
+        ),
+        patch("functions.telemetry.function_app.create_repository", return_value=repository),
+        patch("functions.telemetry.function_app.UsageProcessor") as processor,
     ):
+        processor.return_value.close.side_effect = repository.close
         if fails:
             processor.return_value.process.side_effect = RuntimeError("batch failure")
             with pytest.raises(RuntimeError, match="batch failure"):
@@ -220,12 +225,12 @@ def test_reconciliation_closes_repository(fails: bool) -> None:
         reconciliation_enabled=True, log_analytics_workspace_id="workspace",
     )
     with (
-        patch("turnstile_core.config.get_settings", return_value=settings),
-        patch("turnstile_core.persistence.factory.create_repository", return_value=repository),
-        patch("turnstile_core.integrations.reconciliation.ReconciliationService") as service,
-        patch("turnstile_core.integrations.reconciliation.CacheReadSyncService"),
-        patch("turnstile_core.integrations.reconciliation.LogAnalyticsGatewayUsageLog"),
-        patch("turnstile_core.integrations.reconciliation.LogAnalyticsCacheReadLog"),
+        patch("functions.telemetry.function_app.get_settings", return_value=settings),
+        patch("functions.telemetry.function_app.create_repository", return_value=repository),
+        patch("functions.telemetry.function_app.ReconciliationService") as service,
+        patch("functions.telemetry.function_app.CacheReadSyncService"),
+        patch("functions.telemetry.function_app.LogAnalyticsGatewayUsageLog"),
+        patch("functions.telemetry.function_app.LogAnalyticsCacheReadLog"),
     ):
         if fails:
             service.return_value.run.side_effect = RuntimeError("reconciliation failure")

@@ -197,7 +197,7 @@ def test_function_staging_contains_runtime_contract(
 
 @pytest.mark.parametrize(
     ("target", "expected_functions"),
-    (("telemetry", 5), ("control-plane", 5)),
+    (("telemetry", 5), ("control-plane", 7)),
 )
 def test_staged_function_indexes_without_backend(
     tmp_path: Path,

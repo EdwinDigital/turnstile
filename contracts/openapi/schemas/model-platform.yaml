@@ -1,512 +1,1446 @@
 schemas:
   ModelAvailabilityCommand:
-    type: object
-    additionalProperties: false
-    required: [enabled, expected_revision, idempotency_key]
     properties:
-      enabled: {type: boolean}
-      expected_revision: {type: integer, minimum: 1, maximum: 2147483647}
-      idempotency_key: {type: string, format: uuid}
+      enabled:
+        type: boolean
+      expected_revision:
+        type: integer
+        maximum: 2147483647.0
+        minimum: 1.0
+      idempotency_key:
+        type: string
+        format: uuid
+    additionalProperties: false
+    type: object
+    required:
+    - enabled
+    - expected_revision
+    - idempotency_key
+    title: ModelAvailabilityCommand
   ModelAvailabilityRetry:
-    type: object
-    additionalProperties: false
-    required: [expected_revision]
     properties:
-      expected_revision: {type: integer, minimum: 1, maximum: 2147483647}
+      expected_revision:
+        type: integer
+        maximum: 2147483647.0
+        minimum: 1.0
+    additionalProperties: false
+    type: object
+    required:
+    - expected_revision
+    title: ModelAvailabilityRetry
   ModelAvailabilityTargetResult:
-    type: object
-    additionalProperties: false
-    required: [target_id, inventory_digest]
     properties:
-      target_id: {type: string, format: uuid}
-      inventory_digest: {type: string, pattern: '^[0-9a-f]{64}$'}
+      target_id:
+        type: string
+        format: uuid
+      inventory_digest:
+        type: string
+        pattern: ^[0-9a-f]{64}$
       policy_digest:
-        anyOf: [{type: string, pattern: '^[0-9a-f]{64}$'}, {type: 'null'}]
-      status: {type: string, enum: [pending, verified, failed, unknown], default: pending}
+        anyOf:
+        - type: string
+          pattern: ^[0-9a-f]{64}$
+        - type: 'null'
+      status:
+        type: string
+        enum:
+        - pending
+        - verified
+        - failed
+        - unknown
+        default: pending
       observed_revision:
-        anyOf: [{type: integer, minimum: 1, maximum: 2147483647}, {type: 'null'}]
+        anyOf:
+        - type: integer
+          maximum: 2147483647.0
+          minimum: 1.0
+        - type: 'null'
       observed_enabled:
-        anyOf: [{type: boolean}, {type: 'null'}]
+        anyOf:
+        - type: boolean
+        - type: 'null'
       verified_at:
-        anyOf: [{type: string, format: date-time}, {type: 'null'}]
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
       reason:
-        anyOf: [{type: string, maxLength: 500}, {type: 'null'}]
-  ModelAvailabilityOperation:
-    type: object
+        anyOf:
+        - type: string
+          maxLength: 500
+        - type: 'null'
     additionalProperties: false
-    required: [id, model_id, idempotency_key, expected_revision, desired_revision, desired_enabled, created_by, created_at, updated_at]
+    type: object
+    required:
+    - target_id
+    - inventory_digest
+    title: ModelAvailabilityTargetResult
+  ModelAvailabilityOperation:
     properties:
-      id: {type: string, format: uuid}
-      model_id: {type: string, format: uuid}
-      idempotency_key: {type: string, format: uuid}
-      expected_revision: {type: integer, minimum: 1, maximum: 2147483647}
-      desired_revision: {type: integer, minimum: 1, maximum: 2147483647}
-      desired_enabled: {type: boolean}
-      created_by: {type: string, minLength: 1, maxLength: 255}
-      created_at: {type: string, format: date-time}
-      updated_at: {type: string, format: date-time}
-      status: {type: string, enum: [pending, projected, partial, succeeded, failed, unknown], default: pending}
+      id:
+        type: string
+        format: uuid
+      model_id:
+        type: string
+        format: uuid
+      idempotency_key:
+        type: string
+        format: uuid
+      expected_revision:
+        type: integer
+        maximum: 2147483647.0
+        minimum: 1.0
+      desired_revision:
+        type: integer
+        maximum: 2147483647.0
+        minimum: 1.0
+      desired_enabled:
+        type: boolean
+      created_by:
+        type: string
+        maxLength: 255
+        minLength: 1
+      created_at:
+        type: string
+        format: date-time
+      updated_at:
+        type: string
+        format: date-time
+      status:
+        type: string
+        enum:
+        - pending
+        - projected
+        - partial
+        - succeeded
+        - failed
+        - unknown
+        default: pending
       targets:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityTargetResult
         type: array
-        items: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityTargetResult}
         default: []
       projected_revision:
-        anyOf: [{type: integer, minimum: 1, maximum: 2147483647}, {type: 'null'}]
+        anyOf:
+        - type: integer
+          maximum: 2147483647.0
+          minimum: 1.0
+        - type: 'null'
       projected_at:
-        anyOf: [{type: string, format: date-time}, {type: 'null'}]
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
       completed_at:
-        anyOf: [{type: string, format: date-time}, {type: 'null'}]
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
       error_code:
-        anyOf: [{type: string}, {type: 'null'}]
-  ModelAvailabilityReadback:
-    type: object
+        anyOf:
+        - type: string
+        - type: 'null'
     additionalProperties: false
-    required: [model_id, desired_enabled, desired_revision]
+    type: object
+    required:
+    - id
+    - model_id
+    - idempotency_key
+    - expected_revision
+    - desired_revision
+    - desired_enabled
+    - created_by
+    - created_at
+    - updated_at
+    title: ModelAvailabilityOperation
+  ModelAvailabilityReadback:
     properties:
-      model_id: {type: string, format: uuid}
-      desired_enabled: {type: boolean}
-      desired_revision: {type: integer, minimum: 1, maximum: 2147483647}
+      model_id:
+        type: string
+        format: uuid
+      desired_enabled:
+        type: boolean
+      desired_revision:
+        type: integer
+        maximum: 2147483647.0
+        minimum: 1.0
       effective_enabled:
-        anyOf: [{type: boolean}, {type: 'null'}]
+        anyOf:
+        - type: boolean
+        - type: 'null'
       effective_revision:
-        anyOf: [{type: integer, minimum: 1, maximum: 2147483647}, {type: 'null'}]
+        anyOf:
+        - type: integer
+          maximum: 2147483647.0
+          minimum: 1.0
+        - type: 'null'
       verified_at:
-        anyOf: [{type: string, format: date-time}, {type: 'null'}]
-      status: {type: string, enum: [pending, projected, partial, succeeded, failed, unknown], default: unknown}
-      command_ready: {type: boolean, default: false}
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+      status:
+        type: string
+        enum:
+        - pending
+        - projected
+        - partial
+        - succeeded
+        - failed
+        - unknown
+        default: unknown
+      command_ready:
+        type: boolean
+        default: false
       reason:
-        anyOf: [{type: string}, {type: 'null'}]
+        anyOf:
+        - type: string
+        - type: 'null'
       operation:
         anyOf:
-        - {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityOperation}
-        - {type: 'null'}
-  ModelAvailabilityList:
-    type: object
+        - $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityOperation
+        - type: 'null'
     additionalProperties: false
-    required: [items]
+    type: object
+    required:
+    - model_id
+    - desired_enabled
+    - desired_revision
+    title: ModelAvailabilityReadback
+  ModelAvailabilityList:
     properties:
       items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityReadback
         type: array
-        items: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityReadback}
+    additionalProperties: false
+    type: object
+    required:
+    - items
+    title: ModelAvailabilityList
   ModelAvailabilityAccepted:
-    type: object
-    additionalProperties: false
-    required: [operation, status_url]
     properties:
-      operation: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityOperation}
-      status_url: {type: string}
+      operation:
+        $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityOperation
+      status_url:
+        type: string
+    additionalProperties: false
+    type: object
+    required:
+    - operation
+    - status_url
+    title: ModelAvailabilityAccepted
   BudgetDelegationCheck:
-    type: object
-    additionalProperties: false
-    required: [case, expected_status, actual_status]
     properties:
-      case: {type: string, enum: [valid_identity, wrong_audience, missing_person, current_fenced, candidate_fenced]}
-      expected_status: {type: integer}
-      actual_status: {type: [integer, 'null']}
-      native_gateway_id: {type: [string, 'null'], default: null}
-      expected_error_code: {type: [string, 'null'], default: null}
-      actual_error_code: {type: [string, 'null'], default: null}
+      case:
+        type: string
+        enum:
+        - valid_identity
+        - wrong_audience
+        - missing_person
+        - current_fenced
+        - candidate_fenced
+      expected_status:
+        type: integer
+      actual_status:
+        type:
+        - integer
+        - 'null'
+      native_gateway_id:
+        type:
+        - string
+        - 'null'
+      expected_error_code:
+        type:
+        - string
+        - 'null'
+      actual_error_code:
+        type:
+        - string
+        - 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - case
+    - expected_status
+    - actual_status
+    title: BudgetDelegationCheck
   BudgetExecutionVerificationOptions:
-    type: object
-    additionalProperties: false
-    required: [application_id, model_ids]
     properties:
-      application_id: {type: string, format: uuid}
-      model_ids: {type: array, items: {type: string, format: uuid}}
+      application_id:
+        type: string
+        format: uuid
+      model_ids:
+        items:
+          type: string
+          format: uuid
+        type: array
+    additionalProperties: false
+    type: object
+    required:
+    - application_id
+    - model_ids
+    title: BudgetExecutionVerificationOptions
   BudgetDelegationReadiness:
-    type: object
-    additionalProperties: false
-    required: [gateway_profile_id, native_gateway_id, revision, checked_at, ready, checks]
     properties:
-      gateway_profile_id: {type: string, format: uuid}
-      native_gateway_id: {type: string}
-      revision: {type: string}
-      checked_at: {type: string, format: date-time}
-      ready: {type: boolean}
-      checks: {type: array, items: {$ref: ../../openapi.yaml#/components/schemas/BudgetDelegationCheck}}
-      protocol_mode: {type: string, enum: [prepared, paused, active], default: prepared}
+      gateway_profile_id:
+        type: string
+        format: uuid
+      native_gateway_id:
+        type: string
+      revision:
+        type: string
+      checked_at:
+        type: string
+        format: date-time
+      ready:
+        type: boolean
+      checks:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/BudgetDelegationCheck
+        type: array
+      protocol_mode:
+        type: string
+        enum:
+        - prepared
+        - paused
+        - active
+        default: prepared
       verification:
         anyOf:
-        - {$ref: ../../openapi.yaml#/components/schemas/BudgetExecutionVerificationOptions}
-        - {type: 'null'}
-        default: null
+        - $ref: ../../openapi.yaml#/components/schemas/BudgetExecutionVerificationOptions
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - gateway_profile_id
+    - native_gateway_id
+    - revision
+    - checked_at
+    - ready
+    - checks
+    title: BudgetDelegationReadiness
   BudgetExecutionVerificationRequest:
-    type: object
-    additionalProperties: false
-    required: [application_id, model_id]
     properties:
-      application_id: {type: string, format: uuid}
-      model_id: {type: string, format: uuid}
+      application_id:
+        type: string
+        format: uuid
+      model_id:
+        type: string
+        format: uuid
+    additionalProperties: false
+    type: object
+    required:
+    - application_id
+    - model_id
+    title: BudgetExecutionVerificationRequest
   BudgetExecutionScopeReadback:
-    type: object
-    additionalProperties: false
-    required: [before, after, attempt]
     properties:
-      before: {$ref: ../../openapi.yaml#/components/schemas/LedgerSummary}
+      before:
+        $ref: ../../openapi.yaml#/components/schemas/LedgerSummary
       after:
         anyOf:
-        - {$ref: ../../openapi.yaml#/components/schemas/LedgerSummary}
-        - {type: 'null'}
+        - $ref: ../../openapi.yaml#/components/schemas/LedgerSummary
+        - type: 'null'
       attempt:
         anyOf:
-        - {$ref: ../../openapi.yaml#/components/schemas/LedgerAttempt}
-        - {type: 'null'}
-  BudgetExecutionVerification:
-    type: object
+        - $ref: ../../openapi.yaml#/components/schemas/LedgerAttempt
+        - type: 'null'
     additionalProperties: false
-    required: [gateway_profile_id, native_gateway_id, revision, checked_at, request_id, actual_status, invocation, scopes, settled]
+    type: object
+    required:
+    - before
+    - after
+    - attempt
+    title: BudgetExecutionScopeReadback
+  BudgetExecutionVerification:
     properties:
-      gateway_profile_id: {type: string, format: uuid}
-      native_gateway_id: {type: string}
-      revision: {type: string}
-      checked_at: {type: string, format: date-time}
-      request_id: {type: string}
-      actual_status: {type: integer}
+      gateway_profile_id:
+        type: string
+        format: uuid
+      native_gateway_id:
+        type: string
+      revision:
+        type: string
+      checked_at:
+        type: string
+        format: date-time
+      request_id:
+        type: string
+      actual_status:
+        type: integer
       invocation:
         anyOf:
-        - {$ref: ../../model-gateway.openapi.yaml#/components/schemas/ModelInvocationResponse}
-        - {type: 'null'}
-      scopes: {type: array, items: {$ref: ../../openapi.yaml#/components/schemas/BudgetExecutionScopeReadback}}
-      settled: {type: boolean}
-  LedgerScope:
-    type: object
-    additionalProperties: false
-    required: [scope_type, scope_id, period_start]
-    properties:
-      scope_type: {type: string, enum: [person, application]}
-      scope_id: {type: string, minLength: 1, maxLength: 255}
-      period_start: {type: string, format: date}
-  LedgerSummary:
-    type: object
-    additionalProperties: false
-    required: [epoch, scope, token_limit, enforce, updated_at]
-    properties:
-      protocol_version: {type: integer, const: 2, default: 2}
-      epoch: {type: string, format: uuid}
-      scope: {$ref: ../../openapi.yaml#/components/schemas/LedgerScope}
-      version: {type: integer, minimum: 0, default: 0}
-      policy_revision: {type: integer, minimum: 0, default: 0}
-      token_limit: {type: integer, minimum: 0, maximum: 9223372036854775807}
-      enforce: {type: boolean}
-      enabled: {type: boolean, default: true}
-      confirmed_tokens: {type: integer, minimum: 0, maximum: 9223372036854775807, default: 0}
-      active_reserved_tokens: {type: integer, minimum: 0, maximum: 9223372036854775807, default: 0}
-      upper_bound_tokens: {type: integer, minimum: 0, maximum: 9223372036854775807, default: 0}
-      updated_at: {type: string, format: date-time}
-  LedgerAttemptIdentity:
-    type: object
-    additionalProperties: false
-    required: [scope, gateway_profile_id, native_gateway_id, correlation_id, model_id, admitted_at]
-    properties:
-      scope: {$ref: ../../openapi.yaml#/components/schemas/LedgerScope}
-      gateway_profile_id: {type: string, format: uuid}
-      native_gateway_id: {type: string, minLength: 1, maxLength: 80}
-      correlation_id: {type: string, minLength: 1, maxLength: 255}
-      model_id: {type: string, minLength: 1, maxLength: 255}
-      admitted_at: {type: string, format: date-time}
-  LedgerAttempt:
-    type: object
-    additionalProperties: false
-    required: [identity, epoch, state, reserved_tokens, updated_at]
-    properties:
-      identity: {$ref: ../../openapi.yaml#/components/schemas/LedgerAttemptIdentity}
-      epoch: {type: string, format: uuid}
-      state: {type: string, enum: [reserved, dispatching, uncertain, settled, upper_bound, cancelled]}
-      reserved_tokens: {type: integer, minimum: 1, maximum: 9223372036854775807}
-      actual_tokens: {type: [integer, 'null'], minimum: 0, maximum: 9223372036854775807, default: null}
-      evidence_revision: {type: integer, minimum: 0, default: 0}
-      evidence_key: {type: [string, 'null'], minLength: 1, maxLength: 512, default: null}
-      evidence_rank: {type: integer, enum: [0, 2, 3], default: 0}
-      completion_evidence: {type: [object, 'null'], additionalProperties: true, default: null}
-      updated_at: {type: string, format: date-time}
-  RuntimeCheckSelection:
-    type: object
-    additionalProperties: false
-    required: [model_id, gateway_deployment_id]
-    properties:
-      model_id: {type: string, format: uuid}
-      gateway_deployment_id: {type: string, format: uuid}
-  RuntimeCheckOption:
-    type: object
-    additionalProperties: false
-    required: [model_id, gateway_deployment_id, model_key, model_name, gateway_profile_id, gateway_name, native_gateway_id]
-    properties:
-      model_id: {type: string, format: uuid}
-      gateway_deployment_id: {type: string, format: uuid}
-      model_key: {type: string}
-      model_name: {type: string}
-      gateway_profile_id: {type: string, format: uuid}
-      gateway_name: {type: string}
-      native_gateway_id: {type: string}
-  RuntimeDiagnosticAccess:
-    type: object
-    additionalProperties: false
-    required: [scope, tenant_id, subscription_id, resource_group, apim_name, probe_subscription_id, required_actions, checked_at]
-    properties:
-      status: {type: string, enum: [ready, missing_permissions, unverified], default: unverified}
-      reason:
-        type: [string, 'null']
-        enum: [permission_missing, permission_unverified, identity_unavailable, tenant_mismatch, probe_subscription_unconfigured, null]
-      scope: {type: string}
-      api_principal_id: {type: [string, 'null'], format: uuid}
-      tenant_id: {type: string, format: uuid}
-      subscription_id: {type: string, format: uuid}
-      resource_group: {type: string}
-      apim_name: {type: string}
-      probe_subscription_id: {type: string}
-      required_actions: {type: array, items: {type: string}}
-      missing_actions: {type: array, items: {type: string}}
-      checked_at: {type: string, format: date-time}
-  RuntimeCheckPlan:
-    type: object
-    additionalProperties: false
-    required: [runtime_id, options]
-    properties:
-      runtime_id: {type: string, format: uuid}
-      options:
+        - $ref: ../../openapi.yaml#/components/schemas/ModelInvocationResponse
+        - type: 'null'
+      scopes:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/BudgetExecutionScopeReadback
         type: array
-        items: {$ref: ../../openapi.yaml#/components/schemas/RuntimeCheckOption}
-      unavailable_reason: {type: [string, 'null']}
-      access:
-        oneOf:
-        - {$ref: ../../openapi.yaml#/components/schemas/RuntimeDiagnosticAccess}
-        - {type: 'null'}
-      max_output_tokens: {type: integer, const: 64, default: 64}
-      request_limit: {type: integer, const: 1, default: 1}
-  RuntimeHealth:
-    type: object
+      settled:
+        type: boolean
     additionalProperties: false
-    required: [runtime_id, status, message, checked_at]
+    type: object
+    required:
+    - gateway_profile_id
+    - native_gateway_id
+    - revision
+    - checked_at
+    - request_id
+    - actual_status
+    - invocation
+    - scopes
+    - settled
+    title: BudgetExecutionVerification
+  LedgerScope:
     properties:
-      runtime_id: {type: string, format: uuid}
-      status: {type: string, enum: [unknown, available, unavailable]}
-      message: {type: string}
-      checked_at: {type: string, format: date-time}
-      check_kind: {type: string, enum: [legacy, model_inference], default: legacy}
-      outcome:
-        type: [string, 'null']
-        enum: [passed, blocked, configuration_error, upstream_error, inconclusive, null]
-      selection:
-        oneOf:
-        - {$ref: ../../openapi.yaml#/components/schemas/RuntimeCheckOption}
-        - {type: 'null'}
-      request_id: {type: [string, 'null']}
-      correlation_id: {type: [string, 'null']}
-      http_status: {type: [integer, 'null']}
-      latency_ms: {type: [integer, 'null']}
-      error_code: {type: [string, 'null']}
-      valid_until:
-        type: [string, 'null']
+      scope_type:
+        type: string
+        enum:
+        - person
+        - application
+      scope_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+      period_start:
+        type: string
+        format: date
+    additionalProperties: false
+    type: object
+    required:
+    - scope_type
+    - scope_id
+    - period_start
+    title: LedgerScope
+  LedgerSummary:
+    properties:
+      protocol_version:
+        type: integer
+        const: 2
+        default: 2
+      epoch:
+        type: string
+        format: uuid
+      scope:
+        $ref: ../../openapi.yaml#/components/schemas/LedgerScope
+      version:
+        type: integer
+        minimum: 0.0
+        default: 0
+      policy_revision:
+        type: integer
+        minimum: 0.0
+        default: 0
+      token_limit:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 0.0
+      budget_mode:
+        type: string
+        enum:
+        - tokens
+        - usd
+        default: tokens
+      usd_limit:
+        anyOf:
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*(?:\d{0,16}|(?=[\d.]{1,31}0*$)\d{0,16}\.\d{0,14}0*$)
+        - type: 'null'
+      enforce:
+        type: boolean
+      enabled:
+        type: boolean
+        default: true
+      confirmed_tokens:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 0.0
+        default: 0
+      active_reserved_tokens:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 0.0
+        default: 0
+      upper_bound_tokens:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 0.0
+        default: 0
+      confirmed_usd:
+        type: string
+        pattern: ^(?!^[-+.]*$)[+-]?0*(?:\d{0,16}|(?=[\d.]{1,31}0*$)\d{0,16}\.\d{0,14}0*$)
+        default: '0'
+      active_reserved_usd:
+        type: string
+        pattern: ^(?!^[-+.]*$)[+-]?0*(?:\d{0,16}|(?=[\d.]{1,31}0*$)\d{0,16}\.\d{0,14}0*$)
+        default: '0'
+      upper_bound_usd:
+        type: string
+        pattern: ^(?!^[-+.]*$)[+-]?0*(?:\d{0,16}|(?=[\d.]{1,31}0*$)\d{0,16}\.\d{0,14}0*$)
+        default: '0'
+      updated_at:
+        type: string
         format: date-time
-        description: Legacy expiry; historical diagnostic outcomes do not expire.
-      configuration_fingerprint:
-        type: [string, 'null']
+    additionalProperties: false
+    type: object
+    required:
+    - epoch
+    - scope
+    - token_limit
+    - enforce
+    - updated_at
+    title: LedgerSummary
+  LedgerAttemptIdentity:
+    properties:
+      scope:
+        $ref: ../../openapi.yaml#/components/schemas/LedgerScope
+      gateway_profile_id:
+        type: string
+        format: uuid
+      native_gateway_id:
+        type: string
         maxLength: 80
+        minLength: 1
+      correlation_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+      model_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+      admitted_at:
+        type: string
+        format: date-time
+    additionalProperties: false
+    type: object
+    required:
+    - scope
+    - gateway_profile_id
+    - native_gateway_id
+    - correlation_id
+    - model_id
+    - admitted_at
+    title: LedgerAttemptIdentity
+  LedgerAttempt:
+    properties:
+      identity:
+        $ref: ../../openapi.yaml#/components/schemas/LedgerAttemptIdentity
+      epoch:
+        type: string
+        format: uuid
+      state:
+        type: string
+        enum:
+        - reserved
+        - dispatching
+        - uncertain
+        - settled
+        - upper_bound
+        - cancelled
+      reserved_tokens:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 1.0
+      budget_mode:
+        type: string
+        enum:
+        - tokens
+        - usd
+        default: tokens
+      reserved_usd:
+        anyOf:
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*(?:\d{0,16}|(?=[\d.]{1,31}0*$)\d{0,16}\.\d{0,14}0*$)
+        - type: 'null'
+      actual_usd:
+        anyOf:
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*(?:\d{0,16}|(?=[\d.]{1,31}0*$)\d{0,16}\.\d{0,14}0*$)
+        - type: 'null'
+      price_snapshot:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/BudgetPriceProjection
+        - type: 'null'
+      price_etag:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+      actual_tokens:
+        type:
+        - integer
+        - 'null'
+        maximum: 9223372036854775807
+        minimum: 0
+      evidence_revision:
+        type: integer
+        minimum: 0.0
+        default: 0
+      evidence_key:
+        type:
+        - string
+        - 'null'
+        maxLength: 512
+        minLength: 1
+      evidence_rank:
+        type: integer
+        enum:
+        - 0
+        - 2
+        - 3
+        default: 0
+      completion_evidence:
+        type:
+        - object
+        - 'null'
+        additionalProperties: true
+      rejection_policy:
+        anyOf:
+        - additionalProperties: true
+          type: object
+        - type: 'null'
+      rejection_evidence:
+        anyOf:
+        - additionalProperties: true
+          type: object
+        - type: 'null'
+      resolution_evidence:
+        anyOf:
+        - additionalProperties: true
+          type: object
+        - type: 'null'
+      updated_at:
+        type: string
+        format: date-time
+    additionalProperties: false
+    type: object
+    required:
+    - identity
+    - epoch
+    - state
+    - reserved_tokens
+    - updated_at
+    title: LedgerAttempt
+  RuntimeCheckSelection:
+    properties:
+      model_id:
+        type: string
+        format: uuid
+      gateway_deployment_id:
+        type: string
+        format: uuid
+    additionalProperties: false
+    type: object
+    required:
+    - model_id
+    - gateway_deployment_id
+    title: RuntimeCheckSelection
+  RuntimeCheckOption:
+    properties:
+      model_id:
+        type: string
+        format: uuid
+      gateway_deployment_id:
+        type: string
+        format: uuid
+      model_key:
+        type: string
+      model_name:
+        type: string
+      gateway_profile_id:
+        type: string
+        format: uuid
+      gateway_name:
+        type: string
+      native_gateway_id:
+        type: string
+    additionalProperties: false
+    type: object
+    required:
+    - model_id
+    - gateway_deployment_id
+    - model_key
+    - model_name
+    - gateway_profile_id
+    - gateway_name
+    - native_gateway_id
+    title: RuntimeCheckOption
+  RuntimeDiagnosticAccess:
+    properties:
+      status:
+        type: string
+        enum:
+        - ready
+        - missing_permissions
+        - unverified
+        default: unverified
+      reason:
+        type:
+        - string
+        - 'null'
+        enum:
+        - permission_missing
+        - permission_unverified
+        - identity_unavailable
+        - tenant_mismatch
+        - probe_subscription_unconfigured
+        - null
+      scope:
+        type: string
+      api_principal_id:
+        type:
+        - string
+        - 'null'
+        format: uuid
+      tenant_id:
+        type: string
+        format: uuid
+      subscription_id:
+        type: string
+        format: uuid
+      resource_group:
+        type: string
+      apim_name:
+        type: string
+      probe_subscription_id:
+        type: string
+      required_actions:
+        items:
+          type: string
+        type: array
+      missing_actions:
+        items:
+          type: string
+        type: array
+      checked_at:
+        type: string
+        format: date-time
+      template_path:
+        type: string
+        const: infra/modules/runtime-diagnostic-rbac.bicep
+        default: infra/modules/runtime-diagnostic-rbac.bicep
+    additionalProperties: false
+    type: object
+    required:
+    - scope
+    - tenant_id
+    - subscription_id
+    - resource_group
+    - apim_name
+    - probe_subscription_id
+    - required_actions
+    - checked_at
+    title: RuntimeDiagnosticAccess
+  RuntimeCheckPlan:
+    properties:
+      runtime_id:
+        type: string
+        format: uuid
+      options:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/RuntimeCheckOption
+        type: array
+      unavailable_reason:
+        type:
+        - string
+        - 'null'
+      access:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/RuntimeDiagnosticAccess
+        - type: 'null'
+        oneOf:
+        - $ref: ../../openapi.yaml#/components/schemas/RuntimeDiagnosticAccess
+        - type: 'null'
+      max_output_tokens:
+        type: integer
+        const: 64
+        default: 64
+      request_limit:
+        type: integer
+        const: 1
+        default: 1
+    additionalProperties: false
+    type: object
+    required:
+    - runtime_id
+    - options
+    title: RuntimeCheckPlan
+  RuntimeHealth:
+    properties:
+      runtime_id:
+        type: string
+        format: uuid
+      status:
+        $ref: ../../openapi.yaml#/components/schemas/HealthStatus
+        enum:
+        - unknown
+        - available
+        - unavailable
+      message:
+        type: string
+      checked_at:
+        type: string
+        format: date-time
+      check_kind:
+        type: string
+        enum:
+        - legacy
+        - model_inference
+        default: legacy
+      outcome:
+        type:
+        - string
+        - 'null'
+        enum:
+        - passed
+        - blocked
+        - configuration_error
+        - upstream_error
+        - inconclusive
+        - null
+      selection:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/RuntimeCheckOption
+        - type: 'null'
+        oneOf:
+        - $ref: ../../openapi.yaml#/components/schemas/RuntimeCheckOption
+        - type: 'null'
+      request_id:
+        type:
+        - string
+        - 'null'
+      correlation_id:
+        type:
+        - string
+        - 'null'
+      http_status:
+        type:
+        - integer
+        - 'null'
+      latency_ms:
+        type:
+        - integer
+        - 'null'
+      error_code:
+        type:
+        - string
+        - 'null'
+      valid_until:
+        description: Legacy expiry; historical diagnostic outcomes do not expire.
+        type:
+        - string
+        - 'null'
+        format: date-time
+      configuration_fingerprint:
         description: Server-owned digest of persisted call configuration, not secrets.
+        type:
+        - string
+        - 'null'
+        maxLength: 80
       configuration_status:
         type: string
-        enum: [current, changed, unverified]
-        default: unverified
+        enum:
+        - current
+        - changed
+        - unverified
         description: Configuration comparison, not current availability.
-      configuration_checked_at: {type: [string, 'null'], format: date-time}
-  MultiTargetPublicationChildCreate:
-    type: object
+        default: unverified
+      configuration_checked_at:
+        type:
+        - string
+        - 'null'
+        format: date-time
     additionalProperties: false
-    title: MultiTargetPublicationChildCreate
-    required: [publication]
+    type: object
+    required:
+    - runtime_id
+    - status
+    - message
+    - checked_at
+    title: RuntimeHealth
+  MultiTargetPublicationChildCreate:
     properties:
       publication:
         $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationCreate
-      required: {type: boolean, title: Required, default: true}
-  MultiTargetPublicationCreate:
-    type: object
+      required:
+        type: boolean
+        title: Required
+        default: true
     additionalProperties: false
-    title: MultiTargetPublicationCreate
-    required: [children]
+    type: object
+    required:
+    - publication
+    title: MultiTargetPublicationChildCreate
+  MultiTargetPublicationCreate:
     properties:
       children:
-        type: array
-        minItems: 2
-        maxItems: 20
-        title: Children
         items:
           $ref: ../../openapi.yaml#/components/schemas/MultiTargetPublicationChildCreate
-  MultiTargetPublicationRequestAccepted:
-    type: object
+        type: array
+        maxItems: 20
+        minItems: 2
+        title: Children
     additionalProperties: false
-    title: MultiTargetPublicationRequestAccepted
-    required: [rollout, publications, status_url]
+    type: object
+    required:
+    - children
+    title: MultiTargetPublicationCreate
+  MultiTargetPublicationRequestAccepted:
     properties:
       rollout:
         $ref: ../../openapi.yaml#/components/schemas/MultiTargetRollout
       publications:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationView
         type: array
         title: Publications
-        items:
-          $ref: ../../openapi.yaml#/components/schemas/GatewayPublication
-      status_url: {type: string, title: Status Url}
+      status_url:
+        type: string
+        title: Status Url
+    additionalProperties: false
+    type: object
+    required:
+    - rollout
+    - publications
+    - status_url
+    title: MultiTargetPublicationRequestAccepted
   GatewayProfileNameWrite:
-    type: object
-    additionalProperties: false
-    required: [name]
     properties:
-      name: {type: string, minLength: 1, maxLength: 120, pattern: '\S'}
+      name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        pattern: \S
+    additionalProperties: false
+    type: object
+    required:
+    - name
+    title: GatewayProfileNameWrite
   ImageGenerationLimits:
-    type: object
-    additionalProperties: false
-    required: [max_request_bytes, max_response_bytes, output_reservation_tokens, timeout_seconds]
-    description: Immutable published transport and reservation limits, not provider parameter defaults.
     properties:
-      max_request_bytes: {type: integer, minimum: 1, maximum: 16777216}
-      max_response_bytes: {type: integer, minimum: 1, maximum: 16777216}
-      output_reservation_tokens: {type: integer, minimum: 1, maximum: 2147483647}
-      timeout_seconds: {type: integer, minimum: 1, maximum: 240}
+      max_request_bytes:
+        type: integer
+        maximum: 16777216.0
+        minimum: 1.0
+      max_response_bytes:
+        type: integer
+        maximum: 16777216.0
+        minimum: 1.0
+      output_reservation_tokens:
+        type: integer
+        maximum: 2147483647.0
+        minimum: 1.0
+      timeout_seconds:
+        type: integer
+        maximum: 240.0
+        minimum: 1.0
+    additionalProperties: false
+    type: object
+    required:
+    - max_request_bytes
+    - max_response_bytes
+    - output_reservation_tokens
+    - timeout_seconds
+    title: ImageGenerationLimits
+    description: Immutable published transport and reservation limits, not provider parameter defaults.
   ImageGenerationProfile:
     type: object
     additionalProperties: false
-    required: [id, version, display_name, provider_kind, provider_model, protocol, api_version,
-      backend_path, public_path, usage_format, max_request_bytes, max_response_bytes,
-      output_reservation_tokens, timeout_seconds]
-    description: Content-addressed v4 snapshot attached to an effective publication, not mutable registry metadata.
+    required:
+    - id
+    - version
+    - display_name
+    - provider_kind
+    - provider_model
+    - protocol
+    - api_version
+    - backend_path
+    - public_path
+    - usage_format
+    - max_request_bytes
+    - max_response_bytes
+    - output_reservation_tokens
+    - timeout_seconds
+    description: Content-addressed v4 snapshot attached to an effective publication, not mutable registry
+      metadata.
     properties:
-      id: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
-      version: {type: integer, const: 4}
-      display_name: {type: string, minLength: 1}
-      provider_kind: {type: string, const: microsoft_foundry}
-      provider_model: {type: string, minLength: 1}
-      protocol: {type: string, const: openai_images}
-      api_version: {type: string, const: preview}
-      backend_path: {type: string, const: /openai/v1/images/generations}
-      public_path: {type: string, const: /images/generations}
-      usage_format: {type: string, const: text-input-image-output-v1}
-      max_request_bytes: {type: integer, minimum: 1, maximum: 16777216}
-      max_response_bytes: {type: integer, minimum: 1, maximum: 16777216}
-      output_reservation_tokens: {type: integer, minimum: 1, maximum: 2147483647}
-      timeout_seconds: {type: integer, minimum: 1, maximum: 240}
+      id:
+        type: string
+        pattern: ^sha256:[a-f0-9]{64}$
+      version:
+        type: integer
+        const: 4
+      display_name:
+        type: string
+        minLength: 1
+      provider_kind:
+        type: string
+        const: microsoft_foundry
+      provider_model:
+        type: string
+        minLength: 1
+      protocol:
+        type: string
+        const: openai_images
+      api_version:
+        type: string
+        const: preview
+      backend_path:
+        type: string
+        const: /openai/v1/images/generations
+      public_path:
+        type: string
+        const: /images/generations
+      usage_format:
+        type: string
+        const: text-input-image-output-v1
+      max_request_bytes:
+        type: integer
+        minimum: 1
+        maximum: 16777216
+      max_response_bytes:
+        type: integer
+        minimum: 1
+        maximum: 16777216
+      output_reservation_tokens:
+        type: integer
+        minimum: 1
+        maximum: 2147483647
+      timeout_seconds:
+        type: integer
+        minimum: 1
+        maximum: 240
   ImageInvocationMetadata:
     type: object
     additionalProperties: false
-    required: [organization_id, organization, department_id, department, project_id, project,
-      agent_id, agent, user_id, user, workflow, model_id, model, runtime, request_source, run_id]
+    required:
+    - organization_id
+    - organization
+    - department_id
+    - department
+    - project_id
+    - project
+    - agent_id
+    - agent
+    - user_id
+    - user
+    - workflow
+    - model_id
+    - model
+    - runtime
+    - request_source
+    - run_id
     properties:
-      organization_id: {type: string, minLength: 1, maxLength: 255}
-      organization: {type: string, minLength: 1, maxLength: 255}
-      department_id: {type: string, minLength: 1, maxLength: 255}
-      department: {type: string, minLength: 1, maxLength: 255}
-      project_id: {type: string, minLength: 1, maxLength: 255}
-      project: {type: string, minLength: 1, maxLength: 255}
-      agent_id: {type: string, minLength: 1, maxLength: 255}
-      agent: {type: string, minLength: 1, maxLength: 255}
-      user_id: {type: string, minLength: 1, maxLength: 255}
-      user: {type: string, minLength: 1, maxLength: 255}
-      workflow: {type: string, minLength: 1, maxLength: 255}
-      model_id: {type: string, minLength: 1, maxLength: 255}
-      model: {type: string, minLength: 1, maxLength: 255}
-      runtime: {type: string, minLength: 1, maxLength: 255}
-      request_source: {type: string, minLength: 1, maxLength: 255}
-      usage_domain: {type: string, const: apim, default: apim}
-      run_id: {type: string, minLength: 1, maxLength: 255}
-      turn_index: {type: integer, minimum: 1, default: 1}
+      organization_id:
+        type: string
+        minLength: 1
+        maxLength: 255
+      organization:
+        type: string
+        minLength: 1
+        maxLength: 255
+      department_id:
+        type: string
+        minLength: 1
+        maxLength: 255
+      department:
+        type: string
+        minLength: 1
+        maxLength: 255
+      project_id:
+        type: string
+        minLength: 1
+        maxLength: 255
+      project:
+        type: string
+        minLength: 1
+        maxLength: 255
+      agent_id:
+        type: string
+        minLength: 1
+        maxLength: 255
+      agent:
+        type: string
+        minLength: 1
+        maxLength: 255
+      user_id:
+        type: string
+        minLength: 1
+        maxLength: 255
+      user:
+        type: string
+        minLength: 1
+        maxLength: 255
+      workflow:
+        type: string
+        minLength: 1
+        maxLength: 255
+      model_id:
+        type: string
+        minLength: 1
+        maxLength: 255
+      model:
+        type: string
+        minLength: 1
+        maxLength: 255
+      runtime:
+        type: string
+        minLength: 1
+        maxLength: 255
+      request_source:
+        type: string
+        minLength: 1
+        maxLength: 255
+      usage_domain:
+        type: string
+        const: apim
+        default: apim
+      run_id:
+        type: string
+        minLength: 1
+        maxLength: 255
+      turn_index:
+        type: integer
+        minimum: 1
+        default: 1
   ImageInvocationRequest:
-    type: object
+    properties:
+      prompt:
+        $ref: ../../openapi.yaml#/components/schemas/JsonValue
+        description: Provider-owned JSON prompt value.
+      size:
+        $ref: ../../openapi.yaml#/components/schemas/JsonValue
+        description: Optional provider-owned JSON value.
+      quality:
+        $ref: ../../openapi.yaml#/components/schemas/JsonValue
+        description: Optional provider-owned JSON value.
+      output_format:
+        $ref: ../../openapi.yaml#/components/schemas/JsonValue
+        description: Optional provider-owned JSON value.
+      n:
+        type: integer
+        const: 1
+        default: 1
+      stream:
+        type: boolean
+        const: false
+        default: false
+      metadata:
+        $ref: ../../openapi.yaml#/components/schemas/InvocationMetadata
+      model_id:
+        type: string
+        format: uuid
+      runtime_id:
+        type:
+        - string
+        - 'null'
+        format: uuid
+      gateway_profile_id:
+        type:
+        - string
+        - 'null'
+        format: uuid
+      gateway_deployment_id:
+        type:
+        - string
+        - 'null'
+        format: uuid
     additionalProperties: true
-    required: [metadata, model_id, prompt]
-    description: >-
-      Provider JSON passthrough except for model routing and platform metadata. The selected
-      model overrides any caller-supplied provider model field. No size, quality or format
-      defaults are inserted. Serialized UTF-8 request bytes plus the output reservation
-      are reserved before dispatch, bounded by the published v4 profile. Explicit Gateway
-      selection requires both target and deployment IDs; neither is forwarded to the provider.
+    type: object
+    required:
+    - prompt
+    - metadata
+    - model_id
+    title: ImageInvocationRequest
+    description: Provider JSON passthrough except for model routing and platform metadata. The selected
+      model overrides any caller-supplied provider model field. No size, quality or format defaults are
+      inserted. Serialized UTF-8 request bytes plus the output reservation are reserved before dispatch,
+      bounded by the published v4 profile. Explicit Gateway selection requires both target and deployment
+      IDs; neither is forwarded to the provider.
     allOf:
     - if:
-        required: [gateway_profile_id]
+        required:
+        - gateway_profile_id
         properties:
-          gateway_profile_id: {type: string}
+          gateway_profile_id:
+            type: string
       then:
-        required: [gateway_deployment_id]
+        required:
+        - gateway_deployment_id
         properties:
-          gateway_deployment_id: {type: string, format: uuid}
+          gateway_deployment_id:
+            type: string
+            format: uuid
     - if:
-        required: [gateway_deployment_id]
+        required:
+        - gateway_deployment_id
         properties:
-          gateway_deployment_id: {type: string}
+          gateway_deployment_id:
+            type: string
       then:
-        required: [gateway_profile_id]
+        required:
+        - gateway_profile_id
         properties:
-          gateway_profile_id: {type: string, format: uuid}
-    properties:
-      metadata:
-        $ref: ../../openapi.yaml#/components/schemas/ImageInvocationMetadata
-      model_id: {type: string, format: uuid}
-      runtime_id: {type: [string, 'null'], format: uuid, default: null}
-      gateway_profile_id: {type: [string, 'null'], format: uuid, default: null}
-      gateway_deployment_id: {type: [string, 'null'], format: uuid, default: null}
-      prompt: {writeOnly: true, description: Provider-owned JSON prompt value.}
-      size: {description: Optional provider-owned JSON value.}
-      quality: {description: Optional provider-owned JSON value.}
-      output_format: {description: Optional provider-owned JSON value.}
-      n: {type: integer, const: 1, default: 1}
-      stream: {type: boolean, const: false, default: false}
+          gateway_profile_id:
+            type: string
+            format: uuid
   GeneratedImage:
-    type: object
-    additionalProperties: false
-    required: [b64_json, media_type]
     properties:
-      b64_json: {type: string, contentEncoding: base64, minLength: 1, maxLength: 16777216}
-      media_type: {type: string, enum: [image/png, image/jpeg, image/webp]}
+      b64_json:
+        type: string
+        maxLength: 16777216
+        minLength: 1
+      media_type:
+        type: string
+        enum:
+        - image/png
+        - image/jpeg
+        - image/webp
+    additionalProperties: false
+    type: object
+    required:
+    - b64_json
+    - media_type
+    title: GeneratedImage
   ImageInvocationUsage:
     type: object
     additionalProperties: false
-    required: [input_tokens, cached_tokens, output_tokens, estimated]
+    required:
+    - input_tokens
+    - cached_tokens
+    - output_tokens
+    - estimated
     properties:
-      input_tokens: {type: integer, minimum: 0}
-      cached_tokens: {type: integer, minimum: 0}
-      cache_write_tokens: {type: integer, minimum: 0, const: 0, default: 0}
-      output_tokens: {type: integer, minimum: 0}
-      estimated: {type: boolean, const: false}
+      input_tokens:
+        type: integer
+        minimum: 0
+      cached_tokens:
+        type: integer
+        minimum: 0
+      cache_write_tokens:
+        type: integer
+        minimum: 0
+        const: 0
+        default: 0
+      output_tokens:
+        type: integer
+        minimum: 0
+      estimated:
+        type: boolean
+        const: false
   ImageInvocationResponse:
-    type: object
-    additionalProperties: false
-    required: [request_id, correlation_id, provider, runtime, model, gateway, latency_ms,
-      data, size, quality, output_format, usage]
     properties:
-      request_id: {type: string}
-      correlation_id: {type: string}
-      provider: {type: string}
-      runtime: {type: string}
-      model: {type: string}
-      gateway: {type: string, const: apim}
-      latency_ms: {type: integer, minimum: 0}
+      request_id:
+        type: string
+      correlation_id:
+        type: string
+      provider:
+        type: string
+      runtime:
+        type: string
+      model:
+        type: string
+      gateway:
+        type: string
+      gateway_profile_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+      gateway_deployment_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+      native_gateway_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+      latency_ms:
+        type: integer
+        minimum: 0.0
       data:
-        type: array
-        minItems: 1
-        maxItems: 1
         items:
           $ref: ../../openapi.yaml#/components/schemas/GeneratedImage
-      size: {type: string, description: Decoded pixel dimensions.}
-      quality: {type: [string, 'null']}
-      output_format: {type: string, enum: [png, jpeg, webp]}
+        type: array
+        maxItems: 1
+        minItems: 1
+      size:
+        type: string
+        description: Decoded pixel dimensions.
+      quality:
+        type:
+        - string
+        - 'null'
+      output_format:
+        type: string
+        enum:
+        - png
+        - jpeg
+        - webp
       usage:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/InvocationUsage
+        - type: 'null'
         oneOf:
         - $ref: ../../openapi.yaml#/components/schemas/ImageInvocationUsage
         - type: 'null'
-      estimated_cost: {type: [number, 'null'], minimum: 0, default: null}
-  GatewayReconcileRequest:
-    type: object
+      estimated_cost:
+        type:
+        - number
+        - 'null'
+        minimum: 0
     additionalProperties: false
+    type: object
+    required:
+    - request_id
+    - correlation_id
+    - provider
+    - runtime
+    - model
+    - gateway
+    - latency_ms
+    - data
+    - size
+    - quality
+    - output_format
+    - usage
+    title: ImageInvocationResponse
+  GatewayReconcileRequest:
     properties:
       image_configurations:
-        type: object
-        default: {}
-        description: Existing image model keys mapped to new limits; changes require a new publication.
         additionalProperties:
           $ref: ../../openapi.yaml#/components/schemas/ImageGenerationLimits
-  ModelConnectionCreate:
-    type: object
+        propertyNames:
+          format: uuid
+        type: object
+        description: Existing image model keys mapped to new limits; changes require a new publication.
     additionalProperties: false
+    type: object
+    title: GatewayReconcileRequest
+  ModelConnectionCreate:
+    properties:
+      gateway_profile_id:
+        type: string
+        format: uuid
+      provider:
+        $ref: ../../openapi.yaml#/components/schemas/ProviderTarget
+      auth_mode:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ConnectionAuthMode
+        - type: 'null'
+        enum:
+        - managed_identity
+        - api_key
+        - oauth_m2m
+      foundry_project_endpoint:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        format: uri
+        description: Required Foundry Project identity for both authentication modes.
+      foundry_inference_endpoint:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        format: uri
+        description: Required only for API-key mode; must use the same Foundry account.
+      bedrock_runtime_url:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        format: uri
+        description: Regional Bedrock Runtime origin. No model or key is registered here.
+      openai_base_url:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        pattern: ^https://
+        format: uri
+        description: HTTPS Base URL without credentials, query or fragment. A trailing /chat/completions
+          is normalized. No model or key is registered here.
+      databricks_workspace_url:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        format: uri
+        description: Azure Databricks HTTPS Workspace origin without credentials, path, query, fragment
+          or custom port. Claude uses native Anthropic Messages.
+      oauth_client_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        format: uuid
+        description: Databricks service principal Client ID, required only for default-off OAuth M2M.
+          No secret is collected here.
+      model_vendor:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ModelVendorKey
+        - type: 'null'
+        description: Display metadata for OpenAI-compatible connections only; not a routing rule.
+        enum:
+        - generic
+        - kimi
+        - deepseek
+        - openai
+        - anthropic
+    additionalProperties: false
+    type: object
     required:
     - gateway_profile_id
     - provider
+    title: ModelConnectionCreate
+    allOf:
+    - if:
+        required:
+        - databricks_workspace_url
+        properties:
+          databricks_workspace_url: {}
+      then:
+        properties:
+          auth_mode:
+            enum:
+            - managed_identity
+            - oauth_m2m
+    - if:
+        required:
+        - auth_mode
+        properties:
+          auth_mode:
+            const: oauth_m2m
+      then:
+        required:
+        - databricks_workspace_url
+        - oauth_client_id
+        properties:
+          databricks_workspace_url: {}
+          oauth_client_id: {}
+      else:
+        not:
+          required:
+          - oauth_client_id
+          properties:
+            oauth_client_id: {}
     oneOf:
     - required:
       - foundry_project_endpoint
@@ -524,100 +1458,42 @@ schemas:
     - required:
       - databricks_workspace_url
       - auth_mode
-    allOf:
-    - if:
-        required: [databricks_workspace_url]
-        properties:
-          databricks_workspace_url: {}
-      then:
-        properties:
-          auth_mode: {enum: [managed_identity, oauth_m2m]}
-    - if:
-        required: [auth_mode]
-        properties:
-          auth_mode: {const: oauth_m2m}
-      then:
-        required: [databricks_workspace_url, oauth_client_id]
-        properties:
-          databricks_workspace_url: {}
-          oauth_client_id: {}
-      else:
-        not:
-          required: [oauth_client_id]
-          properties:
-            oauth_client_id: {}
-    properties:
-      gateway_profile_id:
-        type: string
-        format: uuid
-      provider:
-        $ref: ../../openapi.yaml#/components/schemas/GatewayProviderTarget
-      auth_mode:
-        type: string
-        enum:
-        - managed_identity
-        - api_key
-        - oauth_m2m
-      foundry_project_endpoint:
-        type: string
-        format: uri
-        description: Required Foundry Project identity for both authentication modes.
-      foundry_inference_endpoint:
-        type: string
-        format: uri
-        description: Required only for API-key mode; must use the same Foundry account.
-      bedrock_runtime_url:
-        type: string
-        format: uri
-        description: Regional Bedrock Runtime origin. No model or key is registered here.
-      openai_base_url:
-        type: string
-        format: uri
-        pattern: ^https://
-        description: HTTPS Base URL without credentials, query or fragment. A trailing
-          /chat/completions is normalized. No model or key is registered here.
-      model_vendor:
-        type: string
-        enum:
-        - generic
-        - kimi
-        - deepseek
-        - openai
-        - anthropic
-        description: Display metadata for OpenAI-compatible connections only; not a routing rule.
-      databricks_workspace_url:
-        type: string
-        format: uri
-        description: Azure Databricks HTTPS Workspace origin without credentials, path, query, fragment or custom port. Claude uses native Anthropic Messages.
-      oauth_client_id:
-        type: string
-        format: uuid
-        description: Databricks service principal Client ID, required only for default-off OAuth M2M. No secret is collected here.
   DatabricksConnectionAdopt:
-    type: object
-    additionalProperties: false
-    required: [workspace_url]
     properties:
       workspace_url:
         type: string
+        maxLength: 2083
+        minLength: 1
         format: uri
         description: Azure Databricks HTTPS Workspace origin for the existing native Claude models.
-  ModelConnectionUpdate:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - name
-    - enabled
-    - is_default
+    - workspace_url
+    title: DatabricksConnectionAdopt
+  ModelConnectionUpdate:
     properties:
       name:
         type: string
-        minLength: 1
         maxLength: 160
+        minLength: 1
       enabled:
         type: boolean
       is_default:
         type: boolean
+      price_discount_percent:
+        anyOf:
+        - type: number
+          maximum: 100.0
+          exclusiveMinimum: 0.0
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - name
+    - enabled
+    - is_default
+    title: ModelConnectionUpdate
   ModelRegistry:
     type: object
     required:
@@ -641,19 +1517,23 @@ schemas:
       apim_target_topology_available:
         type: boolean
         default: false
-        description: Registered APIM topology is enabled; the UI exposes separate Gateway and APIM instance workspaces.
+        description: Registered APIM topology is enabled; the UI exposes separate Gateway and APIM instance
+          workspaces.
       self_hosted_gateway_enabled:
         type: boolean
         default: false
-        description: Self-hosted Gateway attachment and deployment selection are enabled. Existing lifecycle records remain available.
+        description: Self-hosted Gateway attachment and deployment selection are enabled. Existing lifecycle
+          records remain available.
       context_pricing_supported:
         type: boolean
         default: false
-        description: Compatible API, Publisher and Telemetry support complete context price schedules after migration 009.
+        description: Compatible API, Publisher and Telemetry support complete context price schedules
+          after migration 009.
       context_price_rules_supported:
         type: boolean
         default: false
-        description: API and shared snapshot readers support explicit administrator-defined context thresholds. Does not assert official billing equivalence.
+        description: API and shared snapshot readers support explicit administrator-defined context thresholds.
+          Does not assert official billing equivalence.
       backend_pool_session_affinity_supported:
         type: boolean
         default: false
@@ -661,11 +1541,13 @@ schemas:
       databricks_connections_supported:
         type: boolean
         default: false
-        description: API supports native Claude Workspace connections and explicit legacy adoption. Compatible Publisher is also required.
+        description: API supports native Claude Workspace connections and explicit legacy adoption. Compatible
+          Publisher is also required.
       databricks_oauth_supported:
         type: boolean
         default: false
-        description: True only when Databricks OAuth M2M is explicitly enabled. Does not assert cross-tenant or token-renewal validation.
+        description: True only when Databricks OAuth M2M is explicitly enabled. Does not assert cross-tenant
+          or token-renewal validation.
       image_generation_supported:
         type: boolean
         default: false
@@ -691,8 +1573,8 @@ schemas:
           properties:
             diagnostic:
               oneOf:
-              - {$ref: ../../openapi.yaml#/components/schemas/RuntimeHealth}
-              - {type: 'null'}
+              - $ref: ../../openapi.yaml#/components/schemas/RuntimeHealth
+              - type: 'null'
       models:
         type: array
         items:
@@ -701,7 +1583,9 @@ schemas:
             context_price_references:
               type: array
               maxItems: 32
-              items: {type: string, maxLength: 1000}
+              items:
+                type: string
+                maxLength: 1000
             context_price_rule:
               oneOf:
               - $ref: ../../openapi.yaml#/components/schemas/ContextPriceRule
@@ -709,105 +1593,153 @@ schemas:
             context_price_tiers:
               type: array
               maxItems: 32
-              items: {$ref: ../../openapi.yaml#/components/schemas/StoredContextPriceTier}
+              items:
+                $ref: ../../openapi.yaml#/components/schemas/StoredContextPriceTier
             pending_context_price_tiers:
-              type: [array, 'null']
-              items: {$ref: ../../openapi.yaml#/components/schemas/StoredContextPriceTier}
+              type:
+              - array
+              - 'null'
+              items:
+                $ref: ../../openapi.yaml#/components/schemas/StoredContextPriceTier
             capabilities:
               type: array
               items:
                 type: string
-                enum: [chat, tools, vision, reasoning, streaming, embeddings, image_generation]
+                enum:
+                - chat
+                - tools
+                - vision
+                - reasoning
+                - streaming
+                - embeddings
+                - image_generation
             image_profile:
               oneOf:
               - $ref: ../../openapi.yaml#/components/schemas/ImageGenerationProfile
               - type: 'null'
   ContextPriceRule:
-    type: object
-    additionalProperties: false
-    required: [short_context_max_tokens]
-    description: An explicit administrator-defined estimation rule, not a discovered or official billing threshold. Requires exactly the short and long catalog references; versions and configuration times are server-owned.
     properties:
-      short_context_max_tokens: {type: integer, minimum: 1, maximum: 9007199254740990}
-      note: {type: string, maxLength: 500, default: ''}
+      short_context_max_tokens:
+        type: integer
+        maximum: 9007199254740990.0
+        exclusiveMinimum: 0.0
+      note:
+        type: string
+        maxLength: 500
+        default: ''
       source_url:
-        type: [string, 'null']
-        format: uri
-        pattern: '^https://'
+        type:
+        - string
+        - 'null'
         maxLength: 2000
-        description: Optional reference only. Credentials and whitespace are rejected; the server does not fetch this URL.
+        pattern: ^https://
+        format: uri
+        description: Optional reference only. Credentials and whitespace are rejected; the server does
+          not fetch this URL.
+    additionalProperties: false
+    type: object
+    required:
+    - short_context_max_tokens
+    title: ContextPriceRule
+    description: An explicit administrator-defined estimation rule, not a discovered or official billing
+      threshold. Requires exactly the short and long catalog references; versions and configuration times
+      are server-owned.
   StoredContextPriceTier:
-    type: object
-    additionalProperties: false
-    required: [key, label, reference, min_input_tokens, max_input_tokens, input_price_per_million, output_price_per_million, cached_price_per_million, cache_write_price_per_million, list_prices]
     properties:
-      key: {type: string, minLength: 1}
-      label: {type: string, minLength: 1}
-      reference: {type: string, minLength: 1, maxLength: 1000}
-      min_input_tokens: {type: integer, minimum: 0}
-      max_input_tokens: {type: [integer, 'null'], minimum: 0}
-      input_price_per_million: {type: number, minimum: 0}
-      output_price_per_million: {type: number, minimum: 0}
-      cached_price_per_million: {type: number, minimum: 0}
-      cache_write_price_per_million: {type: number, minimum: 0}
-      list_prices:
-        type: object
-        additionalProperties: false
-        properties:
-          input: {type: [number, 'null']}
-          output: {type: [number, 'null']}
-          cached: {type: [number, 'null']}
-          cache_write: {type: [number, 'null']}
+      key:
+        type: string
+        minLength: 1
+      min_input_tokens:
+        type: integer
+        minimum: 0.0
+      max_input_tokens:
+        type:
+        - integer
+        - 'null'
+        minimum: 0
+      input_price_per_million:
+        type: number
+        minimum: 0.0
+      cached_price_per_million:
+        type: number
+        minimum: 0.0
+      cache_write_price_per_million:
+        type: number
+        minimum: 0.0
+      output_price_per_million:
+        type: number
+        minimum: 0.0
       input_range_source:
-        type: [object, 'null']
-        properties:
-          rule_id: {type: string}
-          url: {type: [string, 'null'], format: uri}
-          revision: {type: string}
-          verified_on: {type: [string, 'null'], format: date}
-          origin: {type: string, enum: [official, reference, custom], default: official}
-          configured_at: {type: [string, 'null'], format: date-time, readOnly: true}
-          note: {type: [string, 'null'], maxLength: 500}
-      model_key: {type: string}
-      model_label: {type: string}
-      product: {type: string}
-      group_key: {type: string}
-      service_tier: {type: string}
-      deployment: {type: string}
-      regions: {type: array, items: {type: string}}
-  GatewayPublicationCreate:
-    type: object
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/PriceCatalogRuleSource
+        - type: 'null'
+      reference:
+        type: string
+        maxLength: 1000
+        minLength: 1
+      label:
+        type: string
+        minLength: 1
+      list_prices:
+        $ref: ../../openapi.yaml#/components/schemas/PendingListPrice
+      model_key:
+        type: string
+        default: ''
+      model_label:
+        type: string
+        default: ''
+      product:
+        type: string
+        default: ''
+      group_key:
+        type: string
+        default: ''
+      service_tier:
+        type: string
+        default: ''
+      deployment:
+        type: string
+        default: ''
+      regions:
+        items:
+          type: string
+        type: array
     additionalProperties: false
+    type: object
+    required:
+    - key
+    - min_input_tokens
+    - input_price_per_million
+    - cached_price_per_million
+    - cache_write_price_per_million
+    - output_price_per_million
+    - reference
+    - label
+    - list_prices
+    title: StoredContextPriceTier
+  GatewayPublicationCreate:
+    properties:
+      gateway_profile_id:
+        type: string
+        format: uuid
+      provider:
+        $ref: ../../openapi.yaml#/components/schemas/ProviderTarget
+      runtime:
+        $ref: ../../openapi.yaml#/components/schemas/RuntimeTarget
+      model:
+        $ref: ../../openapi.yaml#/components/schemas/ModelCreateTarget
+      deployment_scope:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentScope
+    additionalProperties: false
+    type: object
     required:
     - gateway_profile_id
     - provider
     - runtime
     - model
-    properties:
-      gateway_profile_id:
-        type: string
-        format: uuid
-      deployment_scope:
-        $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentScope
-      provider:
-        $ref: ../../openapi.yaml#/components/schemas/GatewayProviderTarget
-      runtime:
-        $ref: ../../openapi.yaml#/components/schemas/GatewayRuntimeTarget
-      model:
-        $ref: ../../openapi.yaml#/components/schemas/GatewayModelTarget
+    title: GatewayPublicationCreate
   GatewayPublicationRetry:
-    type: object
-    additionalProperties: false
-    not:
-      required: [api_key, oauth_client_secret]
-      properties:
-        api_key: {}
-        oauth_client_secret: {}
     properties:
-      authorize_image_probes:
-        type: boolean
-        default: false
-        description: Explicitly authorize a fresh bounded paid image probe attempt after a failed publication.
       api_key:
         type:
         - string
@@ -815,87 +1747,107 @@ schemas:
         format: password
         writeOnly: true
       oauth_client_secret:
-        type: [string, 'null']
+        type:
+        - string
+        - 'null'
+        maxLength: 4096
+        minLength: 1
         format: password
         writeOnly: true
-        minLength: 1
-        maxLength: 4096
-        description: Replacement Databricks OAuth Secret only when retry_requires_credential is true. Never an Entra secret or PAT.
-  GatewayCredentialRotation:
-    type: object
+        description: Replacement Databricks OAuth Secret only when retry_requires_credential is true.
+          Never an Entra secret or PAT.
+      authorize_image_probes:
+        type: boolean
+        default: false
+        description: Explicitly authorize a fresh bounded paid image probe attempt after a failed publication.
     additionalProperties: false
-    required:
-    - model_key
-    oneOf:
-    - required: [api_key]
-      not:
-        required: [oauth_client_secret]
-        properties:
-          oauth_client_secret: {}
-    - required: [oauth_client_secret]
-      not:
-        required: [api_key]
-        properties:
-          api_key: {}
+    type: object
+    title: GatewayPublicationRetry
+  GatewayCredentialRotation:
     properties:
       model_key:
         type: string
-        minLength: 1
         maxLength: 255
+        minLength: 1
         pattern: ^[a-zA-Z0-9._:-]+$
       api_key:
-        type: string
+        anyOf:
+        - type: string
+          format: password
+          writeOnly: true
+        - type: 'null'
         format: password
-        writeOnly: true
       oauth_client_secret:
-        type: string
+        anyOf:
+        - type: string
+          maxLength: 4096
+          minLength: 1
+          format: password
+          writeOnly: true
+        - type: 'null'
         format: password
-        writeOnly: true
         minLength: 1
         maxLength: 4096
-        description: Creates a new Credential Manager resource generation; effective credentials switch only after candidate promotion.
-  GatewayBackendPoolMemberWrite:
-    type: object
+        writeOnly: true
+        description: Creates a new Credential Manager resource generation; effective credentials switch
+          only after candidate promotion.
     additionalProperties: false
+    type: object
     required:
-    - runtime_id
-    - priority
-    - weight
+    - model_key
+    title: GatewayCredentialRotation
+    oneOf:
+    - required:
+      - api_key
+      not:
+        required:
+        - oauth_client_secret
+        properties:
+          oauth_client_secret: {}
+    - required:
+      - oauth_client_secret
+      not:
+        required:
+        - api_key
+        properties:
+          api_key: {}
+  GatewayBackendPoolMemberWrite:
     properties:
       runtime_id:
         type: string
         format: uuid
       priority:
         type: integer
-        minimum: 0
-        maximum: 100
+        maximum: 100.0
+        minimum: 0.0
       weight:
         type: integer
-        minimum: 0
-        maximum: 100
-  GatewayBackendFailureStatusCodeRange:
-    type: object
+        maximum: 100.0
+        minimum: 0.0
     additionalProperties: false
+    type: object
     required:
-    - minimum
-    - maximum
+    - runtime_id
+    - priority
+    - weight
+    title: GatewayBackendPoolMemberWrite
+  GatewayBackendFailureStatusCodeRange:
     properties:
       minimum:
         type: integer
-        minimum: 200
-        maximum: 599
+        maximum: 599.0
+        minimum: 200.0
       maximum:
         type: integer
-        minimum: 200
-        maximum: 599
-  GatewayRateLimitCircuitBreaker:
-    type: object
+        maximum: 599.0
+        minimum: 200.0
     additionalProperties: false
+    type: object
     required:
-    - failure_count
-    - interval_seconds
-    - trip_duration_seconds
-    - accept_retry_after
+    - minimum
+    - maximum
+    title: GatewayBackendFailureStatusCodeRange
+  GatewayRateLimitCircuitBreaker:
     properties:
       failure_count:
         type: integer
@@ -910,6 +1862,8 @@ schemas:
         type: boolean
         const: true
       status_code_ranges:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayBackendFailureStatusCodeRange
         type: array
         default:
         - minimum: 429
@@ -918,26 +1872,25 @@ schemas:
           maximum: 408
         - minimum: 500
           maximum: 599
-        items:
-          $ref: ../../openapi.yaml#/components/schemas/GatewayBackendFailureStatusCodeRange
       error_reasons:
-        type: array
-        default:
-        - BackendConnectionFailure
-        - Timeout
         items:
           type: string
           enum:
           - BackendConnectionFailure
           - Timeout
-  GatewayRateLimitResilience:
-    type: object
+        type: array
+        default:
+        - BackendConnectionFailure
+        - Timeout
     additionalProperties: false
+    type: object
     required:
-    - max_attempts_per_request
-    - retry_interval_seconds
-    - first_fast_retry
-    - circuit_breaker
+    - failure_count
+    - interval_seconds
+    - trip_duration_seconds
+    - accept_retry_after
+    title: GatewayRateLimitCircuitBreaker
+  GatewayRateLimitResilience:
     properties:
       max_attempts_per_request:
         type: integer
@@ -954,49 +1907,52 @@ schemas:
         default: 120
       circuit_breaker:
         $ref: ../../openapi.yaml#/components/schemas/GatewayRateLimitCircuitBreaker
-  GatewayBackendPoolWrite:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - members
-    - rate_limit
+    - max_attempts_per_request
+    - retry_interval_seconds
+    - first_fast_retry
+    - circuit_breaker
+    title: GatewayRateLimitResilience
+  GatewayBackendPoolWrite:
     properties:
+      members:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayBackendPoolMemberWrite
+        type: array
+        maxItems: 30
+        minItems: 2
+      rate_limit:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayRateLimitResilience
       session_affinity:
         type: boolean
         default: false
-        description: Keep requests with the same client-held session cookie on an eligible
-          Pool member. Does not change priority, weight, or failover rules.
-      members:
-        type: array
-        minItems: 2
-        maxItems: 30
-        items:
-          $ref: ../../openapi.yaml#/components/schemas/GatewayBackendPoolMemberWrite
-      rate_limit:
-        $ref: ../../openapi.yaml#/components/schemas/GatewayRateLimitResilience
-  GatewayBackendPoolMember:
-    type: object
+        description: Keep requests with the same client-held session cookie on an eligible Pool member.
+          Does not change priority, weight, or failover rules.
     additionalProperties: false
+    type: object
     required:
-    - runtime_id
-    - runtime_name
-    - backend_url
-    - auth_strategy
-    - priority
-    - weight
+    - members
+    - rate_limit
+    title: GatewayBackendPoolWrite
+  GatewayBackendPoolMember:
     properties:
       runtime_id:
         type: string
         format: uuid
       runtime_name:
         type: string
-        minLength: 1
         maxLength: 160
+        minLength: 1
       backend_url:
         type: string
+        maxLength: 2083
+        minLength: 1
         format: uri
       auth_strategy:
-        type: string
+        $ref: ../../openapi.yaml#/components/schemas/AuthStrategy
+        default: none
         enum:
         - none
         - managed_identity
@@ -1008,35 +1964,45 @@ schemas:
         - 'null'
       priority:
         type: integer
-        minimum: 0
-        maximum: 100
+        maximum: 100.0
+        minimum: 0.0
       weight:
         type: integer
-        minimum: 0
-        maximum: 100
-  GatewayBackendPoolConfig:
-    type: object
+        maximum: 100.0
+        minimum: 0.0
     additionalProperties: false
+    type: object
     required:
-    - members
-    - rate_limit
+    - runtime_id
+    - runtime_name
+    - backend_url
+    - priority
+    - weight
+    title: GatewayBackendPoolMember
+  GatewayBackendPoolConfig:
     properties:
-      session_affinity:
-        type: boolean
-        default: false
-        description: Effective affinity setting; absent in legacy stored Pool JSON.
       schema_version:
         type: integer
         const: 1
         default: 1
       members:
-        type: array
-        minItems: 2
-        maxItems: 30
         items:
           $ref: ../../openapi.yaml#/components/schemas/GatewayBackendPoolMember
+        type: array
+        maxItems: 30
+        minItems: 2
       rate_limit:
         $ref: ../../openapi.yaml#/components/schemas/GatewayRateLimitResilience
+      session_affinity:
+        type: boolean
+        default: false
+        description: Effective affinity setting; absent in legacy stored Pool JSON.
+    additionalProperties: false
+    type: object
+    required:
+    - members
+    - rate_limit
+    title: GatewayBackendPoolConfig
   GatewayProviderTarget:
     type: object
     additionalProperties: false
@@ -1061,16 +2027,20 @@ schemas:
     additionalProperties: false
     allOf:
     - not:
-        required: [api_key, oauth_client_secret]
+        required:
+        - api_key
+        - oauth_client_secret
         properties:
           api_key: {}
           oauth_client_secret: {}
     - if:
-        required: [oauth_client_secret]
+        required:
+        - oauth_client_secret
         properties:
           oauth_client_secret: {}
       then:
-        required: [existing_id]
+        required:
+        - existing_id
         properties:
           existing_id: {}
     oneOf:
@@ -1166,35 +2136,44 @@ schemas:
         type: string
         format: uri
         pattern: ^https://
-        description: HTTPS Chat Completions Base URL without credentials, query or fragment;
-          requires api_key when creating a new Runtime.
+        description: HTTPS Chat Completions Base URL without credentials, query or fragment; requires
+          api_key when creating a new Runtime.
       model_vendor:
         type: string
-        enum: [generic, openai, anthropic, deepseek, kimi]
-        description: Vendor for a new OpenAI-compatible Runtime only. Existing connections
-          retain their configured vendor and cannot redefine it in a publication request.
+        enum:
+        - generic
+        - openai
+        - anthropic
+        - deepseek
+        - kimi
+        description: Vendor for a new OpenAI-compatible Runtime only. Existing connections retain their
+          configured vendor and cannot redefine it in a publication request.
       api_key:
         type: string
         format: password
         writeOnly: true
-        description: One-time Bedrock, Foundry or OpenAI-compatible provider key. It may accompany a new runtime or the first
-          model on a registered API-key connection; it is encrypted on receipt and removed after APIM
-          secret provisioning.
+        description: One-time Bedrock, Foundry or OpenAI-compatible provider key. It may accompany a new
+          runtime or the first model on a registered API-key connection; it is encrypted on receipt and
+          removed after APIM secret provisioning.
       oauth_client_secret:
         type: string
         format: password
         writeOnly: true
         minLength: 1
         maxLength: 4096
-        description: One-time Databricks OAuth Secret for an existing pending OAuth connection. Encrypted outside the release snapshot and erased after verified Credential Manager provisioning.
+        description: One-time Databricks OAuth Secret for an existing pending OAuth connection. Encrypted
+          outside the release snapshot and erased after verified Credential Manager provisioning.
   GatewayModelTarget:
     type: object
     additionalProperties: false
-    description: Catalog pricing is resolved by the server before publication. Submitted rates are used only for manual pricing.
+    description: Catalog pricing is resolved by the server before publication. Submitted rates are used
+      only for manual pricing.
     properties:
       operation:
         type: string
-        enum: [chat, image_generation]
+        enum:
+        - chat
+        - image_generation
         default: chat
         description: Image generation requires an existing Foundry deployment and three explicit prices.
       image_configuration:
@@ -1246,106 +2225,204 @@ schemas:
         minimum: 0
       price_source:
         type: string
-        enum: [manual, azure_retail, anthropic]
+        enum:
+        - manual
+        - azure_retail
+        - anthropic
         default: manual
       price_reference:
-        type: [string, 'null']
+        type:
+        - string
+        - 'null'
         maxLength: 1000
-        description: Selected flat-rate catalog entry; use context_price_references instead for tiered prices.
+        description: Selected flat-rate catalog entry; use context_price_references instead for tiered
+          prices.
       context_price_references:
         type: array
         default: []
         maxItems: 32
         uniqueItems: true
-        items: {type: string, minLength: 1, maxLength: 1000}
-        description: Complete context-tier selection. The server resolves all prices and validates catalog or explicit custom ranges; client amounts do not set catalog prices.
+        items:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        description: Complete context-tier selection. The server resolves all prices and validates catalog
+          or explicit custom ranges; client amounts do not set catalog prices.
       context_price_rule:
         oneOf:
         - $ref: ../../openapi.yaml#/components/schemas/ContextPriceRule
         - type: 'null'
       price_discount_percent:
-        type: [number, 'null']
+        type:
+        - number
+        - 'null'
         exclusiveMinimum: 0
         maximum: 100
-        description: Percent of list price charged; 90 means a 10 percent discount. Null inherits the connection discount, or list price when none is set.
+        description: Percent of list price charged; 90 means a 10 percent discount. Null inherits the
+          connection discount, or list price when none is set.
     allOf:
     - if:
-        required: [operation]
+        required:
+        - operation
         properties:
-          operation: {const: image_generation}
+          operation:
+            const: image_generation
       then:
-        required: [deployment_name, input_cost_per_million, cached_cost_per_million, output_cost_per_million]
+        required:
+        - deployment_name
+        - input_cost_per_million
+        - cached_cost_per_million
+        - output_cost_per_million
         properties:
-          deployment_name: {type: string, minLength: 1, maxLength: 500}
-          input_cost_per_million: {type: number, minimum: 0}
-          cached_cost_per_million: {type: number, minimum: 0}
-          output_cost_per_million: {type: number, minimum: 0}
-          context_window: {type: 'null'}
-          cache_write_cost_per_million: {type: 'null'}
-          price_source: {const: manual}
-          context_price_references: {maxItems: 0}
-          context_price_rule: {type: 'null'}
+          deployment_name:
+            type: string
+            minLength: 1
+            maxLength: 500
+          input_cost_per_million:
+            type: number
+            minimum: 0
+          cached_cost_per_million:
+            type: number
+            minimum: 0
+          output_cost_per_million:
+            type: number
+            minimum: 0
+          context_window:
+            type: 'null'
+          cache_write_cost_per_million:
+            type: 'null'
+          price_source:
+            const: manual
+          context_price_references:
+            maxItems: 0
+          context_price_rule:
+            type: 'null'
     - if:
-        required: [price_source]
+        required:
+        - price_source
         properties:
-          price_source: {const: azure_retail}
+          price_source:
+            const: azure_retail
       then:
         anyOf:
-        - required: [price_reference]
+        - required:
+          - price_reference
           properties:
-            price_reference: {type: string, pattern: '^azure_retail:'}
-            context_price_references: {maxItems: 0}
-        - required: [context_price_references]
+            price_reference:
+              type: string
+              pattern: '^azure_retail:'
+            context_price_references:
+              maxItems: 0
+        - required:
+          - context_price_references
           properties:
-            context_price_references: {minItems: 2, items: {type: string, pattern: '^azure_retail:'}}
+            context_price_references:
+              minItems: 2
+              items:
+                type: string
+                pattern: '^azure_retail:'
     - if:
-        required: [price_source]
+        required:
+        - price_source
         properties:
-          price_source: {const: anthropic}
+          price_source:
+            const: anthropic
       then:
         anyOf:
-        - required: [price_reference]
+        - required:
+          - price_reference
           properties:
-            price_reference: {type: string, pattern: '^anthropic:'}
-            context_price_references: {maxItems: 0}
-        - required: [context_price_references]
+            price_reference:
+              type: string
+              pattern: '^anthropic:'
+            context_price_references:
+              maxItems: 0
+        - required:
+          - context_price_references
           properties:
-            context_price_references: {minItems: 2, items: {type: string, pattern: '^anthropic:'}}
+            context_price_references:
+              minItems: 2
+              items:
+                type: string
+                pattern: '^anthropic:'
     - if:
-        required: [context_price_rule]
+        required:
+        - context_price_rule
         properties:
-          context_price_rule: {type: object}
+          context_price_rule:
+            type: object
       then:
-        required: [price_source, context_price_references]
+        required:
+        - price_source
+        - context_price_references
         properties:
-          price_source: {enum: [azure_retail, anthropic]}
-          context_price_references: {minItems: 2, maxItems: 2}
+          price_source:
+            enum:
+            - azure_retail
+            - anthropic
+          context_price_references:
+            minItems: 2
+            maxItems: 2
   GatewayPublicationFailure:
-    type: object
-    additionalProperties: false
-    required: [code, message]
     properties:
       code:
         type: string
-        enum: [publisher_permissions_missing, publisher_permissions_unverified,
-          publisher_authorization_failed, parent_policy_changed, credential_source_missing,
-          apim_infrastructure_upgrade_required, publication_failed]
+        enum:
+        - publisher_permissions_missing
+        - publisher_permissions_unverified
+        - publisher_authorization_failed
+        - parent_policy_changed
+        - credential_source_missing
+        - apim_infrastructure_upgrade_required
+        - publication_failed
+        - deployment_not_found
+        - deployment_metadata_unavailable
+        - upstream_request_failed
       message:
         type: string
       stage:
-        type: [string, 'null']
-        enum: [queued, validating, provisioning, building_revision, verifying,
-          awaiting_authorization, promoting, active, failed, superseded, rolling_back,
-          rolled_back, null]
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/PublicationStatus
+        - type: 'null'
+        enum:
+        - queued
+        - validating
+        - provisioning
+        - building_revision
+        - verifying
+        - awaiting_authorization
+        - promoting
+        - active
+        - failed
+        - superseded
+        - rolling_back
+        - rolled_back
+        - null
       request_id:
-        type: [string, 'null']
+        type:
+        - string
+        - 'null'
         format: uuid
       http_status:
-        type: [integer, 'null']
-        enum: [401, 403, null]
+        type:
+        - integer
+        - 'null'
+        maximum: 599.0
+        minimum: 100.0
+        enum:
+        - 401
+        - 403
+        - null
       missing_actions:
+        items:
+          type: string
         type: array
-        items: {type: string}
+    additionalProperties: false
+    type: object
+    required:
+    - code
+    - message
+    title: GatewayPublicationFailure
   GatewayPublication:
     type: object
     additionalProperties: false
@@ -1371,12 +2448,19 @@ schemas:
         type: string
         format: uuid
       target_deployments:
-        type: [array, 'null']
+        type:
+        - array
+        - 'null'
         description: Recorded serving deployments for this publication, not inferred from current defaults.
         items:
           type: object
           additionalProperties: false
-          required: [deployment_id, native_gateway_id, kind, endpoint_url, release_gate]
+          required:
+          - deployment_id
+          - native_gateway_id
+          - kind
+          - endpoint_url
+          - release_gate
           properties:
             deployment_id:
               type: string
@@ -1385,13 +2469,17 @@ schemas:
               type: string
             kind:
               type: string
-              enum: [managed, self_hosted]
+              enum:
+              - managed
+              - self_hosted
             endpoint_url:
               type: string
               format: uri
             release_gate:
               type: string
-              enum: [required, optional]
+              enum:
+              - required
+              - optional
       generation:
         type: integer
         minimum: 1
@@ -1440,18 +2528,23 @@ schemas:
         - $ref: ../../openapi.yaml#/components/schemas/DatabricksOAuthAuthorizationRequirement
         - type: 'null'
       credential_kind:
-        type: [string, 'null']
-        enum: [api_key, oauth_m2m, null]
+        type:
+        - string
+        - 'null'
+        enum:
+        - api_key
+        - oauth_m2m
+        - null
         default: null
       retry_requires_credential:
         type: boolean
-        description: True when retry cannot reuse a release-owned APIM credential resource
-          from persisted publication or completed provisioning evidence.
+        description: True when retry cannot reuse a release-owned APIM credential resource from persisted
+          publication or completed provisioning evidence.
       retry_can_authorize_image_probes:
         type: boolean
         default: false
-        description: Whether a failed publication can accept explicit consent for new paid image
-          probes. False for non-image publications, unsupported retry kinds and the 32-attempt limit.
+        description: Whether a failed publication can accept explicit consent for new paid image probes.
+          False for non-image publications, unsupported retry kinds and the 32-attempt limit.
       attempt_count:
         type: integer
         minimum: 0
@@ -1474,40 +2567,34 @@ schemas:
         type: string
         format: date-time
   GatewayReleaseChangeSet:
-    type: object
-    additionalProperties: false
-    required:
-    - added_models
-    - removed_models
-    - changed_models
-    - added_backend_pools
-    - removed_backend_pools
-    - changed_backend_pools
     properties:
       added_models:
-        type: array
         items:
           type: string
+        type: array
       removed_models:
-        type: array
         items:
           type: string
+        type: array
       changed_models:
-        type: array
         items:
           type: string
+        type: array
       added_backend_pools:
-        type: array
         items:
           type: string
+        type: array
       removed_backend_pools:
-        type: array
         items:
           type: string
+        type: array
       changed_backend_pools:
-        type: array
         items:
           type: string
+        type: array
+    additionalProperties: false
+    type: object
+    title: GatewayReleaseChangeSet
   GatewayReleaseDependencies:
     type: object
     additionalProperties: false
@@ -1550,8 +2637,10 @@ schemas:
       oauth_credentials:
         type: array
         default: []
-        items: {type: string}
-        description: Release-owned APIM Credential Manager provider IDs, including connection and APIM identity access-policy checks.
+        items:
+          type: string
+        description: Release-owned APIM Credential Manager provider IDs, including connection and APIM
+          identity access-policy checks.
       recorded_complete:
         type: boolean
       live_status:
@@ -1571,16 +2660,6 @@ schemas:
         items:
           type: string
   GatewayReleaseAuditEvent:
-    type: object
-    additionalProperties: false
-    required:
-    - id
-    - publication_id
-    - from_status
-    - to_status
-    - actor
-    - detail
-    - created_at
     properties:
       id:
         type: string
@@ -1589,9 +2668,9 @@ schemas:
         type: string
         format: uuid
       from_status:
-        type:
-        - string
-        - 'null'
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/PublicationStatus
+        - type: 'null'
         enum:
         - queued
         - validating
@@ -1607,7 +2686,7 @@ schemas:
         - rolled_back
         - null
       to_status:
-        type: string
+        $ref: ../../openapi.yaml#/components/schemas/PublicationStatus
         enum:
         - queued
         - validating
@@ -1624,39 +2703,47 @@ schemas:
       actor:
         type: string
       detail:
-        type: object
         additionalProperties: true
+        type: object
       created_at:
         type: string
         format: date-time
-  GatewayReleaseRetentionPolicy:
-    type: object
     additionalProperties: false
+    type: object
+    required:
+    - id
+    - publication_id
+    - from_status
+    - to_status
+    - actor
+    - created_at
+    title: GatewayReleaseAuditEvent
+  GatewayReleaseRetentionPolicy:
+    properties:
+      retained_count:
+        type: integer
+        maximum: 1000.0
+        minimum: 1.0
+      retained_days:
+        type: integer
+        maximum: 3650.0
+        minimum: 1.0
+      failed_retained_days:
+        type: integer
+        maximum: 3650.0
+        minimum: 1.0
+      protected_labels:
+        items:
+          type: string
+        type: array
+    additionalProperties: false
+    type: object
     required:
     - retained_count
     - retained_days
     - failed_retained_days
-    - protected_labels
-    properties:
-      retained_count:
-        type: integer
-        minimum: 1
-        maximum: 1000
-      retained_days:
-        type: integer
-        minimum: 1
-        maximum: 3650
-      failed_retained_days:
-        type: integer
-        minimum: 1
-        maximum: 3650
-      protected_labels:
-        type: array
-        items:
-          type: string
+    title: GatewayReleaseRetentionPolicy
   GatewayReleaseProtectionWrite:
-    type: object
-    additionalProperties: false
     properties:
       pinned:
         type: boolean
@@ -1665,23 +2752,17 @@ schemas:
         type:
         - string
         - 'null'
-        minLength: 1
         maxLength: 80
+        minLength: 1
       retain_until:
         type:
         - string
         - 'null'
         format: date-time
-  GatewayReleaseProtection:
-    type: object
     additionalProperties: false
-    required:
-    - publication_id
-    - pinned
-    - protected_label
-    - retain_until
-    - updated_by
-    - updated_at
+    type: object
+    title: GatewayReleaseProtectionWrite
+  GatewayReleaseProtection:
     properties:
       publication_id:
         type: string
@@ -1702,17 +2783,17 @@ schemas:
       updated_at:
         type: string
         format: date-time
-  GatewayReleaseProtectionAuditEvent:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - id
     - publication_id
     - pinned
     - protected_label
     - retain_until
-    - actor
-    - created_at
+    - updated_by
+    - updated_at
+    title: GatewayReleaseProtection
+  GatewayReleaseProtectionAuditEvent:
     properties:
       id:
         type: string
@@ -1736,9 +2817,133 @@ schemas:
       created_at:
         type: string
         format: date-time
-  GatewayReleaseSummary:
-    type: object
     additionalProperties: false
+    type: object
+    required:
+    - id
+    - publication_id
+    - pinned
+    - protected_label
+    - retain_until
+    - actor
+    - created_at
+    title: GatewayReleaseProtectionAuditEvent
+  GatewayReleaseSummary:
+    properties:
+      id:
+        type: string
+        format: uuid
+      gateway_profile_id:
+        type: string
+        format: uuid
+      gateway_name:
+        type: string
+      generation:
+        type: integer
+      role:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseRole
+        enum:
+        - current
+        - immediate_rollback
+        - pinned
+        - superseded
+        - failed
+        - expired
+        - in_progress
+        - rolled_back
+      publication_kind:
+        $ref: ../../openapi.yaml#/components/schemas/PublicationKind
+        enum:
+        - model_add
+        - model_remove
+        - credential_rotation
+        - route_reconcile
+      model_key:
+        type: string
+      display_name:
+        type: string
+      status:
+        $ref: ../../openapi.yaml#/components/schemas/PublicationStatus
+        enum:
+        - queued
+        - validating
+        - provisioning
+        - building_revision
+        - verifying
+        - awaiting_authorization
+        - promoting
+        - active
+        - failed
+        - superseded
+        - rolling_back
+        - rolled_back
+      failure:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationFailure
+        - type: 'null'
+        oneOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationFailure
+        - type: 'null'
+      apim_revision:
+        type:
+        - string
+        - 'null'
+      policy_sha256:
+        type:
+        - string
+        - 'null'
+      desired_spec_sha256:
+        type: string
+      change_set:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseChangeSet
+      dependency_count:
+        type: integer
+      recorded_dependencies_complete:
+        type: boolean
+      live_integrity_status:
+        type: string
+        enum:
+        - not_checked
+        - healthy
+        - missing
+        - mismatched
+      rollback_eligible:
+        type: boolean
+      rollback_blockers:
+        items:
+          type: string
+        type: array
+      pinned:
+        type: boolean
+        default: false
+      protected_label:
+        type:
+        - string
+        - 'null'
+      retain_until:
+        type:
+        - string
+        - 'null'
+        format: date-time
+      retention_eligible:
+        type: boolean
+        default: false
+      retention_reasons:
+        items:
+          type: string
+        type: array
+      created_by:
+        type: string
+      created_at:
+        type: string
+        format: date-time
+      completed_at:
+        type:
+        - string
+        - 'null'
+        format: date-time
+    additionalProperties: false
+    type: object
     required:
     - id
     - gateway_profile_id
@@ -1757,139 +2962,20 @@ schemas:
     - recorded_dependencies_complete
     - live_integrity_status
     - rollback_eligible
-    - rollback_blockers
-    - pinned
-    - protected_label
-    - retain_until
-    - retention_eligible
-    - retention_reasons
     - created_by
     - created_at
     - completed_at
-    properties:
-      failure:
-        oneOf:
-        - $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationFailure
-        - type: 'null'
-      id:
-        type: string
-        format: uuid
-      gateway_profile_id:
-        type: string
-        format: uuid
-      gateway_name:
-        type: string
-      generation:
-        type: integer
-        minimum: 1
-      role:
-        type: string
-        enum:
-        - current
-        - immediate_rollback
-        - pinned
-        - superseded
-        - failed
-        - expired
-        - in_progress
-        - rolled_back
-      publication_kind:
-        type: string
-        enum:
-        - model_add
-        - model_remove
-        - credential_rotation
-        - route_reconcile
-      model_key:
-        type: string
-      display_name:
-        type: string
-      status:
-        type: string
-        enum:
-        - queued
-        - validating
-        - provisioning
-        - building_revision
-        - verifying
-        - awaiting_authorization
-        - promoting
-        - active
-        - failed
-        - superseded
-        - rolling_back
-        - rolled_back
-      apim_revision:
-        type:
-        - string
-        - 'null'
-      policy_sha256:
-        type:
-        - string
-        - 'null'
-      desired_spec_sha256:
-        type: string
-      change_set:
-        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseChangeSet
-      dependency_count:
-        type: integer
-        minimum: 0
-      recorded_dependencies_complete:
-        type: boolean
-      live_integrity_status:
-        type: string
-        enum:
-        - not_checked
-        - healthy
-        - missing
-        - mismatched
-      rollback_eligible:
-        type: boolean
-      rollback_blockers:
-        type: array
-        items:
-          type: string
-      pinned:
-        type: boolean
-      protected_label:
-        type:
-        - string
-        - 'null'
-      retain_until:
-        type:
-        - string
-        - 'null'
-        format: date-time
-      retention_eligible:
-        type: boolean
-      retention_reasons:
-        type: array
-        items:
-          type: string
-      created_by:
-        type: string
-      created_at:
-        type: string
-        format: date-time
-      completed_at:
-        type:
-        - string
-        - 'null'
-        format: date-time
+    title: GatewayReleaseSummary
   GatewayReleaseList:
-    type: object
-    additionalProperties: false
-    required:
-    - items
-    - retention_policy
-    - operations_enabled
-    - operations_disabled_reason
     properties:
       items:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseSummary
+        type: array
       retention_policy:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseRetentionPolicy
+        - type: 'null'
         oneOf:
         - $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseRetentionPolicy
         - type: 'null'
@@ -1899,13 +2985,13 @@ schemas:
         type:
         - string
         - 'null'
-  GatewayReleaseDiff:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - release_id
-    - against_release_id
-    - changes
+    - items
+    - operations_enabled
+    title: GatewayReleaseList
+  GatewayReleaseDiff:
     properties:
       release_id:
         type: string
@@ -1917,14 +3003,14 @@ schemas:
         format: uuid
       changes:
         $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseChangeSet
-  GatewayReleaseIntegrity:
-    type: object
     additionalProperties: false
+    type: object
     required:
     - release_id
-    - dependencies
-    - rollback_eligible
-    - rollback_blockers
+    - against_release_id
+    - changes
+    title: GatewayReleaseDiff
+  GatewayReleaseIntegrity:
     properties:
       release_id:
         type: string
@@ -1934,20 +3020,17 @@ schemas:
       rollback_eligible:
         type: boolean
       rollback_blockers:
-        type: array
         items:
           type: string
-  GatewayReleaseRollbackPreview:
-    type: object
+        type: array
     additionalProperties: false
+    type: object
     required:
-    - target_release_id
-    - current_release_id
-    - changes
+    - release_id
     - dependencies
     - rollback_eligible
-    - rollback_blockers
-    - confirmation_sha256
+    title: GatewayReleaseIntegrity
+  GatewayReleaseRollbackPreview:
     properties:
       target_release_id:
         type: string
@@ -1962,32 +3045,33 @@ schemas:
       rollback_eligible:
         type: boolean
       rollback_blockers:
-        type: array
         items:
           type: string
+        type: array
       confirmation_sha256:
         type: string
         pattern: ^[0-9a-f]{64}$
-  GatewayReleaseRollbackRequest:
-    type: object
     additionalProperties: false
+    type: object
     required:
+    - target_release_id
+    - current_release_id
+    - changes
+    - dependencies
+    - rollback_eligible
     - confirmation_sha256
+    title: GatewayReleaseRollbackPreview
+  GatewayReleaseRollbackRequest:
     properties:
       confirmation_sha256:
         type: string
         pattern: ^[0-9a-f]{64}$
-  GatewayReleaseOperationAuditEvent:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - id
-    - operation_id
-    - from_status
-    - to_status
-    - actor
-    - detail
-    - created_at
+    - confirmation_sha256
+    title: GatewayReleaseRollbackRequest
+  GatewayReleaseOperationAuditEvent:
     properties:
       id:
         type: string
@@ -1996,9 +3080,9 @@ schemas:
         type: string
         format: uuid
       from_status:
-        type:
-        - string
-        - 'null'
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationStatus
+        - type: 'null'
         enum:
         - queued
         - validating_dependencies
@@ -2012,7 +3096,7 @@ schemas:
         - restored
         - null
       to_status:
-        type: string
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationStatus
         enum:
         - queued
         - validating_dependencies
@@ -2027,40 +3111,38 @@ schemas:
       actor:
         type: string
       detail:
-        type: object
         additionalProperties: true
+        type: object
       created_at:
         type: string
         format: date-time
-  GatewayReleaseGcCandidate:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - resource_type
-    - resource_id
-    - reasons
+    - id
+    - operation_id
+    - from_status
+    - to_status
+    - actor
+    - created_at
+    title: GatewayReleaseOperationAuditEvent
+  GatewayReleaseGcCandidate:
     properties:
       resource_type:
         type: string
       resource_id:
         type: string
       reasons:
-        type: array
         items:
           type: string
-  GatewayReleaseGcPlan:
-    type: object
+        type: array
     additionalProperties: false
+    type: object
     required:
-    - id
-    - operation_id
-    - gateway_profile_id
-    - retained_release_ids
-    - current_non_release_references
-    - candidates
-    - reference_graph_sha256
-    - created_by
-    - created_at
+    - resource_type
+    - resource_id
+    title: GatewayReleaseGcCandidate
+  GatewayReleaseGcPlan:
     properties:
       id:
         type: string
@@ -2072,17 +3154,17 @@ schemas:
         type: string
         format: uuid
       retained_release_ids:
-        type: array
         items:
           type: string
           format: uuid
-      current_non_release_references:
-        type: object
-        additionalProperties: true
-      candidates:
         type: array
+      current_non_release_references:
+        additionalProperties: true
+        type: object
+      candidates:
         items:
           $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGcCandidate
+        type: array
       reference_graph_sha256:
         type: string
         pattern: ^[0-9a-f]{64}$
@@ -2091,30 +3173,20 @@ schemas:
       created_at:
         type: string
         format: date-time
-  GatewayReleaseOperation:
-    type: object
     additionalProperties: false
+    type: object
     required:
     - id
+    - operation_id
     - gateway_profile_id
-    - operation_kind
-    - target_release_id
-    - prior_release_id
-    - status
-    - semantic_preview
-    - checkpoint
-    - error_code
-    - error_message
-    - attempt_count
+    - retained_release_ids
+    - current_non_release_references
+    - candidates
+    - reference_graph_sha256
     - created_by
     - created_at
-    - started_at
-    - completed_at
-    - updated_at
-    - worker_available
-    - worker_unavailable_reason
-    - audit
-    - gc_plan
+    title: GatewayReleaseGcPlan
+  GatewayReleaseOperation:
     properties:
       id:
         type: string
@@ -2123,7 +3195,7 @@ schemas:
         type: string
         format: uuid
       operation_kind:
-        type: string
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationKind
         enum:
         - rollback
         - integrity_check
@@ -2144,7 +3216,7 @@ schemas:
         - 'null'
         format: uuid
       status:
-        type: string
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationStatus
         enum:
         - queued
         - validating_dependencies
@@ -2157,11 +3229,11 @@ schemas:
         - failed
         - restored
       semantic_preview:
-        type: object
         additionalProperties: true
+        type: object
       checkpoint:
-        type: object
         additionalProperties: true
+        type: object
       error_code:
         type:
         - string
@@ -2172,7 +3244,7 @@ schemas:
         - 'null'
       attempt_count:
         type: integer
-        minimum: 0
+        minimum: 0.0
       created_by:
         type: string
       created_at:
@@ -2198,25 +3270,200 @@ schemas:
         - string
         - 'null'
       audit:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAuditEvent
+        type: array
       gc_plan:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGcPlan
+        - type: 'null'
         oneOf:
         - $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGcPlan
         - type: 'null'
-  GatewayReleaseOperationAccepted:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - operation
-    - status_url
+    - id
+    - gateway_profile_id
+    - operation_kind
+    - target_release_id
+    - prior_release_id
+    - status
+    - error_code
+    - error_message
+    - attempt_count
+    - created_by
+    - created_at
+    - started_at
+    - completed_at
+    - updated_at
+    - worker_available
+    title: GatewayReleaseOperation
+  GatewayReleaseOperationAccepted:
     properties:
       operation:
         $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperation
       status_url:
         type: string
+    additionalProperties: false
+    type: object
+    required:
+    - operation
+    - status_url
+    title: GatewayReleaseOperationAccepted
   GatewayReleaseDetail:
+    properties:
+      id:
+        type: string
+        format: uuid
+        title: Id
+      gateway_profile_id:
+        type: string
+        format: uuid
+        title: Gateway Profile Id
+      gateway_name:
+        type: string
+        title: Gateway Name
+      generation:
+        type: integer
+        title: Generation
+      role:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseRole
+      publication_kind:
+        $ref: ../../openapi.yaml#/components/schemas/PublicationKind
+      model_key:
+        type: string
+        title: Model Key
+      display_name:
+        type: string
+        title: Display Name
+      status:
+        $ref: ../../openapi.yaml#/components/schemas/PublicationStatus
+      failure:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationFailure
+        - type: 'null'
+      apim_revision:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Apim Revision
+      policy_sha256:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Policy Sha256
+      desired_spec_sha256:
+        type: string
+        title: Desired Spec Sha256
+      change_set:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseChangeSet
+      dependency_count:
+        type: integer
+        title: Dependency Count
+      recorded_dependencies_complete:
+        type: boolean
+        title: Recorded Dependencies Complete
+      live_integrity_status:
+        type: string
+        enum:
+        - not_checked
+        - healthy
+        - missing
+        - mismatched
+        title: Live Integrity Status
+      rollback_eligible:
+        type: boolean
+        title: Rollback Eligible
+      rollback_blockers:
+        items:
+          type: string
+        type: array
+        title: Rollback Blockers
+      pinned:
+        type: boolean
+        title: Pinned
+        default: false
+      protected_label:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Protected Label
+      retain_until:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Retain Until
+      retention_eligible:
+        type: boolean
+        title: Retention Eligible
+        default: false
+      retention_reasons:
+        items:
+          type: string
+        type: array
+        title: Retention Reasons
+      created_by:
+        type: string
+        title: Created By
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
+      completed_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Completed At
+      base_release_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Base Release Id
+      diff_from_base:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseDiff
+      dependencies:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseDependencies
+      audit:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseAuditEvent
+        type: array
+        title: Audit
+      protection_audit:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseProtectionAuditEvent
+        type: array
+        title: Protection Audit
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - gateway_profile_id
+    - gateway_name
+    - generation
+    - role
+    - publication_kind
+    - model_key
+    - display_name
+    - status
+    - apim_revision
+    - policy_sha256
+    - desired_spec_sha256
+    - change_set
+    - dependency_count
+    - recorded_dependencies_complete
+    - live_integrity_status
+    - rollback_eligible
+    - created_by
+    - created_at
+    - completed_at
+    - base_release_id
+    - diff_from_base
+    - dependencies
+    title: GatewayReleaseDetail
     allOf:
     - $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseSummary
     - type: object
@@ -2245,35 +3492,55 @@ schemas:
           items:
             $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseProtectionAuditEvent
   DatabricksAuthorizationRequirement:
-    type: object
-    additionalProperties: false
-    required: [kind, principal_id, resource_endpoint, role_name]
     properties:
-      kind: {type: string, const: databricks_workspace}
+      kind:
+        type: string
+        const: databricks_workspace
       principal_id:
         type: string
         format: uuid
         description: APIM Entra Object ID, not the Application Client ID used for Databricks assignment.
-      resource_endpoint: {type: string, format: uri}
-      role_name: {type: string, const: CAN_QUERY}
-  DatabricksOAuthAuthorizationRequirement:
-    type: object
+      resource_endpoint:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+      role_name:
+        type: string
+        const: CAN_QUERY
     additionalProperties: false
-    required: [kind, client_id, resource_endpoint, role_name]
-    properties:
-      kind: {type: string, const: databricks_oauth}
-      client_id: {type: string, format: uuid}
-      resource_endpoint: {type: string, format: uri}
-      role_name: {type: string, const: CAN_QUERY}
-  GatewayAuthorizationRequirement:
     type: object
-    additionalProperties: false
     required:
     - kind
     - principal_id
     - resource_endpoint
-    - role_id
     - role_name
+    title: DatabricksAuthorizationRequirement
+  DatabricksOAuthAuthorizationRequirement:
+    properties:
+      kind:
+        type: string
+        const: databricks_oauth
+      client_id:
+        type: string
+        format: uuid
+      resource_endpoint:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+      role_name:
+        type: string
+        const: CAN_QUERY
+    additionalProperties: false
+    type: object
+    required:
+    - kind
+    - client_id
+    - resource_endpoint
+    - role_name
+    title: DatabricksOAuthAuthorizationRequirement
+  GatewayAuthorizationRequirement:
     properties:
       kind:
         type: string
@@ -2283,12 +3550,25 @@ schemas:
         format: uuid
       resource_endpoint:
         type: string
+        maxLength: 2083
+        minLength: 1
         format: uri
       role_id:
         type: string
         format: uuid
       role_name:
         type: string
+        maxLength: 120
+        minLength: 1
+    additionalProperties: false
+    type: object
+    required:
+    - kind
+    - principal_id
+    - resource_endpoint
+    - role_id
+    - role_name
+    title: GatewayAuthorizationRequirement
   GatewayPublicationAccepted:
     type: object
     additionalProperties: false
@@ -2300,3 +3580,1788 @@ schemas:
         $ref: ../../openapi.yaml#/components/schemas/GatewayPublication
       status_url:
         type: string
+  ActiveRouteHead:
+    properties:
+      state:
+        type: string
+        const: active
+        title: State
+        default: active
+      approval:
+        $ref: ../../openapi.yaml#/components/schemas/ConfigurationApproval
+      activated_epoch:
+        type: integer
+        maximum: 9007199254740991.0
+        minimum: 0.0
+        title: Activated Epoch
+    additionalProperties: false
+    type: object
+    required:
+    - approval
+    - activated_epoch
+    title: ActiveRouteHead
+  ConfigurationApproval:
+    properties:
+      approval_id:
+        type: string
+        title: Approval Id
+      scope:
+        $ref: ../../openapi.yaml#/components/schemas/RouteScope
+      route_version:
+        type: string
+        title: Route Version
+      generation:
+        type: integer
+        maximum: 9007199254740991.0
+        minimum: 1.0
+        title: Generation
+      manifest_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Manifest Sha256
+      dependency_manifest_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Dependency Manifest Sha256
+      catalog_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Catalog Sha256
+      entry_count:
+        type: integer
+        maximum: 10000.0
+        minimum: 0.0
+        title: Entry Count
+      required_program_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Required Program Sha256
+      required_profiles:
+        items:
+          type: string
+          enum:
+          - openai-v1
+          - anthropic-messages
+          - openai-images
+          - microsoft-decision
+        type: array
+        title: Required Profiles
+      budget_epoch:
+        type: string
+        title: Budget Epoch
+      issued_epoch:
+        type: integer
+        maximum: 9007199254740991.0
+        minimum: 0.0
+        title: Issued Epoch
+      activate_before_epoch:
+        type: integer
+        maximum: 9007199254740991.0
+        minimum: 0.0
+        title: Activate Before Epoch
+    additionalProperties: false
+    type: object
+    required:
+    - approval_id
+    - scope
+    - route_version
+    - generation
+    - manifest_sha256
+    - dependency_manifest_sha256
+    - catalog_sha256
+    - entry_count
+    - required_program_sha256
+    - required_profiles
+    - budget_epoch
+    - issued_epoch
+    - activate_before_epoch
+    title: ConfigurationApproval
+  ConnectionApproval:
+    properties:
+      approval_id:
+        type: string
+        title: Approval Id
+      connection:
+        $ref: ../../openapi.yaml#/components/schemas/ConnectionRevision
+      state:
+        type: string
+        enum:
+        - approved
+        - revoked
+        title: State
+      evidence_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Evidence Sha256
+      issued_epoch:
+        type: integer
+        maximum: 9007199254740991.0
+        minimum: 0.0
+        title: Issued Epoch
+      expires_epoch:
+        type: integer
+        maximum: 9007199254740991.0
+        minimum: 0.0
+        title: Expires Epoch
+    additionalProperties: false
+    type: object
+    required:
+    - approval_id
+    - connection
+    - state
+    - evidence_sha256
+    - issued_epoch
+    - expires_epoch
+    title: ConnectionApproval
+  ConnectionRevision:
+    properties:
+      scope:
+        $ref: ../../openapi.yaml#/components/schemas/RouteScope
+      revision_id:
+        type: string
+        title: Revision Id
+      backend_id:
+        type: string
+        pattern: \A[a-zA-Z0-9._-]{1,180}\Z
+        title: Backend Id
+      origin:
+        type: string
+        title: Origin
+      path:
+        type: string
+        maxLength: 1000
+        minLength: 1
+        title: Path
+      protocol_paths:
+        additionalProperties:
+          type: string
+        propertyNames:
+          enum:
+          - chat-completions
+          - responses
+          - anthropic-messages
+          - responses-compact
+          - images-generations
+          - microsoft-decision
+        type: object
+        maxProperties: 5
+        title: Protocol Paths
+      dependency_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Dependency Sha256
+      credential:
+        $ref: ../../openapi.yaml#/components/schemas/RouteCredential
+      observer:
+        type: boolean
+        title: Observer
+        default: false
+      count:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/CountCredential
+        - type: 'null'
+      public_count_path:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Public Count Path
+      pool:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/RouteBackendPool
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - scope
+    - revision_id
+    - backend_id
+    - origin
+    - path
+    - dependency_sha256
+    - credential
+    title: ConnectionRevision
+  ControlledGatewayFleet:
+    properties:
+      controller_kind:
+        type: string
+        const: azure_vm_guarded
+        title: Controller Kind
+      deployment_id:
+        type: string
+        format: uuid
+        title: Deployment Id
+      expected_revision:
+        type: integer
+        maximum: 2147483647.0
+        minimum: 0.0
+        title: Expected Revision
+        default: 0
+      hosts:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ControlledGatewayHost
+        type: array
+        maxItems: 128
+        minItems: 1
+        title: Hosts
+    additionalProperties: false
+    type: object
+    required:
+    - controller_kind
+    - deployment_id
+    - hosts
+    title: ControlledGatewayFleet
+  ControlledGatewayHost:
+    properties:
+      vm_resource_id:
+        type: string
+        pattern: ^/subscriptions/[0-9a-f-]{36}/resourceGroups/[^/]+/providers/Microsoft\.Compute/virtualMachines/[A-Za-z0-9-]+$
+        title: Vm Resource Id
+      installation_command_id:
+        type: string
+        title: Installation Command Id
+      inspection_command_id:
+        type: string
+        title: Inspection Command Id
+      instance_id:
+        type: string
+        pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$
+        title: Instance Id
+      endpoint_url:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Endpoint Url
+      runtime_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Runtime Sha256
+      settings_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Settings Sha256
+      gateway_image:
+        type: string
+        pattern: ^[A-Za-z0-9][A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}$
+        title: Gateway Image
+    additionalProperties: false
+    type: object
+    required:
+    - vm_resource_id
+    - installation_command_id
+    - inspection_command_id
+    - instance_id
+    - endpoint_url
+    - runtime_sha256
+    - settings_sha256
+    - gateway_image
+    title: ControlledGatewayHost
+  CountCredential:
+    properties:
+      mode:
+        type: string
+        enum:
+        - none
+        - managed_identity
+        - key_vault_api_key
+        - key_vault_bearer
+        - oauth_client_credentials
+        title: Mode
+      header:
+        type: string
+        enum:
+        - ''
+        - api-key
+        - x-api-key
+        - Authorization
+        title: Header
+        default: ''
+      secret_id:
+        type: string
+        title: Secret Id
+        default: ''
+      audience:
+        type: string
+        title: Audience
+        default: ''
+      oauth:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/OAuthClientCredentialsConfig
+        - type: 'null'
+      origin:
+        type: string
+        title: Origin
+      endpoints:
+        items:
+          type: string
+        type: array
+        maxItems: 5
+        minItems: 1
+        title: Endpoints
+    additionalProperties: false
+    type: object
+    required:
+    - mode
+    - origin
+    - endpoints
+    title: CountCredential
+  FixedProgramCutover:
+    properties:
+      upgrade:
+        $ref: ../../openapi.yaml#/components/schemas/FixedProgramUpgrade
+      parent_policy:
+        type: string
+        maxLength: 524288
+        minLength: 1
+        title: Parent Policy
+      expected_parent_etag:
+        type: string
+        pattern: ^"[A-Za-z0-9+/=]{1,160}"$
+        title: Expected Parent Etag
+      operation_policies:
+        patternProperties:
+          \A[a-zA-Z0-9._-]{1,180}\Z:
+            type: string
+        type: object
+        maxProperties: 30
+        title: Operation Policies
+      expected_operation_etags:
+        patternProperties:
+          \A[a-zA-Z0-9._-]{1,180}\Z:
+            anyOf:
+            - type: string
+            - type: 'null'
+        type: object
+        maxProperties: 30
+        title: Expected Operation Etags
+    additionalProperties: false
+    type: object
+    required:
+    - upgrade
+    - parent_policy
+    - expected_parent_etag
+    title: FixedProgramCutover
+  FixedProgramInstallation:
+    properties:
+      version:
+        type: integer
+        maximum: 1.0
+        minimum: 1.0
+        title: Version
+        default: 1
+      program:
+        $ref: ../../openapi.yaml#/components/schemas/ProgramIdentity
+      target_identity_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Target Identity Sha256
+      storage_endpoint:
+        type: string
+        title: Storage Endpoint
+      storage_table:
+        type: string
+        title: Storage Table
+      gateway_endpoint:
+        type: string
+        title: Gateway Endpoint
+      publisher_subscription_id:
+        type: string
+        pattern: \A[a-zA-Z0-9._-]{1,180}\Z
+        title: Publisher Subscription Id
+      parent_policy_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Parent Policy Sha256
+      operation_policies_sha256:
+        patternProperties:
+          \A[a-zA-Z0-9._-]{1,180}\Z:
+            type: string
+            pattern: \A[0-9a-f]{64}\Z
+        type: object
+        maxProperties: 30
+        minProperties: 1
+        title: Operation Policies Sha256
+      operation_contracts:
+        patternProperties:
+          \A[a-zA-Z0-9._-]{1,180}\Z:
+            prefixItems:
+            - type: string
+            - type: string
+            type: array
+            maxItems: 2
+            minItems: 2
+        type: object
+        maxProperties: 30
+        minProperties: 1
+        title: Operation Contracts
+      retired_operations:
+        patternProperties:
+          \A[a-zA-Z0-9._-]{1,180}\Z:
+            prefixItems:
+            - type: string
+              const: POST
+            - type: string
+            type: array
+            maxItems: 2
+            minItems: 2
+        type: object
+        maxProperties: 16
+        title: Retired Operations
+      supported_profiles:
+        items:
+          type: string
+          enum:
+          - openai-v1
+          - anthropic-messages
+          - openai-images
+          - microsoft-decision
+        type: array
+        minItems: 1
+        title: Supported Profiles
+      credential_vault_origin:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Credential Vault Origin
+      trusted_vault_origins:
+        items:
+          type: string
+        type: array
+        maxItems: 8
+        title: Trusted Vault Origins
+        default: []
+      image_limits:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ImageGenerationLimits
+        - type: 'null'
+      oauth_enabled:
+        type: boolean
+        title: Oauth Enabled
+        default: false
+      pool_enabled:
+        type: boolean
+        title: Pool Enabled
+        default: false
+      decision_enabled:
+        type: boolean
+        title: Decision Enabled
+        default: false
+      model_additions_enabled:
+        type: boolean
+        title: Model Additions Enabled
+        default: false
+      native_gateway_scope:
+        type: boolean
+        title: Native Gateway Scope
+        default: false
+      legacy_program_sha256:
+        anyOf:
+        - type: string
+          pattern: \A[0-9a-f]{64}\Z
+        - type: 'null'
+        title: Legacy Program Sha256
+      predecessor_program_sha256:
+        items:
+          type: string
+          pattern: \A[0-9a-f]{64}\Z
+        type: array
+        maxItems: 32
+        title: Predecessor Program Sha256
+        default: []
+      supported_adapters:
+        items:
+          type: string
+          const: bedrock-anthropic-v1
+        type: array
+        maxItems: 1
+        title: Supported Adapters
+        default: []
+    additionalProperties: false
+    type: object
+    required:
+    - program
+    - target_identity_sha256
+    - storage_endpoint
+    - storage_table
+    - gateway_endpoint
+    - publisher_subscription_id
+    - parent_policy_sha256
+    - operation_policies_sha256
+    - operation_contracts
+    - supported_profiles
+    title: FixedProgramInstallation
+  FixedProgramMigration:
+    properties:
+      version:
+        type: integer
+        const: 1
+        title: Version
+        default: 1
+      request_id:
+        type: string
+        format: uuid
+        title: Request Id
+      previous_publication_id:
+        type: string
+        format: uuid
+        title: Previous Publication Id
+      previous_revision:
+        type: string
+        pattern: \A[a-zA-Z0-9._-]{1,180}\Z
+        title: Previous Revision
+      previous_spec_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Previous Spec Sha256
+      previous_policy_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Previous Policy Sha256
+      installation:
+        $ref: ../../openapi.yaml#/components/schemas/FixedProgramInstallation
+      known_unavailable_bindings:
+        additionalProperties:
+          type: string
+          pattern: \A[0-9a-f]{64}\Z
+        type: object
+        maxProperties: 10000
+        title: Known Unavailable Bindings
+    additionalProperties: false
+    type: object
+    required:
+    - request_id
+    - previous_publication_id
+    - previous_revision
+    - previous_spec_sha256
+    - previous_policy_sha256
+    - installation
+    title: FixedProgramMigration
+  FixedProgramUpgrade:
+    properties:
+      version:
+        type: integer
+        maximum: 1.0
+        minimum: 1.0
+        title: Version
+        default: 1
+      previous_publication_id:
+        type: string
+        title: Previous Publication Id
+      previous_installation_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Previous Installation Sha256
+      installation:
+        $ref: ../../openapi.yaml#/components/schemas/FixedProgramInstallation
+    additionalProperties: false
+    type: object
+    required:
+    - previous_publication_id
+    - previous_installation_sha256
+    - installation
+    title: FixedProgramUpgrade
+  ImageGenerationProfile-Input:
+    properties:
+      max_request_bytes:
+        type: integer
+        maximum: 16777216.0
+        minimum: 1.0
+        title: Max Request Bytes
+      max_response_bytes:
+        type: integer
+        maximum: 16777216.0
+        minimum: 1.0
+        title: Max Response Bytes
+      output_reservation_tokens:
+        type: integer
+        maximum: 2147483647.0
+        minimum: 1.0
+        title: Output Reservation Tokens
+      timeout_seconds:
+        type: integer
+        maximum: 240.0
+        minimum: 1.0
+        title: Timeout Seconds
+      id:
+        type: string
+        minLength: 1
+        title: Id
+      version:
+        type: integer
+        enum:
+        - 1
+        - 2
+        - 3
+        - 4
+        title: Version
+      display_name:
+        type: string
+        minLength: 1
+        title: Display Name
+      provider_kind:
+        type: string
+        const: microsoft_foundry
+        title: Provider Kind
+      provider_model:
+        type: string
+        minLength: 1
+        title: Provider Model
+      protocol:
+        type: string
+        const: openai_images
+        title: Protocol
+      api_version:
+        type: string
+        minLength: 1
+        title: Api Version
+      backend_path:
+        type: string
+        pattern: ^/
+        title: Backend Path
+      public_path:
+        type: string
+        pattern: ^/
+        title: Public Path
+      usage_format:
+        type: string
+        const: text-input-image-output-v1
+        title: Usage Format
+      sizes:
+        anyOf:
+        - items:
+            type: string
+          type: array
+        - type: 'null'
+        title: Sizes
+      qualities:
+        anyOf:
+        - items:
+            type: string
+          type: array
+        - type: 'null'
+        title: Qualities
+      formats:
+        anyOf:
+        - items:
+            type: string
+            enum:
+            - png
+            - jpeg
+          type: array
+        - type: 'null'
+        title: Formats
+      default_size:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Default Size
+      default_quality:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Default Quality
+      default_format:
+        anyOf:
+        - type: string
+          enum:
+          - png
+          - jpeg
+        - type: 'null'
+        title: Default Format
+      images_per_request:
+        anyOf:
+        - type: integer
+          const: 1
+        - type: 'null'
+        title: Images Per Request
+      stream:
+        anyOf:
+        - type: boolean
+          const: false
+        - type: 'null'
+        title: Stream
+      max_prompt_characters:
+        anyOf:
+        - type: integer
+        - type: 'null'
+        title: Max Prompt Characters
+    additionalProperties: false
+    type: object
+    required:
+    - max_request_bytes
+    - max_response_bytes
+    - output_reservation_tokens
+    - timeout_seconds
+    - id
+    - version
+    - display_name
+    - provider_kind
+    - provider_model
+    - protocol
+    - api_version
+    - backend_path
+    - public_path
+    - usage_format
+    title: ImageGenerationProfile
+  ImageGenerationProfile-Output:
+    additionalProperties: true
+    type: object
+  ManagedProgramInitialization-Input:
+    properties:
+      version:
+        type: integer
+        const: 1
+        title: Version
+        default: 1
+      previous_publication_id:
+        type: string
+        format: uuid
+        title: Previous Publication Id
+      previous_spec_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Previous Spec Sha256
+      previous_revision:
+        type: string
+        pattern: \A[a-zA-Z0-9._-]{1,180}\Z
+        title: Previous Revision
+      previous_policy_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Previous Policy Sha256
+      installation:
+        $ref: ../../openapi.yaml#/components/schemas/FixedProgramInstallation
+      snapshot:
+        $ref: ../../openapi.yaml#/components/schemas/RouteSnapshot-Input
+      head:
+        $ref: ../../openapi.yaml#/components/schemas/ActiveRouteHead
+    additionalProperties: false
+    type: object
+    required:
+    - previous_publication_id
+    - previous_spec_sha256
+    - previous_revision
+    - previous_policy_sha256
+    - installation
+    - snapshot
+    - head
+    title: ManagedProgramInitialization
+  ManagedProgramInitialization-Output:
+    properties:
+      version:
+        type: integer
+        const: 1
+        title: Version
+        default: 1
+      previous_publication_id:
+        type: string
+        format: uuid
+        title: Previous Publication Id
+      previous_spec_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Previous Spec Sha256
+      previous_revision:
+        type: string
+        pattern: \A[a-zA-Z0-9._-]{1,180}\Z
+        title: Previous Revision
+      previous_policy_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Previous Policy Sha256
+      installation:
+        $ref: ../../openapi.yaml#/components/schemas/FixedProgramInstallation
+      snapshot:
+        $ref: ../../openapi.yaml#/components/schemas/RouteSnapshot-Output
+      head:
+        $ref: ../../openapi.yaml#/components/schemas/ActiveRouteHead
+    additionalProperties: false
+    type: object
+    required:
+    - previous_publication_id
+    - previous_spec_sha256
+    - previous_revision
+    - previous_policy_sha256
+    - installation
+    - snapshot
+    - head
+    title: ManagedProgramInitialization
+  ModelAvailabilityNodeEndpoint:
+    properties:
+      instance_id:
+        type: string
+        pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]{0,254}$
+        title: Instance Id
+      endpoint_url:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Endpoint Url
+    additionalProperties: false
+    type: object
+    required:
+    - instance_id
+    - endpoint_url
+    title: ModelAvailabilityNodeEndpoint
+  ModelAvailabilityNodeEnrollment:
+    properties:
+      enrollment_id:
+        type: string
+        format: uuid
+        title: Enrollment Id
+      target_id:
+        type: string
+        format: uuid
+        title: Target Id
+      deployment_id:
+        type: string
+        format: uuid
+        title: Deployment Id
+      api_id:
+        type: string
+        pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$
+        title: Api Id
+      native_gateway_id:
+        type: string
+        pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$
+        title: Native Gateway Id
+      revision:
+        type: integer
+        maximum: 2147483647.0
+        minimum: 1.0
+        title: Revision
+      controller_evidence_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Controller Evidence Sha256
+      fenced_installation_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Fenced Installation Sha256
+      rejoin_contract:
+        type: string
+        const: enrolled_nodes_only_guarded_bootstrap
+        title: Rejoin Contract
+      enrolled_at:
+        type: string
+        format: date-time
+        title: Enrolled At
+      nodes:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityNodeEndpoint
+        type: array
+        maxItems: 128
+        minItems: 1
+        title: Nodes
+    additionalProperties: false
+    type: object
+    required:
+    - enrollment_id
+    - target_id
+    - deployment_id
+    - api_id
+    - native_gateway_id
+    - revision
+    - controller_evidence_sha256
+    - fenced_installation_sha256
+    - rejoin_contract
+    - enrolled_at
+    - nodes
+    title: ModelAvailabilityNodeEnrollment
+  ModelCountContract:
+    properties:
+      algorithm:
+        type: string
+        enum:
+        - context_input_ceiling_v1
+        - request_total_ceiling_v1
+        - legacy_request_estimate_v1
+        title: Algorithm
+        default: context_input_ceiling_v1
+      input_ceiling:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 0.0
+        title: Input Ceiling
+        default: 0
+      output_ceiling:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 0.0
+        title: Output Ceiling
+        default: 0
+      output_field:
+        type: string
+        enum:
+        - max_tokens
+        - max_completion_tokens
+        - max_output_tokens
+        - none
+        title: Output Field
+      request_token_ceiling:
+        anyOf:
+        - type: integer
+          maximum: 9.223372036854776e+18
+          exclusiveMinimum: 0.0
+        - type: 'null'
+        title: Request Token Ceiling
+      output_estimate:
+        anyOf:
+        - type: integer
+          maximum: 9.223372036854776e+18
+          exclusiveMinimum: 0.0
+        - type: 'null'
+        title: Output Estimate
+      supported_features:
+        items:
+          type: string
+          enum:
+          - conversation_state
+          - opaque_state
+          - multimodal_input
+          - server_tools
+          - background
+          - compaction
+        type: array
+        title: Supported Features
+      operations:
+        items:
+          type: string
+          enum:
+          - chat-completions
+          - responses
+          - anthropic-messages
+          - responses-compact
+          - images-generations
+          - microsoft-decision
+        type: array
+        minItems: 1
+        title: Operations
+        default:
+        - chat-completions
+        - responses
+        - anthropic-messages
+      evidence_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Evidence Sha256
+      verified_at:
+        type: string
+        format: date-time
+        title: Verified At
+      native_counter:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/NativeCountContract
+        - type: 'null'
+      request_policy:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ProtocolRequestPolicy
+        - type: 'null'
+      model_id:
+        type: string
+        format: uuid
+        title: Model Id
+      protocols:
+        additionalProperties:
+          $ref: ../../openapi.yaml#/components/schemas/ProtocolCountContract
+        propertyNames:
+          enum:
+          - chat-completions
+          - responses
+          - anthropic-messages
+          - responses-compact
+          - images-generations
+          - microsoft-decision
+        type: object
+        title: Protocols
+    additionalProperties: false
+    type: object
+    required:
+    - output_field
+    - evidence_sha256
+    - verified_at
+    - model_id
+    title: ModelCountContract
+  NativeCountContract:
+    properties:
+      kind:
+        type: string
+        enum:
+        - anthropic_messages
+        - openai_responses
+        title: Kind
+      endpoint:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Endpoint
+      assurance:
+        type: string
+        enum:
+        - estimate
+        - upper_bound
+        title: Assurance
+        default: estimate
+      upper_bound_padding_tokens:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 0.0
+        title: Upper Bound Padding Tokens
+        default: 0
+      supported_features:
+        items:
+          type: string
+          enum:
+          - conversation_state
+          - opaque_state
+          - multimodal_input
+          - server_tools
+          - background
+          - compaction
+        type: array
+        title: Supported Features
+      evidence_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Evidence Sha256
+    additionalProperties: false
+    type: object
+    required:
+    - kind
+    - endpoint
+    - evidence_sha256
+    title: NativeCountContract
+  OAuthClientCredentialsConfig:
+    properties:
+      provider_id:
+        type: string
+        pattern: ^turnstile-oauth-[a-f0-9]{32}$
+        title: Provider Id
+      authorization_id:
+        type: string
+        const: connection
+        title: Authorization Id
+        default: connection
+      client_id:
+        type: string
+        format: uuid
+        title: Client Id
+      token_url:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Token Url
+      scopes:
+        type: string
+        const: all-apis
+        title: Scopes
+        default: all-apis
+    additionalProperties: false
+    type: object
+    required:
+    - provider_id
+    - client_id
+    - token_url
+    title: OAuthClientCredentialsConfig
+  OutputTokenRequirement:
+    properties:
+      minimum_output_tokens:
+        type: integer
+        maximum: 9.223372036854776e+18
+        exclusiveMinimum: 0.0
+        title: Minimum Output Tokens
+    additionalProperties: false
+    type: object
+    required:
+    - minimum_output_tokens
+    title: OutputTokenRequirement
+  ProgramIdentity:
+    properties:
+      scope:
+        $ref: ../../openapi.yaml#/components/schemas/RouteScope
+      api_revision:
+        type: string
+        pattern: \A[a-zA-Z0-9._-]{1,180}\Z
+        title: Api Revision
+      instance_id:
+        type: string
+        maxLength: 256
+        minLength: 1
+        title: Instance Id
+      program_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Program Sha256
+      trust_binding_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Trust Binding Sha256
+    additionalProperties: false
+    type: object
+    required:
+    - scope
+    - api_revision
+    - instance_id
+    - program_sha256
+    - trust_binding_sha256
+    title: ProgramIdentity
+  ProtocolCountContract:
+    properties:
+      algorithm:
+        type: string
+        enum:
+        - context_input_ceiling_v1
+        - request_total_ceiling_v1
+        - legacy_request_estimate_v1
+        title: Algorithm
+        default: context_input_ceiling_v1
+      input_ceiling:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 0.0
+        title: Input Ceiling
+        default: 0
+      output_ceiling:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 0.0
+        title: Output Ceiling
+        default: 0
+      output_field:
+        type: string
+        enum:
+        - max_tokens
+        - max_completion_tokens
+        - max_output_tokens
+        - none
+        title: Output Field
+      request_token_ceiling:
+        anyOf:
+        - type: integer
+          maximum: 9.223372036854776e+18
+          exclusiveMinimum: 0.0
+        - type: 'null'
+        title: Request Token Ceiling
+      output_estimate:
+        anyOf:
+        - type: integer
+          maximum: 9.223372036854776e+18
+          exclusiveMinimum: 0.0
+        - type: 'null'
+        title: Output Estimate
+      supported_features:
+        items:
+          type: string
+          enum:
+          - conversation_state
+          - opaque_state
+          - multimodal_input
+          - server_tools
+          - background
+          - compaction
+        type: array
+        title: Supported Features
+      operations:
+        items:
+          type: string
+          enum:
+          - chat-completions
+          - responses
+          - anthropic-messages
+          - responses-compact
+          - images-generations
+          - microsoft-decision
+        type: array
+        minItems: 1
+        title: Operations
+        default:
+        - chat-completions
+        - responses
+        - anthropic-messages
+      evidence_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Evidence Sha256
+      verified_at:
+        type: string
+        format: date-time
+        title: Verified At
+      native_counter:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/NativeCountContract
+        - type: 'null'
+      request_policy:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ProtocolRequestPolicy
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - output_field
+    - evidence_sha256
+    - verified_at
+    title: ProtocolCountContract
+  ProtocolRejectionRule:
+    properties:
+      status_code:
+        type: integer
+        title: Status Code
+      error_type:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/RequestErrorValue
+        - $ref: ../../openapi.yaml#/components/schemas/RequestErrorEmpty
+        title: Error Type
+      error_code:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/RequestErrorValue
+        - $ref: ../../openapi.yaml#/components/schemas/RequestErrorEmpty
+        title: Error Code
+      error_param:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/RequestErrorValue
+        - $ref: ../../openapi.yaml#/components/schemas/RequestErrorEmpty
+        title: Error Param
+    additionalProperties: false
+    type: object
+    required:
+    - status_code
+    - error_type
+    - error_code
+    - error_param
+    title: ProtocolRejectionRule
+  ProtocolRequestPolicy:
+    properties:
+      version:
+        type: integer
+        enum:
+        - 1
+        - 2
+        - 3
+        title: Version
+        default: 1
+      operation:
+        anyOf:
+        - type: string
+          enum:
+          - chat-completions
+          - responses
+          - anthropic-messages
+          - responses-compact
+          - images-generations
+          - microsoft-decision
+        - type: 'null'
+        title: Operation
+      streaming_thinking_display:
+        anyOf:
+        - type: string
+          const: summarized
+        - type: 'null'
+        title: Streaming Thinking Display
+      output_requirements:
+        additionalProperties:
+          $ref: ../../openapi.yaml#/components/schemas/OutputTokenRequirement
+        propertyNames:
+          const: compaction_trigger
+        type: object
+        title: Output Requirements
+      terminal_rejections:
+        items:
+          anyOf:
+          - $ref: ../../openapi.yaml#/components/schemas/RequestRejectionRule
+          - $ref: ../../openapi.yaml#/components/schemas/ProtocolRejectionRule
+        type: array
+        maxItems: 16
+        title: Terminal Rejections
+      evidence_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Evidence Sha256
+      verified_at:
+        type: string
+        format: date-time
+        title: Verified At
+    additionalProperties: false
+    type: object
+    required:
+    - evidence_sha256
+    - verified_at
+    title: ProtocolRequestPolicy
+  RequestErrorEmpty:
+    properties:
+      state:
+        type: string
+        enum:
+        - 'null'
+        - absent
+        title: State
+    additionalProperties: false
+    type: object
+    required:
+    - state
+    title: RequestErrorEmpty
+  RequestErrorValue:
+    properties:
+      state:
+        type: string
+        const: value
+        title: State
+      value:
+        type: string
+        pattern: ^[A-Za-z0-9_.\[\]-]{1,255}$
+        title: Value
+    additionalProperties: false
+    type: object
+    required:
+    - state
+    - value
+    title: RequestErrorValue
+  RequestRejectionRule:
+    properties:
+      status_code:
+        type: integer
+        title: Status Code
+      error_type:
+        type: string
+        pattern: ^[A-Za-z0-9_.-]{1,128}$
+        title: Error Type
+      error_code:
+        type: string
+        pattern: ^[A-Za-z0-9_.-]{1,128}$
+        title: Error Code
+    additionalProperties: false
+    type: object
+    required:
+    - status_code
+    - error_type
+    - error_code
+    title: RequestRejectionRule
+  RouteBackendPool:
+    properties:
+      members:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/RoutePoolMember
+        type: array
+        maxItems: 30
+        minItems: 2
+        title: Members
+      rate_limit:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayRateLimitResilience
+      session_cookie_name:
+        anyOf:
+        - type: string
+          pattern: \ATurnstileAffinity-[0-9a-f]{16}\Z
+        - type: 'null'
+        title: Session Cookie Name
+      credential_versions:
+        patternProperties:
+          \A[a-zA-Z0-9._-]{1,180}\Z:
+            type: string
+        type: object
+        maxProperties: 30
+        title: Credential Versions
+      header_values:
+        patternProperties:
+          \A[a-zA-Z0-9._-]{1,180}\Z:
+            type: string
+        type: object
+        maxProperties: 60
+        title: Header Values
+    additionalProperties: false
+    type: object
+    required:
+    - members
+    - rate_limit
+    title: RouteBackendPool
+  RouteContent-Input:
+    properties:
+      scope:
+        $ref: ../../openapi.yaml#/components/schemas/RouteScope
+      model_id:
+        type: string
+        title: Model Id
+      alias:
+        type: string
+        pattern: \A[a-zA-Z0-9._:-]{1,255}\Z
+        title: Alias
+      display_name:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Display Name
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
+      upstream_model:
+        type: string
+        pattern: \A[a-zA-Z0-9._:/-]{1,255}\Z
+        title: Upstream Model
+      profile:
+        type: string
+        enum:
+        - openai-v1
+        - anthropic-messages
+        - openai-images
+        - microsoft-decision
+        title: Profile
+      provider_name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Provider Name
+        default: unattributed
+      runtime_name:
+        type: string
+        maxLength: 160
+        minLength: 1
+        title: Runtime Name
+        default: unattributed
+      context_window:
+        type: integer
+        maximum: 9007199254740991.0
+        minimum: 0.0
+        title: Context Window
+        default: 0
+      assignment_required:
+        type: boolean
+        title: Assignment Required
+        default: false
+      streaming_mode:
+        type: string
+        enum:
+        - native
+        - buffered
+        title: Streaming Mode
+        default: native
+      operations:
+        items:
+          type: string
+          enum:
+          - chat-completions
+          - responses
+          - anthropic-messages
+          - responses-compact
+          - images-generations
+          - microsoft-decision
+        type: array
+        maxItems: 5
+        minItems: 1
+        title: Operations
+      connection:
+        $ref: ../../openapi.yaml#/components/schemas/ConnectionRevision
+      budget_epoch:
+        type: string
+        title: Budget Epoch
+      budget:
+        $ref: ../../openapi.yaml#/components/schemas/ModelCountContract
+      image_profile:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ImageGenerationProfile-Input
+        - type: 'null'
+      request_adapter:
+        anyOf:
+        - type: string
+          const: bedrock-anthropic-v1
+        - type: 'null'
+        title: Request Adapter
+    additionalProperties: false
+    type: object
+    required:
+    - scope
+    - model_id
+    - alias
+    - display_name
+    - created_at
+    - upstream_model
+    - profile
+    - operations
+    - connection
+    - budget_epoch
+    - budget
+    title: RouteContent
+  RouteContent-Output:
+    properties:
+      scope:
+        $ref: ../../openapi.yaml#/components/schemas/RouteScope
+      model_id:
+        type: string
+        title: Model Id
+      alias:
+        type: string
+        pattern: \A[a-zA-Z0-9._:-]{1,255}\Z
+        title: Alias
+      display_name:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Display Name
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
+      upstream_model:
+        type: string
+        pattern: \A[a-zA-Z0-9._:/-]{1,255}\Z
+        title: Upstream Model
+      profile:
+        type: string
+        enum:
+        - openai-v1
+        - anthropic-messages
+        - openai-images
+        - microsoft-decision
+        title: Profile
+      provider_name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Provider Name
+        default: unattributed
+      runtime_name:
+        type: string
+        maxLength: 160
+        minLength: 1
+        title: Runtime Name
+        default: unattributed
+      context_window:
+        type: integer
+        maximum: 9007199254740991.0
+        minimum: 0.0
+        title: Context Window
+        default: 0
+      assignment_required:
+        type: boolean
+        title: Assignment Required
+        default: false
+      streaming_mode:
+        type: string
+        enum:
+        - native
+        - buffered
+        title: Streaming Mode
+        default: native
+      operations:
+        items:
+          type: string
+          enum:
+          - chat-completions
+          - responses
+          - anthropic-messages
+          - responses-compact
+          - images-generations
+          - microsoft-decision
+        type: array
+        maxItems: 5
+        minItems: 1
+        title: Operations
+      connection:
+        $ref: ../../openapi.yaml#/components/schemas/ConnectionRevision
+      budget_epoch:
+        type: string
+        title: Budget Epoch
+      budget:
+        $ref: ../../openapi.yaml#/components/schemas/ModelCountContract
+      image_profile:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ImageGenerationProfile-Output
+        - type: 'null'
+      request_adapter:
+        anyOf:
+        - type: string
+          const: bedrock-anthropic-v1
+        - type: 'null'
+        title: Request Adapter
+    additionalProperties: false
+    type: object
+    required:
+    - scope
+    - model_id
+    - alias
+    - display_name
+    - created_at
+    - upstream_model
+    - profile
+    - operations
+    - connection
+    - budget_epoch
+    - budget
+    title: RouteContent
+  RouteCredential:
+    properties:
+      mode:
+        type: string
+        enum:
+        - none
+        - managed_identity
+        - key_vault_api_key
+        - key_vault_bearer
+        - oauth_client_credentials
+        title: Mode
+      header:
+        type: string
+        enum:
+        - ''
+        - api-key
+        - x-api-key
+        - Authorization
+        title: Header
+        default: ''
+      secret_id:
+        type: string
+        title: Secret Id
+        default: ''
+      audience:
+        type: string
+        title: Audience
+        default: ''
+      oauth:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/OAuthClientCredentialsConfig
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - mode
+    title: RouteCredential
+  RouteMember:
+    properties:
+      scope:
+        $ref: ../../openapi.yaml#/components/schemas/RouteScope
+      route_version:
+        type: string
+        title: Route Version
+      alias:
+        type: string
+        pattern: \A[a-zA-Z0-9._:-]{1,255}\Z
+        title: Alias
+      model_id:
+        type: string
+        title: Model Id
+      content_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Content Sha256
+      connection_approval:
+        $ref: ../../openapi.yaml#/components/schemas/ConnectionApproval
+      approval_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Approval Sha256
+    additionalProperties: false
+    type: object
+    required:
+    - scope
+    - route_version
+    - alias
+    - model_id
+    - content_sha256
+    - connection_approval
+    - approval_sha256
+    title: RouteMember
+  RoutePoolMember:
+    properties:
+      runtime_id:
+        type: string
+        title: Runtime Id
+      backend_id:
+        type: string
+        pattern: \A[a-zA-Z0-9._-]{1,180}\Z
+        title: Backend Id
+      dependency_sha256:
+        type: string
+        pattern: \A[0-9a-f]{64}\Z
+        title: Dependency Sha256
+      priority:
+        type: integer
+        maximum: 100.0
+        minimum: 0.0
+        title: Priority
+      weight:
+        type: integer
+        maximum: 100.0
+        minimum: 0.0
+        title: Weight
+    additionalProperties: false
+    type: object
+    required:
+    - runtime_id
+    - backend_id
+    - dependency_sha256
+    - priority
+    - weight
+    title: RoutePoolMember
+  RouteScope:
+    properties:
+      target_id:
+        type: string
+        title: Target Id
+      api_id:
+        type: string
+        pattern: \A[a-zA-Z0-9._-]{1,180}\Z
+        title: Api Id
+      gateway_id:
+        type: string
+        pattern: \A[a-zA-Z0-9._-]{1,180}\Z
+        title: Gateway Id
+      policy_abi:
+        type: integer
+        maximum: 2.0
+        minimum: 2.0
+        title: Policy Abi
+        default: 2
+    additionalProperties: false
+    type: object
+    required:
+    - target_id
+    - api_id
+    - gateway_id
+    title: RouteScope
+  RouteSnapshot-Input:
+    properties:
+      approval:
+        $ref: ../../openapi.yaml#/components/schemas/ConfigurationApproval
+      routes:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/RouteContent-Input
+        type: array
+        maxItems: 10000
+        title: Routes
+      members:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/RouteMember
+        type: array
+        maxItems: 10000
+        title: Members
+    additionalProperties: false
+    type: object
+    required:
+    - approval
+    - routes
+    - members
+    title: RouteSnapshot
+  RouteSnapshot-Output:
+    properties:
+      approval:
+        $ref: ../../openapi.yaml#/components/schemas/ConfigurationApproval
+      routes:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/RouteContent-Output
+        type: array
+        maxItems: 10000
+        title: Routes
+      members:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/RouteMember
+        type: array
+        maxItems: 10000
+        title: Members
+    additionalProperties: false
+    type: object
+    required:
+    - approval
+    - routes
+    - members
+    title: RouteSnapshot

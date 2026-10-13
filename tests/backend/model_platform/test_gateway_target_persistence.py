@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pytest
-from pydantic import HttpUrl
+from pydantic import HttpUrl, SecretStr
 
 from tests.backend.model_platform.control_plane_support import (
     ROOT,
@@ -16,6 +16,9 @@ from tests.backend.model_platform.control_plane_support import (
     FakeApimClient,
     GatewayPublicationWorker,
     bedrock_publication,
+)
+from tests.backend.model_platform.control_plane_support import (
+    GatewayControlPlaneService as LegacyGatewayControlPlaneService,
 )
 from tests.backend.model_platform.test_gateway_targets import NOW, TARGET, deployment, target
 from turnstile_core.domain.budget_counting import BudgetPublicationContracts
@@ -48,7 +51,13 @@ from turnstile_core.services.gateway_release_operation_worker import GatewayRele
 
 def test_new_gateway_creation_queues_one_identity_without_an_existing_gateway() -> None:
     repository = InMemoryRepository()
-    repository.upsert_apim_target(target(capabilities={"self_hosted_gateway": "supported"}))
+    repository.upsert_apim_target(
+        target(
+            capabilities={"self_hosted_gateway": "supported"},
+            drift_state="in_sync",
+            last_inventory_sync_at=NOW,
+        )
+    )
     service = GatewayControlPlaneService(repository, self_hosted_gateway_provisioning_enabled=True)
     write = SelfHostedGatewayCreate(
         display_name="New gateway", endpoint_url=HttpUrl("https://new.example.test/unit/llm"),
@@ -79,7 +88,11 @@ def test_new_gateway_creation_queues_one_identity_without_an_existing_gateway() 
 
 def test_gateway_creation_worker_materializes_only_after_arm_readback() -> None:
     repository = InMemoryRepository()
-    registered = target(capabilities={"self_hosted_gateway": "supported"})
+    registered = target(
+        capabilities={"self_hosted_gateway": "supported"},
+        drift_state="in_sync",
+        last_inventory_sync_at=NOW,
+    )
     repository.upsert_apim_target(registered)
 
     class Client(FakeApimClient):
@@ -108,16 +121,18 @@ def test_gateway_creation_worker_materializes_only_after_arm_readback() -> None:
             })
 
         def self_hosted_gateway_bootstrap(
-            self, spec: SelfHostedGatewayProvisionSpec, hours: int, image: str,
+            self, spec: SelfHostedGatewayProvisionSpec,
+            request: SelfHostedGatewayBootstrapRequest, image: str,
         ) -> SelfHostedGatewayBootstrap:
             self.bootstrap_reads += 1
             assert spec == self.created
             return SelfHostedGatewayBootstrap(
                 deployment_id=spec.deployment_id, native_gateway_id=spec.native_gateway_id,
                 configuration_endpoint=HttpUrl("https://unit.configuration.azure-api.net"),
-                expires_at=datetime.now(UTC) + timedelta(hours=hours), image=image,
+                expires_at=datetime.now(UTC) + timedelta(hours=request.expires_in_hours),
+                image=image,
                 environment_file_name=spec.native_gateway_id + ".env",
-                environment_file="config.service.auth=GatewayKey unit-secret",
+                environment_file=SecretStr("config.service.auth=GatewayKey unit-secret"),
                 docker_command="docker run --env-file gateway.env " + image,
                 renewal_command="docker stop unit && docker rm unit",
             )
@@ -150,32 +165,43 @@ def test_gateway_creation_worker_materializes_only_after_arm_readback() -> None:
     assert stored["declared_state"] == "present"
     assert stored["reachability_state"] == "unknown"
     assert str(stored["endpoint_url"]) == str(spec.configuration.endpoint_url)
-    enrollment.assert_called_once()
-    assert repository._provisioned_gateway_endpoint(stored) == str(spec.configuration.endpoint_url)
+    enrollment.assert_not_called()
+    inventory_syncs = [
+        row for row in repository.gateway_release_operations
+        if row["operation_kind"] == "target_inventory_sync"
+    ]
+    assert len(inventory_syncs) == 1
+    assert inventory_syncs[0]["gateway_profile_id"] == TARGET
+    assert inventory_syncs[0]["status"] == "queued"
     repository.apim_targets[TARGET]["api_path"] = "changed/llm"
-    assert repository._provisioned_gateway_endpoint(stored) is None
-    with pytest.raises(ControlPlaneConflictError, match="identity changed"):
+    with pytest.raises(ControlPlaneConflictError, match="identity is no longer verified"):
         service.self_hosted_gateway_bootstrap(
-            spec.deployment_id, SelfHostedGatewayBootstrapRequest(),
+            spec.deployment_id, SelfHostedGatewayBootstrapRequest(endpoint_control_confirmed=True),
         )
     repository.apim_targets[TARGET]["api_path"] = registered.api_path
     bootstrap = service.self_hosted_gateway_bootstrap(
-        spec.deployment_id, SelfHostedGatewayBootstrapRequest(),
+        spec.deployment_id, SelfHostedGatewayBootstrapRequest(endpoint_control_confirmed=True),
     )
-    assert bootstrap.environment_file.endswith("unit-secret")
+    assert bootstrap.environment_file.get_secret_value().endswith("unit-secret")
     assert "unit-secret" not in service.release_operation(created.operation.id).model_dump_json()
     assert repository.gateway_release_operation_secrets == {}
     repository.gateway_deployments[spec.deployment_id]["endpoint_url"] = "https://other.example.test"
-    with pytest.raises(ControlPlaneConflictError, match="changed"):
+    with pytest.raises(ControlPlaneConflictError, match="identity is no longer verified"):
         service.self_hosted_gateway_bootstrap(
-            spec.deployment_id, SelfHostedGatewayBootstrapRequest(),
+            spec.deployment_id, SelfHostedGatewayBootstrapRequest(endpoint_control_confirmed=True),
         )
     assert client.bootstrap_reads == 1
 
 
 def test_failed_gateway_creation_retries_same_task_without_release_rollback() -> None:
     repository = InMemoryRepository()
-    repository.upsert_apim_target(target(capabilities={"self_hosted_gateway": "supported"}))
+    repository.upsert_apim_target(
+        target(
+            capabilities={"self_hosted_gateway": "supported"},
+            drift_state="in_sync",
+            last_inventory_sync_at=NOW,
+        )
+    )
     service = GatewayControlPlaneService(repository, self_hosted_gateway_provisioning_enabled=True)
     created = service.request_self_hosted_gateway_provision(
         TARGET, SelfHostedGatewayCreate(
@@ -199,28 +225,41 @@ def test_failed_gateway_creation_retries_same_task_without_release_rollback() ->
     assert retried.operation.audit[-1].detail["error_code"] == failed.error_code
 
 
-def test_invocation_query_uses_active_route_deployment_scope() -> None:
+@pytest.mark.parametrize("explicit", [False, True])
+def test_invocation_query_uses_active_route_deployment_scope(explicit: bool) -> None:
     connection, context = MagicMock(), MagicMock()
     context.__enter__.return_value = connection
     connection.execute.return_value.fetchone.return_value = {"model_id": UUID(int=17)}
     repository = PostgreSqlOpsDbProxy("postgresql://unused", pool_min_size=0)
     with patch.object(repository, "_connection", return_value=context):
-        repository.invocation_route(None, UUID(int=17))
+        if explicit:
+            repository.invocation_route(
+                None, UUID(int=17), gateway_profile_id=TARGET,
+                gateway_deployment_id=UUID(int=18),
+            )
+        else:
+            repository.invocation_route(None, UUID(int=17))
     statement, parameters = connection.execute.call_args.args
-    assert parameters == [UUID(int=17)]
+    assert parameters == (
+        [TARGET, UUID(int=18), UUID(int=17), TARGET] if explicit else [UUID(int=17)]
+    )
+    assert statement.count("%s") == len(parameters)
     assert "FROM apim_target_route_binding" in statement
-    assert "route.enabled" in statement
-    assert "route.is_default_serving DESC" in statement
-    assert "COALESCE(route_binding.runtime_id, model.runtime_id)" in statement
-    assert "route_binding.deployment_scope_mode = 'all'" in statement
+    assert "target_route.enabled" in statement
+    if explicit:
+        assert "COALESCE(target_route.runtime_id, model.runtime_id)" in statement
+        assert "AND deployment.id = %s" in statement
+    else:
+        assert "target_route.is_default_serving" in statement
+    assert "target_route.deployment_scope_mode = 'all'" in statement
     assert "selected.gateway_deployment_id = deployment.id" in statement
     assert "deployment.apim_target_id = gateway.id" in statement
-    assert "route_binding.current_publication_id = publication.id" in statement
+    assert "target_route.current_publication_id = publication.id" in statement
     assert "gateway_deployment_api_association" in statement
     assert "deployment.retired_at IS NULL" in statement
     assert "deployment.declared_state = 'present'" in statement
-    assert "AS gateway_deployments" in statement
-    assert "route_binding.id IS NOT NULL OR NOT EXISTS" in statement
+    assert "selected_deployment.id IS NOT NULL" in statement
+    assert "target_route.id IS NOT NULL OR NOT EXISTS" in statement
 
 
 @pytest.mark.parametrize("explicit_id", [False, True])
@@ -310,15 +349,34 @@ def test_invocation_route_respects_serving_scope_and_retirement(
     elif state == "unassociated":
         repository.gateway_deployment_inventories[edge.id]["associated_api_ids"] = []
     route = repository.invocation_route(runtime["id"], model["id"])
-    if state in {"disabled", "stale_release"} or (scope_mode == "selected" and state != "present"):
+    denied = {"disabled", "stale_release"}
+    unavailable = {"retired", "absent", "unassociated"}
+    if state in denied or (scope_mode == "selected" and state in unavailable):
         assert route is None
     else:
         assert route is not None
-        expected = ([str(managed.id)] if scope_mode == "all" else [])
-        if state in {"present", "unassociated"}:
-            expected.append(str(edge.id))
-        assert [item["deployment_id"] for item in route["gateway_deployments"]] == expected
         assert route["gateway_deployment_id"] == (managed.id if scope_mode == "all" else edge.id)
+    selected = repository.invocation_route(
+        runtime["id"], model["id"], gateway_profile_id=TARGET,
+        gateway_deployment_id=edge.id,
+    )
+    if state in denied | unavailable:
+        assert selected is None
+    else:
+        assert selected is not None
+        assert selected["gateway_deployment_id"] == edge.id
+        assert selected["gateway_base_url"] == str(edge.endpoint_url)
+        if state == "unreachable":
+            assert selected["gateway_deployment"]["reachability_state"] == "unreachable"
+    selected_managed = repository.invocation_route(
+        runtime["id"], model["id"], gateway_profile_id=TARGET,
+        gateway_deployment_id=managed.id,
+    )
+    if scope_mode == "selected" or state in denied:
+        assert selected_managed is None
+    else:
+        assert selected_managed is not None
+        assert selected_managed["gateway_deployment_id"] == managed.id
 
 
 @pytest.mark.parametrize("change", ["retired", "missing", "target", "native", "endpoint"])
@@ -385,6 +443,9 @@ def test_postgres_queue_checks_snapshot_after_target_lock_and_before_any_insert(
     context.__enter__.return_value = connection
     calls = []
     gateway = deployment(endpoint_url="https://unit.example.test/unit/llm", retired_at=NOW)
+    intent = LegacyGatewayControlPlaneService(InMemoryRepository()).seed_legacy_publication(
+        bedrock_publication(), "unit-owner",
+    )
 
     def execute(sql: str, values: Any = None) -> MagicMock:
         calls.append((sql, values))
@@ -400,10 +461,18 @@ def test_postgres_queue_checks_snapshot_after_target_lock_and_before_any_insert(
         patch.object(repository, "_connection", return_value=context),
         pytest.raises(ValueError, match="Gateway deployment changed"),
     ):
-        repository.create_gateway_publication(TARGET, {"gateway_deployments": [{
-            "deployment_id": str(gateway.id), "native_gateway_id": "managed",
-            "endpoint_url": str(gateway.endpoint_url),
-        }]}, "unit-spec", "model_add", "unit-owner")
+        repository.create_gateway_publication(TARGET, {
+            "gateway_profile_id": str(TARGET),
+            "discovery_models": [
+                item.model_dump(mode="json") for item in intent.desired_spec.discovery_models
+            ],
+            "bindings": [intent.desired_spec.bindings[0].model_dump(mode="json")],
+            "gateway_deployments": [{
+                "deployment_id": str(gateway.id), "native_gateway_id": "managed",
+                "kind": "managed", "release_gate": "required",
+                "endpoint_url": str(gateway.endpoint_url),
+            }],
+        }, "unit-spec", "model_add", "unit-owner")
     connection.transaction.assert_called_once()
     assert calls[0][1] == (f"gateway-publication:{TARGET}",)
     assert "pg_advisory_xact_lock" in calls[0][0]
@@ -516,14 +585,20 @@ def test_registered_target_activation_persists_logical_identity_and_selected_rou
         last_arm_sync_at=NOW, reachability_state="reachable", last_probe_at=NOW,
         release_gate="required",
     ))
-    service = GatewayControlPlaneService(
+    service = LegacyGatewayControlPlaneService(
         repository, TEST_CIPHER, deployment_scoping_enabled=True, target_registry_enabled=True,
     )
     request = bedrock_publication().model_copy(update={"deployment_scope": GatewayDeploymentScope(
         mode=GatewayDeploymentScopeMode.SELECTED, deployment_ids=(deployment().id,),
     )})
-    publication = service.publish(request, "unit-owner")
-    binding = publication.desired_spec.bindings[-1]
+    publication = service.seed_legacy_publication(request, "unit-owner")
+    binding = publication.desired_spec.bindings[-1].model_copy(update={
+        "logical_model_id": UUID(int=105),
+    })
+    publication.desired_spec = publication.desired_spec.model_copy(update={"bindings": [binding]})
+    stored = repository.get_gateway_publication(publication.id)
+    assert stored is not None
+    stored["desired_spec"] = publication.desired_spec.model_dump(mode="json")
     contracts = BudgetPublicationContracts.capture(publication, {"models": []}, {
         "protocol_version": 2, "mode": "active", "epoch": str(UUID(int=10)),
         "gateway_profile_id": str(TARGET), "model_contracts": {},
@@ -610,13 +685,19 @@ def test_postgres_stale_inventory_never_deletes_newer_child_rows() -> None:
         source_api_version="2024-05-01",
         synced_at=NOW,
     )
+    connection.execute.return_value.fetchone.side_effect = [None, inventory.model_dump()]
     with (
         patch.object(repository, "_connection", return_value=context),
-        patch.object(repository, "_deployment_inventories", return_value=[{"stored": True}]),
+        patch.object(repository, "_deployment_inventory_view", return_value={"stored": True}),
     ):
         assert repository.upsert_gateway_deployment_inventory(inventory) == {"stored": True}
-    assert connection.execute.call_count == 1
-    assert "EXCLUDED.synced_at >= existing.synced_at" in connection.execute.call_args.args[0]
+    assert connection.execute.call_count == 2
+    assert "EXCLUDED.synced_at >= existing.synced_at" in (
+        connection.execute.call_args_list[0].args[0]
+    )
+    assert "SELECT * FROM gateway_deployment_inventory" in (
+        connection.execute.call_args_list[1].args[0]
+    )
     connection.cursor.assert_not_called()
 
 

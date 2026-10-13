@@ -76,7 +76,7 @@ def test_diagnostic_claim_cooldown_and_completion_require_current_owner() -> Non
     assert not repository.claim_runtime_diagnostic(runtime["id"], "second", now, before)
 
 
-def test_diagnostic_context_is_a_snapshot_of_only_requested_selection() -> None:
+def test_unit_diagnostic_context_resolves_only_requested_selection() -> None:
     repository = InMemoryRepository()
     model = next(row for row in repository.models if row["enabled"])
     runtime = next(row for row in repository.runtimes if row["id"] == model["runtime_id"])
@@ -88,9 +88,9 @@ def test_diagnostic_context_is_a_snapshot_of_only_requested_selection() -> None:
     assert context["model"]["id"] == model["id"]
     assert context["runtime"]["id"] == runtime["id"]
     assert context["deployment"] is None
-    original = context["runtime"]["config"].copy()
-    runtime["config"]["path"] = "/changed"
-    assert context["runtime"]["config"] == original
+    assert context["runtime"] is runtime
+    assert context["model"] is model
+    assert context["gateway_deployment_id"] == UUID(int=75)
 
 
 def test_explicit_diagnostic_route_does_not_fall_back_to_another_gateway() -> None:

@@ -25,12 +25,17 @@ ROOT = Path(__file__).resolve().parents[3]
 def test_budget_events_supply_public_reader_identity_on_success_and_error() -> None:
     source = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
     root = parse_policy(compiler.compose_budget_execution_parent(source, source, enabled=True))
+    native = root.find("./inbound/set-variable[@name='telemetryNativeGatewayId']")
+    assert native is not None and native.get("value") == "@(context.Deployment.Gateway.Id)"
+    canonical = root.find("./inbound/set-variable[@name='telemetryUsageId']")
+    assert canonical is not None and "turnstile-v2-" in canonical.get("value", "")
+    assert "context.Request.Headers" not in canonical.get("value", "")
     for section in ("outbound", "on-error"):
         events = root.findall(f"./{section}//log-to-eventhub")
         assert events
         for event in events:
             expression = event.text or ""
-            assert 'new JProperty("native_gateway_id", context.Deployment.Gateway.Id)' in expression
+            assert 'context.Variables["telemetryNativeGatewayId"]' in expression
             assert 'new JProperty("usage_event_source", "apim")' in expression
             assert 'new JProperty("correlation_id", context.RequestId.ToString())' in expression
             assert "turnstile-v2-" not in expression
@@ -178,7 +183,10 @@ def application_tpm_expressions() -> dict[str, str]:
     source = (ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
     composed = compiler.compose_budget_execution_parent(source, source, enabled=True)
     root = parse_policy(composed.replace("__TOKENS_PER_MINUTE__", "100000"))
-    names = {"applicationLedgerUrl", "applicationLedgerState", "applicationTokensPerMinute"}
+    names = {
+        "applicationLedgerUrl", "applicationLedgerState", "applicationTokensPerMinute",
+        "applicationRateLimitPartition",
+    }
     return {node.attrib["name"]: node.attrib["value"]
             for node in root.iter("set-variable") if node.get("name") in names}
 
@@ -502,18 +510,15 @@ def test_execution_retains_configured_public_application_tpm(
         "body": "{}", "expression": expression_id(expressions["applicationTokensPerMinute"]),
         "variables": {
             "applicationAdmission": "ok",
-            "applicationLedgerRead": {
-                "__response": True, "status": 200, "headers": {}, "body": json.dumps({
-                    "value": [
-                        {"RowKey": "Q", "Limit": 1000000,
-                         "TokensPerMinute": 4321, "Enforce": True},
-                        {"RowKey": "M", "Configured": True, "Models": "|unit-model|"},
-                    ],
+            "applicationRateLimitPartition": "app-tpm|unit-application",
+            "applicationRateLimitRead": {
+                "__response": True, "status": 200, "headers": {"ETag": 'W/"unit"'},
+                "body": json.dumps({
+                    "PartitionKey": "app-tpm|unit-application", "RowKey": "T",
+                    "TokensPerMinute": 4321,
                 }),
             },
         },
-        "steps": [{"variable": "applicationLedgerState",
-                   "expression": expression_id(expressions["applicationLedgerState"])}],
     }, {
         "body": "{}", "expression": expression_id(expressions["applicationLedgerUrl"]),
         "variables": {"applicationLedgerPartition": "unit-app|2026-09",
@@ -523,8 +528,38 @@ def test_execution_retains_configured_public_application_tpm(
     from urllib.parse import unquote
 
     query = unquote(values[1])
-    assert "RowKey eq 'Q'" in query and "RowKey eq 'M'" in query
+    assert "RowKey eq 'M'" in query and "RowKey eq 'Q'" not in query
     assert "RowKey eq 'C'" not in query and "RowKey eq 'R" not in query
+
+
+@pytest.mark.parametrize("status,etag,changes", [
+    (404, 'W/"unit"', {}), (200, "", {}), (200, "*", {}),
+    (200, 'W/"unit"', {"PartitionKey": "foreign-application"}),
+    (200, 'W/"unit"', {"RowKey": "Q"}),
+    (200, 'W/"unit"', {"TokensPerMinute": True}),
+    (200, 'W/"unit"', {"TokensPerMinute": 1.5}),
+    (200, 'W/"unit"', {"TokensPerMinute": 0}),
+    (200, 'W/"unit"', {"TokensPerMinute": -1}),
+    (200, 'W/"unit"', {"TokensPerMinute": 2**31}),
+])
+def test_execution_tpm_rejects_unproven_or_invalid_rate_without_a_default(
+    compiled_expressions: tuple[Path, str], tmp_path: Path,
+    status: int, etag: str, changes: dict[str, object],
+) -> None:
+    expression = application_tpm_expressions()["applicationTokensPerMinute"]
+    row = {"PartitionKey": "app-tpm|unit-application", "RowKey": "T",
+           "TokensPerMinute": 4321, **changes}
+    result = run_cases(compiled_expressions, tmp_path, [{
+        "body": "{}", "expression": expression_id(expression),
+        "variables": {
+            "applicationRateLimitPartition": "app-tpm|unit-application",
+            "applicationRateLimitRead": {
+                "__response": True, "status": status, "headers": {"ETag": etag},
+                "body": json.dumps(row),
+            },
+        },
+    }])[0]
+    assert result == 0
 
 
 def analyze(
@@ -611,6 +646,7 @@ def test_business_json_is_not_protocol_content(
         "complete": True,
         "remote_content": False,
         "required_features": [],
+        "request_controls": [],
     }
 
 
@@ -953,12 +989,14 @@ def test_error_owner_preserves_status_contract(
     code: str,
     status: int,
 ) -> None:
+    owner = compiler._admission().find(".//set-variable[@name='executionStatus']")
+    assert owner is not None
     result = run_cases(
         compiled_expressions,
         tmp_path,
         [
             {
-                "expression": expression_id(compiler.ERROR_STATUS),
+                "expression": expression_id(owner.attrib["value"]),
                 "body": "{}",
                 "variables": {"executionError": code},
             }

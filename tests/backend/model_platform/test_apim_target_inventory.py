@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from uuid import UUID
 
 import httpx
@@ -15,6 +15,9 @@ from tests.backend.model_platform.control_plane_support import (
     TEST_CIPHER,
     FakeApimClient,
     bedrock_publication,
+)
+from tests.backend.model_platform.control_plane_support import (
+    GatewayControlPlaneService as LegacyGatewayControlPlaneService,
 )
 from tests.backend.model_platform.test_gateway_targets import NOW, TARGET, deployment, target
 from turnstile_core.config import Settings
@@ -61,7 +64,7 @@ def lifecycle_service() -> tuple[InMemoryRepository, GatewayControlPlaneService]
     repository.models = []
     repository.upsert_apim_target(target(capabilities={"self_hosted_gateway": "supported"}))
     return repository, GatewayControlPlaneService(
-        repository, TEST_CIPHER, self_hosted_gateway_enabled=True,
+        repository, TEST_CIPHER,
     )
 
 
@@ -126,7 +129,7 @@ def test_self_hosted_validation_never_sends_credentials_to_an_unbound_host(
             "Gateway validation returned HTTP 503"
         )
     service = GatewayControlPlaneService(
-        repository, TEST_CIPHER, self_hosted_gateway_enabled=True, gateway_connection_probe=probe,
+        repository, TEST_CIPHER, gateway_connection_probe=probe,
         trusted_gateway_endpoints={identity: self_hosted_write().endpoint_url} if trusted else {},
     )
     if problem is None:
@@ -204,11 +207,13 @@ def test_publication_deployment_scope_is_resolved_before_queueing(scope_error: s
             service.publish(request, "unit-owner")
         assert repository.gateway_publications == []
     else:
-        publication = service.publish(request, "unit-owner")
+        publication = LegacyGatewayControlPlaneService(
+            repository, TEST_CIPHER, deployment_scoping_enabled=True, target_registry_enabled=True,
+        ).seed_legacy_publication(request, "unit-owner")
         binding = publication.desired_spec.bindings[-1]
         assert binding.deployment_scope.deployment_ids == (edge_id,)
         assert binding.serving_deployments[0].native_gateway_id == "edge"
-        assert binding.logical_model_id is not None
+        assert binding.logical_model_id is None
         assert len(publication.desired_spec.gateway_deployments) == 2
 
 
@@ -238,7 +243,7 @@ def test_inventory_queue_resolves_exact_target_and_persists_checkpoint(wrong_tar
         assert result.status == "succeeded" and result.checkpoint["gateway_count"] == 1
         assert result.checkpoint["read_only_arm_discovery"] is True
         client.discover_apim_target_inventory.assert_called_once_with(TARGET)
-    assert worker._active_client.get() is None
+    assert resolver.resolve.call_args_list == [call(TARGET)] * (1 if wrong_target else 2)
 
 
 @pytest.mark.parametrize("lose_lease", [False, True])

@@ -12,7 +12,10 @@ from backend.http.service_dependencies import apim_onboarding_service
 from backend.http.session import SessionIdentity, require_authenticated_session
 from backend.services.runtime_service import ModelRuntimeService
 from tests.backend.model_platform.control_plane_support import TEST_CIPHER
-from tests.backend.model_platform.test_apim_onboarding import onboarding_request, service_fixture
+from tests.backend.model_platform.test_apim_onboarding import (
+    onboarding_request,
+    onboarding_service_fixture,
+)
 from tests.backend.model_platform.test_apim_target_inventory import (
     lifecycle_service,
     self_hosted_write,
@@ -227,11 +230,11 @@ def test_onboarding_http_preview_start_idempotency_and_linked_retry(
     publication_api: InMemoryRepository,
 ) -> None:
     del publication_api
-    service, repository, _, _ = service_fixture()
+    repository, state, service, _ = onboarding_service_fixture()
     path = "/api/v1/model-management/apim-onboarding"
     with patch.dict(app.dependency_overrides, {apim_onboarding_service: lambda: service}):
         assert client.get(path).json()["available"] is True
-        preview = client.post(path + "/preview", json=onboarding_request().model_dump(mode="json"))
+        preview = client.post(path + "/preview", json=state.plan.request.model_dump(mode="json"))
         assert preview.status_code == 200
         plan = preview.json()
         write = {"request": plan["request"], "confirmation_sha256": plan["confirmation_sha256"]}
@@ -321,7 +324,7 @@ def test_onboarding_operations_preserve_owner_session_and_origin_guards(
 def test_target_inventory_sync_is_a_durable_owner_operation(
     publication_api: InMemoryRepository,
 ) -> None:
-    path = f"/api/v1/model-management/apim-targets/{TARGET}/inventory-sync"
+    path = f"/api/v1/model-management/apim-targets/{TARGET}/inventory-syncs"
     assert client.post(path).status_code == 503
     publication_api.upsert_apim_target(target())
     service = GatewayControlPlaneService(publication_api, target_inventory_sync_enabled=True)

@@ -46,6 +46,8 @@ def _execution_usage(row: dict[str, Any]) -> dict[str, Any]:
         normalized_identity,
         validate_completion,
     )
+    from turnstile_core.domain.gateway_targets import canonical_usage_id_v2
+    from turnstile_core.domain.ledger import LedgerAdmissionReceipt
 
     encoded = row.get("budget_execution")
     if not isinstance(encoded, str) or not 1 <= len(encoded) <= 16384:
@@ -53,11 +55,10 @@ def _execution_usage(row: dict[str, Any]) -> dict[str, Any]:
     receipts = json.loads(base64.b64decode(encoded, validate=True).decode("utf-8"))
     if not isinstance(receipts, list) or not 1 <= len(receipts) <= 2:
         raise ValueError("Execution requires bounded admission receipts")
+    receipts = [LedgerAdmissionReceipt.model_validate(item).model_dump(mode="json")
+                for item in receipts]
     seen: set[str] = set()
     for receipt in receipts:
-        if (not isinstance(receipt, dict)
-            or set(receipt) != {"identity", "epoch", "reserved_tokens"}):
-            raise ValueError("Execution receipt is malformed")
         identity = normalized_identity(receipt["identity"])
         UUID(receipt["epoch"])
         if exact_integer(receipt["reserved_tokens"]) == 0:
@@ -68,10 +69,29 @@ def _execution_usage(row: dict[str, Any]) -> dict[str, Any]:
         )) or (scope["scope_type"] == "person" and scope["scope_id"] != row.get("user_id"))):
             raise ValueError("Execution receipt differs from trusted request metadata")
         seen.add(scope["scope_type"])
+    gateway_profile_id = UUID(row["gateway_profile_id"])
+    context_fields = {
+        name: _text(row, name, "") for name in (
+            "native_gateway_id", "native_gateway_instance_id", "apim_service_id",
+            "apim_region", "api_revision",
+        )
+    }
+    if not all(context_fields.values()):
+        raise ValueError("Execution usage requires complete Gateway context")
+    managed = _text(row, "gateway_is_managed", "").casefold()
+    if managed not in {"true", "false"}:
+        raise ValueError("Execution usage requires trusted Gateway management state")
+    usage_id = canonical_usage_id_v2(
+        gateway_profile_id, context_fields["apim_service_id"],
+        context_fields["native_gateway_id"], _text(row, "correlation_id", ""),
+    )
+    if row.get("usage_id") != usage_id:
+        raise ValueError("Execution usage identity does not match its Gateway context")
     result: dict[str, Any] = {
+        "event_schema_version": 2, "id": usage_id, "usage_id": usage_id,
+        **context_fields, "gateway_is_managed": managed == "true",
         "budget_execution": receipts, "usage_complete": False, "usage_event_source": "observer",
-        "gateway_profile_id": str(UUID(row["gateway_profile_id"])),
-        "native_gateway_id": row["native_gateway_id"],
+        "gateway_profile_id": str(gateway_profile_id),
         "apim_subscription_id": _text(row, "apim_subscription_id", "") or None,
         "application_actor_type": _text(row, "application_actor_type", "") or None,
         "application_actor_id": _text(row, "application_actor_id", "") or None,

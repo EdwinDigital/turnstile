@@ -89,18 +89,21 @@ def test_application_budget_api_distinguishes_missing_zero_and_upper_bound() -> 
             pending_reserved_tokens=200,
             pending_reservation_count=1,
             stale_reservation_count=1,
-            finalized_upper_bound_tokens=300,
-            finalized_upper_bound_count=1,
             oldest_reservation_at=moment - timedelta(hours=2),
-            available_tokens=99_400,
+            available_tokens=99_700,
             snapshot_at=moment,
         )
-        repository.save_gateway_application_ledger_states([state])
+        sidecar = {
+            "period_start": state.period_start, "application_id": application_id,
+            "finalized_upper_bound_tokens": 300, "finalized_upper_bound_count": 1,
+            "snapshot_at": moment,
+        }
+        repository.save_gateway_application_ledger_snapshot([state], [sidecar])
         observed = client.get(url).json()["budget"]
         assert observed["pending_reserved_tokens"] == 200
         assert observed["finalized_upper_bound_tokens"] == 300
         assert observed["available_tokens"] == 99_400
-        repository.save_gateway_application_ledger_states(
+        repository.save_gateway_application_ledger_snapshot(
             [
                 state.model_copy(
                     update={
@@ -114,9 +117,13 @@ def test_application_budget_api_distinguishes_missing_zero_and_upper_bound() -> 
                         "snapshot_at": moment + timedelta(minutes=5),
                     }
                 )
-            ]
+            ],
+            [{
+                **sidecar, "snapshot_at": moment + timedelta(minutes=5),
+                "finalized_upper_bound_tokens": 0, "finalized_upper_bound_count": 0,
+            }],
         )
-        repository.save_gateway_application_ledger_states([state])
+        repository.save_gateway_application_ledger_snapshot([state], [sidecar])
         zero = client.get(url).json()["budget"]
         assert zero["pending_reserved_tokens"] == 0
         assert zero["finalized_upper_bound_tokens"] == 0

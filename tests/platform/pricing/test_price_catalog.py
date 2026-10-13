@@ -200,7 +200,7 @@ def test_context_tier_metadata_does_not_guess_ambiguous_names(label: str) -> Non
     assert parse_context_tier(label) is None
 
 
-def test_context_threshold_requires_source_data_not_a_model_name() -> None:
+def test_context_threshold_requires_reference_provenance_not_only_a_model_name() -> None:
     label = "5.6 sol ShortCo Std"
     descriptor = parse_context_tier(label)
     model = CatalogModel(
@@ -208,7 +208,15 @@ def test_context_threshold_requires_source_data_not_a_model_name() -> None:
         source=PriceSource.AZURE_RETAIL, product="Azure OpenAI GPT5",
         context_tier=descriptor,
     )
-    assert model.resolved_context_tier is descriptor
+    resolved = model.resolved_context_tier
+    assert resolved is not None and resolved.input_range is not None
+    assert resolved.input_range.min_input_tokens == 0
+    assert resolved.input_range.max_input_tokens == 272000
+    assert resolved.input_range_source is not None
+    assert resolved.input_range_source.origin == "reference"
+    assert resolved.input_range_source.url is not None
+    assert resolved.input_range_source.url.startswith("https://learn.microsoft.com/")
+    assert "not a verified Standard billing threshold" in (resolved.input_range_source.note or "")
     assert descriptor is not None and descriptor.input_range is None
 
 
@@ -252,13 +260,20 @@ def test_azure_context_details_do_not_fetch_threshold_webpages(
         found = catalog.options(model)
         assert catalog.options(model) is found
         descriptor = found.model.resolved_context_tier
-        assert descriptor is not None and descriptor.input_range is None
-        assert descriptor.input_range_source is None
+        assert descriptor is not None
+        if product == "Azure OpenAI GPT5":
+            assert descriptor.input_range is not None
+            assert descriptor.input_range_source is not None
+            assert descriptor.input_range_source.origin == "reference"
+        else:
+            assert descriptor.input_range is None
+            assert descriptor.input_range_source is None
         option = found.options[0]
         assert option.entry.input_per_million == (7 if descriptor.key == "short" else 19)
         assert catalog.entry(option.reference) == option.entry
         references.append(option.reference)
-    with pytest.raises(ValueError, match="thresholds are unavailable"):
+    message = "unverified" if product == "Azure OpenAI GPT5" else "thresholds are unavailable"
+    with pytest.raises(ValueError, match=message):
         resolve_context_prices(
             CompositeCatalog([catalog]), PriceSource.AZURE_RETAIL, references, 80,
         )

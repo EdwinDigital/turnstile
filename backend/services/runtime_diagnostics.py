@@ -9,7 +9,6 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import httpx
@@ -20,7 +19,7 @@ from turnstile_core.domain.application_access import application_id_for
 from turnstile_core.domain.gateway_targets import (
     ApimTarget,
     GatewayDeployment,
-    SelfHostedGatewayProvisionSpec,
+    validate_gateway_endpoint,
 )
 from turnstile_core.domain.runtime_models import (
     ChatMessage,
@@ -96,103 +95,61 @@ class RuntimeDiagnostics:
     def configuration_fingerprint(context: Mapping[str, Any]) -> str | None:
         fields = {
             "runtime": (
-                "id",
-                "provider_id",
-                "gateway_profile_id",
-                "runtime_kind",
-                "enabled",
-                "config",
+                "id", "provider_id", "gateway_profile_id", "runtime_kind", "enabled", "config",
             ),
             "provider": ("id", "provider_kind", "endpoint_url", "auth_type", "enabled", "config"),
             "gateway": ("id", "implementation", "enabled"),
             "model": ("id", "provider_id", "runtime_id", "model_key", "enabled", "capabilities"),
             "target": (
-                "gateway_profile_id",
-                "tenant_id",
-                "subscription_id",
-                "resource_group",
-                "service_name",
-                "arm_resource_id",
-                "api_id",
-                "api_path",
-                "principal_id",
-                "probe_subscription_id",
-                "management_auth_profile_ref",
+                "gateway_profile_id", "tenant_id", "subscription_id", "resource_group",
+                "service_name", "arm_resource_id", "api_id", "api_path", "principal_id",
+                "probe_subscription_id", "management_auth_profile_ref",
             ),
             "deployment": (
-                "id",
-                "apim_target_id",
-                "kind",
-                "native_gateway_id",
-                "endpoint_url",
-                "declared_state",
-                "retired_at",
+                "id", "apim_target_id", "kind", "native_gateway_id", "endpoint_url",
+                "declared_state", "retired_at",
             ),
         }
         if any(not isinstance(context.get(kind), dict) for kind in fields):
             return None
         payload: dict[str, Any] = {
-            kind: {key: context[kind].get(key) for key in keys} for kind, keys in fields.items()
+            kind: {key: context[kind].get(key) for key in keys}
+            for kind, keys in fields.items()
         }
-        model, metadata = context["model"], context.get("model_metadata") or {}
-        payload["model"].update(
-            family_key=metadata.get("family_key") or "generic",
-            upstream_model_id=metadata.get("upstream_model_id") or model["model_key"],
-            capabilities=sorted(model.get("capabilities") or []),
-        )
+        model = context["model"]
+        metadata = context.get("model_metadata") or {}
+        payload["model"].update({
+            "family_key": metadata.get("family_key") or "generic",
+            "upstream_model_id": metadata.get("upstream_model_id") or model["model_key"],
+            "capabilities": sorted(model.get("capabilities") or []),
+        })
         ciphertext = context["provider"].get("credential_ciphertext")
         if isinstance(ciphertext, str):
             ciphertext = (
                 bytes.fromhex(ciphertext[2:])
-                if ciphertext.startswith("\\x")
-                else ciphertext.encode()
+                if ciphertext.startswith("\\x") else ciphertext.encode()
             )
         payload["provider"]["credential_version"] = (
             hashlib.sha256(bytes(ciphertext)).hexdigest() if ciphertext else None
         )
         binding = context.get("binding")
-        payload["binding"] = (
-            {
-                key: binding.get(key)
-                for key in (
-                    "logical_model_id",
-                    "apim_target_id",
-                    "runtime_id",
-                    "enabled",
-                )
-            }
-            if binding
-            else None
-        )
+        payload["binding"] = {key: binding.get(key) for key in (
+            "logical_model_id", "apim_target_id", "runtime_id", "enabled",
+        )} if binding else None
         payload["deployment_in_scope"] = context.get("deployment_in_scope")
         published = context.get("published_route")
-        payload["published_route"] = None
-        if isinstance(published, dict):
-            payload["published_route"] = {
-                key: value
-                for key, value in published.items()
-                if key
-                not in {
-                    "model",
-                    "provider_name",
-                    "runtime_name",
-                    "gateway_name",
-                    "display_name",
-                    "deployment_scope",
-                    "serving_deployments",
-                }
+        payload["published_route"] = {
+            key: value for key, value in published.items()
+            if key not in {
+                "model", "provider_name", "runtime_name", "gateway_name", "display_name",
+                "deployment_scope", "serving_deployments",
             }
+        } if isinstance(published, dict) else None
+        if isinstance(published, dict):
             payload["published_route"]["serving_deployments"] = [
-                {
-                    key: deployment.get(key)
-                    for key in (
-                        "deployment_id",
-                        "apim_target_id",
-                        "native_gateway_id",
-                        "endpoint_url",
-                        "kind",
-                    )
-                }
+                {key: deployment.get(key) for key in (
+                    "deployment_id", "apim_target_id", "native_gateway_id", "endpoint_url", "kind",
+                )}
                 for deployment in published.get("serving_deployments", [])
                 if str(deployment.get("deployment_id")) == str(context["gateway_deployment_id"])
             ]
@@ -211,52 +168,41 @@ class RuntimeDiagnostics:
             if not message.startswith(DIAGNOSTIC_PREFIX):
                 continue
             try:
-                result = RuntimeHealth.model_validate_json(message[len(DIAGNOSTIC_PREFIX) :])
+                result = RuntimeHealth.model_validate_json(message[len(DIAGNOSTIC_PREFIX):])
             except ValueError:
                 continue
             if result.runtime_id != runtime["id"]:
                 continue
-            results[result.runtime_id] = result.model_copy(
-                update={
-                    "configuration_status": "unverified",
-                    "configuration_checked_at": None,
-                }
-            )
+            result = result.model_copy(update={
+                "configuration_status": "unverified", "configuration_checked_at": None,
+            })
+            results[result.runtime_id] = result
             if result.selection and re.fullmatch(
-                r"v1:[0-9a-f]{64}", result.configuration_fingerprint or ""
+                r"v1:[0-9a-f]{64}", result.configuration_fingerprint or "",
             ):
-                selections.append(
-                    (
-                        result.runtime_id,
-                        result.selection.model_id,
-                        result.selection.gateway_profile_id,
-                        result.selection.gateway_deployment_id,
-                    )
-                )
+                selections.append((result.runtime_id, result.selection.model_id,
+                                   result.selection.gateway_profile_id,
+                                   result.selection.gateway_deployment_id))
         if not selections:
             return results
         try:
-            indexed = {
-                UUID(str(context["runtime_id"])): context
-                for context in self._repository.runtime_diagnostic_contexts(selections)
-            }
+            contexts = self._repository.runtime_diagnostic_contexts(selections)
+            indexed = {UUID(str(context["runtime_id"])): context for context in contexts}
             checked_at = datetime.now(UTC)
             for runtime_id, _model_id, _gateway_id, _deployment_id in selections:
+                result = results[runtime_id]
                 context = indexed.get(runtime_id)
-                if context is not None:
-                    result = results[runtime_id]
-                    matches = (
-                        self.configuration_fingerprint(context) == result.configuration_fingerprint
-                    )
-                    results[runtime_id] = result.model_copy(
-                        update={
-                            "configuration_status": "current" if matches else "changed",
-                            "configuration_checked_at": checked_at,
-                        }
-                    )
+                if context is None:
+                    continue
+                fingerprint = self.configuration_fingerprint(context)
+                results[runtime_id] = result.model_copy(update={
+                    "configuration_status": "current"
+                    if fingerprint == result.configuration_fingerprint else "changed",
+                    "configuration_checked_at": checked_at,
+                })
         except Exception as error:
             logger.warning(
-                "Diagnostic configuration unavailable error_type=%s", type(error).__name__
+                "Runtime diagnostic configuration unavailable error_type=%s", type(error).__name__,
             )
         return results
 
@@ -264,50 +210,61 @@ class RuntimeDiagnostics:
         plan = self._plan(runtime_id)
         if not plan.options:
             return plan
-        target = self._target(plan.options[0].gateway_profile_id)
+        target_row = self._repository.get_apim_target(plan.options[0].gateway_profile_id)
+        if target_row is None:
+            return plan.model_copy(update={
+                "options": [], "unavailable_reason": "A registered APIM target is required",
+            })
+        target = ApimTarget.model_validate(
+            {key: target_row[key] for key in ApimTarget.model_fields}
+        )
         return plan.model_copy(update={"access": self._access_checker(target)})
-
-    def _target(self, target_id: UUID) -> ApimTarget:
-        row = self._repository.get_apim_target(target_id)
-        if row is None:
-            raise HTTPException(status_code=409, detail="A registered APIM target is required")
-        return ApimTarget.model_validate({key: row[key] for key in ApimTarget.model_fields})
 
     def _plan(self, runtime_id: UUID) -> RuntimeCheckPlan:
         registry = self._repository.registry()
         runtime = next((row for row in registry["runtimes"] if row["id"] == runtime_id), None)
         if runtime is None:
             raise HTTPException(status_code=404, detail="Connection not found")
-        plan = RuntimeCheckPlan(runtime_id=runtime_id, options=[])
         if not runtime["enabled"]:
-            return plan.model_copy(update={"unavailable_reason": "Connection is disabled"})
-        gateway_id = runtime.get("gateway_profile_id")
-        if not gateway_id or self._repository.get_apim_target(gateway_id) is None:
-            return plan.model_copy(
-                update={"unavailable_reason": "A registered APIM target is required"}
+            return RuntimeCheckPlan(
+                runtime_id=runtime_id, options=[], unavailable_reason="Connection is disabled"
             )
-        target = self._target(gateway_id)
+        gateway_id = runtime.get("gateway_profile_id")
+        target_row = self._repository.get_apim_target(gateway_id) if gateway_id else None
+        if target_row is None:
+            return RuntimeCheckPlan(
+                runtime_id=runtime_id,
+                options=[],
+                unavailable_reason="A registered APIM target is required",
+            )
+        target = ApimTarget.model_validate(
+            {key: target_row[key] for key in ApimTarget.model_fields}
+        )
+        gateway_id = target.gateway_profile_id
         gateway = next((row for row in registry["gateways"] if row["id"] == gateway_id), None)
         provider = next(
             (row for row in registry["providers"] if row["id"] == runtime["provider_id"]), None
         )
         if not gateway or not gateway["enabled"] or not provider or not provider["enabled"]:
-            return plan.model_copy(update={"unavailable_reason": "Provider or Gateway is disabled"})
+            return RuntimeCheckPlan(
+                runtime_id=runtime_id,
+                options=[],
+                unavailable_reason="Provider or Gateway is disabled",
+            )
         try:
             self._system_application(target)
         except ValueError as error:
-            return plan.model_copy(update={"unavailable_reason": str(error)})
-        bindings = self._repository.list_apim_target_route_bindings(apim_target_ids=[gateway_id])
+            return RuntimeCheckPlan(
+                runtime_id=runtime_id, options=[], unavailable_reason=str(error)
+            )
         deployments = self._repository.list_gateway_deployments(gateway_id)
-        options = []
+        bindings = self._repository.list_apim_target_route_bindings(apim_target_ids=[gateway_id])
+        options: list[RuntimeCheckOption] = []
         for model in registry["models"]:
+            if model["runtime_id"] != runtime_id or not model["enabled"]:
+                continue
             capabilities = model.get("capabilities") or []
-            if (
-                model["runtime_id"] != runtime_id
-                or not model["enabled"]
-                or "chat" not in capabilities
-                or "image_generation" in capabilities
-            ):
+            if "chat" not in capabilities or "image_generation" in capabilities:
                 continue
             binding = next(
                 (row for row in bindings if row["logical_model_id"] == model["id"]), None
@@ -316,7 +273,7 @@ class RuntimeDiagnostics:
                 continue
             for row in deployments:
                 deployment = GatewayDeployment.model_validate(
-                    {key: row[key] for key in GatewayDeployment.model_fields},
+                    {key: row[key] for key in GatewayDeployment.model_fields if key in row}
                 )
                 scope = binding["deployment_scope"] if binding else None
                 if (
@@ -343,13 +300,12 @@ class RuntimeDiagnostics:
                     )
                 )
         options.sort(key=lambda option: (option.model_key, option.native_gateway_id))
-        return plan.model_copy(
-            update={
-                "options": options,
-                "unavailable_reason": None
-                if options
-                else "No eligible text model and trusted Gateway route",
-            }
+        return RuntimeCheckPlan(
+            runtime_id=runtime_id,
+            options=options,
+            unavailable_reason=None
+            if options
+            else "No eligible text model and trusted Gateway route",
         )
 
     def _system_application(self, target: ApimTarget) -> None:
@@ -370,9 +326,10 @@ class RuntimeDiagnostics:
             or application["gateway_profile_id"] != target.gateway_profile_id
         ):
             raise ValueError("Synchronize the target's system diagnostic subscription")
+        subscriptions = self._repository.list_gateway_application_subscriptions([application_id])
         matches = [
             row
-            for row in self._repository.list_gateway_application_subscriptions([application_id])
+            for row in subscriptions
             if row["gateway_profile_id"] == target.gateway_profile_id
             and row["apim_subscription_id"] == target.probe_subscription_id
             and row["application_id"] == application_id
@@ -389,111 +346,17 @@ class RuntimeDiagnostics:
             raise ValueError("The diagnostic subscription must belong to the selected APIM target")
 
     def _validate_endpoint(self, target: ApimTarget, deployment: GatewayDeployment) -> None:
-        if (
-            deployment.apim_target_id != target.gateway_profile_id
-            or deployment.retired_at is not None
-            or deployment.declared_state != "present"
-            or deployment.endpoint_url is None
-            or deployment.reachability_state == "unreachable"
-        ):
-            raise ValueError("Gateway endpoint is unavailable")
-        endpoint = str(deployment.endpoint_url).rstrip("/")
-        parsed = urlsplit(endpoint)
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("Gateway endpoint is not trusted")
-        matches_api_endpoint = (
-            parsed.port in (None, 443)
-            and parsed.path.rstrip("/") == ("/" + target.api_path.strip("/")).rstrip("/")
-        )
-        inventory = self._repository.get_gateway_deployment_inventory(deployment.id) or {}
-        hosts = {
-            str(row["hostname"]).casefold() for row in inventory.get("hostname_configurations", [])
-        }
-        if deployment.kind == "managed":
-            if (
-                deployment.native_gateway_id != "managed"
-                or not matches_api_endpoint
-                or (
-                    parsed.hostname.casefold() != f"{target.service_name}.azure-api.net".casefold()
-                    and parsed.hostname.casefold() not in hosts
-                )
-            ):
-                raise ValueError("Managed Gateway endpoint does not match the APIM target")
-            return
-        if deployment.native_gateway_id == "managed":
-            raise ValueError("Self-hosted Gateway identity is invalid")
-        if not self._settings.self_hosted_gateway_enabled:
+        if deployment.kind == "self_hosted" and not self._settings.self_hosted_gateway_enabled:
             raise ValueError("Self-hosted Gateway diagnostics are disabled")
-        if not any(
-            str(value).casefold() == target.api_id.casefold()
-            for value in inventory.get("associated_api_ids", [])
-        ):
-            raise ValueError("Gateway is not associated with the target API")
-        trusted = self._settings.self_hosted_gateway_trusted_endpoints.get(deployment.id)
-        if (matches_api_endpoint and parsed.hostname.casefold() in hosts) or (
-            trusted and str(trusted).rstrip("/") == endpoint
-        ):
-            return
-        if deployment.provisioning_operation_id is None:
-            raise ValueError("Gateway endpoint is not trusted")
-        operation = self._repository.get_gateway_release_operation(
-            deployment.provisioning_operation_id
+        inventory = self._repository.get_gateway_deployment_inventory(deployment.id) \
+            if deployment.kind == "self_hosted" else None
+        if inventory is not None and deployment.provisioning_operation_id is not None:
+            inventory = {**inventory, "provisioning_operation":
+                self._repository.get_gateway_release_operation(deployment.provisioning_operation_id)}
+        validate_gateway_endpoint(
+            target.model_dump(), deployment.model_dump(), inventory,
+            trusted_endpoint=self._settings.self_hosted_gateway_trusted_endpoints.get(deployment.id),
         )
-        if (
-            not operation
-            or operation["status"] != "succeeded"
-            or operation["operation_kind"] != "self_hosted_gateway_provision"
-        ):
-            raise ValueError("Gateway endpoint is not trusted")
-        spec = SelfHostedGatewayProvisionSpec.model_validate(operation["semantic_preview"])
-        if (
-            operation["gateway_profile_id"] != target.gateway_profile_id
-            or spec.deployment_id != deployment.id
-            or spec.native_gateway_id != deployment.native_gateway_id
-            or spec.target.arm_resource_id.casefold() != target.arm_resource_id.casefold()
-            or spec.target.api_id != target.api_id
-            or spec.target.api_path != target.api_path
-            or spec.target.tenant_id != target.tenant_id
-            or not spec.configuration.endpoint_control_confirmed
-            or str(spec.configuration.endpoint_url).rstrip("/") != endpoint
-        ):
-            raise ValueError("Gateway creation evidence does not match the current endpoint")
-
-    @staticmethod
-    def _protocol(route: Mapping[str, Any]) -> dict[str, Any]:
-        if route["runtime_kind"] not in {RuntimeKind.FOUNDRY, RuntimeKind.OPENAI_COMPATIBLE}:
-            raise ValueError("Unsupported diagnostic runtime")
-        config = dict(route["runtime_config"])
-        if route.get("model_family_key") == "claude":
-            config.update(
-                path="/v1/messages", api_format="anthropic_messages", anthropic_version="2023-06-01"
-            )
-        api_format = config.get("api_format", "openai_chat")
-        paths = (
-            {"/v1/messages"}
-            if api_format == "anthropic_messages"
-            else {
-                "/chat/completions",
-                "/v1/chat/completions",
-                "/openai/v1/chat/completions",
-            }
-        )
-        if (
-            api_format not in {"openai_chat", "anthropic_messages"}
-            or str(config.get("path", "/v1/chat/completions")) not in paths
-            or config.get("max_tokens_field", "max_tokens")
-            not in {"max_tokens", "max_completion_tokens"}
-        ):
-            raise ValueError("Unsupported diagnostic protocol or output limit")
-        config.update(timeout_seconds=12, control_plane_managed=True)
-        return config
 
     def check(
         self, runtime_id: UUID, selection: RuntimeCheckSelection, actor: str
@@ -515,7 +378,10 @@ class RuntimeDiagnostics:
             )
         if plan.access is None or plan.access.status != "ready":
             raise HTTPException(
-                status_code=409, detail="Diagnostic access is not ready; refresh the plan"
+                status_code=409,
+                detail=(
+                    "Diagnostic access is not ready; refresh the plan and review deployment access"
+                ),
             )
         route = self._repository.invocation_route(
             runtime_id,
@@ -534,12 +400,16 @@ class RuntimeDiagnostics:
             raise HTTPException(
                 status_code=409, detail="The selected diagnostic route is no longer available"
             )
-        target = self._target(selected.gateway_profile_id)
+        target_row = self._repository.get_apim_target(selected.gateway_profile_id)
         deployment_row = self._repository.get_gateway_deployment(selected.gateway_deployment_id)
-        if deployment_row is None:
+        if not target_row or not deployment_row:
             raise HTTPException(status_code=409, detail="Diagnostic target changed")
+        target = ApimTarget.model_validate(
+            {key: target_row[key] for key in ApimTarget.model_fields}
+        )
         deployment = GatewayDeployment.model_validate(
-            {key: deployment_row[key] for key in GatewayDeployment.model_fields},
+            {key: deployment_row[key] for key in GatewayDeployment.model_fields
+             if key in deployment_row}
         )
         try:
             self._system_application(target)
@@ -548,25 +418,19 @@ class RuntimeDiagnostics:
             raise HTTPException(status_code=409, detail=str(error)) from None
         if str(route["gateway_base_url"]).rstrip("/") != str(deployment.endpoint_url).rstrip("/"):
             raise HTTPException(status_code=409, detail="Diagnostic endpoint changed")
-        context_selection = (
-            runtime_id,
-            selected.model_id,
-            selected.gateway_profile_id,
-            selected.gateway_deployment_id,
-        )
+        context_selection = (runtime_id, selected.model_id, selected.gateway_profile_id,
+                             selected.gateway_deployment_id)
         contexts = self._repository.runtime_diagnostic_contexts([context_selection])
         fingerprint = self.configuration_fingerprint(contexts[0]) if len(contexts) == 1 else None
         if fingerprint is None:
             raise HTTPException(
-                status_code=409, detail="Diagnostic configuration could not be verified"
+                status_code=409, detail="Diagnostic configuration could not be verified",
             )
-        request_id, started_at = str(uuid4()), datetime.now(UTC)
+        request_id = str(uuid4())
+        started_at = datetime.now(UTC)
         marker = DIAGNOSTIC_PREFIX + "pending:" + request_id
         if not self._repository.claim_runtime_diagnostic(
-            runtime_id,
-            marker,
-            started_at,
-            started_at - timedelta(seconds=60),
+            runtime_id, marker, started_at, started_at - timedelta(seconds=60)
         ):
             raise HTTPException(
                 status_code=429,
@@ -592,32 +456,38 @@ class RuntimeDiagnostics:
             request_id=request_id,
             configuration_fingerprint=fingerprint,
         )
-        started, dispatched = time.monotonic(), False
+        started = time.monotonic()
+        dispatched = False
         try:
             protocol = self._protocol(route)
             credential = self._credentials.resolve(target)
             if credential is None:
                 raise ValueError("Diagnostic credential unavailable")
+            current_target = self._repository.get_apim_target(selected.gateway_profile_id)
+            current_deployment = self._repository.get_gateway_deployment(
+                selected.gateway_deployment_id,
+            )
             current_runtime = next(
                 (row for row in self._repository.registry()["runtimes"] if row["id"] == runtime_id),
                 None,
             )
+            current_route = self._repository.invocation_route(
+                runtime_id,
+                selected.model_id,
+                gateway_profile_id=selected.gateway_profile_id,
+                gateway_deployment_id=selected.gateway_deployment_id,
+            )
             current_contexts = self._repository.runtime_diagnostic_contexts([context_selection])
             if (
-                self._target(target.gateway_profile_id) != target
-                or self._repository.get_gateway_deployment(deployment.id) != deployment_row
-                or self._repository.invocation_route(
-                    runtime_id,
-                    selected.model_id,
-                    gateway_profile_id=selected.gateway_profile_id,
-                    gateway_deployment_id=selected.gateway_deployment_id,
-                )
-                != route
+                current_target != target_row
+                or current_deployment != deployment_row
+                or current_route != route
                 or current_runtime is None
                 or current_runtime.get("health_message") != marker
                 or selected not in self._plan(runtime_id).options
                 or len(current_contexts) != 1
                 or self.configuration_fingerprint(current_contexts[0]) != fingerprint
+                or datetime.now(UTC) >= started_at + timedelta(seconds=45)
             ):
                 raise ValueError("Diagnostic target or ownership changed before dispatch")
             diagnostic_route = {
@@ -628,13 +498,16 @@ class RuntimeDiagnostics:
             diagnostic_route.update(
                 runtime_config=protocol,
                 gateway_auth_type="api_key",
-                gateway_config={"header_name": "Ocp-Apim-Subscription-Key"},
+                gateway_config={**dict(route.get("gateway_config") or {}),
+                                "header_name": "Ocp-Apim-Subscription-Key"},
                 gateway_credential=credential.get_secret_value(),
                 request_id=request_id,
             )
             request = ModelInvocationRequest(
                 runtime_id=runtime_id,
                 model_id=selected.model_id,
+                gateway_profile_id=selected.gateway_profile_id,
+                gateway_deployment_id=selected.gateway_deployment_id,
                 metadata=InvocationMetadata(
                     organization_id="system",
                     organization="Turnstile",
@@ -679,7 +552,7 @@ class RuntimeDiagnostics:
             )
         except GatewayInvocationError as error:
             received = error.__cause__
-            status = (
+            received_status = (
                 received.response.status_code
                 if isinstance(received, httpx.HTTPStatusError)
                 else None
@@ -690,20 +563,18 @@ class RuntimeDiagnostics:
                     payload = received.response.json()
             nested = payload.get("error", payload) if isinstance(payload, dict) else None
             raw_code = nested.get("code") if isinstance(nested, dict) else nested
-            code = (
-                raw_code
-                if isinstance(raw_code, str) and raw_code in _KNOWN_ERRORS
-                else next(
-                    (
-                        value
-                        for value in _KNOWN_ERRORS
-                        if re.search(r"(?<![a-z_])" + value + r"(?![a-z_])", str(error))
-                    ),
-                    None,
-                )
+            code = next(
+                (
+                    value
+                    for value in _KNOWN_ERRORS
+                    if re.search(r"(?<![a-z_])" + value + r"(?![a-z_])", str(error))
+                ),
+                None,
             )
-            blocked = code is not None or status in {401, 403, 409, 429}
-            upstream = status in {500, 502, 503} and not blocked
+            if isinstance(raw_code, str) and raw_code in _KNOWN_ERRORS:
+                code = raw_code
+            blocked = code is not None or received_status in {401, 403, 409, 429}
+            upstream = received_status in {500, 502, 503} and not blocked
             result = result.model_copy(
                 update={
                     "status": HealthStatus.UNAVAILABLE if upstream else HealthStatus.UNKNOWN,
@@ -717,7 +588,7 @@ class RuntimeDiagnostics:
                     else "Selected route returned a server error"
                     if upstream
                     else "Diagnostic did not establish availability",
-                    "http_status": status,
+                    "http_status": received_status,
                     "error_code": code,
                     "correlation_id": error.headers.get("x-correlation-id"),
                 }
@@ -754,11 +625,34 @@ class RuntimeDiagnostics:
                 detail="A newer diagnostic superseded this result",
                 headers={"x-request-id": request_id},
             )
-        return self.project_results(
-            [
-                {
-                    "id": runtime_id,
-                    "health_message": DIAGNOSTIC_PREFIX + result.model_dump_json(),
-                }
-            ]
-        )[runtime_id]
+        return self.project_results([{
+            "id": runtime_id, "health_message": DIAGNOSTIC_PREFIX + result.model_dump_json(),
+        }])[runtime_id]
+
+    @staticmethod
+    def _protocol(route: dict[str, Any]) -> dict[str, Any]:
+        if route["runtime_kind"] not in {RuntimeKind.FOUNDRY, RuntimeKind.OPENAI_COMPATIBLE}:
+            raise ValueError("Unsupported diagnostic runtime")
+        config = dict(route["runtime_config"])
+        if route.get("model_family_key") == "claude":
+            config.update(
+                path="/v1/messages",
+                api_format="anthropic_messages",
+                anthropic_version="2023-06-01",
+            )
+        api_format = config.get("api_format", "openai_chat")
+        if api_format not in {"openai_chat", "anthropic_messages"}:
+            raise ValueError("Unsupported diagnostic protocol")
+        path = str(config.get("path", "/v1/chat/completions"))
+        if path not in (
+            {"/v1/messages"} if api_format == "anthropic_messages" else
+            {"/chat/completions", "/v1/chat/completions", "/openai/v1/chat/completions"}
+        ):
+            raise ValueError("Unsupported diagnostic protocol")
+        if config.get("max_tokens_field", "max_tokens") not in {
+            "max_tokens",
+            "max_completion_tokens",
+        }:
+            raise ValueError("Unsupported diagnostic output limit")
+        config.update(timeout_seconds=12, control_plane_managed=True)
+        return config

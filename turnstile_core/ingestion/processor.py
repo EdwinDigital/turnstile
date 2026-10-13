@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -13,7 +13,13 @@ from ..domain.application_access import (
     UsageApplicationAttribution,
 )
 from ..domain.control_plane import GatewayPublication, PublicationKind, publication_model_id
-from ..domain.ledger import LedgerAdmissionReceipt
+from ..domain.gateway_targets import (
+    UsageGatewayAttribution,
+    UsageGatewayAttributionSource,
+    canonical_usage_id_v2,
+    gateway_deployment_id_for,
+)
+from ..domain.ledger import BudgetPriceProjection, LedgerAdmissionReceipt
 from ..domain.models import ModelIdentity, ModelPrice, TokenUsageRecord, UsageEvent
 from ..persistence.repository import OpsDbProxy
 
@@ -62,10 +68,15 @@ class UsageProcessor:
         self._prices: dict[str, ModelPrice] = {}
         self._identities: dict[str, ModelIdentity] = {}
         self._registry_read_at = 0.0
+        self._probe_publications: dict[UUID, tuple[float, GatewayPublication]] = {}
         self._application_maps: dict[
             UUID, tuple[float, dict[str, Mapping[str, Any]]]
         ] = {}
-        self._probe_publications: dict[UUID, tuple[float, GatewayPublication]] = {}
+
+    def close(self) -> None:
+        close = getattr(self._repository, "close", None)
+        if close is not None:
+            close()
 
     def _refresh_registry(self) -> None:
         now = time.monotonic()
@@ -121,11 +132,13 @@ class UsageProcessor:
         for binding in publication.desired_spec.bindings:
             alias = binding.model.model_key
             identity = self._identity_for(alias, alias)
-            if (publication.publication_kind is PublicationKind.MODEL_ADD
+            canonical_id = binding.logical_model_id
+            if (canonical_id is None and publication.publication_kind is PublicationKind.MODEL_ADD
                     and binding is publication.desired_spec.bindings[-1]):
-                model_id = str(publication_model_id(publication.id, alias))
-            else:
-                model_id = identity.model_id if identity is not None else alias
+                canonical_id = publication_model_id(publication.id, alias)
+            model_id = str(canonical_id) if canonical_id is not None else (
+                identity.model_id if identity is not None else alias
+            )
             if raw_model_id.casefold() not in {model_id.casefold(), alias.casefold()}:
                 continue
             if event.model.casefold() not in {
@@ -226,11 +239,8 @@ class UsageProcessor:
         ingest_error = event.ingest_error
         estimated = event.estimated
         token_fields = (
-            "input_tokens",
-            "cached_tokens",
-            "cache_write_tokens",
-            "output_tokens",
-            "tokens_consumed",
+            "input_tokens", "cached_tokens", "cache_write_tokens",
+            "output_tokens", "tokens_consumed",
         )
         invalid_usage = any(
             raw_event.get(field) is not None and type(raw_event[field]) is not int
@@ -239,10 +249,8 @@ class UsageProcessor:
         if event.cached_tokens is not None and event.cache_write_tokens is not None:
             invalid_usage = invalid_usage or event.cache_write_tokens > event.cached_tokens
         if (
-            event.tokens_consumed is not None
-            and event.input_tokens is not None
-            and event.cached_tokens is not None
-            and event.output_tokens is not None
+            event.tokens_consumed is not None and event.input_tokens is not None
+            and event.cached_tokens is not None and event.output_tokens is not None
         ):
             invalid_usage = invalid_usage or event.tokens_consumed != (
                 event.input_tokens + event.cached_tokens + event.output_tokens
@@ -297,10 +305,43 @@ class UsageProcessor:
             probe_model[1] if probe_model is not None
             else self._price_for(raw_model_id, event.model)
         )
-        context_snapshot = price.model_dump(mode="json") if price and price.context_tiers else None
+        price_projection = (
+            BudgetPriceProjection.model_validate(event.budget_price_projection)
+            if event.budget_price_projection is not None else None
+        )
+        admitted_prices = [
+            receipt.price_snapshot
+            for receipt in (LedgerAdmissionReceipt.model_validate(value)
+                            for value in event.budget_execution)
+            if receipt.budget_mode == "usd"
+        ]
+        if admitted_prices:
+            admitted_price = admitted_prices[0]
+            if (admitted_price is None or any(value != admitted_price for value in admitted_prices)
+                or (price_projection is not None and price_projection != admitted_price)
+                or event.event_schema_version != 2 or event.ingest_source != "eventhub"
+                or event.usage_event_source not in {"apim", "observer"}):
+                raise ValueError("USD usage must retain one trusted admission price snapshot")
+            price_projection = admitted_price
+        if price_projection is not None:
+            if (
+                price_projection.price is None
+                or price_projection.model_id != UUID(str(model_id))
+                or (
+                    event.usd_cost is not None
+                    and event.usd_cost != price_projection.price.cost_decimal(
+                        input_tokens, cached_tokens, output_tokens, cache_write_tokens,
+                    )
+                )
+            ):
+                raise ValueError("APIM USD cost does not match its admission price snapshot")
+            price = price_projection.price
+        context_snapshot = (
+            price.model_dump(mode="json") if price is not None and price.context_tiers else None
+        )
         if context_snapshot is not None:
             if (estimated or invalid_usage
-                or event.input_tokens is None or event.cached_tokens is None):
+                    or event.input_tokens is None or event.cached_tokens is None):
                 price = None
                 ingest_error = ingest_error or "context_pricing_input_unavailable"
             elif price is not None:
@@ -315,12 +356,24 @@ class UsageProcessor:
             if price
             else 0.0
         )
-        is_copilot_usage = event.ingest_source == "copilot_cli" or (
-            event.request_source or ""
-        ).startswith("copilot-assistant")
+        usd_cost = (
+            price.cost_decimal(input_tokens, cached_tokens, output_tokens, cache_write_tokens)
+            if price is not None and not estimated and not invalid_usage
+            else None
+        )
+        usage_domain: Literal["apim", "github_copilot"] = (
+            "github_copilot"
+            if event.ingest_source == "copilot_cli"
+            or (event.request_source or "").startswith("copilot-assistant")
+            else "apim"
+        )
         correlation_id = event.correlation_id or event.request_id or event.id
         return TokenUsageRecord(
-            id=event.id if is_copilot_usage else correlation_id,
+            id=(
+                event.usage_id or correlation_id
+                if usage_domain == "apim" and event.event_schema_version >= 2
+                else correlation_id if usage_domain == "apim" else event.id
+            ),
             request_id=event.request_id or event.id,
             correlation_id=correlation_id,
             ts=event.ts,
@@ -345,12 +398,12 @@ class UsageProcessor:
             runtime_authoritative=(
                 event.runtime_authoritative
                 and not estimated
-                and not is_copilot_usage
+                and usage_domain == "apim"
                 and event.ingest_source == "eventhub"
                 and event.runtime not in {"", "unattributed"}
             ),
             request_source=event.request_source or "unattributed",
-            usage_domain="github_copilot" if is_copilot_usage else "apim",
+            usage_domain=usage_domain,
             input_tokens=input_tokens,
             cached_tokens=cached_tokens,
             cache_write_tokens=cache_write_tokens,
@@ -361,6 +414,13 @@ class UsageProcessor:
             status=event.status,
             status_code=event.status_code or _status_code(event.status),
             estimated_cost=estimated_cost,
+            usd_cost=usd_cost,
+            usd_price_sha256=(
+                price_projection.price_sha256 if price_projection is not None else None
+            ),
+            usd_price_updated_at=(
+                price_projection.updated_at if price_projection is not None else None
+            ),
             input_price_per_million=price.input_price_per_million if price else None,
             cached_price_per_million=price.cached_price_per_million if price else None,
             cache_write_price_per_million=price.cache_write_price_per_million if price else None,
@@ -375,42 +435,104 @@ class UsageProcessor:
             model_admission=event.model_admission,
         )
 
+    @staticmethod
+    def _gateway_attribution(
+        event: UsageEvent,
+    ) -> UsageGatewayAttribution | None:
+        if event.event_schema_version < 2:
+            return None
+        assert event.usage_id is not None
+        assert event.gateway_profile_id is not None
+        assert event.native_gateway_id is not None
+        assert event.gateway_is_managed is not None
+        assert event.apim_service_id is not None
+        assert event.apim_region is not None
+        assert event.api_revision is not None
+        correlation_id = event.correlation_id or event.request_id or event.id
+        expected_usage_id = canonical_usage_id_v2(
+            event.gateway_profile_id,
+            event.apim_service_id,
+            event.native_gateway_id,
+            correlation_id,
+        )
+        if event.usage_id != expected_usage_id or event.id != expected_usage_id:
+            raise ValueError("usage event canonical Gateway identity does not match usage_id")
+        source = {
+            "apim": UsageGatewayAttributionSource.EVENT_HUB,
+            "observer": UsageGatewayAttributionSource.OBSERVER,
+            "reconciliation": UsageGatewayAttributionSource.RECONCILIATION,
+            "backfill": UsageGatewayAttributionSource.BACKFILL,
+        }[event.usage_event_source]
+        return UsageGatewayAttribution(
+            usage_id=expected_usage_id,
+            apim_target_id=event.gateway_profile_id,
+            gateway_deployment_id=(
+                event.gateway_deployment_id
+                or gateway_deployment_id_for(
+                    event.gateway_profile_id, event.native_gateway_id
+                )
+            ),
+            native_gateway_id=event.native_gateway_id,
+            native_instance_id=event.native_gateway_instance_id,
+            is_managed=event.gateway_is_managed,
+            apim_service_id=event.apim_service_id,
+            apim_region=event.apim_region,
+            api_revision=event.api_revision,
+            event_schema_version=event.event_schema_version,
+            attribution_source=source,
+            observed_at=event.ts,
+        )
+
     def process(self, raw_event: Mapping[str, Any]) -> bool:
         record = self.normalize(raw_event)
         if record is None:
             return False
         event = UsageEvent.model_validate(raw_event)
+        try:
+            gateway = self._gateway_attribution(event)
+        except ValueError as error:
+            logger.warning("Malformed Gateway usage identity skipped: %s", error)
+            return False
         if event.budget_execution:
-            if not self._execution_enabled:
-                raise RuntimeError("Budget execution receipts require the enabled execution reader")
+            if not self._execution_enabled or event.event_schema_version != 2:
+                raise RuntimeError("Budget execution receipts require the enabled schema-2 reader")
             if (record.usage_domain != "apim" or event.ingest_source != "eventhub"
                     or event.usage_event_source not in {"apim", "observer"}
                     or event.gateway_profile_id is None or not event.native_gateway_id):
                 raise ValueError("Budget execution receipts require trusted gateway attribution")
-            receipts = [LedgerAdmissionReceipt.model_validate(value)
-                        for value in event.budget_execution]
+            receipts = [
+                LedgerAdmissionReceipt.model_validate(value) for value in event.budget_execution
+            ]
             self._repository.write_token_usage(
-                record, self._application_attribution(event),
+                record, self._application_attribution(event), gateway=gateway,
                 execution_receipts=receipts,
                 gateway_profile_id=event.gateway_profile_id,
                 native_gateway_id=event.native_gateway_id,
                 evidence_source=event.usage_event_source,
                 usage_complete=(
-                    event.usage_complete and not record.estimated and record.ingest_error is None
+                    event.usage_complete and not record.estimated
+                    and record.ingest_error is None
+                    and event.ingest_source == "eventhub"
+                    and event.usage_event_source in {"apim", "observer"}
                     and all(type(raw_event.get(field)) is int for field in (
                         "input_tokens", "cached_tokens", "cache_write_tokens",
                         "output_tokens", "tokens_consumed",
                     ))
                 ),
+                terminal_observation=event.budget_terminal,
             )
             if self._settle_committed_usage is not None:
                 try:
                     self._settle_committed_usage(record.id)
                 except Exception as error:
-                    logger.warning("Budget settlement wakeup failed after commit error_type=%s",
-                                   type(error).__name__)
+                    logger.warning(
+                        "Budget settlement wakeup failed after commit error_type=%s",
+                        type(error).__name__,
+                    )
         else:
-            self._repository.write_token_usage(record, self._application_attribution(event))
+            self._repository.write_token_usage(
+                record, self._application_attribution(event), gateway=gateway,
+            )
         return True
 
 

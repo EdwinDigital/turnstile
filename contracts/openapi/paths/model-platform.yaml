@@ -1,658 +1,317 @@
 paths:
+  /api/v1/model-management:
+    get:
+      summary: Get Model Registry
+      operationId: get_model_registry_api_v1_model_management_get
+      parameters:
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
   /api/v1/model-management/model-availability:
     get:
-      tags: [Model Control Plane]
-      operationId: listModelAvailability
       summary: Read desired and verified model availability
-      description: Owner-only consistent state and latest operation snapshot. Unknown or stale target coverage never becomes verified success.
-      security: [{sessionCookie: []}]
+      operationId: listModelAvailability
       responses:
         '200':
           description: Model availability snapshots
-          headers:
-            Cache-Control:
-              schema: {type: string, const: no-store}
           content:
             application/json:
-              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityList}
-        '401': {description: Authentication required}
-        '403': {description: Owner session required}
-        '503': {description: Model availability storage is unavailable}
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityList
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication required
+        '403':
+          description: Owner session required
+        '503':
+          description: Model availability storage is unavailable
+      security:
+      - sessionCookie: []
+      description: Owner-only consistent state and latest operation snapshot. Unknown or stale target
+        coverage never becomes verified success.
+      tags:
+      - Model Control Plane
   /api/v1/model-management/models/{item_id}/availability:
-    parameters:
-    - name: item_id
-      in: path
-      required: true
-      schema: {type: string, format: uuid}
     get:
-      tags: [Model Control Plane]
-      operationId: getModelAvailability
       summary: Read one model's desired and verified state
-      security: [{sessionCookie: []}]
+      operationId: getModelAvailability
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
       responses:
         '200':
           description: Latest desired state and independent effective evidence
-          headers:
-            Cache-Control:
-              schema: {type: string, const: no-store}
           content:
             application/json:
-              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityReadback}
-        '401': {description: Authentication required}
-        '403': {description: Owner session required}
-        '404': {description: Unknown model availability identity}
-        '503': {description: Model availability storage is unavailable}
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityReadback
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          description: Authentication required
+        '403':
+          description: Owner session required
+        '404':
+          description: Unknown model availability identity
+        '503':
+          description: Model availability storage is unavailable
+      security:
+      - sessionCookie: []
+      tags:
+      - Model Control Plane
     put:
-      tags: [Model Control Plane]
-      operationId: changeModelAvailability
       summary: Submit an idempotent versioned model availability command
-      description: Requires fresh coverage of every target, the current expected revision and a unique intent key. Returns an accepted operation, not effective success. Does not modify prices, default selection, assignments or budgets. Ordinary model PUT cannot change enabled.
-      security: [{sessionCookie: []}]
+      operationId: changeModelAvailability
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
       requestBody:
         required: true
         content:
           application/json:
-            schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityCommand}
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityCommand
       responses:
         '202':
           description: Versioned operation accepted or exact intent replayed
-          headers:
-            Location:
-              schema: {type: string}
-              description: Relative status URL for the same operation
-            Cache-Control:
-              schema: {type: string, const: no-store}
           content:
             application/json:
-              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityAccepted}
-        '401': {description: Authentication required}
-        '403': {description: Owner session and allowed write origin required}
-        '409': {description: 'Stale revision, conflicting intent, pending operation or removal'}
-        '422': {description: 'Invalid strict Boolean, revision or idempotency key'}
-        '503': {description: Availability storage or complete target coverage unavailable}
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityAccepted
+          headers:
+            Location:
+              schema:
+                type: string
+              description: Relative status URL for the same operation
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Invalid strict Boolean, revision or idempotency key
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          description: Authentication required
+        '403':
+          description: Owner session and allowed write origin required
+        '409':
+          description: Stale revision, conflicting intent, pending operation or removal
+        '503':
+          description: Availability storage or complete target coverage unavailable
+      security:
+      - sessionCookie: []
+      description: Requires fresh coverage of every target, the current expected revision and a unique
+        intent key. Returns an accepted operation, not effective success. Does not modify prices, default
+        selection, assignments or budgets. Ordinary model PUT cannot change enabled.
+      tags:
+      - Model Control Plane
   /api/v1/model-management/model-availability/operations/{operation_id}:
     get:
-      tags: [Model Control Plane]
-      operationId: getModelAvailabilityOperation
       summary: Read an immutable availability intent and its observed progress
-      security: [{sessionCookie: []}]
+      operationId: getModelAvailabilityOperation
       parameters:
       - name: operation_id
         in: path
         required: true
-        schema: {type: string, format: uuid}
+        schema:
+          type: string
+          format: uuid
+          title: Operation Id
       responses:
         '200':
           description: Operation and per-target evidence
-          headers:
-            Cache-Control:
-              schema: {type: string, const: no-store}
           content:
             application/json:
-              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityOperation}
-        '401': {description: Authentication required}
-        '403': {description: Owner session required}
-        '404': {description: Unknown operation}
-        '503': {description: Model availability storage is unavailable}
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityOperation
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          description: Authentication required
+        '403':
+          description: Owner session required
+        '404':
+          description: Unknown operation
+        '503':
+          description: Model availability storage is unavailable
+      security:
+      - sessionCookie: []
+      tags:
+      - Model Control Plane
   /api/v1/model-management/model-availability/operations/{operation_id}/retry:
     post:
-      tags: [Model Control Plane]
-      operationId: retryModelAvailabilityOperation
       summary: Retry the same failed availability operation
-      description: Retains the original operation, intent and desired revision. Requires matching current revision and coverage; at most three manual retries are permitted.
-      security: [{sessionCookie: []}]
+      operationId: retryModelAvailabilityOperation
       parameters:
       - name: operation_id
         in: path
         required: true
-        schema: {type: string, format: uuid}
+        schema:
+          type: string
+          format: uuid
+          title: Operation Id
       requestBody:
         required: true
         content:
           application/json:
-            schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityRetry}
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityRetry
       responses:
         '202':
           description: Existing operation accepted for retry
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityAccepted
           headers:
             Location:
-              schema: {type: string}
+              schema:
+                type: string
             Cache-Control:
-              schema: {type: string, const: no-store}
-          content:
-            application/json:
-              schema: {$ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityAccepted}
-        '401': {description: Authentication required}
-        '403': {description: Owner session and allowed write origin required}
-        '409': {description: 'Revision changed, operation ineligible or retry limit reached'}
-        '422': {description: Invalid expected revision}
-        '503': {description: Availability storage or complete target coverage unavailable}
-  /api/v1/model-management/gateways/{gateway_profile_id}/budget-readiness:
-    post:
-      operationId: checkGatewayBudgetReadiness
-      summary: Verify budget delegation and candidate fence identity
-      description: Owner-only bounded catalog checks on the configured target. Does not invoke a model or mutate the fence. Reports actual and expected status separately.
-      security: [{sessionCookie: []}]
-      parameters:
-      - name: gateway_profile_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      responses:
-        '200':
-          description: Observed identity and fence checks
-          headers:
-            Cache-Control:
-              schema: {type: string, const: no-store}
-          content:
-            application/json:
-              schema: {$ref: ../../openapi.yaml#/components/schemas/BudgetDelegationReadiness}
-        '403': {description: Owner session or allowed write origin required}
-        '409': {description: Target or isolated candidate prerequisites are not satisfied}
-        '503': {description: Verification could not be completed}
-  /api/v1/model-management/gateways/{gateway_profile_id}/budget-execution-verification:
-    post:
-      operationId: verifyGatewayBudgetExecution
-      summary: Verify one isolated two-scope budget invocation
-      description: Requires an Owner and an exact paused candidate across every shared budget target. Uses the configured person and Application identities. Sends at most one nonstreaming request with 32 output tokens. Unknown outcomes do not authorize replay. Reads both scope receipts without mutating budgets or settlement.
-      security: [{sessionCookie: []}]
-      parameters:
-      - name: gateway_profile_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: ../../openapi.yaml#/components/schemas/BudgetExecutionVerificationRequest}
-      responses:
-        '200':
-          description: Invocation outcome and independent before/after ledger observations
-          headers:
-            Cache-Control:
-              schema: {type: string, const: no-store}
-          content:
-            application/json:
-              schema: {$ref: ../../openapi.yaml#/components/schemas/BudgetExecutionVerification}
-        '403': {description: Owner session or required model access missing}
-        '404': {description: Candidate Application subscription was not found}
-        '409': {description: Exact candidate or shared fence identity is not ready}
-        '422': {description: Only explicit application and model IDs are accepted}
-        '503': {description: Verification resources are unavailable}
-  /api/v1/model-management/runtimes/{runtime_id}/check:
-    parameters:
-    - name: runtime_id
-      in: path
-      required: true
-      schema: {type: string, format: uuid}
-    get:
-      tags: [Model Management]
-      operationId: runtimeCheckPlan
-      summary: Preview an Owner connection diagnostic
-      description: Reads eligible text models, trusted Gateway routes and the API identity's scoped system-subscription permissions. Does not read subscription keys or issue inference. Historical diagnostic results do not expire; configuration applicability is not a live availability assertion.
-      security: [{sessionCookie: []}]
-      responses:
-        '200':
-          description: Explicit diagnostic choices and access evidence
-          headers:
-            Cache-Control:
-              schema: {type: string, const: no-store}
-          content:
-            application/json:
-              schema: {$ref: ../../openapi.yaml#/components/schemas/RuntimeCheckPlan}
-        '403': {description: An Owner session is required}
-        '404': {description: Connection not found}
-    post:
-      tags: [Model Management]
-      operationId: checkRuntime
-      summary: Run one explicitly selected connection diagnostic
-      description: Requires an Owner session and same-origin checks. Rechecks target, system subscription, trusted endpoint and configuration before a single non-streaming request with at most 64 output tokens. No automatic retry. A 60-second per-connection claim prevents concurrent diagnostics; unknown outcomes are not availability or zero-cost evidence.
-      security: [{sessionCookie: []}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: {$ref: ../../openapi.yaml#/components/schemas/RuntimeCheckSelection}
-      responses:
-        '200':
-          description: Timestamped diagnostic outcome and configuration applicability
-          headers:
-            Cache-Control:
-              schema: {type: string, const: no-store}
-          content:
-            application/json:
-              schema: {$ref: ../../openapi.yaml#/components/schemas/RuntimeHealth}
-        '403': {description: An Owner session is required}
-        '409': {description: 'Access, target, configuration or diagnostic ownership changed'}
-        '422': {description: Explicit model and Gateway selection is required}
-        '429':
-          description: A diagnostic is running or recently completed
-          headers:
-            Retry-After:
-              schema: {type: string}
-  /api/v1/model-management/rollouts:
-    post:
-      tags: [Model Control Plane]
-      operationId: createMultiTargetRollout
-      summary: Atomically queue model publication to multiple APIM targets
-      description: Requires the existing publication Owner session and write-origin checks plus MULTI_APIM_TARGET_ROLLOUT_ENABLED. Accepts two to twenty distinct registered targets. All plans are prepared before one queue transaction. A canonical child supplies the shared logical model and complete price identity; target-specific runtime and upstream bindings remain separate. The parent is idempotent, excludes credentials from its request identity, and reports independent child outcomes rather than distributed atomic promotion.
-      security:
-      - sessionCookie: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/MultiTargetPublicationCreate
-      responses:
-        '202':
-          description: Parent intent, safe child publication views and parent status URL.
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Invalid expected revision
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/MultiTargetPublicationRequestAccepted
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+          description: Authentication required
         '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+          description: Owner session and allowed write origin required
         '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+          description: Revision changed, operation ineligible or retry limit reached
         '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    get:
-      tags: [Model Control Plane]
-      operationId: listMultiTargetRollouts
-      summary: List recent multi-target rollout intents and derived status
-      description: Requires the publication Owner session. Status is derived from every child; mixed terminal success and failure is partial. This endpoint performs no ARM or inference requests.
+          description: Availability storage or complete target coverage unavailable
       security:
       - sessionCookie: []
-      parameters:
-      - name: limit
-        in: query
-        schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+      description: Retains the original operation, intent and desired revision. Requires matching current
+        revision and coverage; at most three manual retries are permitted.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/apim-targets:
+    get:
+      summary: List persisted APIM targets and Gateway deployments
+      operationId: listApimTargetTopologies
       responses:
         '200':
-          description: Recent parent rollout states.
+          description: Enabled registered APIM targets and their active deployments.
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/MultiTargetRolloutList
+                $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopologyList
         '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/rollouts/{rollout_id}:
-    get:
-      tags: [Model Control Plane]
-      operationId: getMultiTargetRollout
-      summary: Read one multi-target rollout with child publication identities
-      description: Requires the publication Owner session. Failed children retain their own existing publication retry and authorization-resume workflows; successful targets are not implicitly replayed or rolled back.
       security:
       - sessionCookie: []
-      parameters:
-      - name: rollout_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      responses:
-        '200':
-          description: Parent intent with current derived status and child references.
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/MultiTargetRollout
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions:
+      description: Requires an authenticated session. Reads persisted inventory without ARM or inference
+        requests. Declared, reachable and observed states are independent.
+      tags:
+      - Model Control Plane
     post:
-      tags: [Model Control Plane]
-      operationId: createSelfHostedGateway
-      summary: Create an APIM Self-hosted Gateway and associate the target API
-      description: Owner-only, same-origin, opt-in durable creation. Turnstile generates the native ID from the target and Idempotency-Key; the client never supplies a native ID. Repeated identical submissions return the same operation. The worker checks permissions and ownership, creates only the named child configuration, and verifies API membership. Success means configuration ready, not a running container. Server installation remains customer-controlled.
-      security:
-      - sessionCookie: []
-      parameters:
-      - name: gateway_profile_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      - name: Idempotency-Key
-        in: header
-        required: true
-        schema: {type: string, format: uuid}
+      summary: Register an existing APIM target
+      operationId: registerApimTarget
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayCreate
+              $ref: ../../openapi.yaml#/components/schemas/ApimTargetWrite
+        required: true
       responses:
-        '202':
-          description: Durable creation accepted; inspect status_url for actual completion.
+        '201':
+          description: Registered APIM target and persisted inventory.
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+                $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopology
         '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/self-hosted-gateway-provisions:
-    get:
-      tags: [Model Control Plane]
-      operationId: listSelfHostedGatewayProvisions
-      summary: List Owner-visible Gateway creation progress and failures
-      security:
-      - sessionCookie: []
-      responses:
-        '200':
-          description: Creation capability and durable tasks; never contains bootstrap tokens.
+          description: Validation Error
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayProvisionOperations
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/self-hosted-gateway-provisions/{operation_id}/retry:
-    post:
-      tags: [Model Control Plane]
-      operationId: retrySelfHostedGatewayProvision
-      summary: Retry the same failed Gateway creation without changing its native ID
-      description: Requires an Owner session and the write-origin check. Preserves the original task identity, configuration and failure audit. The worker reads the existing resource before any conditional write; foreign resources are never adopted by this operation.
-      security:
-      - sessionCookie: []
-      parameters:
-      - name: operation_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      responses:
-        '202':
-          description: Same operation requeued or already active.
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/self-hosted-gateways/{deployment_id}/bootstrap:
-    post:
-      tags: [Model Control Plane]
-      operationId: getSelfHostedGatewayBootstrap
-      summary: Generate short-lived Gateway-specific Docker startup credentials
-      description: Requires an Owner session, the write-origin check and an unchanged active deployment owned by a succeeded creation task. Verifies the live APIM Gateway and API association. Returns a GatewayKey token only in the environment file, never a model subscription key. No token is persisted in tasks, logs or audits. Tokens last at most 720 hours. Regenerate from Turnstile for renewal; recreating the named container interrupts its connections.
-      security:
-      - sessionCookie: []
-      parameters:
-      - name: deployment_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayBootstrapRequest
-      responses:
-        '200':
-          description: Sensitive environment file and credential-free container commands.
-          headers:
-            Cache-Control:
-              schema: {type: string, const: no-store}
-            Pragma:
-              schema: {type: string, const: no-cache}
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayBootstrap
         '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '502':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways:
-    post:
-      tags: [Model Control Plane]
-      operationId: addSelfHostedGateway
-      summary: Associate Self-hosted Gateway metadata with an APIM target
-      description: Requires an Owner session, the write-origin check and the lifecycle feature. Records customer-managed hosting metadata only. Does not create or modify an Azure Gateway or container. New or re-added entries require fresh reachability evidence.
-      security:
-      - sessionCookie: []
-      parameters:
-      - name: gateway_profile_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayWrite
-      responses:
-        '201':
-          description: Saved deployment metadata and persisted inventory.
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '503':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/self-hosted-gateways/{deployment_id}/name:
-    patch:
-      tags: [Model Control Plane]
-      operationId: renameSelfHostedGateway
-      summary: Change only the Self-hosted Gateway display name
-      description: Requires an Owner session, the write-origin check and lifecycle availability. Trims a nonblank display name. Routing, credentials, inventory and retirement state are unchanged. Returns a minimal acknowledgement without a post-write topology read.
       security:
       - sessionCookie: []
-      parameters:
-      - name: deployment_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayNameWrite
-      responses:
-        '204':
-          description: Display name saved; no response body.
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/self-hosted-gateways/{deployment_id}/validations:
-    post:
-      tags: [Model Control Plane]
-      operationId: validateSelfHostedGateway
-      summary: Validate a trusted Self-hosted Gateway endpoint without inference
-      description: Requires an Owner session and the write-origin check. Requires present ARM declaration, API association and either a matching declared hostname or the exact trusted endpoint. Sends the target credential only after these checks. GET models follows no redirects; the timestamped result records reachability, not live health or physical migration.
-      security:
-      - sessionCookie: []
-      parameters:
-      - name: deployment_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      responses:
-        '200':
-          description: Updated deployment with successful reachability evidence.
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/self-hosted-gateways/{deployment_id}/removal-preview:
-    get:
-      tags: [Model Control Plane]
-      operationId: previewSelfHostedGatewayRemoval
-      summary: Preview metadata retirement blockers
-      description: Requires an Owner session and lifecycle availability. Lists model dependencies and in-flight publications without modifying the Gateway or its Azure resources.
-      security:
-      - sessionCookie: []
-      parameters:
-      - name: deployment_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      responses:
-        '200':
-          description: Current retirement blockers and model dependencies.
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayRemovalPreview
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/self-hosted-gateways/{deployment_id}:
-    delete:
-      tags: [Model Control Plane]
-      operationId: retireSelfHostedGateway
-      summary: Retire a Self-hosted Gateway association while preserving history
-      description: Requires an Owner session, the write-origin check and lifecycle availability. Rechecks model and in-flight publication dependencies within persistence before retirement. No Azure resource or container is deleted. Re-adding the same target/native identity reuses its stable deployment ID and resets reachability.
-      security:
-      - sessionCookie: []
-      parameters:
-      - name: deployment_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      responses:
-        '200':
-          description: Confirmed retirement with its prior dependency preview.
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayRemovalPreview
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/self-hosted-gateways/{deployment_id}/apim-association:
-    put:
-      tags: [Model Control Plane]
-      operationId: changeSelfHostedGatewayAssociation
-      summary: Change platform association to another registered APIM target
-      description: Requires an Owner session, the write-origin check and lifecycle availability. Refuses occupied destinations, unsupported targets, model dependencies and in-flight publications. Persists the destination and retires the source atomically. This is metadata reassociation, not a container, token or Azure Gateway migration.
-      security:
-      - sessionCookie: []
-      parameters:
-      - name: deployment_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayAssociationChange
-      responses:
-        '200':
-          description: Destination deployment with fresh unknown reachability.
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      description: Requires an Owner session, the write-origin check and the target-registry gate. Validates
+        ARM identity and a credentialed GET models probe before persisting the profile. Does not create
+        Azure resources or issue inference requests.
+      tags:
+      - Model Control Plane
   /api/v1/model-management/apim-onboarding:
     get:
-      tags: [Model Control Plane]
-      operationId: listApimOnboardingOperations
       summary: List the latest initialization operation per APIM target
-      description: Requires an Owner session. Reads durable task state and capability without contacting Azure. Credentials are never returned.
-      security:
-      - sessionCookie: []
+      operationId: listApimOnboardingOperations
       responses:
         '200':
           description: Initialization availability and persisted operations.
@@ -666,19 +325,21 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    post:
-      tags: [Model Control Plane]
-      operationId: startApimOnboarding
-      summary: Queue a confirmed initialization of an existing APIM service
-      description: Requires an Owner session and the write-origin check. Revalidates the preview hash before queuing. Repeating the same confirmed plan returns its existing operation; a changed plan is rejected. The leased worker initializes only owned API resources and enables the local target after budget projection and authenticated Managed Gateway readiness checks.
       security:
       - sessionCookie: []
+      description: Requires an Owner session. Reads durable task state and capability without contacting
+        Azure. Credentials are never returned.
+      tags:
+      - Model Control Plane
+    post:
+      summary: Queue a confirmed initialization of an existing APIM service
+      operationId: startApimOnboarding
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingStart
+        required: true
       responses:
         '202':
           description: Persisted initialization operation and status URL.
@@ -686,13 +347,17 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '502':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
@@ -700,20 +365,24 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/apim-onboarding/preview:
-    post:
-      tags: [Model Control Plane]
-      operationId: previewApimOnboarding
-      summary: Preview a target-bound APIM initialization plan
-      description: Requires an Owner session and the write-origin check. Read-only validation of the existing APIM, reserved API identity, shared governance configuration and budget readiness. Returns exact generated identifiers, steps, blockers and a confirmation hash. No Azure resource or local target is created by preview.
       security:
       - sessionCookie: []
+      description: Requires an Owner session and the write-origin check. Revalidates the preview hash
+        before queuing. Repeating the same confirmed plan returns its existing operation; a changed plan
+        is rejected. The leased worker initializes only owned API resources and enables the local target
+        after budget projection and authenticated Managed Gateway readiness checks.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/apim-onboarding/preview:
+    post:
+      summary: Preview a target-bound APIM initialization plan
+      operationId: previewApimOnboarding
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingRequest
+        required: true
       responses:
         '200':
           description: Initialization plan; ready is false when blockers remain.
@@ -721,11 +390,15 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingPlan
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '502':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
@@ -733,19 +406,26 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/apim-onboarding/{operation_id}/retry:
-    post:
-      tags: [Model Control Plane]
-      operationId: retryApimOnboarding
-      summary: Retry the latest failed initialization with its original plan
-      description: Requires an Owner session and the write-origin check. Revalidates the same preview hash, retains the failed operation, links retry_of and reuses the existing encrypted credentials. Does not silently accept changed plans or retry an older attempt.
       security:
       - sessionCookie: []
+      description: Requires an Owner session and the write-origin check. Read-only validation of the existing
+        APIM, reserved API identity, shared governance configuration and budget readiness. Returns exact
+        generated identifiers, steps, blockers and a confirmation hash. No Azure resource or local target
+        is created by preview.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/apim-onboarding/{operation_id}/retry:
+    post:
+      summary: Retry the latest failed initialization with its original plan
+      operationId: retryApimOnboarding
       parameters:
       - name: operation_id
         in: path
         required: true
-        schema: {type: string, format: uuid}
+        schema:
+          type: string
+          format: uuid
+          title: Operation Id
       responses:
         '202':
           description: New linked operation and status URL.
@@ -753,13 +433,17 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '502':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
@@ -767,71 +451,25 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/apim-targets:
-    get:
-      tags: [Model Control Plane]
-      operationId: listApimTargetTopologies
-      summary: List persisted APIM targets and Gateway deployments
-      description: Requires an authenticated session. Reads persisted inventory without ARM or inference requests. Declared, reachable and observed states are independent.
       security:
       - sessionCookie: []
-      responses:
-        '200':
-          description: Enabled registered APIM targets and their active deployments.
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopologyList
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    post:
-      tags: [Model Control Plane]
-      operationId: registerApimTarget
-      summary: Register an existing APIM target
-      description: Requires an Owner session, the write-origin check and the target-registry gate. Validates ARM identity and a credentialed GET models probe before persisting the profile. Does not create Azure resources or issue inference requests.
-      security:
-      - sessionCookie: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/ApimTargetWrite
-      responses:
-        '201':
-          description: Registered APIM target and persisted inventory.
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopology
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '502':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      description: Requires an Owner session and the write-origin check. Revalidates the same preview
+        hash, retains the failed operation, links retry_of and reuses the existing encrypted credentials.
+        Does not silently accept changed plans or retry an older attempt.
+      tags:
+      - Model Control Plane
   /api/v1/model-management/apim-targets/{gateway_profile_id}:
     get:
-      tags: [Model Control Plane]
-      operationId: getApimTargetTopology
       summary: Read one persisted APIM target topology
-      security:
-      - sessionCookie: []
+      operationId: getApimTargetTopology
       parameters:
       - name: gateway_profile_id
         in: path
         required: true
-        schema: {type: string, format: uuid}
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
       responses:
         '200':
           description: Registered target topology.
@@ -839,26 +477,33 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopology
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
-      tags: [Model Control Plane]
-      operationId: removeApimTarget
-      summary: Remove an APIM target from Turnstile
-      description: Requires an Owner session and the write-origin check. Rechecks Self-hosted Gateway, runtime and model dependencies before retiring deployments and disabling the Gateway profile. Preserves target metadata and history. No Azure resource or container is deleted or modified.
       security:
       - sessionCookie: []
+      tags:
+      - Model Control Plane
+    delete:
+      summary: Remove an APIM target from Turnstile
+      operationId: removeApimTarget
       parameters:
       - name: gateway_profile_id
         in: path
         required: true
-        schema: {type: string, format: uuid}
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
       responses:
         '200':
           description: Dependency preview for the removed target.
@@ -866,6 +511,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/ApimTargetRemovalPreview
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -874,23 +525,27 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/apim-targets/{gateway_profile_id}/removal-preview:
-    get:
-      tags: [Model Control Plane]
-      operationId: previewApimTargetRemoval
-      summary: Inspect dependencies before removing an APIM target
-      description: Requires an Owner session. Reads persisted Self-hosted Gateway, runtime and model dependencies without contacting or modifying Azure.
       security:
       - sessionCookie: []
+      description: Requires an Owner session and the write-origin check. Rechecks Self-hosted Gateway,
+        runtime and model dependencies before retiring deployments and disabling the Gateway profile.
+        Preserves target metadata and history. No Azure resource or container is deleted or modified.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/removal-preview:
+    get:
+      summary: Inspect dependencies before removing an APIM target
+      operationId: previewApimTargetRemoval
       parameters:
       - name: gateway_profile_id
         in: path
         required: true
-        schema: {type: string, format: uuid}
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
       responses:
         '200':
           description: Related resources, counts and removal blockers.
@@ -898,36 +553,220 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/ApimTargetRemovalPreview
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-sync:
-    post:
-      tags: [Model Control Plane]
-      operationId: requestApimTargetInventorySync
-      summary: Queue a durable APIM inventory synchronization
-      description: Requires an Owner session, the write-origin check and an enabled inventory worker. ARM discovery is read-only; the worker persists validated inventory and independent deployment states. A duplicate active operation is rejected.
       security:
       - sessionCookie: []
+      description: Requires an Owner session. Reads persisted Self-hosted Gateway, runtime and model dependencies
+        without contacting or modifying Azure.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions:
+    post:
+      summary: Create an APIM Self-hosted Gateway and associate the target API
+      operationId: createSelfHostedGateway
       parameters:
       - name: gateway_profile_id
         in: path
         required: true
-        schema: {type: string, format: uuid}
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Idempotency-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayCreate
       responses:
         '202':
-          description: Persisted operation and status URL.
+          description: Durable creation accepted; inspect status_url for actual completion.
           content:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Owner-only, same-origin, opt-in durable creation. Turnstile generates the native ID
+        from the target and Idempotency-Key; the client never supplies a native ID. Repeated identical
+        submissions return the same operation. The worker checks permissions and ownership, creates only
+        the named child configuration, and verifies API membership. Success means configuration ready,
+        not a running container. Server installation remains customer-controlled.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/self-hosted-gateway-provisions:
+    get:
+      summary: List Owner-visible Gateway creation progress and failures
+      operationId: listSelfHostedGatewayProvisions
+      responses:
+        '200':
+          description: Creation capability and durable tasks; never contains bootstrap tokens.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayProvisionOperations
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/self-hosted-gateway-provisions/{operation_id}/retry:
+    post:
+      summary: Retry the same failed Gateway creation without changing its native ID
+      operationId: retrySelfHostedGatewayProvision
+      parameters:
+      - name: operation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Operation Id
+      responses:
+        '202':
+          description: Same operation requeued or already active.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires an Owner session and the write-origin check. Preserves the original task identity,
+        configuration and failure audit. The worker reads the existing resource before any conditional
+        write; foreign resources are never adopted by this operation.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/bootstrap:
+    post:
+      summary: Generate short-lived Gateway-specific Docker startup credentials
+      operationId: getSelfHostedGatewayBootstrap
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Deployment Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayBootstrapRequest
+      responses:
+        '200':
+          description: Sensitive environment file and credential-free container commands.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayBootstrap
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            Pragma:
+              schema:
+                type: string
+                const: no-cache
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '502':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires an Owner session, the write-origin check and an unchanged active deployment
+        owned by a succeeded creation task. Verifies the live APIM Gateway and API association. Returns
+        a GatewayKey token only in the environment file, never a model subscription key. No token is persisted
+        in tasks, logs or audits. Tokens last at most 720 hours. Regenerate from Turnstile for renewal;
+        recreating the named container interrupts its connections.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways:
+    post:
+      summary: Associate Self-hosted Gateway metadata with an APIM target
+      operationId: addSelfHostedGateway
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayWrite
+      responses:
+        '201':
+          description: Saved deployment metadata and persisted inventory.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -940,23 +779,360 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/gateways/{item_id}/name:
-    patch:
-      tags: [Model Control Plane]
-      operationId: renameGatewayProfile
-      summary: Update only a gateway display name
-      description: Requires an Owner session and the write-origin check. Routing, credentials and defaults are unchanged. No APIM mutation is performed.
       security:
       - sessionCookie: []
+      description: Requires an Owner session, the write-origin check and the lifecycle feature. Records
+        customer-managed hosting metadata only. Does not create or modify an Azure Gateway or container.
+        New or re-added entries require fresh reachability evidence.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/name:
+    patch:
+      summary: Change only the Self-hosted Gateway display name
+      operationId: renameSelfHostedGateway
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Deployment Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayNameWrite
+      responses:
+        '204':
+          description: Display name saved; no response body.
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires an Owner session, the write-origin check and lifecycle availability. Trims
+        a nonblank display name. Routing, credentials, inventory and retirement state are unchanged. Returns
+        a minimal acknowledgement without a post-write topology read.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/removal-preview:
+    get:
+      summary: Preview metadata retirement blockers
+      operationId: previewSelfHostedGatewayRemoval
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Deployment Id
+      responses:
+        '200':
+          description: Current retirement blockers and model dependencies.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayRemovalPreview
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires an Owner session and lifecycle availability. Lists model dependencies and
+        in-flight publications without modifying the Gateway or its Azure resources.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/validations:
+    post:
+      summary: Validate a trusted Self-hosted Gateway endpoint without inference
+      operationId: validateSelfHostedGateway
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Deployment Id
+      responses:
+        '200':
+          description: Updated deployment with successful reachability evidence.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires an Owner session and the write-origin check. Requires present ARM declaration,
+        API association and either a matching declared hostname or the exact trusted endpoint. Sends the
+        target credential only after these checks. GET models follows no redirects; the timestamped result
+        records reachability, not live health or physical migration.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}:
+    delete:
+      summary: Retire a Self-hosted Gateway association while preserving history
+      operationId: retireSelfHostedGateway
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Deployment Id
+      responses:
+        '200':
+          description: Confirmed retirement with its prior dependency preview.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayRemovalPreview
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires an Owner session, the write-origin check and lifecycle availability. Rechecks
+        model and in-flight publication dependencies within persistence before retirement. No Azure resource
+        or container is deleted. Re-adding the same target/native identity reuses its stable deployment
+        ID and resets reachability.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/apim-association:
+    put:
+      summary: Change platform association to another registered APIM target
+      operationId: changeSelfHostedGatewayAssociation
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Deployment Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewayAssociationChange
+      responses:
+        '200':
+          description: Destination deployment with fresh unknown reachability.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentTopology
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires an Owner session, the write-origin check and lifecycle availability. Refuses
+        occupied destinations, unsupported targets, model dependencies and in-flight publications. Persists
+        the destination and retires the source atomically. This is metadata reassociation, not a container,
+        token or Azure Gateway migration.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/gateways:
+    post:
+      summary: Create Gateway Profile
+      operationId: create_gateway_profile_api_v1_model_management_gateways_post
+      parameters:
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/GatewayProfileWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/gateways/{item_id}:
+    put:
+      summary: Update Gateway Profile
+      operationId: update_gateway_profile_api_v1_model_management_gateways__item_id__put
       parameters:
       - name: item_id
         in: path
         required: true
-        schema: {type: string, format: uuid}
-      - name: Prefer
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      - name: authorization
         in: header
-        schema: {type: string, enum: ['return=minimal']}
-        description: Request a 204 acknowledgement without reading inventory after the write.
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/GatewayProfileWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+    delete:
+      summary: Delete Gateway Profile
+      operationId: delete_gateway_profile_api_v1_model_management_gateways__item_id__delete
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/gateways/{item_id}/name:
+    patch:
+      summary: Update only a gateway display name
+      operationId: renameGatewayProfile
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      - name: prefer
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Prefer
       requestBody:
         required: true
         content:
@@ -969,74 +1145,174 @@ paths:
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/ModelRegistry
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
         '204':
           description: Name saved without an inventory response.
           headers:
             Preference-Applied:
-              schema: {type: string, const: 'return=minimal'}
+              schema:
+                type: string
+                const: return=minimal
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-gateway/images/generations:
-    post:
-      tags: [Model Gateway]
-      operationId: generateImage
-      summary: Generate one image through an assigned APIM model
-      description: >-
-        Requires an authenticated session and the shared write-origin check. The backend
-        binds the caller or an authorized test identity, checks assignment and quota,
-        records a billable attempt before dispatch, and performs no automatic paid retry.
-        Prompt, optional provider JSON fields and image bytes are not persisted.
       security:
       - sessionCookie: []
+      description: Requires an Owner session and the write-origin check. Routing, credentials and defaults
+        are unchanged. No APIM mutation is performed.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/providers:
+    post:
+      summary: Create Provider
+      operationId: create_provider_api_v1_model_management_providers_post
+      parameters:
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: ../../openapi.yaml#/components/schemas/ImageInvocationRequest
+              $ref: ../../openapi.yaml#/components/schemas/ProviderWrite
       responses:
         '200':
-          description: One validated image and nullable measured usage
-          headers:
-            Cache-Control:
-              schema: {type: string, const: no-store}
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/ImageInvocationResponse
-        '401':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/providers/{item_id}:
+    put:
+      summary: Update Provider
+      operationId: update_provider_api_v1_model_management_providers__item_id__put
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ProviderWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/runtimes:
+    post:
+      summary: Create Runtime
+      operationId: create_runtime_api_v1_model_management_runtimes_post
+      parameters:
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/RuntimeWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/connections:
+    post:
+      summary: Register a zero-model provider connection
+      operationId: createModelConnection
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ModelConnectionCreate
+        required: true
+      responses:
+        '200':
+          description: Updated model registry with the zero-model connection
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '429':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '502':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '504':
+        '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/connections:
-    post:
-      tags:
-      - Model Control Plane
-      operationId: createModelConnection
-      summary: Register a zero-model provider connection
+      security:
+      - sessionCookie: []
       description: 'Stores provider endpoint identity, authentication mode, and target APIM gateway.
 
         This operation does not create a model, mutate APIM, or collect a provider key.
@@ -1046,40 +1322,12 @@ paths:
         for API-key connections, carries the one-time key.
 
         '
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/ModelConnectionCreate
-      responses:
-        '200':
-          description: Updated model registry with the zero-model connection
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/ModelRegistry
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/connections/{runtime_id}:
-    put:
       tags:
       - Model Control Plane
-      operationId: updateModelConnection
+  /api/v1/model-management/connections/{runtime_id}:
+    put:
       summary: Update safe connection metadata
-      description: 'Updates only the display name and enabled/default state. Provider, gateway,
-
-        endpoint, authentication, and routing configuration remain immutable so an
-
-        existing database connection cannot drift from its published APIM route.
-
-        '
+      operationId: updateModelConnection
       parameters:
       - name: runtime_id
         in: path
@@ -1087,6 +1335,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Runtime Id
       requestBody:
         required: true
         content:
@@ -1099,20 +1348,64 @@ paths:
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/ModelRegistry
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'Updates only the display name and enabled/default state. Provider, gateway,
+
+        endpoint, authentication, and routing configuration remain immutable so an
+
+        existing database connection cannot drift from its published APIM route.
+
+        '
+      tags:
+      - Model Control Plane
+    delete:
+      summary: Delete an empty Turnstile-managed connection
+      operationId: deleteModelConnection
+      parameters:
+      - name: runtime_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Runtime Id
+      responses:
+        '200':
+          description: Updated model registry without the deleted connection
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
         '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
-      tags:
-      - Model Control Plane
-      operationId: deleteModelConnection
-      summary: Delete an empty Turnstile-managed connection
+      security:
+      - sessionCookie: []
       description: 'Deletes only the zero-model Runtime row. Connections with models, default
 
         connections, unmanaged runtimes, and connections used by an in-progress publication
@@ -1122,6 +1415,12 @@ paths:
         are not deleted.
 
         '
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/connections/{runtime_id}/adopt:
+    post:
+      summary: Publish managed routes for an existing legacy Databricks connection
+      operationId: adoptDatabricksConnection
       parameters:
       - name: runtime_id
         in: path
@@ -1129,40 +1428,7 @@ paths:
         schema:
           type: string
           format: uuid
-      responses:
-        '200':
-          description: Updated model registry without the deleted connection
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/ModelRegistry
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/connections/{runtime_id}/adopt:
-    post:
-      tags: [Model Control Plane]
-      security:
-      - sessionCookie: []
-      operationId: adoptDatabricksConnection
-      summary: Publish managed routes for an existing legacy Databricks connection
-      description: >-
-        Owner-only and Origin-protected. Accepts an Azure Databricks Workspace origin for
-        same-tenant APIM managed identity. Queues a candidate route-reconciliation release;
-        no connection or model row is rewritten. The effective release supplies the adopted
-        connection configuration, so rollback restores the previous configuration.
-        Existing model IDs, aliases, prices and access remain unchanged. Normal publication
-        probes are billable and may include other models already in the gateway release.
-      parameters:
-      - name: runtime_id
-        in: path
-        required: true
-        schema: {type: string, format: uuid}
+          title: Runtime Id
       requestBody:
         required: true
         content:
@@ -1175,25 +1441,287 @@ paths:
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationAccepted
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationRequestAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Owner-only and Origin-protected. Accepts an Azure Databricks Workspace origin for same-tenant
+        APIM managed identity. Queues a candidate route-reconciliation release; no connection or model
+        row is rewritten. The effective release supplies the adopted connection configuration, so rollback
+        restores the previous configuration. Existing model IDs, aliases, prices and access remain unchanged.
+        Normal publication probes are billable and may include other models already in the gateway release.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/runtimes/{item_id}:
+    put:
+      summary: Update Runtime
+      operationId: update_runtime_api_v1_model_management_runtimes__item_id__put
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/RuntimeWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
         '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/price-catalog/models:
+    get:
+      summary: Search Price Catalog Models
+      operationId: search_price_catalog_models_api_v1_model_management_price_catalog_models_get
+      parameters:
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 120
+          default: ''
+          title: Q
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PriceCatalogModelsResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/price-catalog/options:
+    get:
+      summary: Price Catalog Options
+      operationId: price_catalog_options_api_v1_model_management_price_catalog_options_get
+      parameters:
+      - name: model
+        in: query
+        required: true
+        schema:
+          type: string
+          maxLength: 300
+          title: Model
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PriceCatalogOptionsResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/price-sync:
+    post:
+      summary: Sync Model Prices
+      operationId: sync_model_prices_api_v1_model_management_price_sync_post
+      parameters:
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        content:
+          application/json:
+            schema:
+              anyOf:
+              - $ref: ../../openapi.yaml#/components/schemas/PriceSyncRequest
+              - type: 'null'
+              title: Request
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PriceSyncResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/models:
+    post:
+      summary: Create Model
+      operationId: create_model_api_v1_model_management_models_post
+      parameters:
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ManagedModelWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-management/models/{item_id}:
+    put:
+      summary: Update Model
+      operationId: update_model_api_v1_model_management_models__item_id__put
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ManagedModelWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+    delete:
+      summary: Remove a model from Turnstile and its managed APIM API
+      operationId: deleteManagedModel
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      responses:
+        '202':
+          description: Model removal publication queued
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationRequestAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/models/{item_id}:
-    delete:
-      tags:
-      - Model Control Plane
       security:
       - sessionCookie: []
-      operationId: deleteManagedModel
-      summary: Remove a model from Turnstile and its managed APIM API
       description: 'Queues a subtractive APIM revision. The active Registry row remains available until
 
         the candidate revision proves the alias is absent and is promoted. Activation then
@@ -1205,6 +1733,12 @@ paths:
         including Amazon Bedrock models and Microsoft Foundry deployments, are never deleted.
 
         '
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/models/{item_id}/backend-pool:
+    get:
+      summary: Read one model's effective APIM-native backend Pool
+      operationId: getManagedModelBackendPool
       parameters:
       - name: item_id
         in: path
@@ -1212,13 +1746,61 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Item Id
       responses:
-        '202':
-          description: Model removal publication queued
+        '200':
+          description: Effective resolved Pool configuration
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationAccepted
+                $ref: ../../openapi.yaml#/components/schemas/GatewayBackendPoolConfig
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Authenticated readback for both Owner and Member Router users.
+      tags:
+      - Model Control Plane
+    put:
+      summary: Queue an APIM-native equivalent-deployment Pool for one model
+      operationId: configureManagedModelBackendPool
+      parameters:
+      - name: item_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Item Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/GatewayBackendPoolWrite
+      responses:
+        '202':
+          description: Pool route reconciliation queued
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationRequestAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -1227,42 +1809,8 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/models/{item_id}/backend-pool:
-    get:
-      tags:
-      - Model Control Plane
       security:
       - sessionCookie: []
-      operationId: getManagedModelBackendPool
-      summary: Read one model's effective APIM-native backend Pool
-      description: Authenticated readback for both Owner and Member Router users.
-      parameters:
-      - name: item_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: uuid
-      responses:
-        '200':
-          description: Effective resolved Pool configuration
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayBackendPoolConfig
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    put:
-      tags:
-      - Model Control Plane
-      security:
-      - sessionCookie: []
-      operationId: configureManagedModelBackendPool
-      summary: Queue an APIM-native equivalent-deployment Pool for one model
       description: 'Owner-only. This publishes independently of Router draft persistence.
 
         Resolves only existing compatible managed Runtimes. All members must share the
@@ -1278,48 +1826,11 @@ paths:
         timeout, and deterministic per-member candidate probes before promotion.
 
         '
-      parameters:
-      - name: item_id
-        in: path
-        required: true
-        schema:
-          type: string
-          format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/GatewayBackendPoolWrite
-      responses:
-        '202':
-          description: Pool route reconciliation queued
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationAccepted
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
       tags:
       - Model Control Plane
-      security:
-      - sessionCookie: []
-      operationId: removeManagedModelBackendPool
+    delete:
       summary: Queue removal of one model's APIM-native backend Pool
-      description: 'Owner-only. Queues restoration of the model''s direct backend route; the active
-
-        Revision remains unchanged until candidate verification and promotion complete.
-
-        '
+      operationId: removeManagedModelBackendPool
       parameters:
       - name: item_id
         in: path
@@ -1327,13 +1838,20 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Item Id
       responses:
         '202':
           description: Direct backend route reconciliation queued
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationAccepted
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationRequestAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -1342,104 +1860,38 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/publications:
-    post:
-      tags:
-      - Model Control Plane
-      operationId: createGatewayPublication
-      summary: Queue a model and runtime for APIM publication
-      description: 'Saves an immutable desired release and returns 202. The request never mutates the
+      security:
+      - sessionCookie: []
+      description: 'Owner-only. Queues restoration of the model''s direct backend route; the active
 
-        current APIM revision synchronously. Credential-bearing providers use an encrypted
-
-        one-time sidecar. Foundry uses the APIM managed identity and may pause for customer
-
-        authorization. A separate managed-identity Function provisions and verifies a candidate.
+        Revision remains unchanged until candidate verification and promotion complete.
 
         '
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationCreate
-      responses:
-        '202':
-          description: Publication queued
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationAccepted
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    get:
       tags:
       - Model Control Plane
-      operationId: listGatewayPublications
-      summary: List recent gateway publications
-      parameters:
-      - name: gateway_profile_id
-        in: query
-        schema:
-          type: string
-          format: uuid
-      - name: limit
-        in: query
-        schema:
-          type: integer
-          minimum: 1
-          maximum: 100
-          default: 50
-      responses:
-        '200':
-          description: Recent publications
-          content:
-            application/json:
-              schema:
-                type: object
-                required:
-                - items
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: ../../openapi.yaml#/components/schemas/GatewayPublication
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
   /api/v1/model-management/releases:
     get:
-      tags:
-      - Model Control Plane
-      operationId: listGatewayReleases
       summary: List Gateway Releases and their rollback roles
-      description: 'Authenticated read-only projection of immutable gateway publications. Current and
-
-        immediate-rollback roles come from the effective release pointer and recorded base release.
-
-        A recorded manifest is not treated as live dependency validation.
-
-        '
+      operationId: listGatewayReleases
       parameters:
       - name: gateway_profile_id
         in: query
+        required: false
         schema:
-          type: string
-          format: uuid
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Gateway Profile Id
       - name: limit
         in: query
+        required: false
         schema:
           type: integer
-          minimum: 1
           maximum: 100
+          minimum: 1
           default: 100
+          title: Limit
       responses:
         '200':
           description: Gateway Release summaries ordered newest first
@@ -1447,18 +1899,33 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseList
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/releases/{release_id}:
-    get:
+      security:
+      - sessionCookie: []
+      description: 'Authenticated read-only projection of immutable gateway publications. Current and
+
+        immediate-rollback roles come from the effective release pointer and recorded base release.
+
+        A recorded manifest is not treated as live dependency validation.
+
+        '
       tags:
       - Model Control Plane
-      operationId: getGatewayRelease
+  /api/v1/model-management/releases/{release_id}:
+    get:
       summary: Read one Gateway Release with diff, dependencies, and audit
+      operationId: getGatewayRelease
       parameters:
       - name: release_id
         in: path
@@ -1466,6 +1933,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Release Id
       responses:
         '200':
           description: Gateway Release detail
@@ -1473,6 +1941,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseDetail
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1481,12 +1955,14 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/releases/{release_id}/diff:
-    get:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: getGatewayReleaseDiff
+  /api/v1/model-management/releases/{release_id}/diff:
+    get:
       summary: Compare one Gateway Release with its base or another release
+      operationId: getGatewayReleaseDiff
       parameters:
       - name: release_id
         in: path
@@ -1494,11 +1970,16 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Release Id
       - name: against_release_id
         in: query
+        required: false
         schema:
-          type: string
-          format: uuid
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Against Release Id
       responses:
         '200':
           description: Semantic model and Backend Pool diff
@@ -1506,6 +1987,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseDiff
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1516,17 +2003,14 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/releases/{release_id}/integrity:
-    get:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: getGatewayReleaseIntegrity
+  /api/v1/model-management/releases/{release_id}/integrity:
+    get:
       summary: Read recorded and live dependency-integrity state
-      description: 'Phase A reports recorded manifest completeness separately from live ARM integrity.
-
-        `not_checked` never makes a release rollback-eligible.
-
-        '
+      operationId: getGatewayReleaseIntegrity
       parameters:
       - name: release_id
         in: path
@@ -1534,6 +2018,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Release Id
       responses:
         '200':
           description: Dependency inventory and rollback blockers
@@ -1541,6 +2026,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseIntegrity
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1549,12 +2040,19 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/releases/{release_id}/protection:
-    put:
+      security:
+      - sessionCookie: []
+      description: 'Phase A reports recorded manifest completeness separately from live ARM integrity.
+
+        `not_checked` never makes a release rollback-eligible.
+
+        '
       tags:
       - Model Control Plane
-      operationId: protectGatewayRelease
+  /api/v1/model-management/releases/{release_id}/protection:
+    put:
       summary: Pin or retain a Gateway Release
+      operationId: protectGatewayRelease
       parameters:
       - name: release_id
         in: path
@@ -1562,6 +2060,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Release Id
       requestBody:
         required: true
         content:
@@ -1575,6 +2074,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseProtection
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1585,11 +2090,13 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: unprotectGatewayRelease
+    delete:
       summary: Remove explicit protection from a Gateway Release
+      operationId: unprotectGatewayRelease
       parameters:
       - name: release_id
         in: path
@@ -1597,9 +2104,16 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Release Id
       responses:
         '204':
           description: Protection removed and audited
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1608,12 +2122,14 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/releases/{release_id}/integrity-checks:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: requestGatewayReleaseIntegrityCheck
+  /api/v1/model-management/releases/{release_id}/integrity-checks:
+    post:
       summary: Queue a live dependency-integrity check
+      operationId: requestGatewayReleaseIntegrityCheck
       parameters:
       - name: release_id
         in: path
@@ -1621,6 +2137,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Release Id
       responses:
         '202':
           description: Integrity operation queued
@@ -1628,6 +2145,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1640,12 +2163,14 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/releases/{release_id}/rollback-preview:
-    get:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: previewGatewayReleaseRollback
+  /api/v1/model-management/releases/{release_id}/rollback-preview:
+    get:
       summary: Build the current semantic rollback preview and confirmation hash
+      operationId: previewGatewayReleaseRollback
       parameters:
       - name: release_id
         in: path
@@ -1653,6 +2178,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Release Id
       responses:
         '200':
           description: Rollback preview bound to current and target snapshots
@@ -1660,6 +2186,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseRollbackPreview
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1670,12 +2202,14 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/releases/{release_id}/rollback:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: requestGatewayReleaseRollback
+  /api/v1/model-management/releases/{release_id}/rollback:
+    post:
       summary: Queue a confirmed guarded rollback
+      operationId: requestGatewayReleaseRollback
       parameters:
       - name: release_id
         in: path
@@ -1683,6 +2217,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Release Id
       requestBody:
         required: true
         content:
@@ -1696,6 +2231,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1708,12 +2249,14 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/release-operations/{operation_id}:
-    get:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: getGatewayReleaseOperation
+  /api/v1/model-management/release-operations/{operation_id}:
+    get:
       summary: Read a resumable release operation and immutable audit timeline
+      operationId: getGatewayReleaseOperation
       parameters:
       - name: operation_id
         in: path
@@ -1721,6 +2264,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Operation Id
       responses:
         '200':
           description: Release operation status
@@ -1728,6 +2272,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperation
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1736,13 +2286,14 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/gateways/{gateway_profile_id}/gc-plans:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: requestGatewayReleaseGcPlan
+  /api/v1/model-management/gateways/{gateway_profile_id}/gc-plans:
+    post:
       summary: Queue a release-resource garbage-collection dry run
-      description: Produces an immutable reference-graph report only. It never deletes cloud resources.
+      operationId: requestGatewayReleaseGcPlan
       parameters:
       - name: gateway_profile_id
         in: path
@@ -1750,6 +2301,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Gateway Profile Id
       responses:
         '202':
           description: GC dry-run operation queued
@@ -1757,6 +2309,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
@@ -1767,38 +2325,551 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/publications/{publication_id}:
-    get:
+      security:
+      - sessionCookie: []
+      description: Produces an immutable reference-graph report only. It never deletes cloud resources.
       tags:
       - Model Control Plane
-      operationId: getGatewayPublication
-      summary: Read one gateway publication state
+  /api/v1/model-management/runtimes/{runtime_id}/check:
+    get:
+      summary: Preview an Owner connection diagnostic
+      operationId: runtimeCheckPlan
       parameters:
-      - name: publication_id
+      - name: runtime_id
         in: path
         required: true
         schema:
           type: string
           format: uuid
+          title: Runtime Id
       responses:
         '200':
-          description: Publication status
+          description: Explicit diagnostic choices and access evidence
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublication
+                $ref: ../../openapi.yaml#/components/schemas/RuntimeCheckPlan
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          description: An Owner session is required
+        '404':
+          description: Connection not found
+      security:
+      - sessionCookie: []
+      description: Reads eligible text models, trusted Gateway routes and the API identity's scoped system-subscription
+        permissions. Does not read subscription keys or issue inference. Historical diagnostic results
+        do not expire; configuration applicability is not a live availability assertion.
+      tags:
+      - Model Management
+    post:
+      summary: Run one explicitly selected connection diagnostic
+      operationId: checkRuntime
+      parameters:
+      - name: runtime_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Runtime Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/RuntimeCheckSelection
+      responses:
+        '200':
+          description: Timestamped diagnostic outcome and configuration applicability
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/RuntimeHealth
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Explicit model and Gateway selection is required
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          description: An Owner session is required
+        '409':
+          description: Access, target, configuration or diagnostic ownership changed
+        '429':
+          description: A diagnostic is running or recently completed
+          headers:
+            Retry-After:
+              schema:
+                type: string
+      security:
+      - sessionCookie: []
+      description: Requires an Owner session and same-origin checks. Rechecks target, system subscription,
+        trusted endpoint and configuration before a single non-streaming request with at most 64 output
+        tokens. No automatic retry. A 60-second per-connection claim prevents concurrent diagnostics;
+        unknown outcomes are not availability or zero-cost evidence.
+      tags:
+      - Model Management
+  /api/v1/model-management/gateways/{gateway_profile_id}/budget-readiness:
+    post:
+      summary: Verify budget delegation and candidate fence identity
+      operationId: checkGatewayBudgetReadiness
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      responses:
+        '200':
+          description: Observed identity and fence checks
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/BudgetDelegationReadiness
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          description: Owner session or allowed write origin required
+        '409':
+          description: Target or isolated candidate prerequisites are not satisfied
+        '503':
+          description: Verification could not be completed
+      security:
+      - sessionCookie: []
+      description: Owner-only bounded catalog checks on the configured target. Does not invoke a model
+        or mutate the fence. Reports actual and expected status separately.
+  /api/v1/model-management/gateways/{gateway_profile_id}/budget-execution-verification:
+    post:
+      summary: Verify one isolated two-scope budget invocation
+      operationId: verifyGatewayBudgetExecution
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/BudgetExecutionVerificationRequest
+      responses:
+        '200':
+          description: Invocation outcome and independent before/after ledger observations
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/BudgetExecutionVerification
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Only explicit application and model IDs are accepted
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          description: Owner session or required model access missing
+        '404':
+          description: Candidate Application subscription was not found
+        '409':
+          description: Exact candidate or shared fence identity is not ready
+        '503':
+          description: Verification resources are unavailable
+      security:
+      - sessionCookie: []
+      description: Requires an Owner and an exact paused candidate across every shared budget target.
+        Uses the configured person and Application identities. Sends at most one nonstreaming request
+        with 32 output tokens. Unknown outcomes do not authorize replay. Reads both scope receipts without
+        mutating budgets or settlement.
+  /api/v1/model-gateway/decision:
+    post:
+      summary: Invoke Decision
+      operationId: invoke_decision_api_v1_model_gateway_decision_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/DecisionInvocationRequest
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/DecisionInvocationResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-gateway/invoke:
+    post:
+      summary: Invoke Model
+      operationId: invoke_model_api_v1_model_gateway_invoke_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ModelInvocationRequest
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ModelInvocationResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-gateway/images/generations:
+    post:
+      summary: Generate one image through an assigned APIM model
+      operationId: generateImage
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ImageInvocationRequest
+        required: true
+      responses:
+        '200':
+          description: One validated image and nullable measured usage
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ImageInvocationResponse
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '429':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '502':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '504':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires an authenticated session and the shared write-origin check. The backend binds
+        the caller or an authorized test identity, checks assignment and quota, records a billable attempt
+        before dispatch, and performs no automatic paid retry. Prompt, optional provider JSON fields and
+        image bytes are not persisted.
+      tags:
+      - Model Gateway
+  /api/v1/model-management/publications:
+    post:
+      summary: Queue a model and runtime for APIM publication
+      operationId: createGatewayPublication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationCreate
+      responses:
+        '202':
+          description: Publication queued
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationRequestAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'Saves an immutable desired release and returns 202. The request never mutates the
+
+        current APIM revision synchronously. Credential-bearing providers use an encrypted
+
+        one-time sidecar. Foundry uses the APIM managed identity and may pause for customer
+
+        authorization. A separate managed-identity Function provisions and verifies a candidate.
+
+        '
+      tags:
+      - Model Control Plane
+    get:
+      summary: List recent gateway publications
+      operationId: listGatewayPublications
+      parameters:
+      - name: gateway_profile_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Gateway Profile Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Recent publications
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationList
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/rollouts:
+    post:
+      summary: Atomically queue model publication to multiple APIM targets
+      operationId: createMultiTargetRollout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/MultiTargetPublicationCreate
+      responses:
+        '202':
+          description: Parent intent, safe child publication views and parent status URL.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/MultiTargetPublicationRequestAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires the existing publication Owner session and write-origin checks plus MULTI_APIM_TARGET_ROLLOUT_ENABLED.
+        Accepts two to twenty distinct registered targets. All plans are prepared before one queue transaction.
+        A canonical child supplies the shared logical model and complete price identity; target-specific
+        runtime and upstream bindings remain separate. The parent is idempotent, excludes credentials
+        from its request identity, and reports independent child outcomes rather than distributed atomic
+        promotion.
+      tags:
+      - Model Control Plane
+    get:
+      summary: List recent multi-target rollout intents and derived status
+      operationId: listMultiTargetRollouts
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Recent parent rollout states.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/MultiTargetRolloutList
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Requires the publication Owner session. Status is derived from every child; mixed terminal
+        success and failure is partial. This endpoint performs no ARM or inference requests.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/rollouts/{rollout_id}:
+    get:
+      summary: Read one multi-target rollout with child publication identities
+      operationId: getMultiTargetRollout
+      parameters:
+      - name: rollout_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Rollout Id
+      responses:
+        '200':
+          description: Parent intent with current derived status and child references.
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/MultiTargetRollout
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
+      security:
+      - sessionCookie: []
+      description: Requires the publication Owner session. Failed children retain their own existing publication
+        retry and authorization-resume workflows; successful targets are not implicitly replayed or rolled
+        back.
       tags:
       - Model Control Plane
-      operationId: cancelGatewayPublicationAuthorization
-      summary: Cancel an unstarted or authorization-paused publication
-      description: Cancels only a queued candidate with zero attempts or an authorization-paused candidate. Marks it as rolled back and leaves the current APIM Revision unchanged.
+  /api/v1/model-management/gateways/{gateway_profile_id}/reconcile:
+    post:
+      summary: Rebuild the current model set on a new APIM revision
+      operationId: reconcileGatewayRoutes
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      requestBody:
+        content:
+          application/json:
+            schema:
+              anyOf:
+              - $ref: ../../openapi.yaml#/components/schemas/GatewayReconcileRequest
+              - type: 'null'
+              title: Write
+      responses:
+        '202':
+          description: Route reconciliation publication queued
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationRequestAccepted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Copies the effective release without adding, deleting, renaming, or reassigning models.
+      tags:
+      - Model Control Plane
+  /api/v1/model-management/publications/{publication_id}:
+    get:
+      summary: Read one gateway publication state
+      operationId: getGatewayPublication
       parameters:
       - name: publication_id
         in: path
@@ -1806,13 +2877,54 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Publication Id
+      responses:
+        '200':
+          description: Publication status
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationView
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Model Control Plane
+    delete:
+      summary: Cancel an unstarted or authorization-paused publication
+      operationId: cancelGatewayPublicationAuthorization
+      parameters:
+      - name: publication_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Publication Id
       responses:
         '200':
           description: Unstarted or authorization-paused publication cancelled
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublication
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationView
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -1821,15 +2933,16 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/publications/{publication_id}/retry:
-    post:
+      security:
+      - sessionCookie: []
+      description: Cancels only a queued candidate with zero attempts or an authorization-paused candidate.
+        Marks it as rolled back and leaves the current APIM Revision unchanged.
       tags:
       - Model Control Plane
-      operationId: retryGatewayPublication
+  /api/v1/model-management/publications/{publication_id}/retry:
+    post:
       summary: Retry a failed publication
-      description: Credential-bearing providers require a replacement key only when persisted
-        publication evidence cannot recover the release-owned APIM Named Value. An explicitly
-        supplied replacement key is provisioned again; managed-identity providers do not accept one.
+      operationId: retryGatewayPublication
       parameters:
       - name: publication_id
         in: path
@@ -1837,6 +2950,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Publication Id
       requestBody:
         required: true
         content:
@@ -1849,7 +2963,13 @@ paths:
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublication
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationView
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -1858,12 +2978,17 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/publications/{publication_id}/authorization/resume:
-    post:
+      security:
+      - sessionCookie: []
+      description: Credential-bearing providers require a replacement key only when persisted publication
+        evidence cannot recover the release-owned APIM Named Value. An explicitly supplied replacement
+        key is provisioned again; managed-identity providers do not accept one.
       tags:
       - Model Control Plane
-      operationId: resumeGatewayPublicationAuthorization
+  /api/v1/model-management/publications/{publication_id}/authorization/resume:
+    post:
       summary: Re-run candidate verification after provider authorization
+      operationId: resumeGatewayPublicationAuthorization
       parameters:
       - name: publication_id
         in: path
@@ -1871,13 +2996,20 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Publication Id
       responses:
         '200':
           description: Existing candidate returned to verification
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublication
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationView
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -1886,12 +3018,14 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/gateways/{gateway_profile_id}/credentials/rotate:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: rotateGatewayCredential
+  /api/v1/model-management/gateways/{gateway_profile_id}/credentials/rotate:
+    post:
       summary: Publish a release-scoped replacement provider key
+      operationId: rotateGatewayCredential
       parameters:
       - name: gateway_profile_id
         in: path
@@ -1899,6 +3033,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Gateway Profile Id
       requestBody:
         required: true
         content:
@@ -1911,20 +3046,27 @@ paths:
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublication
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationView
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/model-management/gateways/{gateway_profile_id}/reconcile:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Model Control Plane
-      operationId: reconcileGatewayRoutes
-      summary: Rebuild the current model set on a new APIM revision
-      description: Copies the effective release without adding, deleting, renaming, or reassigning models.
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-syncs:
+    post:
+      summary: Request Apim Target Inventory Sync
+      operationId: request_apim_target_inventory_sync_api_v1_model_management_apim_targets__gateway_profile_id__inventory_syncs_post
       parameters:
       - name: gateway_profile_id
         in: path
@@ -1932,22 +3074,577 @@ paths:
         schema:
           type: string
           format: uuid
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/GatewayReconcileRequest
+          title: Gateway Profile Id
       responses:
         '202':
-          description: Route reconciliation publication queued
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationAccepted
+                $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseOperationAccepted
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
         '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.
+  /api/v1/model-management/gateways/{gateway_profile_id}/managed-program-initializations:
+    post:
+      summary: Register Managed Program Initialization
+      operationId: register_managed_program_initialization_api_v1_model_management_gateways__gateway_profile_id__managed_program_initializations_post
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      - name: If-Match
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: If-Match
+      - name: Prefer
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - const: validate-only
+            type: string
+          - type: 'null'
+          title: Prefer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ManagedProgramInitialization-Input
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ManagedProgramInitialization-Output
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '403':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.
+  /api/v1/model-management/gateways/{gateway_profile_id}/managed-program-initializations/preview:
+    get:
+      summary: Preview Managed Program Initialization
+      operationId: preview_managed_program_initialization_api_v1_model_management_gateways__gateway_profile_id__managed_program_initializations_preview_get
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Preview Managed Program Initialization Api V1 Model Management Gateways  Gateway
+                  Profile Id  Managed Program Initializations Preview Get
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '403':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-migrations:
+    post:
+      summary: Migrate Gateway Program
+      operationId: migrate_gateway_program_api_v1_model_management_gateways__gateway_profile_id__program_migrations_post
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/FixedProgramMigration
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationRequestAccepted
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '403':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-migrations/preview:
+    get:
+      summary: Preview Gateway Program Migration
+      operationId: preview_gateway_program_migration_api_v1_model_management_gateways__gateway_profile_id__program_migrations_preview_get
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Preview Gateway Program Migration Api V1 Model Management Gateways  Gateway
+                  Profile Id  Program Migrations Preview Get
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '403':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-upgrades:
+    post:
+      summary: Register Gateway Program Upgrade
+      operationId: register_gateway_program_upgrade_api_v1_model_management_gateways__gateway_profile_id__program_upgrades_post
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      - name: If-Match
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: If-Match
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/FixedProgramUpgrade
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/FixedProgramUpgrade
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '403':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-upgrades/cutover:
+    post:
+      summary: Cutover Gateway Program Upgrade
+      operationId: cutover_gateway_program_upgrade_api_v1_model_management_gateways__gateway_profile_id__program_upgrades_cutover_post
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      - name: If-Match
+        in: header
+        required: true
+        schema:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: If-Match
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/FixedProgramCutover
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/FixedProgramUpgrade
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '403':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-upgrades/preview:
+    get:
+      summary: Preview Gateway Program Upgrade
+      operationId: preview_gateway_program_upgrade_api_v1_model_management_gateways__gateway_profile_id__program_upgrades_preview_get
+      parameters:
+      - name: gateway_profile_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Gateway Profile Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Preview Gateway Program Upgrade Api V1 Model Management Gateways  Gateway
+                  Profile Id  Program Upgrades Preview Get
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '403':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.
+  /api/v1/model-management/publications/{publication_id}/archive:
+    post:
+      summary: Archive Failed Gateway Publication
+      operationId: archive_failed_gateway_publication_api_v1_model_management_publications__publication_id__archive_post
+      parameters:
+      - name: publication_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Publication Id
+      responses:
+        '204':
+          description: Successful Response
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '403':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/node-enrollments:
+    post:
+      summary: Enroll Controlled Gateway Fleet
+      operationId: enroll_controlled_gateway_fleet_api_v1_model_management_self_hosted_gateways__deployment_id__node_enrollments_post
+      parameters:
+      - name: deployment_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Deployment Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/ControlledGatewayFleet
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ModelAvailabilityNodeEnrollment
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '401':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        '403':
+          description: Authentication or Owner authorization required.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+      security:
+      - sessionCookie: []
+      description: Owner-only platform operation.

@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
@@ -11,6 +12,7 @@ import httpx
 from pydantic import BaseModel
 
 from ..domain.ledger import (
+    BudgetPriceProjection,
     LedgerAdmissionReceipt,
     LedgerAttempt,
     LedgerAttemptIdentity,
@@ -31,11 +33,12 @@ from .table_batch import (
     TableBatchConflict,
     TableBatchUnavailable,
     conditional_batch,
-    exact_etag,
     validate_batch_response,
 )
 
 SUMMARY_ROW = "S"
+PRICE_ROW = "P"
+PRICE_PARTITION_PREFIX = "budget-price|"
 
 
 class LedgerUnavailable(RuntimeError):
@@ -71,29 +74,71 @@ class AtomicTableLedger(TableStorageLedger):
             raise LedgerProtocolConflict("Ledger document exceeds its property limit")
         return serialized
 
-    def _read(self, scope: LedgerScope, row_key: str) -> tuple[dict[str, Any], str] | None:
-        response = self._request("GET", self._entity_url(scope.partition, row_key))
+    def _read(self, scope: LedgerScope | str, row_key: str) -> tuple[dict[str, Any], str] | None:
+        partition = scope.partition if isinstance(scope, LedgerScope) else scope
+        response = self._request("GET", self._entity_url(partition, row_key))
         if response.status_code == 404:
             return None
         response.raise_for_status()
         value = response.json()
-        try:
-            etag = exact_etag(response.headers.get("etag") or value.get("odata.etag"))
-        except ValueError as error:
-            raise LedgerUnavailable("Ledger read returned no usable concurrency token") from error
+        etag = response.headers.get("etag") or value.get("odata.etag")
+        if not isinstance(etag, str) or not etag or etag == "*" or "\n" in etag or "\r" in etag:
+            raise LedgerUnavailable("Ledger read returned no usable concurrency token")
         document = json.loads(value["Document"])
         if not isinstance(document, dict):
             raise LedgerUnavailable("Ledger read returned an invalid document")
         return document, etag
 
     def read_summary(self, scope: LedgerScope) -> LedgerSummary:
-        current = self._read(scope, SUMMARY_ROW)
-        if current is None:
+        value = self._read(scope, SUMMARY_ROW)
+        if value is None:
             raise LedgerUnavailable("Budget execution scope is not initialized")
-        summary = LedgerSummary.model_validate(current[0])
+        summary = LedgerSummary.model_validate(value[0])
         if summary.scope != scope:
             raise LedgerProtocolConflict("Ledger summary belongs to a different scope")
         return summary
+
+    @staticmethod
+    def _price_partition(model_id: UUID) -> str:
+        return PRICE_PARTITION_PREFIX + str(model_id)
+
+    def read_model_price(self, model_id: UUID) -> BudgetPriceProjection | None:
+        """Read one current model-price projection, never route metadata."""
+        value = self._read(self._price_partition(model_id), PRICE_ROW)
+        if value is None:
+            return None
+        projection = BudgetPriceProjection.model_validate(value[0])
+        if projection.model_id != model_id:
+            raise LedgerProtocolConflict("Projected price belongs to another model")
+        return projection
+
+    def project_model_price(
+        self, projection: BudgetPriceProjection, *, attempts: int = 3, create_only: bool = False,
+    ) -> bool:
+        """Conditionally publish a current price snapshot; older writers cannot roll it back."""
+        partition = self._price_partition(projection.model_id)
+        for _ in range(max(1, min(attempts, 5))):
+            current = self._read(partition, PRICE_ROW)
+            etag = None
+            if current is not None:
+                stored = BudgetPriceProjection.model_validate(current[0])
+                if stored.model_id != projection.model_id:
+                    raise LedgerProtocolConflict("Projected price row has a foreign model identity")
+                if create_only:
+                    return False
+                if stored.price_sha256 == projection.price_sha256:
+                    return False
+                if stored.updated_at > projection.updated_at:
+                    return False
+                if stored.updated_at == projection.updated_at:
+                    raise LedgerProtocolConflict("A price timestamp cannot identify two snapshots")
+                etag = current[1]
+            entity = {
+                "Document": projection.model_dump_json(),
+            }
+            if self.replace_if_match(partition, PRICE_ROW, entity, etag):
+                return True
+        raise LedgerUnavailable("Price projection exhausted its bounded ETag retries")
 
     def _commit(self, scope: LedgerScope, entities: Sequence[ConditionalEntity]) -> None:
         try:
@@ -152,6 +197,8 @@ class AtomicTableLedger(TableStorageLedger):
         reserved_tokens: int,
         *,
         epoch: UUID,
+        reserved_usd: Decimal | None = None,
+        price_snapshot: BudgetPriceProjection | None = None,
         attempts: int = 3,
     ) -> ReservedLedgerAttempt:
         for _ in range(max(1, min(attempts, 5))):
@@ -168,10 +215,15 @@ class AtomicTableLedger(TableStorageLedger):
                     receipt.identity != identity
                     or receipt.epoch != state.epoch
                     or receipt.reserved_tokens != reserved_tokens
+                    or receipt.reserved_usd != reserved_usd
+                    or receipt.price_snapshot != price_snapshot
                 ):
                     raise LedgerProtocolConflict("An attempt cannot change its reservation")
                 return ReservedLedgerAttempt(state, receipt, False)
-            updated, receipt = reserve_ledger(state, identity, reserved_tokens, datetime.now(UTC))
+            updated, receipt = reserve_ledger(
+                state, identity, reserved_tokens, datetime.now(UTC),
+                reserved_usd=reserved_usd, price_snapshot=price_snapshot,
+            )
             try:
                 self._commit(
                     identity.scope,
@@ -195,12 +247,12 @@ class AtomicTableLedger(TableStorageLedger):
         attempts: int = 3,
     ) -> tuple[LedgerSummary, LedgerAttempt]:
         for _ in range(max(1, min(attempts, 5))):
-            state_row = self._read(identity.scope, SUMMARY_ROW)
-            attempt_row = self._read(identity.scope, identity.row_key)
-            if state_row is None or attempt_row is None:
+            summary_value = self._read(identity.scope, SUMMARY_ROW)
+            attempt_value = self._read(identity.scope, identity.row_key)
+            if summary_value is None or attempt_value is None:
                 raise LedgerUnavailable("Ledger request or summary is not available")
-            state = LedgerSummary.model_validate(state_row[0])
-            receipt = LedgerAttempt.model_validate(attempt_row[0])
+            state = LedgerSummary.model_validate(summary_value[0])
+            receipt = LedgerAttempt.model_validate(attempt_value[0])
             if (
                 receipt.identity != identity
                 or state.scope != identity.scope
@@ -214,8 +266,8 @@ class AtomicTableLedger(TableStorageLedger):
                 self._commit(
                     identity.scope,
                     [
-                        ConditionalEntity(SUMMARY_ROW, updated, state_row[1]),
-                        ConditionalEntity(identity.row_key, result, attempt_row[1]),
+                        ConditionalEntity(SUMMARY_ROW, updated, summary_value[1]),
+                        ConditionalEntity(identity.row_key, result, attempt_value[1]),
                     ],
                 )
             except (LedgerCompareFailed, httpx.TransportError):
@@ -225,11 +277,14 @@ class AtomicTableLedger(TableStorageLedger):
 
     def settle(self, charge: LedgerCharge) -> tuple[LedgerSummary, LedgerAttempt]:
         return self._update_attempt(
-            charge.identity, lambda state, attempt, now: settle_ledger(state, attempt, charge, now)
+            charge.identity,
+            lambda state, receipt, now: settle_ledger(state, receipt, charge, now),
         )
 
     def complete(
-        self, receipt: LedgerAdmissionReceipt, completion: dict[str, Any]
+        self,
+        receipt: LedgerAdmissionReceipt,
+        completion: dict[str, Any],
     ) -> tuple[LedgerSummary, LedgerAttempt]:
         return self._update_attempt(
             receipt.identity,
@@ -245,6 +300,9 @@ class AtomicTableLedger(TableStorageLedger):
             attempt.identity != receipt.identity
             or attempt.epoch != receipt.epoch
             or attempt.reserved_tokens != receipt.reserved_tokens
+            or attempt.budget_mode != receipt.budget_mode
+            or attempt.reserved_usd != receipt.reserved_usd
+            or attempt.price_snapshot != receipt.price_snapshot
         ):
             raise LedgerProtocolConflict("Stored attempt does not match its immutable admission")
         return attempt
@@ -261,6 +319,31 @@ class AtomicTableLedger(TableStorageLedger):
             lambda summary, receipt, now: transition_ledger_attempt(summary, receipt, state, now),
         )
 
+    def quiesce_budget_scope(
+        self, scope: LedgerScope, epoch: UUID, revision: int,
+    ) -> LedgerSummary:
+        for _ in range(3):
+            current = self._read(scope, SUMMARY_ROW)
+            if current is None:
+                raise LedgerUnavailable("Budget execution scope is not initialized")
+            summary = LedgerSummary.model_validate(current[0])
+            if summary.scope != scope or summary.epoch != epoch:
+                raise LedgerProtocolConflict("Budget switch belongs to another scope or epoch")
+            if summary.policy_revision >= revision:
+                return summary
+            if not summary.enabled:
+                return summary
+            disabled = LedgerSummary.model_validate({
+                **summary.model_dump(), "enabled": False, "version": summary.version + 1,
+                "updated_at": datetime.now(UTC),
+            })
+            try:
+                self._commit(scope, [ConditionalEntity(SUMMARY_ROW, disabled, current[1])])
+            except (LedgerCompareFailed, httpx.TransportError):
+                continue
+            return disabled
+        raise LedgerUnavailable("Budget switch could not stop new reservations")
+
     def write_policy(
         self,
         scope: LedgerScope,
@@ -270,6 +353,9 @@ class AtomicTableLedger(TableStorageLedger):
         token_limit: int,
         enforce: bool,
         enabled: bool,
+        budget_mode: Literal["tokens", "usd"] = "tokens",
+        usd_limit: Decimal | None = None,
+        opening_balance: int | Decimal | None = None,
     ) -> LedgerSummary:
         for _ in range(3):
             current = self._read(scope, SUMMARY_ROW)
@@ -278,6 +364,23 @@ class AtomicTableLedger(TableStorageLedger):
             summary = LedgerSummary.model_validate(current[0])
             if summary.scope != scope:
                 raise LedgerProtocolConflict("Budget policy belongs to another scope")
+            if summary.epoch != epoch:
+                raise LedgerProtocolConflict("Budget policy belongs to another epoch")
+            if revision < summary.policy_revision:
+                return summary
+            if revision == summary.policy_revision and summary.budget_mode != budget_mode:
+                raise LedgerProtocolConflict("A budget policy revision cannot change its unit")
+            if summary.budget_mode != budget_mode:
+                if (summary.enabled or summary.active_reserved_tokens or summary.upper_bound_tokens
+                    or summary.active_reserved_usd or summary.upper_bound_usd
+                    or opening_balance is None):
+                    raise LedgerUnavailable("Budget unit switch awaits existing request settlement")
+                summary = LedgerSummary.model_validate({
+                    **summary.model_dump(), "budget_mode": budget_mode, "usd_limit": usd_limit,
+                    "confirmed_tokens": (int(opening_balance) if budget_mode == "tokens"
+                                         else summary.confirmed_tokens),
+                    "confirmed_usd": opening_balance if budget_mode == "usd" else Decimal(0),
+                })
             updated = update_ledger_policy(
                 summary,
                 epoch=epoch,
@@ -286,6 +389,8 @@ class AtomicTableLedger(TableStorageLedger):
                 enforce=enforce,
                 enabled=enabled,
                 now=datetime.now(UTC),
+                budget_mode=budget_mode,
+                usd_limit=usd_limit,
             )
             if updated is summary:
                 return summary
@@ -302,8 +407,8 @@ class AtomicTableLedger(TableStorageLedger):
         try:
             self._commit(plan.scope, [ConditionalEntity(plan.row_key, plan, None)])
         except (LedgerCompareFailed, httpx.TransportError):
-            current = self._read(plan.scope, plan.row_key)
-            if current is None or LedgerDispatch.model_validate(current[0]) != plan:
+            existing = self._read(plan.scope, plan.row_key)
+            if existing is None or LedgerDispatch.model_validate(existing[0]) != plan:
                 raise LedgerUnavailable("Dispatch creation was not confirmed") from None
         return plan
 
@@ -315,7 +420,11 @@ class AtomicTableLedger(TableStorageLedger):
             if plan.expires_at <= datetime.now(UTC):
                 raise LedgerProtocolConflict("Dispatch preparation lease expired")
             result = self.reserve(
-                admission.identity, admission.reserved_tokens, epoch=admission.epoch
+                admission.identity,
+                admission.reserved_tokens,
+                epoch=admission.epoch,
+                reserved_usd=admission.reserved_usd,
+                price_snapshot=admission.price_snapshot,
             )
             if result.attempt.state != "reserved":
                 raise LedgerProtocolConflict("An earlier attempt cannot authorize another dispatch")
@@ -327,8 +436,21 @@ class AtomicTableLedger(TableStorageLedger):
         if plan.expires_at <= datetime.now(UTC):
             raise LedgerProtocolConflict("Dispatch preparation lease expired")
         for admission in plan.receipts:
-            attempt = self.read_attempt(admission)
-            if attempt.state != "reserved":
+            stored = self._read(admission.identity.scope, admission.identity.row_key)
+            if stored is None:
+                raise LedgerProtocolConflict(
+                    "Every required budget must be reserved before dispatch"
+                )
+            attempt = LedgerAttempt.model_validate(stored[0])
+            if (
+                attempt.identity != admission.identity
+                or attempt.epoch != admission.epoch
+                or attempt.reserved_tokens != admission.reserved_tokens
+                or attempt.budget_mode != (admission.budget_mode or "tokens")
+                or attempt.reserved_usd != admission.reserved_usd
+                or attempt.price_snapshot != admission.price_snapshot
+                or attempt.state != "reserved"
+            ):
                 raise LedgerProtocolConflict("Dispatch reservation does not match its plan")
         authorized = LedgerDispatch.model_validate(
             {
@@ -392,15 +514,32 @@ class AtomicTableLedger(TableStorageLedger):
                 if current_summary is None:
                     raise LedgerUnavailable("Dispatch compensation requires its budget summary")
                 summary = LedgerSummary.model_validate(current_summary[0])
-                if summary.epoch != admission.epoch or summary.scope != admission.identity.scope:
+                if (
+                    summary.epoch != admission.epoch or summary.scope != admission.identity.scope
+                    or (admission.budget_mode == "usd" and summary.budget_mode != "usd")
+                ):
                     raise LedgerProtocolConflict("Dispatch compensation epoch does not match")
                 if existing is not None:
-                    attempt = self.read_attempt(admission)
+                    attempt = LedgerAttempt.model_validate(existing[0])
+                    if (
+                        attempt.identity != admission.identity
+                        or attempt.epoch != admission.epoch
+                        or attempt.reserved_tokens != admission.reserved_tokens
+                        or attempt.budget_mode != summary.budget_mode
+                        or (admission.budget_mode == "usd" and (
+                            attempt.reserved_usd != admission.reserved_usd
+                            or attempt.price_snapshot != admission.price_snapshot
+                        ))
+                    ):
+                        raise LedgerProtocolConflict("Cancelled reservation identity changed")
                     if attempt.state not in {"settled", "cancelled"}:
                         self._update_attempt(
                             admission.identity,
                             lambda current, retained, moment: transition_ledger_attempt(
-                                current, retained, "cancelled", moment
+                                current,
+                                retained,
+                                "cancelled",
+                                moment,
                             ),
                         )
                         released += 1
@@ -411,6 +550,9 @@ class AtomicTableLedger(TableStorageLedger):
                     epoch=admission.epoch,
                     state="cancelled",
                     reserved_tokens=admission.reserved_tokens,
+                    budget_mode=admission.budget_mode or "tokens",
+                    reserved_usd=admission.reserved_usd,
+                    price_snapshot=admission.price_snapshot,
                     updated_at=now,
                 )
                 advanced = LedgerSummary.model_validate(

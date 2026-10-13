@@ -1,12 +1,23 @@
 schemas:
   SelfHostedGatewayCreate:
     properties:
-      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
-      endpoint_url: {type: string, maxLength: 2083, minLength: 1, format: uri, title: Endpoint Url}
+      display_name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Display Name
+      endpoint_url:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Endpoint Url
       location:
         anyOf:
-        - {type: string, maxLength: 128, minLength: 1}
-        - {type: 'null'}
+        - type: string
+          maxLength: 128
+          minLength: 1
+        - type: 'null'
         title: Location
       hosting_mode:
         $ref: ../../openapi.yaml#/components/schemas/GatewayHostingMode
@@ -14,39 +25,94 @@ schemas:
       release_gate:
         $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGate
         default: required
-      endpoint_control_confirmed: {type: boolean, const: true, title: Endpoint Control Confirmed}
+      endpoint_control_confirmed:
+        type: boolean
+        const: true
+        title: Endpoint Control Confirmed
     additionalProperties: false
     type: object
-    required: [display_name, endpoint_url, endpoint_control_confirmed]
+    required:
+    - display_name
+    - endpoint_url
+    - endpoint_control_confirmed
     title: SelfHostedGatewayCreate
   SelfHostedGatewayBootstrapRequest:
     properties:
-      expires_in_hours: {type: integer, maximum: 720, minimum: 1, title: Expires In Hours, default: 24}
+      expires_in_hours:
+        type: integer
+        maximum: 24.0
+        minimum: 1.0
+        title: Expires In Hours
+        default: 1
+      endpoint_control_confirmed:
+        type: boolean
+        const: true
+      trusted_reverse_proxy:
+        type: boolean
+        default: false
     additionalProperties: false
     type: object
+    required:
+    - endpoint_control_confirmed
     title: SelfHostedGatewayBootstrapRequest
   SelfHostedGatewayBootstrap:
     properties:
-      deployment_id: {type: string, format: uuid, title: Deployment Id}
-      native_gateway_id: {type: string, title: Native Gateway Id}
-      configuration_endpoint: {type: string, maxLength: 2083, minLength: 1, format: uri, title: Configuration Endpoint}
-      expires_at: {type: string, format: date-time, title: Expires At}
-      image: {type: string, title: Image}
-      environment_file_name: {type: string, title: Environment File Name}
-      environment_file: {type: string, title: Environment File}
-      docker_command: {type: string, title: Docker Command}
-      renewal_command: {type: string, title: Renewal Command}
+      deployment_id:
+        type: string
+        format: uuid
+        title: Deployment Id
+      native_gateway_id:
+        type: string
+        title: Native Gateway Id
+      configuration_endpoint:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Configuration Endpoint
+      expires_at:
+        type: string
+        format: date-time
+        title: Expires At
+      image:
+        type: string
+        title: Image
+      environment_file_name:
+        type: string
+        title: Environment File Name
+      environment_file:
+        type: string
+        format: password
+        title: Environment File
+        writeOnly: true
+      docker_command:
+        type: string
+        title: Docker Command
+      renewal_command:
+        type: string
+        title: Renewal Command
     additionalProperties: false
     type: object
-    required: [deployment_id, native_gateway_id, configuration_endpoint, expires_at, image, environment_file_name, environment_file, docker_command, renewal_command]
+    required:
+    - deployment_id
+    - native_gateway_id
+    - configuration_endpoint
+    - expires_at
+    - image
+    - environment_file_name
+    - environment_file
+    - docker_command
+    - renewal_command
     title: SelfHostedGatewayBootstrap
   SelfHostedGatewayProvisionOperations:
     properties:
-      available: {type: boolean, title: Available}
+      available:
+        type: boolean
+        title: Available
       unavailable_reason:
         anyOf:
-        - {type: string}
-        - {type: 'null'}
+        - type: string
+        - type: 'null'
         title: Unavailable Reason
       items:
         items:
@@ -55,18 +121,27 @@ schemas:
         title: Items
     additionalProperties: false
     type: object
-    required: [available]
+    required:
+    - available
     title: SelfHostedGatewayProvisionOperations
   MultiTargetRollout:
     properties:
-      schema_version: {type: integer, const: 1, title: Schema Version, default: 1}
-      id: {type: string, format: uuid, title: Id}
+      schema_version:
+        type: integer
+        const: 1
+        title: Schema Version
+        default: 1
+      id:
+        type: string
+        format: uuid
+        title: Id
       kind:
         $ref: ../../openapi.yaml#/components/schemas/TargetRolloutKind
       logical_model_id:
         anyOf:
-        - {type: string, format: uuid}
-        - {type: 'null'}
+        - type: string
+          format: uuid
+        - type: 'null'
         title: Logical Model Id
       status:
         $ref: ../../openapi.yaml#/components/schemas/TargetRolloutStatus
@@ -76,11 +151,24 @@ schemas:
         type: array
         minItems: 1
         title: Children
-      created_by: {type: string, maxLength: 320, minLength: 1, title: Created By}
-      created_at: {type: string, format: date-time, title: Created At}
+      created_by:
+        type: string
+        maxLength: 320
+        minLength: 1
+        title: Created By
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
     additionalProperties: false
     type: object
-    required: [id, kind, status, children, created_by, created_at]
+    required:
+    - id
+    - kind
+    - status
+    - children
+    - created_by
+    - created_at
     title: MultiTargetRollout
   MultiTargetRolloutList:
     properties:
@@ -91,47 +179,105 @@ schemas:
         title: Items
     additionalProperties: false
     type: object
-    required: [items]
+    required:
+    - items
     title: MultiTargetRolloutList
   TargetRolloutChild:
     properties:
-      apim_target_id: {type: string, format: uuid, title: Apim Target Id}
-      publication_id: {type: string, format: uuid, title: Publication Id}
-      required: {type: boolean, title: Required, default: true}
+      apim_target_id:
+        type: string
+        format: uuid
+        title: Apim Target Id
+      publication_id:
+        type: string
+        format: uuid
+        title: Publication Id
+      required:
+        type: boolean
+        title: Required
+        default: true
       status:
         $ref: ../../openapi.yaml#/components/schemas/TargetRolloutChildStatus
     additionalProperties: false
     type: object
-    required: [apim_target_id, publication_id, status]
+    required:
+    - apim_target_id
+    - publication_id
+    - status
     title: TargetRolloutChild
   TargetRolloutChildStatus:
     type: string
-    enum: [queued, in_progress, succeeded, failed, rolling_back, rolled_back]
+    enum:
+    - queued
+    - in_progress
+    - succeeded
+    - failed
+    - rolling_back
+    - rolled_back
     title: TargetRolloutChildStatus
   TargetRolloutKind:
     type: string
-    enum: [model_add, model_remove, credential_rotation, route_reconcile]
+    enum:
+    - model_add
+    - model_remove
+    - credential_rotation
+    - route_reconcile
     title: TargetRolloutKind
   TargetRolloutStatus:
     type: string
-    enum: [queued, in_progress, succeeded, partial, failed, rolling_back, rolled_back]
+    enum:
+    - queued
+    - in_progress
+    - succeeded
+    - partial
+    - failed
+    - rolling_back
+    - rolled_back
     title: TargetRolloutStatus
   SelfHostedGatewaySummary:
     properties:
-      id: {type: string, format: uuid, title: Id}
-      native_gateway_id: {type: string, maxLength: 80, minLength: 1, title: Native Gateway Id}
-      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
+      id:
+        type: string
+        format: uuid
+        title: Id
+      native_gateway_id:
+        type: string
+        maxLength: 80
+        minLength: 1
+        title: Native Gateway Id
+      display_name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Display Name
     additionalProperties: false
     type: object
-    required: [id, native_gateway_id, display_name]
+    required:
+    - id
+    - native_gateway_id
+    - display_name
     title: SelfHostedGatewaySummary
   ApimTargetRemovalPreview:
     properties:
-      gateway_profile_id: {type: string, format: uuid, title: Gateway Profile Id}
-      service_name: {type: string, title: Service Name}
-      self_hosted_gateway_count: {type: integer, minimum: 0, title: Self Hosted Gateway Count}
-      runtime_count: {type: integer, minimum: 0, title: Runtime Count}
-      model_count: {type: integer, minimum: 0, title: Model Count}
+      gateway_profile_id:
+        type: string
+        format: uuid
+        title: Gateway Profile Id
+      service_name:
+        type: string
+        title: Service Name
+      self_hosted_gateway_count:
+        type: integer
+        minimum: 0.0
+        title: Self Hosted Gateway Count
+      runtime_count:
+        type: integer
+        minimum: 0.0
+        title: Runtime Count
+      model_count:
+        type: integer
+        minimum: 0.0
+        title: Model Count
       self_hosted_gateways:
         items:
           $ref: ../../openapi.yaml#/components/schemas/SelfHostedGatewaySummary
@@ -144,25 +290,49 @@ schemas:
         type: array
         title: Models
         default: []
-      removal_allowed: {type: boolean, title: Removal Allowed}
+      removal_allowed:
+        type: boolean
+        title: Removal Allowed
       blockers:
-        items: {type: string}
+        items:
+          type: string
         type: array
         title: Blockers
         default: []
     additionalProperties: false
     type: object
-    required: [gateway_profile_id, service_name, self_hosted_gateway_count, runtime_count, model_count, removal_allowed]
+    required:
+    - gateway_profile_id
+    - service_name
+    - self_hosted_gateway_count
+    - runtime_count
+    - model_count
+    - removal_allowed
     title: ApimTargetRemovalPreview
   SelfHostedGatewayWrite:
     properties:
-      native_gateway_id: {type: string, maxLength: 80, minLength: 1, title: Native Gateway Id}
-      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
-      endpoint_url: {type: string, maxLength: 2083, minLength: 1, format: uri, title: Endpoint Url}
+      native_gateway_id:
+        type: string
+        maxLength: 80
+        minLength: 1
+        title: Native Gateway Id
+      display_name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Display Name
+      endpoint_url:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Endpoint Url
       location:
         anyOf:
-        - {type: string, maxLength: 128, minLength: 1}
-        - {type: 'null'}
+        - type: string
+          maxLength: 128
+          minLength: 1
+        - type: 'null'
         title: Location
       hosting_mode:
         $ref: ../../openapi.yaml#/components/schemas/GatewayHostingMode
@@ -172,24 +342,47 @@ schemas:
         default: required
     additionalProperties: false
     type: object
-    required: [native_gateway_id, display_name, endpoint_url]
+    required:
+    - native_gateway_id
+    - display_name
+    - endpoint_url
     title: SelfHostedGatewayWrite
   SelfHostedGatewayNameWrite:
     properties:
-      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
+      display_name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Display Name
     additionalProperties: false
     type: object
-    required: [display_name]
+    required:
+    - display_name
     title: SelfHostedGatewayNameWrite
   SelfHostedGatewayAssociationChange:
     properties:
-      native_gateway_id: {type: string, maxLength: 80, minLength: 1, title: Native Gateway Id}
-      display_name: {type: string, maxLength: 120, minLength: 1, title: Display Name}
-      endpoint_url: {type: string, maxLength: 2083, minLength: 1, format: uri, title: Endpoint Url}
+      native_gateway_id:
+        type: string
+        maxLength: 80
+        minLength: 1
+        title: Native Gateway Id
+      display_name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Display Name
+      endpoint_url:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Endpoint Url
       location:
         anyOf:
-        - {type: string, maxLength: 128, minLength: 1}
-        - {type: 'null'}
+        - type: string
+          maxLength: 128
+          minLength: 1
+        - type: 'null'
         title: Location
       hosting_mode:
         $ref: ../../openapi.yaml#/components/schemas/GatewayHostingMode
@@ -197,81 +390,140 @@ schemas:
       release_gate:
         $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGate
         default: required
-      apim_target_id: {type: string, format: uuid, title: Apim Target Id}
+      apim_target_id:
+        type: string
+        format: uuid
+        title: Apim Target Id
     additionalProperties: false
     type: object
-    required: [native_gateway_id, display_name, endpoint_url, apim_target_id]
+    required:
+    - native_gateway_id
+    - display_name
+    - endpoint_url
+    - apim_target_id
     title: SelfHostedGatewayAssociationChange
   SelfHostedGatewayRemovalPreview:
     properties:
-      deployment_id: {type: string, format: uuid, title: Deployment Id}
-      display_name: {type: string, title: Display Name}
-      model_count: {type: integer, minimum: 0, title: Model Count}
+      deployment_id:
+        type: string
+        format: uuid
+        title: Deployment Id
+      display_name:
+        type: string
+        title: Display Name
+      model_count:
+        type: integer
+        minimum: 0.0
+        title: Model Count
       models:
         items:
           $ref: ../../openapi.yaml#/components/schemas/GatewayPublishedModelSummary
         type: array
         title: Models
         default: []
-      removal_allowed: {type: boolean, title: Removal Allowed}
+      removal_allowed:
+        type: boolean
+        title: Removal Allowed
       blockers:
-        items: {type: string}
+        items:
+          type: string
         type: array
         title: Blockers
         default: []
     additionalProperties: false
     type: object
-    required: [deployment_id, display_name, model_count, removal_allowed]
+    required:
+    - deployment_id
+    - display_name
+    - model_count
+    - removal_allowed
     title: SelfHostedGatewayRemovalPreview
   ApimOnboardingRequest:
     properties:
-      tenant_id: {type: string, format: uuid, title: Tenant Id}
-      resource_id: {type: string, maxLength: 1024, minLength: 1, title: Resource Id}
+      tenant_id:
+        type: string
+        format: uuid
+        title: Tenant Id
+      resource_id:
+        type: string
+        maxLength: 1024
+        minLength: 1
+        title: Resource Id
       name:
         anyOf:
-        - {type: string, maxLength: 120, minLength: 1}
-        - {type: 'null'}
+        - type: string
+          maxLength: 120
+          minLength: 1
+        - type: 'null'
         title: Name
     additionalProperties: false
     type: object
-    required: [tenant_id, resource_id]
+    required:
+    - tenant_id
+    - resource_id
     title: ApimOnboardingRequest
   ApimOnboardingPlan:
     properties:
       request:
         $ref: ../../openapi.yaml#/components/schemas/ApimOnboardingRequest
-      gateway_profile_id: {type: string, format: uuid, title: Gateway Profile Id}
-      service_name: {type: string, title: Service Name}
-      service_tier: {type: string, title: Service Tier}
-      location: {type: string, title: Location}
+      gateway_profile_id:
+        type: string
+        format: uuid
+        title: Gateway Profile Id
+      service_name:
+        type: string
+        title: Service Name
+      service_tier:
+        type: string
+        title: Service Tier
+      location:
+        type: string
+        title: Location
       managed_gateway_origin:
         type: string
         maxLength: 2083
         minLength: 1
         format: uri
         title: Managed Gateway Origin
-      api_id: {type: string, title: Api Id}
-      api_path: {type: string, title: Api Path}
-      dashboard_subscription_id: {type: string, title: Dashboard Subscription Id}
-      probe_subscription_id: {type: string, title: Probe Subscription Id}
+      api_id:
+        type: string
+        title: Api Id
+      api_path:
+        type: string
+        title: Api Path
+      dashboard_subscription_id:
+        type: string
+        title: Dashboard Subscription Id
+      probe_subscription_id:
+        type: string
+        title: Probe Subscription Id
       initial_monthly_token_limit:
         type: integer
-        minimum: 1
+        minimum: 1.0
         title: Initial Monthly Token Limit
         default: 100000
       initial_tokens_per_minute:
         type: integer
-        maximum: 2147483647
-        minimum: 1
+        maximum: 2147483647.0
+        minimum: 1.0
         title: Initial Tokens Per Minute
         default: 100000
-      ready: {type: boolean, title: Ready}
+      fixed_program_sha256:
+        anyOf:
+        - type: string
+          pattern: ^[0-9a-f]{64}$
+        - type: 'null'
+      ready:
+        type: boolean
+        title: Ready
       blockers:
-        items: {type: string}
+        items:
+          type: string
         type: array
         title: Blockers
       steps:
-        items: {type: string}
+        items:
+          type: string
         type: array
         title: Steps
       confirmation_sha256:
@@ -304,15 +556,19 @@ schemas:
         title: Confirmation Sha256
     additionalProperties: false
     type: object
-    required: [request, confirmation_sha256]
+    required:
+    - request
+    - confirmation_sha256
     title: ApimOnboardingStart
   ApimOnboardingOperations:
     properties:
-      available: {type: boolean, title: Available}
+      available:
+        type: boolean
+        title: Available
       unavailable_reason:
         anyOf:
-        - {type: string}
-        - {type: 'null'}
+        - type: string
+        - type: 'null'
         title: Unavailable Reason
       items:
         items:
@@ -321,25 +577,30 @@ schemas:
         title: Items
     additionalProperties: false
     type: object
-    required: [available]
+    required:
+    - available
     title: ApimOnboardingOperations
   GatewayDeploymentScope:
-    additionalProperties: false
     properties:
       mode:
         $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentScopeMode
         default: all
       deployment_ids:
-        default: []
-        items: {format: uuid, type: string}
-        title: Deployment Ids
+        items:
+          type: string
+          format: uuid
         type: array
-    title: GatewayDeploymentScope
+        title: Deployment Ids
+        default: []
+    additionalProperties: false
     type: object
+    title: GatewayDeploymentScope
   GatewayDeploymentScopeMode:
-    enum: [all, selected]
-    title: GatewayDeploymentScopeMode
     type: string
+    enum:
+    - all
+    - selected
+    title: GatewayDeploymentScopeMode
   ApimTarget:
     properties:
       schema_version:
@@ -605,10 +866,6 @@ schemas:
       resource_lifecycle_available:
         type: boolean
         title: Resource Lifecycle Available
-      deployment_scoping_available:
-        type: boolean
-        title: Deployment Scoping Available
-        default: false
       onboarding_available:
         type: boolean
         title: Onboarding Available
@@ -691,7 +948,7 @@ schemas:
         maxLength: 255
         minLength: 1
         title: Probe Subscription Id
-        default: turnstile-publisher-probe
+        default: finops-publisher-probe
     additionalProperties: false
     type: object
     required:

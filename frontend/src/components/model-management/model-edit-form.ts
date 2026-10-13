@@ -1,4 +1,28 @@
+import contextRules from "../../../../turnstile_core/pricing/context-rules.json" with { type: "json" }
 import type { ContextPriceRule, ManagedModel, PriceCatalogContextTier, PriceCatalogModel, PriceCatalogOption, PriceCatalogOptionsResponse, PriceSource } from "../../data-sources/apim/types"
+
+export function resolveContextPriceRule(
+  model: PriceCatalogModel,
+  descriptor: PriceCatalogContextTier,
+  rules = contextRules.rules,
+): PriceCatalogContextTier {
+  const matching = rules.filter(rule => rule.basis === "request_input_tokens" && rule.matches.some(match =>
+    match.source === model.source && match.product === model.product
+    && match.group_key === descriptor.group_key && match.service_tier === descriptor.service_tier))
+  if (matching.length !== 1) return descriptor
+  const rule = matching[0]
+  if (descriptor.input_range !== null) return descriptor.input_range_source?.rule_id === rule.id
+    && rule.origin === "reference" ? {
+      ...descriptor, input_range_source: { ...descriptor.input_range_source, origin: "reference" },
+    } : descriptor
+  const tier = rule.tiers.find(candidate => candidate.key === descriptor.key)
+  return tier ? {
+    ...descriptor,
+    input_range: tier.input_range,
+    input_range_source: { rule_id: rule.id, url: rule.source_url, revision: rule.source_revision,
+      verified_on: rule.verified_on, origin: rule.origin === "official" ? "official" : "reference", note: rule.note },
+  } : descriptor
+}
 
 type ModelContextTier = {
   key: string
@@ -49,11 +73,12 @@ export function groupContextPriceModels(models: PriceCatalogModel[]): ModelPrice
   const result: ModelPriceCandidate[] = []
   const groups = new Map<string, ModelPriceCandidate>()
   for (const model of models) {
-    const descriptor = contextTierFromModel(model)
-    if (!descriptor) {
+    const discovered = contextTierFromModel(model)
+    if (!discovered) {
       result.push(model)
       continue
     }
+    const descriptor = resolveContextPriceRule(model, discovered)
     const groupKey = JSON.stringify([model.source, model.product, descriptor.group_key, descriptor.service_tier])
     let grouped = groups.get(groupKey)
     if (!grouped) {
@@ -95,8 +120,9 @@ export function pairContextPriceOptions(
       || metadata.key !== tier.key || metadata.order !== tier.order) {
       throw new Error("分档价目与所选模型不匹配。")
     }
-    return metadata.input_range === null ? tier : {
-      ...tier, inputRange: metadata.input_range, inputRangeSource: metadata.input_range_source,
+    const resolved = resolveContextPriceRule(details, metadata)
+    return resolved.input_range === null ? tier : {
+      ...tier, inputRange: resolved.input_range, inputRangeSource: resolved.input_range_source,
     }
   })
   const ranges = tiers.map(tier => tier.inputRange)
@@ -502,4 +528,8 @@ export function restoreContextPrices(model: ManagedModel): ModelPriceOptions | n
   })
   const [grouped] = groupContextPriceModels(responses.map(response => response.model_entry))
   return pairContextPriceOptions(grouped, responses)
+}
+
+export function toggleModelSelection<T extends string>(values: T[], value: T, checked: boolean): T[] {
+  return checked ? values.includes(value) ? values : [...values, value] : values.filter((item) => item !== value)
 }

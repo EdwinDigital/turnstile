@@ -62,6 +62,7 @@ export function compatibleNativeRouteRuntimes(
   model: ManagedModel,
   registry: ModelRegistry,
 ) {
+  if (model.capabilities.includes("image_generation")) return []
   const primary = registry.runtimes.find((runtime) => runtime.id === model.runtime_id)
   if (!primary) return []
   return registry.runtimes.filter((runtime) => runtimeCompatible(runtime, primary))

@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 from uuid import UUID, uuid5
 
@@ -24,7 +28,11 @@ from .gateway_targets import (
     GatewayServingDeployment,
     MultiTargetRollout,
 )
-from .image_profiles import ImageGenerationLimits, ImageGenerationProfile, validate_image_profile
+from .image_profiles import (
+    ImageGenerationLimits,
+    ImageGenerationProfile,
+    validate_image_profile,
+)
 from .models import StrictModel
 from .runtime_models import (
     BrandKey,
@@ -42,11 +50,22 @@ from .runtime_models import (
     default_capabilities,
 )
 
+_PUBLICATION_PERMISSIONS = json.loads(
+    Path(__file__).with_name("apim_publication_permissions.json").read_text(encoding="utf-8")
+)
+PUBLICATION_REQUIRED_ACTIONS: tuple[str, ...] = tuple(_PUBLICATION_PERMISSIONS["publication"])
+PUBLICATION_RECOVERY_ACTIONS: tuple[str, ...] = tuple(_PUBLICATION_PERMISSIONS["recovery"])
+PUBLICATION_PROBE_ACTIONS: tuple[str, ...] = tuple(_PUBLICATION_PERMISSIONS["probe"])
+PUBLICATION_OAUTH_ACTIONS: tuple[str, ...] = tuple(_PUBLICATION_PERMISSIONS["oauth"])
+GATEWAY_PROVISION_ACTIONS: tuple[str, ...] = tuple(_PUBLICATION_PERMISSIONS["gateway_provision"])
+GATEWAY_BOOTSTRAP_ACTIONS: tuple[str, ...] = tuple(_PUBLICATION_PERMISSIONS["gateway_bootstrap"])
+
 
 class ApiFormat(StrEnum):
     OPENAI_CHAT = "openai_chat"
     ANTHROPIC_MESSAGES = "anthropic_messages"
     OPENAI_IMAGES = "openai_images"
+    MICROSOFT_DECISION = "microsoft_decision"
 
 
 class AuthStrategy(StrEnum):
@@ -60,6 +79,51 @@ class AuthStrategy(StrEnum):
 class StreamingMode(StrEnum):
     NATIVE = "native"
     BUFFERED = "buffered"
+
+
+@dataclass(frozen=True)
+class CountTokensOperation:
+    support: Literal["supported", "unsupported", "unknown"]
+    backend_path: str | None = None
+
+
+@dataclass(frozen=True)
+class CountTokensRejection:
+    status_code: int
+    reason: str
+    error_type: str
+    code: str
+    message: str
+
+    def payload(self) -> dict[str, object]:
+        return {"type": "error", "error": {
+            "type": self.error_type, "code": self.code, "message": self.message,
+        }}
+
+    def matches(self, status_code: int, payload: object) -> bool:
+        if status_code != self.status_code or not isinstance(payload, dict):
+            return False
+        error = payload.get("error")
+        return (
+            payload.get("type") == "error"
+            and isinstance(error, dict)
+            and error.get("type") == self.error_type
+            and error.get("code") == self.code
+            and isinstance(error.get("message"), str)
+            and bool(error["message"].strip())
+        )
+
+
+COUNT_TOKENS_REJECTIONS = MappingProxyType({
+    "unavailable": CountTokensRejection(
+        404, "Not Found", "not_found_error", "count_tokens_unavailable",
+        "Token counting is unavailable for this model",
+    ),
+    "unpublished": CountTokensRejection(
+        400, "Bad Request", "invalid_request_error", "model_not_published",
+        "The requested model is not published by this gateway revision",
+    ),
+})
 
 
 class PublicationStatus(StrEnum):
@@ -93,6 +157,24 @@ class GatewayReleaseRole(StrEnum):
     EXPIRED = "expired"
     IN_PROGRESS = "in_progress"
     ROLLED_BACK = "rolled_back"
+
+
+def program_migration_spec_matches(
+    previous: GatewayReleaseSpec, candidate: GatewayReleaseSpec,
+) -> bool:
+    before = previous.model_copy(update={"removed_models": []}).model_dump(mode="json")
+    after = candidate.model_dump(mode="json")
+    if len(before["bindings"]) != len(after["bindings"]):
+        return False
+    for old, new in zip(before["bindings"], after["bindings"], strict=True):
+        if old.get("runtime_id") is None and new.get("runtime_id") is not None:
+            try:
+                if str(UUID(new["runtime_id"])) != new["runtime_id"]:
+                    return False
+            except (ValueError, TypeError):
+                return False
+            old["runtime_id"] = new["runtime_id"]
+    return before == after
 
 
 class GatewayReleaseOperationKind(StrEnum):
@@ -165,9 +247,13 @@ class RuntimeTarget(StrictModel):
         ):
             raise ValueError("a new Bedrock runtime requires its Runtime URL and API key")
         if has_openai and self.api_key is None:
-            raise ValueError("a new OpenAI-compatible runtime requires its Base URL and API key")
+            raise ValueError(
+                "a new OpenAI-compatible runtime requires its Base URL and API key"
+            )
         if self.model_vendor is not None and not has_openai:
-            raise ValueError("model_vendor belongs only to a new OpenAI-compatible runtime")
+            raise ValueError(
+                "model_vendor belongs only to a new OpenAI-compatible runtime"
+            )
         if not has_bedrock and not has_foundry and not has_openai:
             raise ValueError("a new runtime requires a supported provider connection")
         if has_foundry and (self.foundry_inference_endpoint is None) != (
@@ -190,36 +276,6 @@ class ModelTarget(StrictModel):
     output_cost_per_million: float | None = Field(default=None, ge=0)
     cached_cost_per_million: float | None = Field(default=None, ge=0)
     cache_write_cost_per_million: float | None = Field(default=None, ge=0)
-    price_source: PriceSource = Field(
-        default=PriceSource.MANUAL, exclude_if=lambda value: value is PriceSource.MANUAL,
-    )
-    price_reference: str | None = Field(
-        default=None, max_length=1000, exclude_if=lambda value: value is None,
-    )
-    price_discount_percent: float | None = Field(
-        default=None, gt=0, le=100, exclude_if=lambda value: value is None,
-    )
-    context_price_references: list[str] = Field(
-        default_factory=list, max_length=32, exclude_if=lambda value: not value,
-    )
-    context_price_tiers: list[StoredContextPriceTier] = Field(
-        default_factory=list, max_length=32, exclude_if=lambda value: not value,
-    )
-    context_price_rule: ContextPriceRule | None = Field(
-        default=None, exclude_if=lambda value: value is None,
-    )
-    list_input_cost_per_million: float | None = Field(
-        default=None, ge=0, exclude_if=lambda value: value is None,
-    )
-    list_output_cost_per_million: float | None = Field(
-        default=None, ge=0, exclude_if=lambda value: value is None,
-    )
-    list_cached_cost_per_million: float | None = Field(
-        default=None, ge=0, exclude_if=lambda value: value is None,
-    )
-    list_cache_write_cost_per_million: float | None = Field(
-        default=None, ge=0, exclude_if=lambda value: value is None,
-    )
     allowed_roles: list[str] = Field(default_factory=lambda: ["owner", "admin", "member"])
     assignment_required: bool = True
     image_profile: ImageGenerationProfile | None = None
@@ -245,14 +301,54 @@ class ModelTarget(StrictModel):
         if self.image_profile is not None:
             if self.capabilities != ["image_generation"]:
                 raise ValueError("An image profile belongs only to an image model")
-            if self.price_source is not PriceSource.MANUAL:
-                raise ValueError("Image generation requires explicit manual prices")
+            if self.price_source not in {PriceSource.MANUAL, PriceSource.AZURE_RETAIL}:
+                raise ValueError("Image generation requires manual or Azure retail prices")
             validate_image_profile(self.image_profile)
         return self
 
+    price_source: PriceSource = Field(
+        default=PriceSource.MANUAL, exclude_if=lambda value: value is PriceSource.MANUAL,
+    )
+
+    price_reference: str | None = Field(
+        default=None, max_length=1000, exclude_if=lambda value: value is None,
+    )
+
+    price_discount_percent: float | None = Field(
+        default=None, gt=0, le=100, exclude_if=lambda value: value is None,
+    )
+
+    context_price_references: list[str] = Field(
+        default_factory=list, max_length=32, exclude_if=lambda value: not value,
+    )
+
+    context_price_tiers: list[StoredContextPriceTier] = Field(
+        default_factory=list, max_length=32, exclude_if=lambda value: not value,
+    )
+
+    context_price_rule: ContextPriceRule | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+
+    list_input_cost_per_million: float | None = Field(
+        default=None, ge=0, exclude_if=lambda value: value is None,
+    )
+
+    list_output_cost_per_million: float | None = Field(
+        default=None, ge=0, exclude_if=lambda value: value is None,
+    )
+
+    list_cached_cost_per_million: float | None = Field(
+        default=None, ge=0, exclude_if=lambda value: value is None,
+    )
+
+    list_cache_write_cost_per_million: float | None = Field(
+        default=None, ge=0, exclude_if=lambda value: value is None,
+    )
+
 
 class ModelCreateTarget(StrictModel):
-    operation: Literal["chat", "image_generation"] = "chat"
+    operation: Literal["chat", "image_generation", "decision"] = "chat"
     image_configuration: ImageGenerationLimits | None = None
     deployment_name: str | None = Field(default=None, min_length=1, max_length=500)
     model_key: str | None = Field(
@@ -268,13 +364,6 @@ class ModelCreateTarget(StrictModel):
     output_cost_per_million: float | None = Field(default=None, ge=0)
     cached_cost_per_million: float | None = Field(default=None, ge=0)
     cache_write_cost_per_million: float | None = Field(default=None, ge=0)
-    price_source: PriceSource = PriceSource.MANUAL
-    price_reference: str | None = Field(default=None, max_length=1000)
-    price_discount_percent: float | None = Field(default=None, gt=0, le=100)
-    context_price_references: list[str] = Field(default_factory=list, max_length=32)
-    context_price_rule: ContextPriceRule | None = Field(
-        default=None, exclude_if=lambda value: value is None,
-    )
 
     @model_validator(mode="after")
     def require_deployment_or_explicit_identity(self) -> ModelCreateTarget:
@@ -297,14 +386,19 @@ class ModelCreateTarget(StrictModel):
                 raise ValueError("Catalog pricing requires a reference from its selected source")
             self.price_reference = reference
         if self.operation == "image_generation":
-            if self.price_source is not PriceSource.MANUAL:
-                raise ValueError("Image generation requires explicit manual prices")
+            if self.price_source not in {PriceSource.MANUAL, PriceSource.AZURE_RETAIL}:
+                raise ValueError("Image generation requires manual or Azure retail prices")
             if self.deployment_name is None:
                 raise ValueError("Image generation requires an existing Foundry deployment")
             if self.context_window is not None or self.cache_write_cost_per_million is not None:
                 raise ValueError("Image generation has no text context window or cache-write rate")
         elif self.image_configuration is not None:
             raise ValueError("An image profile cannot be attached to a text model")
+        if self.operation == "decision":
+            if self.deployment_name is None:
+                raise ValueError("Decision requires an existing Foundry deployment")
+            if self.price_source not in {PriceSource.MANUAL, PriceSource.AZURE_RETAIL}:
+                raise ValueError("Decision requires manual or Azure retail prices")
         explicit = (self.model_key, self.display_name, self.upstream_model_id)
         if self.deployment_name is not None:
             if any(value is not None for value in explicit):
@@ -318,13 +412,27 @@ class ModelCreateTarget(StrictModel):
             )
         return self
 
+    price_source: PriceSource = PriceSource.MANUAL
+
+    price_reference: str | None = Field(default=None, max_length=1000)
+
+    price_discount_percent: float | None = Field(default=None, gt=0, le=100)
+
+    context_price_references: list[str] = Field(default_factory=list, max_length=32)
+
+    context_price_rule: ContextPriceRule | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+
 
 class GatewayPublicationCreate(StrictModel):
     gateway_profile_id: UUID
-    deployment_scope: GatewayDeploymentScope = Field(default_factory=GatewayDeploymentScope)
     provider: ProviderTarget
     runtime: RuntimeTarget
     model: ModelCreateTarget
+    deployment_scope: GatewayDeploymentScope = Field(
+        default_factory=GatewayDeploymentScope
+    )
 
 
 class MultiTargetPublicationChildCreate(StrictModel):
@@ -333,13 +441,18 @@ class MultiTargetPublicationChildCreate(StrictModel):
 
 
 class MultiTargetPublicationCreate(StrictModel):
-    children: tuple[MultiTargetPublicationChildCreate, ...] = Field(min_length=2, max_length=20)
+    children: tuple[MultiTargetPublicationChildCreate, ...] = Field(
+        min_length=2,
+        max_length=20,
+    )
 
     @model_validator(mode="after")
     def require_distinct_targets(self) -> MultiTargetPublicationCreate:
-        target_ids = [child.publication.gateway_profile_id for child in self.children]
+        target_ids = [
+            child.publication.gateway_profile_id for child in self.children
+        ]
         if len(target_ids) != len(set(target_ids)):
-            raise ValueError("A multi-target publication cannot repeat an APIM target")
+            raise ValueError("a multi-target publication cannot repeat an APIM target")
         return self
 
 
@@ -525,10 +638,27 @@ class GatewayModelBinding(StrictModel):
     managed_identity_resource: str | None = None
     streaming_mode: StreamingMode
     runtime_config: dict[str, object] = Field(default_factory=dict)
-    deployment_scope: GatewayDeploymentScope = Field(default_factory=GatewayDeploymentScope)
+    deployment_scope: GatewayDeploymentScope = Field(
+        default_factory=GatewayDeploymentScope
+    )
     serving_deployments: tuple[GatewayServingDeployment, ...] = ()
     logical_model_id: UUID | None = None
     model: ModelTarget
+
+    @property
+    def count_tokens_operation(self) -> CountTokensOperation:
+        if self.api_format is not ApiFormat.ANTHROPIC_MESSAGES:
+            return CountTokensOperation("unsupported")
+        if self.provider_brand_key in {BrandKey.AMAZON_BEDROCK, BrandKey.AZURE_DATABRICKS}:
+            return CountTokensOperation("unsupported")
+        if (
+            self.routing_managed
+            and self.backend_url is not None
+            and self.provider_brand_key is BrandKey.MICROSOFT_FOUNDRY
+            and self.backend_path.rstrip("/") == "/anthropic/v1/messages"
+        ):
+            return CountTokensOperation("supported", "/anthropic/v1/messages/count_tokens")
+        return CountTokensOperation("unknown")
 
     @property
     def oauth(self) -> OAuthClientCredentialsConfig | None:
@@ -551,13 +681,6 @@ class GatewayModelBinding(StrictModel):
 
     @model_validator(mode="after")
     def require_managed_backend_details(self) -> GatewayModelBinding:
-        serving_ids = [item.deployment_id for item in self.serving_deployments]
-        native_ids = [item.native_gateway_id.casefold() for item in self.serving_deployments]
-        if len(serving_ids) != len(set(serving_ids)) or len(native_ids) != len(set(native_ids)):
-            raise ValueError("A model binding cannot repeat a serving Gateway deployment")
-        if (self.deployment_scope.mode is GatewayDeploymentScopeMode.SELECTED
-                and set(serving_ids) != set(self.deployment_scope.deployment_ids)):
-            raise ValueError("Selected deployment scope must match immutable serving deployments")
         if self.auth_strategy is AuthStrategy.OAUTH_CLIENT_CREDENTIALS:
             oauth = self.oauth
             if (
@@ -579,6 +702,19 @@ class GatewayModelBinding(StrictModel):
             and not self.managed_identity_resource
         ):
             raise ValueError("a managed-identity binding requires managed_identity_resource")
+        serving_ids = [item.deployment_id for item in self.serving_deployments]
+        native_ids = [item.native_gateway_id.casefold() for item in self.serving_deployments]
+        if len(serving_ids) != len(set(serving_ids)) or len(native_ids) != len(
+            set(native_ids)
+        ):
+            raise ValueError("a model binding cannot repeat a serving Gateway deployment")
+        if self.deployment_scope.mode is GatewayDeploymentScopeMode.ALL:
+            if self.deployment_scope.deployment_ids:
+                raise ValueError("an all-deployments binding cannot select deployment IDs")
+        elif set(serving_ids) != set(self.deployment_scope.deployment_ids):
+            raise ValueError(
+                "selected deployment scope must match its immutable serving deployments"
+            )
         return self
 
 
@@ -591,11 +727,6 @@ class GatewayReleaseSpec(StrictModel):
 
     @model_validator(mode="after")
     def require_unique_aliases(self) -> GatewayReleaseSpec:
-        release_ids = {item.deployment_id for item in self.gateway_deployments}
-        native_ids = {item.native_gateway_id.casefold() for item in self.gateway_deployments}
-        if (len(release_ids) != len(self.gateway_deployments)
-            or len(native_ids) != len(self.gateway_deployments)):
-            raise ValueError("A Gateway release cannot repeat a serving deployment")
         aliases = [item.id.casefold() for item in self.discovery_models]
         if len(aliases) != len(set(aliases)):
             raise ValueError("model aliases must be unique within a gateway release")
@@ -607,9 +738,25 @@ class GatewayReleaseSpec(StrictModel):
         removed_aliases = [item.model_key.casefold() for item in self.removed_models]
         if set(removed_aliases) & (set(aliases) | set(binding_aliases)):
             raise ValueError("a removed model cannot remain active in the gateway release")
+        release_deployment_ids = {
+            deployment.deployment_id for deployment in self.gateway_deployments
+        }
+        release_native_ids = {
+            deployment.native_gateway_id.casefold()
+            for deployment in self.gateway_deployments
+        }
+        if len(release_deployment_ids) != len(self.gateway_deployments) or len(
+            release_native_ids
+        ) != len(self.gateway_deployments):
+            raise ValueError("a gateway release cannot repeat a serving deployment")
         for binding in self.bindings:
-            if not {item.deployment_id for item in binding.serving_deployments} <= release_ids:
-                raise ValueError("Binding serving deployments must belong to the Gateway release")
+            if not {
+                deployment.deployment_id
+                for deployment in binding.serving_deployments
+            }.issubset(release_deployment_ids):
+                raise ValueError(
+                    "binding serving deployments must belong to the gateway release"
+                )
             pool = binding.backend_pool
             if pool is None:
                 continue
@@ -642,24 +789,26 @@ class GatewayPublicationIntent(StrictModel):
     @model_validator(mode="after")
     def require_operation_target(self) -> GatewayPublicationIntent:
         if self.gateway_profile_id != self.desired_spec.gateway_profile_id:
-            raise ValueError("Publication target must match its desired gateway release")
+            raise ValueError("publication target must match its desired gateway release")
         if self.publication_kind is PublicationKind.MODEL_REMOVE:
             if len(self.desired_spec.removed_models) != 1:
-                raise ValueError("A model removal publication requires one removal target")
+                raise ValueError("a model removal publication requires one removal target")
         elif self.desired_spec.removed_models:
-            raise ValueError("Only model removal publications can carry a removal target")
-        if self.publication_kind is not PublicationKind.MODEL_REMOVE \
-                and not self.desired_spec.bindings:
-            raise ValueError("Non-removal publications require a binding")
+            raise ValueError("only model removal publications can carry a removal target")
+        if (
+            self.publication_kind is not PublicationKind.MODEL_REMOVE
+            and not self.desired_spec.bindings
+        ):
+            if isinstance(self, GatewayPublication):
+                self.require_empty_fixed_installation()
+                return self
+            raise ValueError("non-removal publications require a binding")
         return self
 
 
-class GatewayPublication(StrictModel):
+class GatewayPublication(GatewayPublicationIntent):
     id: UUID
-    gateway_profile_id: UUID
     generation: int
-    publication_kind: PublicationKind = PublicationKind.MODEL_ADD
-    desired_spec: GatewayReleaseSpec
     desired_spec_sha256: str
     status: PublicationStatus
     base_release_id: UUID | None
@@ -675,19 +824,66 @@ class GatewayPublication(StrictModel):
     completed_at: datetime | None
     updated_at: datetime
 
-    @model_validator(mode="after")
-    def require_operation_target(self) -> GatewayPublication:
-        if self.publication_kind is PublicationKind.MODEL_REMOVE:
-            if len(self.desired_spec.removed_models) != 1:
-                raise ValueError("a model removal publication requires one removal target")
-        elif self.desired_spec.removed_models:
-            raise ValueError("only model removal publications can carry a removal target")
+    def require_onboarding_installation(
+        self, target_id: UUID, operation_id: UUID, artifact_sha256: str | None,
+    ) -> None:
+        from .storage_routes import FixedProgramInstallation, canonical_document, document_digest
+
+        self.require_empty_fixed_installation()
+        raw_program = self.resource_manifest.get("fixed_route_program")
+        if not isinstance(raw_program, dict):
+            raise ValueError("APIM initialization fixed program is missing")
+        installed = FixedProgramInstallation.model_validate_json(canonical_document(raw_program))
         if (
-            self.publication_kind is not PublicationKind.MODEL_REMOVE
-            and not self.desired_spec.bindings
+            artifact_sha256 is None or self.gateway_profile_id != target_id
+            or self.id != uuid5(operation_id, "fixed-program-installation")
+            or self.desired_spec_sha256 != document_digest(self.desired_spec)
+            or not installed.model_additions_enabled
+            or installed.program.scope.gateway_id != "managed"
+            or self.resource_manifest.get("onboarding_operation_id") != str(operation_id)
+            or self.resource_manifest.get("initialization_program_artifact_sha256")
+            != artifact_sha256
         ):
-            raise ValueError("non-removal publications require a binding")
-        return self
+            raise ValueError("APIM initialization requires its exact verified fixed program")
+
+    def require_empty_fixed_installation(self) -> None:
+        from .storage_routes import (
+            ActiveRouteHead,
+            ProgramIdentity,
+            RouteSnapshot,
+            canonical_document,
+        )
+
+        if (
+            self.publication_kind is not PublicationKind.ROUTE_RECONCILE
+            or self.status is not PublicationStatus.ACTIVE or self.base_release_id is not None
+            or self.generation != 1 or self.desired_spec.discovery_models
+            or self.desired_spec.removed_models
+        ):
+            raise ValueError("Only an initial fixed installation can have an empty release")
+        raw_program = self.resource_manifest.get("fixed_route_program")
+        if not isinstance(raw_program, dict):
+            raise ValueError("Empty installation requires a fixed program")
+        identity = raw_program.get("program")
+        raw_snapshot = self.resource_manifest.get("fixed_route_snapshot")
+        raw_head = self.resource_manifest.get("fixed_route_head")
+        if (not isinstance(identity, dict) or not isinstance(raw_snapshot, dict)
+                or not isinstance(raw_head, dict)):
+            raise ValueError("Empty installation records are incomplete")
+        program = ProgramIdentity.model_validate_json(canonical_document(identity))
+        snapshot = RouteSnapshot.model_validate_json(canonical_document(raw_snapshot))
+        head = ActiveRouteHead.model_validate_json(canonical_document(raw_head))
+        snapshot.require_valid(head.activated_epoch)
+        if (
+            snapshot.routes or snapshot.members or snapshot.approval.entry_count != 0
+            or head.approval != snapshot.approval or head.approval.generation != 1
+            or program.scope != head.approval.scope
+            or program.scope.target_id != str(self.gateway_profile_id)
+            or program.api_revision != self.apim_revision
+            or program.program_sha256 != self.policy_sha256
+            or program.program_sha256 != head.approval.required_program_sha256
+        ):
+            raise ValueError("Empty installation program and configuration binding changed")
 
 
 class GatewayAuthorizationRequirement(StrictModel):
@@ -739,8 +935,9 @@ def _credential_binding_documents(publication: GatewayPublication) -> dict[str, 
     documents: dict[str, set[str]] = {}
     for binding in publication.desired_spec.bindings:
         sources: list[GatewayModelBinding | GatewayBackendPoolMember] = [binding]
-        if binding.backend_pool is not None:
-            sources.extend(binding.backend_pool.members)
+        pool = binding.backend_pool
+        if pool is not None:
+            sources.extend(pool.members)
         for source in sources:
             if source.named_value_name is None:
                 continue
@@ -749,15 +946,19 @@ def _credential_binding_documents(publication: GatewayPublication) -> dict[str, 
             )
             provider_id = source.provider_id if isinstance(source, GatewayModelBinding) else None
             documents.setdefault(source.named_value_name, set()).add(json.dumps({
-                "name": source.named_value_name, "auth": source.auth_strategy.value,
+                "name": source.named_value_name,
+                "auth": source.auth_strategy.value,
                 "key_vault_secret_id": str(secret_id) if secret_id is not None else None,
                 "backend_url": str(source.backend_url or "").rstrip("/"),
-                "runtime_id": str(source.runtime_id or ""), "provider_id": str(provider_id or ""),
+                "runtime_id": str(source.runtime_id or ""),
+                "provider_id": str(provider_id or ""),
             }, sort_keys=True, separators=(",", ":")))
     return documents
 
 
-def _credential_binding_digest(publication: GatewayPublication, documents: set[str]) -> str:
+def _credential_binding_digest(
+    publication: GatewayPublication, documents: set[str],
+) -> str:
     payload = {"bindings": sorted(documents),
                "credential_generation": publication.resource_manifest.get("credential_generation")}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -816,8 +1017,10 @@ def publication_missing_credential_source(publication: GatewayPublication) -> bo
     if states is not None and publication.desired_spec.bindings:
         reference = publication.desired_spec.bindings[-1].named_value_name
         return reference is not None and states.get(reference) == "missing"
-    return (publication.status is PublicationStatus.FAILED
-            and publication.error_code == "CredentialSourceMissingError")
+    return (
+        publication.status is PublicationStatus.FAILED
+        and publication.error_code == "CredentialSourceMissingError"
+    )
 
 
 def publication_materialized_named_values(
@@ -831,28 +1034,31 @@ def publication_materialized_named_values(
     }:
         return []
     binding = publication.desired_spec.bindings[-1]
-    if (
+    directly_managed = (
         binding.auth_strategy
-        not in {AuthStrategy.NAMED_VALUE_BEARER, AuthStrategy.NAMED_VALUE_API_KEY}
-        or binding.key_vault_secret_id is not None
-        or binding.named_value_name is None
-    ):
+        in {
+            AuthStrategy.NAMED_VALUE_BEARER,
+            AuthStrategy.NAMED_VALUE_API_KEY,
+        }
+        and binding.key_vault_secret_id is None
+    )
+    if not directly_managed or binding.named_value_name is None:
         return []
     states = publication_credential_states(publication)
     if states is not None:
         return [name for name, state in states.items() if state == "present"]
     confirmed = publication.apim_revision is not None or provisioning_completed
-    raw_names = publication.resource_manifest.get("named_values") if confirmed else None
-    names = (
-        [value for value in raw_names if isinstance(value, str)]
-        if isinstance(raw_names, list)
+    raw_materialized = publication.resource_manifest.get("named_values") if confirmed else None
+    materialized = (
+        [str(value) for value in raw_materialized]
+        if isinstance(raw_materialized, list)
         else []
     )
     if publication_missing_credential_source(publication):
-        return [reference for reference in names if reference != binding.named_value_name]
-    if binding.named_value_name not in names and confirmed:
-        names.append(binding.named_value_name)
-    return names
+        return [reference for reference in materialized if reference != binding.named_value_name]
+    if binding.named_value_name not in materialized and confirmed:
+        materialized.append(binding.named_value_name)
+    return materialized
 
 
 def publication_retry_requires_credential(publication: GatewayPublication) -> bool:
@@ -865,57 +1071,31 @@ def publication_retry_requires_credential(publication: GatewayPublication) -> bo
     if binding.oauth is not None:
         materialized = publication.resource_manifest.get("oauth_credentials")
         return not isinstance(materialized, list) or binding.oauth.provider_id not in materialized
-    return (
+    directly_managed = (
         binding.auth_strategy
-        in {AuthStrategy.NAMED_VALUE_BEARER, AuthStrategy.NAMED_VALUE_API_KEY}
+        in {
+            AuthStrategy.NAMED_VALUE_BEARER,
+            AuthStrategy.NAMED_VALUE_API_KEY,
+        }
         and binding.key_vault_secret_id is None
-        and binding.named_value_name not in publication_materialized_named_values(publication)
     )
-
-
-PUBLICATION_REQUIRED_ACTIONS = (
-    "Microsoft.ApiManagement/service/read",
-    "Microsoft.ApiManagement/service/apis/read",
-    "Microsoft.ApiManagement/service/apis/write",
-    "Microsoft.ApiManagement/service/apis/policies/read",
-    "Microsoft.ApiManagement/service/apis/policies/write",
-    "Microsoft.ApiManagement/service/apis/operations/read",
-    "Microsoft.ApiManagement/service/apis/operations/policies/read",
-    "Microsoft.ApiManagement/service/apis/operations/policies/write",
-    "Microsoft.ApiManagement/service/apis/releases/read",
-    "Microsoft.ApiManagement/service/apis/releases/write",
-    "Microsoft.ApiManagement/service/backends/read",
-    "Microsoft.ApiManagement/service/backends/write",
-    "Microsoft.ApiManagement/service/namedValues/read",
-    "Microsoft.ApiManagement/service/namedValues/write",
-)
-PUBLICATION_RECOVERY_ACTIONS = (
-    "Microsoft.ApiManagement/service/apis/read",
-    "Microsoft.ApiManagement/service/apis/policies/read",
-)
-PUBLICATION_PROBE_ACTIONS = (
-    "Microsoft.ApiManagement/service/subscriptions/read",
-    "Microsoft.ApiManagement/service/subscriptions/listSecrets/action",
-)
-PUBLICATION_OAUTH_ACTIONS = tuple(
-    f"Microsoft.ApiManagement/service/{resource}/{action}"
-    for resource in (
-        "authorizationProviders", "authorizationProviders/authorizations",
-        "authorizationProviders/authorizations/accessPolicies",
-    ) for action in ("read", "write")
-)
+    return directly_managed and binding.named_value_name not in (
+        publication_materialized_named_values(publication)
+    )
 
 
 class GatewayPublicationFailure(StrictModel):
     code: Literal[
         "publisher_permissions_missing", "publisher_permissions_unverified",
         "publisher_authorization_failed", "parent_policy_changed", "credential_source_missing",
-        "apim_infrastructure_upgrade_required", "publication_failed",
+        "apim_infrastructure_upgrade_required",
+        "publication_failed", "deployment_not_found", "deployment_metadata_unavailable",
+        "upstream_request_failed",
     ]
     message: str
     stage: PublicationStatus | None = None
     request_id: UUID | None = None
-    http_status: Literal[401, 403] | None = None
+    http_status: int | None = Field(default=None, strict=True, ge=100, le=599)
     missing_actions: list[str] = Field(default_factory=list)
 
 
@@ -944,6 +1124,40 @@ def publication_failure(
     message = publication.error_message or ""
     if not isinstance(message, str) or len(message) > 8192:
         return failure
+    if message.startswith("Deployment validation failed: "):
+        try:
+            details = json.loads(message.split(": ", 1)[1])
+        except (ValueError, TypeError):
+            return failure
+        if (not isinstance(details, dict)
+                or details.get("code") not in {
+                    "deployment_not_found", "deployment_metadata_unavailable",
+                }
+                or not isinstance(details.get("deployment"), str)
+                or not re.fullmatch(r"[a-zA-Z0-9_.-]{1,128}", details["deployment"])
+                or type(details.get("http_status")) is not int
+                or not 100 <= details["http_status"] <= 599):
+            return failure
+        deployment = details["deployment"]
+        reason = (f"Deployment '{deployment}' does not exist in the selected connection. "
+                  "Use the deployment name, not the model name."
+                  if details["code"] == "deployment_not_found" else
+                  f"Deployment '{deployment}' could not be verified; "
+                  f"the deployment directory returned HTTP {details['http_status']}.")
+        return failure.model_copy(update={
+            "code": details["code"], "message": reason, "http_status": details["http_status"],
+        })
+    probe = re.fullmatch(
+        r"Route probe returned HTTP ([1-5][0-9]{2}); no request replayed", message,
+    )
+    if probe is not None:
+        status = int(probe.group(1))
+        return failure.model_copy(update={
+            "code": "upstream_request_failed", "http_status": status,
+            "message": f"Model validation returned HTTP {status}. "
+            + ("Check the deployment name and endpoint. " if status == 404 else "")
+            + "This request was not replayed.",
+        })
     if message == "The current APIM policy changed after publication was queued":
         return failure.model_copy(update={
             "code": "parent_policy_changed",
@@ -968,8 +1182,9 @@ def publication_failure(
     except ValueError:
         pass
     if preflight:
-        allowed = {*PUBLICATION_REQUIRED_ACTIONS, *PUBLICATION_PROBE_ACTIONS,
-                   *PUBLICATION_OAUTH_ACTIONS}
+        allowed = {
+            *PUBLICATION_REQUIRED_ACTIONS, *PUBLICATION_PROBE_ACTIONS, *PUBLICATION_OAUTH_ACTIONS,
+        }
         supplied = details.get("missing_actions", [])
         if not isinstance(supplied, list) or any(
             not isinstance(action, str) or action not in allowed for action in supplied
@@ -989,8 +1204,9 @@ def publication_failure(
                     "The Publisher identity's APIM publication permissions could not be verified."
                 ),
             })
-    if (management and details.get("code") == "AuthorizationFailed"
-            and type(details.get("status")) is int and details["status"] in {401, 403}):
+    if management and details.get("code") == "AuthorizationFailed" and type(
+        details.get("status")
+    ) is int and details["status"] in {401, 403}:
         return failure.model_copy(update={
             "code": "publisher_authorization_failed", "request_id": request_id,
             "http_status": details["status"],
@@ -1008,6 +1224,7 @@ class GatewayPublicationView(StrictModel):
     model_key: str
     display_name: str
     status: PublicationStatus
+    configuration_only: bool = Field(default=False, exclude_if=lambda value: value is False)
     error_code: str | None
     error_message: str | None
     failure: GatewayPublicationFailure | None = None
@@ -1058,7 +1275,8 @@ class GatewayPublicationView(StrictModel):
                     else GatewayAuthorizationRequirement
                 )
                 authorization = requirement_type.model_validate(raw_authorization)
-        probe_authorization = publication.resource_manifest.get("image_probe_authorization", {})
+        failure = publication_failure(publication)
+        probe_authorization = publication.resource_manifest.get("image_probe_authorization")
         probe_limit = (
             probe_authorization.get("attempt_limit", 1)
             if isinstance(probe_authorization, dict)
@@ -1074,20 +1292,23 @@ class GatewayPublicationView(StrictModel):
             )
             and type(probe_limit) is int and 1 <= probe_limit < 32
         )
-        infrastructure_upgrade_required = (
-            publication.status is PublicationStatus.FAILED
-            and publication.error_code == "InfrastructureUpgradeRequiredError"
-        )
-        failure = publication_failure(publication)
+        target_deployments: tuple[GatewayServingDeployment, ...] | None = None
+        if publication.publication_kind in {
+            PublicationKind.MODEL_ADD, PublicationKind.CREDENTIAL_ROTATION,
+        }:
+            binding = publication.desired_spec.bindings[-1]
+            target_deployments = (
+                publication.desired_spec.gateway_deployments
+                if binding.deployment_scope.mode is GatewayDeploymentScopeMode.ALL
+                else binding.serving_deployments
+            ) or None
+        route_configuration = publication.resource_manifest.get("route_configuration")
         return cls(
             id=publication.id,
             gateway_profile_id=publication.gateway_profile_id,
-            target_deployments=(
-                publication.desired_spec.bindings[-1].serving_deployments or None
-                if publication.publication_kind in {
-                    PublicationKind.MODEL_ADD, PublicationKind.CREDENTIAL_ROTATION,
-                } else None
-            ),
+            configuration_only=isinstance(route_configuration, dict)
+            and route_configuration.get("configuration_only") is True,
+            target_deployments=target_deployments,
             generation=publication.generation,
             publication_kind=publication.publication_kind,
             model_key=model_key,
@@ -1095,7 +1316,7 @@ class GatewayPublicationView(StrictModel):
             status=publication.status,
             error_code=(
                 "apim_infrastructure_upgrade_required"
-                if infrastructure_upgrade_required
+                if failure and failure.code == "apim_infrastructure_upgrade_required"
                 else "publication_failed"
                 if publication.status is PublicationStatus.FAILED
                 else "provider_authorization_required"
@@ -1108,7 +1329,9 @@ class GatewayPublicationView(StrictModel):
             failure=failure,
             authorization=authorization,
             retry_can_authorize_image_probes=can_authorize_probes,
-            retry_requires_credential=publication_retry_requires_credential(publication),
+            retry_requires_credential=publication_retry_requires_credential(
+                publication
+            ),
             credential_kind=(
                 "oauth_m2m" if publication.desired_spec.bindings
                 and publication.desired_spec.bindings[-1].oauth is not None
@@ -1141,6 +1364,8 @@ class GatewayReleaseDependencies(StrictModel):
     apim_revision: str | None
     parent_policy_sha256: str | None
     compiled_policy_sha256: str | None
+    route_configuration_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    route_head_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     backends: list[str] = Field(default_factory=list)
     backend_pools: list[str] = Field(default_factory=list)
     named_values: list[str] = Field(default_factory=list)
@@ -1157,6 +1382,9 @@ class GatewayReleaseDependencies(StrictModel):
         result: dict[str, object] = handler(self)
         if not self.oauth_credentials:
             result.pop("oauth_credentials", None)
+        for field in ("route_configuration_sha256", "route_head_sha256"):
+            if getattr(self, field) is None:
+                result.pop(field, None)
         return result
 
 
@@ -1317,15 +1545,15 @@ class GatewayReleaseOperation(StrictModel):
     gc_plan: GatewayReleaseGcPlan | None = None
 
 
+class GatewayReleaseOperationAccepted(StrictModel):
+    operation: GatewayReleaseOperation
+    status_url: str
+
+
 class ApimOnboardingOperations(StrictModel):
     available: bool
     unavailable_reason: str | None = None
     items: list[GatewayReleaseOperation] = Field(default_factory=list)
-
-
-class GatewayReleaseOperationAccepted(StrictModel):
-    operation: GatewayReleaseOperation
-    status_url: str
 
 
 class SelfHostedGatewayProvisionOperations(StrictModel):
@@ -1348,12 +1576,12 @@ class GatewayReleaseDetail(GatewayReleaseSummary):
     )
 
 
-class MultiTargetPublicationRequestAccepted(StrictModel):
-    rollout: MultiTargetRollout
-    publications: list[GatewayPublicationView]
+class GatewayPublicationRequestAccepted(StrictModel):
+    publication: GatewayPublicationView
     status_url: str
 
 
-class GatewayPublicationRequestAccepted(StrictModel):
-    publication: GatewayPublicationView
+class MultiTargetPublicationRequestAccepted(StrictModel):
+    rollout: MultiTargetRollout
+    publications: list[GatewayPublicationView]
     status_url: str

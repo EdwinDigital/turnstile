@@ -46,6 +46,12 @@ static_resources:
                           budget_execution: "%DYNAMIC_METADATA(turnstile.request:budget_execution)%"
                           gateway_profile_id: "%DYNAMIC_METADATA(turnstile.request:gateway_profile_id)%"
                           native_gateway_id: "%DYNAMIC_METADATA(turnstile.request:native_gateway_id)%"
+                          usage_id: "%DYNAMIC_METADATA(turnstile.request:usage_id)%"
+                          native_gateway_instance_id: "%DYNAMIC_METADATA(turnstile.request:native_gateway_instance_id)%"
+                          gateway_is_managed: "%DYNAMIC_METADATA(turnstile.request:gateway_is_managed)%"
+                          apim_service_id: "%DYNAMIC_METADATA(turnstile.request:apim_service_id)%"
+                          apim_region: "%DYNAMIC_METADATA(turnstile.request:apim_region)%"
+                          api_revision: "%DYNAMIC_METADATA(turnstile.request:api_revision)%"
                           apim_subscription_id: "%DYNAMIC_METADATA(turnstile.request:apim_subscription_id)%"
                           application_actor_type: "%DYNAMIC_METADATA(turnstile.request:application_actor_type)%"
                           application_actor_id: "%DYNAMIC_METADATA(turnstile.request:application_actor_id)%"
@@ -124,6 +130,12 @@ static_resources:
                         - { header: x-turnstile-budget-execution, on_header_present: { metadata_namespace: turnstile.request, key: budget_execution, type: STRING }, remove: true }
                         - { header: x-turnstile-gateway-profile-id, on_header_present: { metadata_namespace: turnstile.request, key: gateway_profile_id, type: STRING }, remove: true }
                         - { header: x-turnstile-native-gateway-id, on_header_present: { metadata_namespace: turnstile.request, key: native_gateway_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-usage-id, on_header_present: { metadata_namespace: turnstile.request, key: usage_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-native-gateway-instance-id, on_header_present: { metadata_namespace: turnstile.request, key: native_gateway_instance_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-gateway-is-managed, on_header_present: { metadata_namespace: turnstile.request, key: gateway_is_managed, type: STRING }, remove: true }
+                        - { header: x-turnstile-apim-service-id, on_header_present: { metadata_namespace: turnstile.request, key: apim_service_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-apim-region, on_header_present: { metadata_namespace: turnstile.request, key: apim_region, type: STRING }, remove: true }
+                        - { header: x-turnstile-api-revision, on_header_present: { metadata_namespace: turnstile.request, key: api_revision, type: STRING }, remove: true }
                         - { header: x-turnstile-apim-subscription-id, on_header_present: { metadata_namespace: turnstile.request, key: apim_subscription_id, type: STRING }, remove: true }
                         - { header: x-turnstile-application-actor-type, on_header_present: { metadata_namespace: turnstile.request, key: application_actor_type, type: STRING }, remove: true }
                         - { header: x-turnstile-application-actor-id, on_header_present: { metadata_namespace: turnstile.request, key: application_actor_id, type: STRING }, remove: true }

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   Activity,
   AlertTriangle,
@@ -86,6 +86,7 @@ import {
 import { usageWindow } from "../api"
 import { getIntlLocale, useLocale, type LocalePreference } from "../../../locales/index"
 import { estimateRequestCost, hasModelPrices, priceRequests, requestCostCalculation } from "../../../lib/pricing"
+import { useAuth } from "../../../providers/auth-provider"
 import { finopsKeys, finopsQueries, trendDimensionForFilters } from "../queries"
 import type {
   AnomalyRule,
@@ -1145,45 +1146,50 @@ function RequestTrace({
   const [selected, setSelected] = useState<string | null>(initialRequestId);
   const [searchText, setSearchText] = useState(initialRequestId ?? "");
   const [statusFilter, setStatusFilter] = useState<"all" | "success" | "error">("all");
-  const query = useQuery(finopsQueries.requests(filters))
+  const query = useInfiniteQuery(finopsQueries.requestPages(filters))
+  const requestRows = query.data?.pages.flatMap((page) => page.items) ?? []
+  const loadingNextPageRef = useRef(false)
   // The header describes the whole window, so it reads the server aggregate. The list below
   // is a page of recent requests and legitimately uses the rows.
   const overview = useQuery(finopsQueries.executiveOverview(filters))
   const volumeTrend = useQuery(finopsQueries.trends(filters, "none", "day"))
   const detail = useQuery(finopsQueries.requestDetail(selected ?? ""))
-  const firstRequestId = query.data?.[0] ? requestTraceId(query.data[0]) : null
-  const selectedTraceId = detail.data ? requestTraceId(detail.data) : selected
+  const firstRequestId = requestRows[0] ? requestTraceId(requestRows[0]) : null
   useEffect(() => {
     if (!selected && firstRequestId) setSelected(firstRequestId)
   }, [firstRequestId, selected])
+  const loadNextPage = () => {
+    if (!query.hasNextPage || query.isFetchingNextPage || loadingNextPageRef.current) return
+    loadingNextPageRef.current = true
+    void query.fetchNextPage().finally(() => { loadingNextPageRef.current = false })
+  }
   if (query.isLoading || overview.isLoading || volumeTrend.isLoading) return <LoadingState />;
   if (query.error || overview.error || volumeTrend.error) return <ErrorState error={query.error ?? overview.error ?? volumeTrend.error} />;
-  if (!query.data?.length)
+  if (!requestRows.length)
     return (
       <EmptyState
         title="暂无请求记录"
         detail="调用完成后可在此按 requestId 查询。"
       />
     );
-  const requestRows = priceRequests(query.data, models);
+  const pricedRows = priceRequests(requestRows, models);
   const attemptsByRequest = new Map<string, UsageRequestSummary[]>();
-  for (const item of requestRows) {
+  for (const item of pricedRows) {
     const attempts = attemptsByRequest.get(item.request_id) ?? [];
     attempts.push(item);
     attemptsByRequest.set(item.request_id, attempts);
   }
   const attemptPositions = new Map<string, { index: number; total: number }>();
   for (const attempts of attemptsByRequest.values()) {
-    attempts.sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)
-      || requestTraceId(left).localeCompare(requestTraceId(right)));
+    attempts.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
     attempts.forEach((item, index) => {
       attemptPositions.set(requestTraceId(item), { index: index + 1, total: attempts.length });
     });
   }
   const normalizedSearch = searchText.trim().toLocaleLowerCase();
-  const visibleRows = requestRows.filter((item) => {
+  const visibleRows = pricedRows.filter((item) => {
     const matchesStatus = statusFilter === "all"
-      || (item.status_code != null && (statusFilter === "success" ? !requestTraceFailed(item) : requestTraceFailed(item)));
+      || (item.status_code !== null && (statusFilter === "success" ? !requestTraceFailed(item) : requestTraceFailed(item)));
     const matchesSearch = !normalizedSearch || [
       item.request_id,
       item.correlation_id,
@@ -1191,6 +1197,7 @@ function RequestTrace({
       item.upstream_request_id,
       item.agent_name,
       item.model_name,
+      item.selected_model_name,
       item.user_name,
       item.project_name,
     ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch));
@@ -1201,6 +1208,9 @@ function RequestTrace({
   const clientErrors = totals?.client_error_requests ?? 0;
   const serverErrors = totals?.server_error_requests ?? 0;
   const failedRequests = clientErrors + serverErrors;
+  const statusTotal = statusFilter === "all"
+    ? windowRequests
+    : statusFilter === "success" ? totals?.success_requests ?? 0 : failedRequests;
   const slowRequests = totals?.latency_over_5s ?? 0;
   const slowRequestPercent = windowRequests ? (slowRequests / windowRequests) * 100 : 0;
   const volumeRows = (volumeTrend.data?.points ?? []).map((point) => ({
@@ -1227,8 +1237,12 @@ function RequestTrace({
         <RequestLatencyChart totals={totals} percentage />
       </section>
       <div className="trace-layout span-3">
-        <section className="finops-panel trace-list">
-          <PanelTitle title="请求记录" meta={`${visibleRows.length} / ${requestRows.length} 条`} />
+        <section className="finops-panel trace-list" onScroll={(event) => {
+          if (searchText.trim() || statusFilter !== "all") return
+          const list = event.currentTarget
+          if (list.scrollHeight - list.scrollTop - list.clientHeight <= 160) loadNextPage()
+        }}>
+          <PanelTitle title="请求记录" meta={`${visibleRows.length} / ${statusTotal} 条`} />
           <div className="trace-list-tools">
             <label>
               <Search size={14} />
@@ -1257,13 +1271,17 @@ function RequestTrace({
             <TraceRow
               key={requestTraceId(item)}
               item={item}
-              active={selectedTraceId === requestTraceId(item)}
+              active={selected === requestTraceId(item)}
               onClick={() => setSelected(requestTraceId(item))}
               costAvailable={estimateRequestCost(item, models) !== null}
               attempt={attemptPositions.get(requestTraceId(item))}
             />
           ))}
           {!visibleRows.length && <div className="trace-no-results">没有符合条件的请求</div>}
+          {query.hasNextPage && (searchText.trim() || statusFilter !== "all")
+            ? <button type="button" className="trace-load-more" disabled={query.isFetchingNextPage} onClick={loadNextPage}>{query.isFetchingNextPage ? <><RefreshCw className="spin" size={12} />正在加载更多请求</> : "加载更多请求"}</button>
+            : query.hasNextPage && <div className="trace-load-sentinel" aria-hidden="true" />}
+          {query.isFetchingNextPage && <div className="trace-load-status" role="status"><RefreshCw className="spin" size={12} />正在加载更多请求</div>}
         </section>
         <section className="finops-panel trace-detail">
           <PanelTitle title="请求详情" />
@@ -1329,6 +1347,29 @@ const budgetAdmissionWarnings: Record<string, { title: string; detail: string; t
   },
 };
 
+const routerDecisionLabels: Record<string, string> = {
+  model_based_fallback: "安全回退",
+  interaction_sticky: "复用首轮模型",
+  fallback_success: "Fallback 命中",
+};
+
+const routerStrategyLabels: Record<string, string> = {
+  priority: "优先级顺序",
+  weighted: "加权选择",
+  model_based: "模型判路由",
+};
+
+const conditionOperatorLabels: Record<string, string> = {
+  equals: "=",
+  not_equals: "≠",
+  contains: "contains",
+  greater_than: ">",
+  greater_than_or_equal: "≥",
+  less_than: "<",
+  less_than_or_equal: "≤",
+  exists: "exists",
+};
+
 function RequestTraceDetail({
   request,
   costAvailable,
@@ -1336,6 +1377,13 @@ function RequestTraceDetail({
   request: UsageRequestDetail;
   costAvailable: boolean;
 }) {
+  const { user: sessionUser } = useAuth();
+  const selectedModelId = request.selected_model_id ?? request.model_id;
+  const backendPool = useQuery({
+    ...finopsQueries.modelBackendPool(selectedModelId),
+    enabled: Boolean(selectedModelId),
+  });
+
   const errorMessage = request.ingest_source === "policy"
     ? request.error_message === "API policy denied: Model is not assigned to this user"
       ? "该人员无权使用此模型"
@@ -1384,9 +1432,37 @@ function RequestTraceDetail({
   // identical to one that was actually checked against a budget.
   const admissionWarning = budgetAdmissionWarnings[request.budget_admission ?? ""];
   const modelWarning = modelAdmissionWarnings[request.model_admission ?? ""];
+
+
+
+
+
+
+
+
+  const poolMembers = backendPool.data?.members ?? [];
+  const poolPriorities = new Set(poolMembers.map((member) => member.priority));
+  const poolWeights = new Set(poolMembers.map((member) => member.weight));
+  const poolMode = poolMembers.length < 2
+    ? null
+    : poolWeights.size === 1 && poolPriorities.size === 1
+      ? "均衡分流"
+      : poolWeights.size === 1 && poolPriorities.size === 2
+        ? "主备切换"
+        : "自定义分组";
+  const selectedPoolMember = poolMembers.find(
+    (member) => member.runtime_name === request.runtime,
+  );
+  const primaryPoolPriority = poolMembers.length
+    ? Math.min(...poolMembers.map((member) => member.priority))
+    : null;
+  const selectedPoolRole = selectedPoolMember && primaryPoolPriority != null
+    ? selectedPoolMember.priority === primaryPoolPriority ? "主 Runtime" : "备用 Runtime"
+    : null;
   return <div className="trace-detail-content">
     <div className="trace-detail-hero">
       <span className={request.status_code == null ? "" : requestTraceFailed(request) ? "failed" : "success"}>{request.status_code ?? "未知"}</span>
+
       <div><b>{request.model_name}</b><small>{new Date(request.timestamp).toLocaleString(getIntlLocale())}</small></div>
       <strong>{formatLatency(request.latency_ms)}</strong>
     </div>
@@ -1395,8 +1471,9 @@ function RequestTraceDetail({
     {modelWarning && <div className="trace-error" data-tone={modelWarning.tone}><CircleAlert size={15} /><div><b>{modelWarning.title}</b><span>{modelWarning.detail}</span></div></div>}
     {request.platform_outcome && <TraceFacts title="调用结果" facts={[
       ["Turnstile", request.platform_outcome === "failed" ? "失败" : request.platform_outcome === "succeeded" ? "成功" : "未知"],
-      ["网关", request.gateway_status_code == null ? "未知" : String(request.gateway_status_code)],
+      ["Gateway", request.gateway_status_code == null ? request.ingest_source === "platform" ? "网关记录未匹配" : "未知" : String(request.gateway_status_code)],
     ]} />}
+
     <section className="trace-detail-section">
       <h3>处理链路</h3>
       <div className="trace-path">
@@ -1438,7 +1515,7 @@ function RequestTraceDetail({
 
 export function RequestCostCalculation({ request }: { request: UsageRequestDetail }) {
   const calculation = requestCostCalculation(request);
-  if (!calculation) return <span className="trace-cost-unavailable">{request.input_price_per_million === undefined ? "当前后端未提供历史单价" : "历史单价不可用"}</span>;
+  if (!calculation) return <span className="trace-cost-unavailable"></span>;
   const number = (value: number) => value.toLocaleString(getIntlLocale(), { maximumFractionDigits: 0 });
   const rate = (value: number) => value.toLocaleString(getIntlLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 20 });
   const amount = (value: number) => value.toLocaleString(getIntlLocale(), { minimumFractionDigits: 8, maximumFractionDigits: 8 });
@@ -1491,6 +1568,8 @@ export function TraceRow({
   costAvailable: boolean;
   attempt: { index: number; total: number } | undefined;
 }) {
+  // The list contract carries no `estimated` flag, but a successful call never truly consumes zero
+  // tokens: those zeros identify a row that is still waiting for reconciliation.
   const state = usageState(!(item.usage_available ?? item.total_tokens > 0), item.timestamp);
   const placeholder = state === "pending" ? "待对账" : "不可用";
   return (
@@ -1499,7 +1578,7 @@ export function TraceRow({
         {item.status_code ?? "未知"}
       </span>
       <div>
-        <b>{item.model_name}</b>
+        <b></b>
         <code title={`Correlation ID: ${item.correlation_id ?? "未知"}`}>{attempt && attempt.total > 1 ? `#${attempt.index}/${attempt.total} · ${item.request_id}` : item.request_id}</code>
       </div>
       <small>{state === "measured" ? `${compact.format(item.total_tokens)} tokens` : placeholder}</small>

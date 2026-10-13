@@ -24,23 +24,26 @@ export function gatewayFormValid(value: SelfHostedGatewayWrite) {
 }
 
 export function gatewayFormPayload(value: SelfHostedGatewayWrite): SelfHostedGatewayWrite {
-  return { ...value, native_gateway_id: value.native_gateway_id.trim(), display_name: value.display_name.trim(),
-    endpoint_url: value.endpoint_url.trim(), location: value.location?.trim() || null }
+  return {
+    ...value,
+    native_gateway_id: value.native_gateway_id.trim(),
+    display_name: value.display_name.trim(),
+    endpoint_url: value.endpoint_url.trim(),
+    location: value.location?.trim() || null,
+  }
 }
 
-export type GatewayCreateForm = Omit<SelfHostedGatewayCreate, "endpoint_control_confirmed"> & { endpoint_control_confirmed: boolean }
-
-export function gatewayCreateFormValid(value: GatewayCreateForm) {
-  return textWithin(value.display_name, 120) && isGatewayEndpoint(value.endpoint_url)
+export function gatewayCreateFormValid(value: SelfHostedGatewayCreate) {
+  return value.endpoint_control_confirmed === true && textWithin(value.display_name, 120)
+    && isGatewayEndpoint(value.endpoint_url) && new URL(value.endpoint_url.trim()).port === ""
     && (!value.location?.trim() || value.location.trim().length <= 128)
-    && value.endpoint_control_confirmed === true
+    && ["docker", "aks", "kubernetes", "arc", "container_apps", "other"].includes(value.hosting_mode)
 }
 
-export function gatewayCreateFormPayload(value: GatewayCreateForm): SelfHostedGatewayCreate {
-  if (!gatewayCreateFormValid(value)) throw new Error("Gateway creation fields are incomplete")
+export function gatewayCreateFormPayload(value: SelfHostedGatewayCreate): SelfHostedGatewayCreate {
   return { display_name: value.display_name.trim(), endpoint_url: value.endpoint_url.trim(),
-    location: value.location?.trim() || null, hosting_mode: value.hosting_mode ?? "docker",
-    release_gate: value.release_gate ?? "required", endpoint_control_confirmed: true }
+    location: value.location?.trim() || null, hosting_mode: value.hosting_mode,
+    release_gate: value.release_gate, endpoint_control_confirmed: value.endpoint_control_confirmed }
 }
 
 export function apimFormValid(value: ApimTargetWrite) {
@@ -48,7 +51,7 @@ export function apimFormValid(value: ApimTargetWrite) {
   if (!uuid.test(value.tenant_id.trim()) || !uuid.test(value.subscription_id.trim())) return false
   if (!textWithin(value.name, 120) || !textWithin(value.resource_group, 90)
     || !textWithin(value.service_name, 50) || !textWithin(value.api_id, 256)
-    || !textWithin(value.dashboard_subscription_id ?? "", 255) || !textWithin(value.probe_subscription_id ?? "", 255)
+    || !textWithin(value.dashboard_subscription_id, 255) || !textWithin(value.probe_subscription_id, 255)
     || !isGatewayEndpoint(value.gateway_endpoint) || !isGatewayEndpoint(value.management_endpoint)) return false
   const endpoint = new URL(value.management_endpoint.trim())
   const expected = `/subscriptions/${value.subscription_id.trim()}/resourceGroups/${value.resource_group.trim()}/providers/Microsoft.ApiManagement/service/${value.service_name.trim()}`
@@ -72,4 +75,10 @@ export function apimOnboardingFormValid(value: ApimOnboardingRequest) {
 
 export function apimOnboardingFormPayload(value: ApimOnboardingRequest): ApimOnboardingRequest {
   return { tenant_id: value.tenant_id.trim(), resource_id: value.resource_id.trim().replace(/\/+$/, ""), name: value.name?.trim() || null }
+}
+
+export function publicationNumberError(contextWindow: string, prices: string[]) {
+  if (contextWindow.trim() && (!Number.isSafeInteger(Number(contextWindow)) || Number(contextWindow) < 1)) return "上下文窗口必须是正整数。"
+  return prices.some((value) => value.trim() && (!Number.isFinite(Number(value)) || Number(value) < 0))
+    ? "价格必须是非负数字。" : null
 }

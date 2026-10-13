@@ -209,7 +209,10 @@ def test_availability_command_failures_never_report_accepted_success(
 def test_gateway_creation_api_generates_identity_and_retries_the_same_request(
     publication_api: InMemoryRepository,
 ) -> None:
-    publication_api.upsert_apim_target(target(capabilities={"self_hosted_gateway": "supported"}))
+    publication_api.upsert_apim_target(target(
+        capabilities={"self_hosted_gateway": "supported"}, drift_state="in_sync",
+        last_inventory_sync_at=datetime.now(UTC),
+    ))
     service = GatewayControlPlaneService(
         publication_api, self_hosted_gateway_provisioning_enabled=True,
     )
@@ -291,10 +294,11 @@ def test_gateway_bootstrap_response_is_not_cached_and_never_uses_model_keys(
     })
     with patch.object(service, "self_hosted_gateway_bootstrap", return_value=result) as bootstrap:
         response = client.post(
-            f"/api/v1/model-management/self-hosted-gateways/{UUID(int=104)}/bootstrap", json={},
+            f"/api/v1/model-management/self-hosted-gateways/{UUID(int=104)}/bootstrap",
+            json={"endpoint_control_confirmed": True, "expires_in_hours": 24},
         )
     assert response.status_code == 200
-    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Cache-Control"] == "no-store, private"
     assert response.headers["Pragma"] == "no-cache"
     assert bootstrap.call_args.args[1].expires_in_hours == 24
     assert "unit-bootstrap-secret" in response.json()["environment_file"]

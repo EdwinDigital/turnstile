@@ -3,16 +3,19 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
+from uuid import UUID
 
 import pytest
 import yaml  # type: ignore[import-untyped]
 
 from tests.backend.telemetry.test_atomic_ledger import EPOCH, identity
-from turnstile_core.domain.ledger import LedgerAdmissionReceipt
-from turnstile_core.domain.models import UsageEvent
+from turnstile_core.domain.gateway_targets import canonical_usage_id_v2
+from turnstile_core.domain.ledger import BudgetPriceProjection, LedgerAdmissionReceipt
+from turnstile_core.domain.models import ModelPrice, UsageEvent
 
 ROOT = Path(__file__).parents[3]
 ADAPTER = ROOT / "infra" / "envoy-cache-adapter"
@@ -69,6 +72,13 @@ def execution_row(**overrides: object) -> dict[str, object]:
         model_id=attempt.model_id, correlation_id=attempt.correlation_id,
         gateway_profile_id=str(attempt.gateway_profile_id),
         native_gateway_id=attempt.native_gateway_id,
+        native_gateway_instance_id=attempt.native_gateway_id,
+        gateway_is_managed=str(attempt.native_gateway_id == "managed"),
+        apim_service_id="unit-service", apim_region="unit-region", api_revision="1",
+        usage_id=canonical_usage_id_v2(
+            attempt.gateway_profile_id, "unit-service", attempt.native_gateway_id,
+            attempt.correlation_id,
+        ),
         budget_execution=base64.b64encode(json.dumps([receipt.model_dump(mode="json")]).encode()).decode(),
         response_content_type="text/event-stream", response_flags="-", total_tokens=1230,
     )
@@ -120,6 +130,41 @@ def test_observer_execution_rejects_malformed_or_mismatched_receipts(
         load_shipper().normalize_access_row(execution_row(**changes))
 
 
+@pytest.mark.parametrize("changes", [
+    {"usage_id": "wrong"}, {"usage_id": None}, {"apim_service_id": "wrong-service"},
+    {"apim_region": None}, {"api_revision": None}, {"native_gateway_instance_id": None},
+    {"gateway_is_managed": "unknown"},
+])
+def test_observer_rejects_unproven_schema_two_gateway_context(changes: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        load_shipper().normalize_access_row(execution_row(**changes))
+
+
+def test_observer_keeps_original_usd_admission_price_and_reserved_amount() -> None:
+    model_id = UUID(int=4)
+    price = ModelPrice(
+        input_price_per_million=10, cached_price_per_million=1,
+        cache_write_price_per_million=20, output_price_per_million=30,
+    )
+    projection = BudgetPriceProjection.create(model_id, price, identity().admitted_at)
+    receipt = LedgerAdmissionReceipt(
+        identity=identity(model_id=str(model_id)), epoch=EPOCH, reserved_tokens=2000,
+        budget_mode="usd", reserved_usd=Decimal("0.01000000000000"), price_snapshot=projection,
+    )
+    encoded = base64.b64encode(json.dumps([receipt.model_dump(mode="json")]).encode()).decode()
+    event = load_shipper().normalize_access_row(execution_row(
+        model_id=str(model_id), budget_execution=encoded, response_status="completed",
+        last_event_type="response.completed",
+    ))
+    assert event is not None
+    parsed = UsageEvent.model_validate(event)
+    actual = LedgerAdmissionReceipt.model_validate(parsed.budget_execution[0])
+    assert actual == receipt
+    assert actual.reserved_usd == Decimal("0.01000000000000")
+    assert actual.price_snapshot == projection
+    assert parsed.usage_complete is True
+
+
 def test_observer_budget_headers_are_removed_before_upstream_and_only_fixed_usage_is_logged(
 ) -> None:
     template = yaml.safe_load((ADAPTER / "envoy.yaml.template").read_text())
@@ -128,6 +173,8 @@ def test_observer_budget_headers_are_removed_before_upstream_and_only_fixed_usag
     filters = {item["name"]: item["typed_config"] for item in config["http_filters"]}
     rules = filters["envoy.filters.http.header_to_metadata"]["request_rules"]
     for name in ("budget-execution", "gateway-profile-id", "native-gateway-id",
+                 "usage-id", "native-gateway-instance-id", "gateway-is-managed",
+                 "apim-service-id", "apim-region", "api-revision",
                  "apim-subscription-id", "application-actor-type", "application-actor-id"):
         rule = next(rule for rule in rules if rule["header"] == "x-turnstile-" + name)
         assert rule["remove"] is True

@@ -29,7 +29,10 @@ schemas:
         items:
           type: object
           additionalProperties: false
-          required: [identity, epoch, reserved_tokens]
+          required:
+          - identity
+          - epoch
+          - reserved_tokens
           properties:
             epoch:
               type: string
@@ -42,16 +45,27 @@ schemas:
             identity:
               type: object
               additionalProperties: false
-              required: [scope, gateway_profile_id, native_gateway_id, correlation_id, model_id, admitted_at]
+              required:
+              - scope
+              - gateway_profile_id
+              - native_gateway_id
+              - correlation_id
+              - model_id
+              - admitted_at
               properties:
                 scope:
                   type: object
                   additionalProperties: false
-                  required: [scope_type, scope_id, period_start]
+                  required:
+                  - scope_type
+                  - scope_id
+                  - period_start
                   properties:
                     scope_type:
                       type: string
-                      enum: [person, application]
+                      enum:
+                      - person
+                      - application
                     scope_id:
                       type: string
                       minLength: 1
@@ -83,13 +97,19 @@ schemas:
         default: false
         description: Complete trusted producer counters; estimates and interrupted streams are false.
       native_gateway_id:
-        type: [string, 'null']
+        type:
+        - string
+        - 'null'
         minLength: 1
         maxLength: 80
       usage_event_source:
         type: string
         default: apim
-        enum: [apim, observer, reconciliation, backfill]
+        enum:
+        - apim
+        - observer
+        - reconciliation
+        - backfill
       ts:
         type: string
         format: date-time
@@ -172,7 +192,9 @@ schemas:
         format: int64
         minimum: 0
       cache_write_tokens:
-        type: [integer, 'null']
+        type:
+        - integer
+        - 'null'
         format: int64
         minimum: 0
         description: A subset of cached_tokens, not additional tokens.

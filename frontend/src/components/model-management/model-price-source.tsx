@@ -8,6 +8,7 @@ import type {
   ManagedModel,
   PriceCatalogOptionsResponse,
   PriceSource,
+  PriceSyncStatus,
 } from "../../data-sources/apim/types"
 import { ModelBrandLogo } from "../brand-logos"
 import { Button } from "../ui/button"
@@ -40,7 +41,7 @@ const SOURCE_LABEL: Record<string, string> = {
   anthropic: "Anthropic 列表价",
 }
 
-const SYNC_STATUS_LABEL: Record<string, string> = {
+const SYNC_STATUS_LABEL: Record<PriceSyncStatus, string> = {
   ok: "已同步",
   unmapped: "未映射",
   stale: "来源读取失败，保留上次单价",
@@ -76,13 +77,15 @@ async function loadModelPrices(candidate: ModelPriceCandidate): Promise<ModelPri
  * 24 to 28 regions it is sold in -- is a single choice with no region to pick, and a region is
  * asked for only where two regions genuinely disagree.
  */
-export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, modelName = "", draft, setDraft, busy, connectionDiscount }: {
+export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, modelName = "", draft, setDraft, busy, connectionDiscount, showAnthropic = true, imageGeneration = false }: {
   model?: ManagedModel
   modelName?: string
   draft: Draft
   setDraft: (updater: (current: Draft) => Draft) => void
   busy: boolean
   connectionDiscount: number | null
+  showAnthropic?: boolean
+  imageGeneration?: boolean
 }) {
   const restored = model ? restoreContextPrices(model) : null
   const [query, setQuery] = useState<string | null>(() => restored?.model_entry.label ?? null)
@@ -185,7 +188,8 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
     try {
       const response = await dataSource.priceCatalogModels(text)
       if (version !== requestVersion.current) return
-      setMatches(groupContextPriceModels(response.models.filter(candidate => candidate.source === source)))
+      setMatches(groupContextPriceModels(response.models.filter(candidate => candidate.source === source
+        && (!imageGeneration || candidate.text_to_image === true))))
       if (response.unavailable.length) {
         setError(`这些来源暂时读不到：${response.unavailable.join("、")}`)
       }
@@ -263,7 +267,7 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
     </div>
     <ButtonGroup className="model-tabs usage-metric-segment model-price-source-choice" aria-label="价格来源"
       data-value={draft.priceSource}>
-      {(["manual", "azure_retail", "anthropic"] as const).map((source) => (
+      {(["manual", "azure_retail", "anthropic"] as const).filter(source => showAnthropic || source !== "anthropic").map((source) => (
         <button key={source} type="button" disabled={busy} aria-label={SOURCE_LABEL[source]}
           className={draft.priceSource === source ? "active" : ""}
           title={SOURCE_LABEL[source]} aria-pressed={draft.priceSource === source}
@@ -310,6 +314,7 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
         connectionDiscount={connectionDiscount} />
 
       <PriceArithmetic model={model} draft={draft} setDraft={setDraft} percent={discount.percent}
+        imageGeneration={imageGeneration}
         busy={busy || loadingOptions || details?.complete === false}
         option={details?.complete ? selectedOption : null} otherMeters={details?.other_meters ?? []} />
 
@@ -631,7 +636,7 @@ function ContextPriceTable({ pricing, percent }: {
                 ? <a href={tier.inputRangeSource.url} target="_blank" rel="noopener noreferrer"
                   title={`${tier.inputRangeSource.url}\n${tier.inputRangeSource.verified_on}`} data-no-localize>{rangeLabel}</a>
                 : <span data-no-localize>{rangeLabel}</span>}</>}</small>
-              {tier.inputRangeSource?.origin === "reference" && <small><ModelPriceText>参考阈值</ModelPriceText></small>}
+            {tier.inputRangeSource?.origin === "reference" && <small><ModelPriceText>参考阈值</ModelPriceText></small>}
           </th>
         })}
       </tr>
@@ -656,7 +661,7 @@ function ContextPriceTable({ pricing, percent }: {
   </div>
 }
 
-function PriceArithmetic<Draft extends ModelPriceDraft>({ model, draft, setDraft, busy, percent, option, otherMeters }: {
+function PriceArithmetic<Draft extends ModelPriceDraft>({ model, draft, setDraft, busy, percent, option, otherMeters, imageGeneration }: {
   model?: ManagedModel
   draft: Draft
   setDraft: (updater: (current: Draft) => Draft) => void
@@ -664,6 +669,7 @@ function PriceArithmetic<Draft extends ModelPriceDraft>({ model, draft, setDraft
   percent: number | null
   option: ModelPriceOption | null
   otherMeters: string[]
+  imageGeneration: boolean
 }) {
   // A freshly picked option wins over the last sync, so the list price and the charged rate in
   // each row always come from the same place and the multiplication reads true.
@@ -685,11 +691,11 @@ function PriceArithmetic<Draft extends ModelPriceDraft>({ model, draft, setDraft
     cacheWrite: draft.cacheWritePrice ? Number(draft.cacheWritePrice) : null,
   }
   const rows: Array<[string, number | null, number | null]> = [
-    ["输入", list.input, charged.input],
-    ["输出", list.output, charged.output],
-    ["缓存读取", list.cached, charged.cached],
-    ["缓存写入", list.cacheWrite, charged.cacheWrite],
+    [imageGeneration ? "文字输入" : "输入", list.input, charged.input],
+    [imageGeneration ? "图像输出" : "输出", list.output, charged.output],
+    [imageGeneration ? "缓存文字输入" : "缓存读取", list.cached, charged.cached],
   ]
+  if (!imageGeneration) rows.push(["缓存写入", list.cacheWrite, charged.cacheWrite])
   return <div className="model-price-arithmetic">
     <div className="registry-field-label-row">
       <span className="registry-field-label">实际单价</span>
@@ -722,7 +728,7 @@ function PriceArithmetic<Draft extends ModelPriceDraft>({ model, draft, setDraft
         && ` · ${SYNC_STATUS_LABEL[model.price_sync_status] ?? model.price_sync_status}`}
       {model.price_sync_message && ` · ${model.price_sync_message}`}
     </p>}
-    {!option?.contextPricing && list.cacheWrite === null && (option !== null || model?.price_synced_at) && <p className="publication-form-note">
+    {!imageGeneration && !option?.contextPricing && list.cacheWrite === null && (option !== null || model?.price_synced_at) && <p className="publication-form-note">
       该来源未单独发布缓存写入价，按缓存读取单价计费。
     </p>}
     {otherMeters.length > 0 && <details className="model-editor-advanced">

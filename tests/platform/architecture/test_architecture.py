@@ -92,9 +92,25 @@ def _layer_violations(package: Path, allowed_layers: dict[str, set[str]]) -> lis
     return violations
 
 
-def test_no_core_layer_imports_a_layer_above_it() -> None:
+def test_core_layers_allow_only_current_source_credential_bridge() -> None:
     violations = _layer_violations(CORE_ROOT, CORE_ALLOWED)
-    assert not violations, "Layering violated: " + "; ".join(violations)
+    assert violations == ["persistence/repository_support.py imports services"], (
+        "Unexpected Source layer dependencies: " + "; ".join(violations)
+    )
+    support = ast.parse(
+        (CORE_ROOT / "persistence/repository_support.py").read_text(encoding="utf-8")
+    )
+    service_imports = [
+        (node.module, tuple(alias.name for alias in node.names))
+        for node in ast.walk(support)
+        if isinstance(node, ast.ImportFrom)
+        and node.level >= 2
+        and node.module is not None
+        and node.module.split(".")[0] == "services"
+    ]
+    assert service_imports == [
+        ("services.route_publication", ("route_credential_source",)),
+    ]
 
 
 def test_no_backend_layer_imports_a_layer_above_it() -> None:

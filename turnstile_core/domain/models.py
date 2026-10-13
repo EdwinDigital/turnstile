@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date, datetime
+from decimal import Decimal, localcontext
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
@@ -123,16 +124,15 @@ class DistributionResponse(StrictModel):
 
 
 class UsageRequestSummary(StrictModel):
+    # Caller-visible logical identity. Retries may reuse it.
     request_id: str
+    # Unique APIM attempt identity and the exact-detail selector.
     correlation_id: str | None
     trace_id: str | None = None
     usage_available: bool = True
     platform_outcome: Literal["dispatched", "succeeded", "failed"] | None = None
     gateway_status_code: int | None = Field(default=None, ge=100, le=599)
     upstream_request_id: str | None = None
-    apim_target_id: UUID | None = None
-    gateway_deployment_id: UUID | None = None
-    native_gateway_id: str | None = None
     timestamp: datetime
     organization_id: str
     organization_name: str
@@ -150,6 +150,13 @@ class UsageRequestSummary(StrictModel):
     # The access point the call arrived through. On the summary rather than the detail because
     # separating APIM traffic from CLI traffic is a list-level and aggregate-level question.
     runtime: str
+    apim_target_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+    native_gateway_id: str | None = None
+    native_gateway_instance_id: str | None = None
+    gateway_is_managed: bool | None = None
+    apim_region: str | None = None
+    api_revision: str | None = None
     prompt_tokens: int = Field(ge=0)
     completion_tokens: int = Field(ge=0)
     total_tokens: int = Field(ge=0)
@@ -158,6 +165,8 @@ class UsageRequestSummary(StrictModel):
     estimated_cost: float = Field(ge=0)
     cost_available: bool | None = None
     error_message: str | None
+    selected_model_id: UUID | None = None
+    selected_model_name: str | None = None
 
 
 class UsageRequestListResponse(StrictModel):
@@ -266,13 +275,27 @@ class EnterpriseEntityCatalog(StrictModel):
 
 
 BudgetScopeType = Literal["organization", "department", "user"]
-BudgetStatus = Literal["unallocated", "healthy", "warning", "exceeded"]
-PeopleBudgetFilter = Literal["all", "assigned", "unallocated", "healthy", "warning", "exceeded"]
+BudgetStatus = Literal["unallocated", "unverified", "healthy", "warning", "exceeded"]
+BudgetMode = Literal["tokens", "usd"]
+PeopleBudgetFilter = Literal[
+    "all", "assigned", "unallocated", "unverified", "healthy", "warning", "exceeded"
+]
 
 
 class TokenBudgetWrite(StrictModel):
-    token_limit: int = Field(ge=1)
+    budget_mode: BudgetMode = "tokens"
+    token_limit: int | None = Field(default=None, ge=1)
+    usd_limit: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=2)
     warning_threshold_percent: int = Field(default=80, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def require_one_limit(self) -> TokenBudgetWrite:
+        if self.budget_mode == "tokens":
+            if self.token_limit is None or self.usd_limit is not None:
+                raise ValueError("Token budgets require only token_limit")
+        elif self.usd_limit is None or self.token_limit is not None:
+            raise ValueError("USD budgets require only usd_limit")
+        return self
 
 
 class TokenBudgetItem(StrictModel):
@@ -280,10 +303,17 @@ class TokenBudgetItem(StrictModel):
     scope_id: str
     scope_name: str
     parent_scope_id: str | None
+    budget_mode: BudgetMode = "tokens"
     token_limit: int | None
+    usd_limit: Decimal | None = None
     warning_threshold_percent: int
     used_tokens: int = Field(ge=0)
     remaining_tokens: int | None
+    used_usd: Decimal | None = None
+    remaining_usd: Decimal | None = None
+    forecast_usd: Decimal | None = None
+    usd_cost_available: bool | None = None
+    unpriced_usage_count: int = Field(default=0, ge=0)
     usage_percent: float | None
     forecast_tokens: int = Field(ge=0)
     forecast_percent: float | None
@@ -311,8 +341,12 @@ class TokenBudgetAuditEvent(StrictModel):
     scope_id: str
     scope_name: str
     action: Literal["assigned", "updated", "removed"]
+    previous_budget_mode: BudgetMode | None = None
+    new_budget_mode: BudgetMode | None = None
     previous_token_limit: int | None
     new_token_limit: int | None
+    previous_usd_limit: Decimal | None = None
+    new_usd_limit: Decimal | None = None
     previous_warning_threshold_percent: int | None
     new_warning_threshold_percent: int | None
     changed_at: datetime
@@ -383,6 +417,9 @@ class TokenBudgetPeopleResponse(StrictModel):
     department_token_limit: int | None
     department_allocated_tokens: int = Field(ge=0)
     department_available_tokens: int | None
+    department_usd_limit: Decimal | None = None
+    department_allocated_usd: Decimal | None = None
+    department_available_usd: Decimal | None = None
     total: int = Field(ge=0)
     offset: int = Field(ge=0)
     limit: int = Field(ge=1, le=200)
@@ -400,9 +437,28 @@ class TokenBudgetBulkWrite(StrictModel):
     query: str | None = Field(default=None, max_length=200)
     status: PeopleBudgetFilter = "all"
     allocation_mode: Literal["fixed", "equal_remaining", "preserve"] = "fixed"
+    budget_mode: BudgetMode = "tokens"
     token_limit: int | None = Field(default=None, ge=1)
+    usd_limit: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=2)
     warning_threshold_percent: int = Field(default=80, ge=1, le=100)
     model_ids: list[UUID] | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_limit(self) -> TokenBudgetBulkWrite:
+        if self.allocation_mode == "preserve":
+            if self.token_limit is not None or self.usd_limit is not None:
+                raise ValueError("Preserve allocations cannot include a limit")
+            return self
+        if self.allocation_mode == "equal_remaining":
+            if self.token_limit is not None or self.usd_limit is not None:
+                raise ValueError("Equal allocations derive their limit from the parent")
+            return self
+        if self.budget_mode == "tokens":
+            if self.token_limit is None or self.usd_limit is not None:
+                raise ValueError("Token allocations require only token_limit")
+        elif self.usd_limit is None or self.token_limit is not None:
+            raise ValueError("USD allocations require only usd_limit")
+        return self
 
 
 class TokenBudgetBulkResult(StrictModel):
@@ -410,7 +466,9 @@ class TokenBudgetBulkResult(StrictModel):
     department_id: str
     updated_count: int = Field(ge=1)
     token_limit_per_user: int | None = Field(default=None, ge=1)
+    usd_limit_per_user: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=2)
     total_allocated: int | None = Field(default=None, ge=1)
+    total_usd_allocated: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=2)
     model_policy_updated_count: int = Field(default=0, ge=0)
 
 
@@ -582,9 +640,26 @@ class OptimizationEventListResponse(StrictModel):
 class UsageEvent(StrictModel):
     id: str
     budget_execution: list[dict[str, Any]] = Field(default_factory=list, max_length=2)
+    budget_price_projection: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    usd_cost: Decimal | None = Field(
+        default=None, ge=0, max_digits=30, decimal_places=14,
+        exclude_if=lambda value: value is None,
+    )
+    budget_terminal: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     usage_complete: bool = Field(default=False, strict=True)
-    native_gateway_id: str | None = Field(default=None, min_length=1, max_length=80)
-    usage_event_source: Literal["apim", "observer", "reconciliation", "backfill"] = "apim"
+    event_schema_version: int = Field(default=1, ge=1, le=2)
+    usage_id: str | None = Field(
+        default=None,
+        pattern=r"^turnstile-v2-[0-9a-f]{64}$",
+        max_length=77,
+    )
+    usage_event_source: Literal["apim", "observer", "reconciliation", "backfill"] = (
+        "apim"
+    )
     request_id: str | None = None
     correlation_id: str | None = None
     ts: datetime
@@ -609,6 +684,15 @@ class UsageEvent(StrictModel):
     runtime_authoritative: bool = False
     request_source: str = "unattributed"
     gateway_profile_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+    native_gateway_id: str | None = Field(default=None, min_length=1, max_length=80)
+    native_gateway_instance_id: str | None = Field(
+        default=None, min_length=1, max_length=255
+    )
+    gateway_is_managed: bool | None = None
+    apim_service_id: str | None = Field(default=None, min_length=1, max_length=2048)
+    apim_region: str | None = Field(default=None, min_length=1, max_length=128)
+    api_revision: str | None = Field(default=None, min_length=1, max_length=256)
     apim_subscription_id: str | None = Field(default=None, max_length=255)
     application_actor_type: Literal["person", "service"] | None = None
     application_actor_id: str | None = Field(default=None, max_length=255)
@@ -633,6 +717,76 @@ class UsageEvent(StrictModel):
     budget_admission: str | None = Field(default=None, max_length=64)
     # How the gateway's per-person model access check resolved, on the same contract.
     model_admission: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_gateway_attribution(self) -> UsageEvent:
+        if (self.usd_cost is not None or self.budget_price_projection is not None) and (
+            self.usd_cost is None or self.budget_price_projection is None
+            or self.event_schema_version != 2 or self.usage_event_source != "apim"
+            or self.usage_complete is not True or self.estimated is not False
+            or self.ingest_source != "eventhub"
+        ):
+            raise ValueError("USD cost requires complete measured APIM price evidence")
+        if self.budget_terminal is not None:
+            from .budget_completion import validate_terminal_observation
+
+            observed = validate_terminal_observation(self.budget_terminal)
+            if (
+                self.event_schema_version != 2 or not self.budget_execution
+                or self.ingest_source != "eventhub" or self.usage_event_source != observed["source"]
+                or self.status_code != observed["rejection"]["status_code"]
+                or self.usage_complete or not self.estimated
+                or any(value is not None for value in (
+                    self.input_tokens, self.cached_tokens, self.cache_write_tokens,
+                    self.output_tokens, self.tokens_consumed,
+                ))
+            ):
+                raise ValueError("Terminal evidence requires attributable unknown-usage telemetry")
+            self.budget_terminal = observed
+        gateway_fields = (
+            self.gateway_profile_id,
+            self.native_gateway_id,
+            self.gateway_is_managed,
+            self.apim_service_id,
+            self.apim_region,
+            self.api_revision,
+        )
+        if self.event_schema_version == 1:
+            if self.usage_id is not None or any(
+                value is not None
+                for value in (
+                    self.gateway_deployment_id,
+                    self.native_gateway_id,
+                    self.native_gateway_instance_id,
+                    self.gateway_is_managed,
+                    self.apim_service_id,
+                    self.apim_region,
+                    self.api_revision,
+                )
+            ):
+                raise ValueError("Gateway attribution fields require usage event schema 2")
+            return self
+        if self.usage_id is None:
+            raise ValueError("usage event schema 2 requires usage_id")
+        if self.id != self.usage_id:
+            raise ValueError("usage event schema 2 requires id to equal usage_id")
+        if self.correlation_id is None:
+            raise ValueError("usage event schema 2 requires correlation_id")
+        if any(value is None for value in gateway_fields):
+            raise ValueError("usage event schema 2 requires complete Gateway attribution")
+        assert self.native_gateway_id is not None
+        assert self.gateway_is_managed is not None
+        if self.gateway_is_managed != (
+            self.native_gateway_id.casefold() == "managed"
+        ):
+            raise ValueError("managed Gateway attribution conflicts with native Gateway ID")
+        if (
+            self.gateway_is_managed
+            and self.native_gateway_instance_id is not None
+            and self.native_gateway_instance_id.casefold() != "managed"
+        ):
+            raise ValueError("managed Gateway instance identity must be 'managed'")
+        return self
 
 
 class TokenUsageRecord(StrictModel):
@@ -672,22 +826,34 @@ class TokenUsageRecord(StrictModel):
     status: str
     status_code: int
     estimated_cost: float = Field(ge=0)
+    usd_cost: Decimal | None = Field(
+        default=None, ge=0, max_digits=30, decimal_places=14,
+        exclude_if=lambda value: value is None,
+    )
+    usd_price_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", exclude_if=lambda value: value is None,
+    )
+    usd_price_updated_at: datetime | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     # Unit prices applied when the row was priced. None means the request could not be priced, which
     # stays distinguishable from a genuine zero cost.
     input_price_per_million: float | None = Field(default=None, ge=0)
     cached_price_per_million: float | None = Field(default=None, ge=0)
     cache_write_price_per_million: float | None = Field(default=None, ge=0)
     output_price_per_million: float | None = Field(default=None, ge=0)
-    price_context_tier: str | None = Field(default=None, exclude_if=lambda value: value is None)
-    price_context_snapshot: dict[str, Any] | None = Field(
-        default=None, exclude_if=lambda value: value is None,
-    )
     error_message: str | None = Field(default=None, max_length=2000)
     estimated: bool
     ingest_source: str
     ingest_error: str | None = None
     budget_admission: str | None = Field(default=None, max_length=64)
     model_admission: str | None = Field(default=None, max_length=64)
+
+    price_context_tier: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    price_context_snapshot: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
 
 class PriceCatalogRuleSource(StrictModel):
@@ -748,6 +914,18 @@ class ModelPrice(StrictModel):
             cached_price_per_million=cached,
             cache_write_price_per_million=cached if writes is None else writes,
         )
+
+    @classmethod
+    def from_usage_snapshot(cls, values: Mapping[str, Any]) -> ModelPrice | None:
+        snapshot = values.get("price_context_snapshot")
+        if snapshot is not None:
+            return cls.model_validate(snapshot)
+        return cls.from_registry({
+            "input_cost_per_million": values.get("input_price_per_million"),
+            "output_cost_per_million": values.get("output_price_per_million"),
+            "cached_cost_per_million": values.get("cached_price_per_million"),
+            "cache_write_cost_per_million": values.get("cache_write_price_per_million"),
+        })
 
     def snapshot_prices(
         self, input_tokens: int, cached_tokens: int,
@@ -852,6 +1030,26 @@ class ModelPrice(StrictModel):
             8,
         )
 
+    def cost_decimal(
+        self,
+        input_tokens: int,
+        cached_tokens: int,
+        output_tokens: int,
+        cache_write_tokens: int = 0,
+    ) -> Decimal:
+        """Return exact USD from the persisted eight-decimal unit-price precision."""
+        price = self.for_input_tokens(input_tokens + cached_tokens)
+        cache_reads = max(cached_tokens - cache_write_tokens, 0)
+        with localcontext() as context:
+            context.prec = 50
+            million = Decimal(1_000_000)
+            return (
+                Decimal(input_tokens) * Decimal(str(price.input_price_per_million))
+                + Decimal(cache_reads) * Decimal(str(price.cached_price_per_million))
+                + Decimal(cache_write_tokens) * Decimal(str(price.cache_write_price_per_million))
+                + Decimal(output_tokens) * Decimal(str(price.output_price_per_million))
+            ) / million
+
 
 class ModelIdentity(StrictModel):
     """Canonical registry identity for a model.
@@ -875,6 +1073,8 @@ class ReconciledUsage(StrictModel):
 
 
 class ReservationTerminalEvidence(StrictModel):
+    """Sanitized APIM terminal evidence for one unresolved ledger reservation."""
+
     correlation_id: str = Field(min_length=1, max_length=255)
     observed_at: datetime
     status_code: int | None = Field(default=None, ge=0, le=599, strict=True)

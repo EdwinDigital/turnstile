@@ -56,6 +56,14 @@ test("records preserve connection identity, enabled state and image classificati
   assert.deepEqual(modelFilterRecord(model({ capabilities: [] })).capability, [])
 })
 
+test("decision is an independent model type and never matches the chat filter", () => {
+  const record = modelFilterRecord(model({ capabilities: ["decision"] }), runtime)
+  assert.deepEqual(record.capability, ["decision"])
+  assert.equal(matchesModelFilters(record, { ...emptyModelFilters(), capability: ["decision"] }), true)
+  assert.equal(matchesModelFilters(record, { ...emptyModelFilters(), capability: ["chat"] }), false)
+  assert.equal(matchesModelFilters(record, { ...emptyModelFilters(), capability: ["image_generation"] }), false)
+})
+
 test("multiple choices are OR within a dimension and AND across dimensions", () => {
   const record = modelFilterRecord(model(), runtime)
   const filters = { ...emptyModelFilters(), family: ["claude", "openai"], platform: ["microsoft_foundry"], connection: ["connection-one"], capability: ["chat"], status: ["enabled"] }
@@ -142,6 +150,18 @@ test("menu exposes all five original categories in the original order", () => {
   assert.equal(nodes(current.tree).find(node => node.type === "DropdownMenuTrigger").props.render.props["aria-label"], "筛选模型")
 })
 
+test("decision menu selection retains source label, counts and zero-result selection", () => {
+  const decision = modelFilterRecord(model({ model_key: "decision-example", capabilities: ["decision"] }), runtime)
+  const current = menu(emptyModelFilters(), { records: [...records, decision] })
+  const option = current.options("capability").find(node => node.props.title === "Decision")
+  assert.ok(option)
+  assert.equal(nodes(option).find(item => item.props?.className === "model-filter-option-count").props.children, 1)
+  option.props.onCheckedChange(true)
+  assert.deepEqual(plain(current.changes[0].capability), ["decision"])
+  const selected = menu({ ...emptyModelFilters(), capability: ["decision"] }, { records: [] })
+  assert.equal(selected.options("capability").find(node => node.props.title === "Decision").props.checked, true)
+})
+
 test("facet counts ignore their own selection but honor other dimensions and search", () => {
   const filters = { ...emptyModelFilters(), family: ["openai"], status: ["enabled"] }
   const current = menu(filters)
@@ -163,7 +183,7 @@ test("checkboxes stay open, preserve other selections and retain zero-result sel
   assert.deepEqual(current.changes[0].status, ["enabled"])
   const empty = menu({ ...emptyModelFilters(), connection: ["removed-connection"] }, { records: [] })
   assert.equal(empty.options("connection")[0].props.checked, true)
-  assert.equal(empty.options("capability").length, 2)
+  assert.equal(empty.options("capability").length, 3)
 })
 
 test("mobile submenus open below and active chips remove one category or clear all", () => {

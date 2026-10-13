@@ -61,6 +61,10 @@ class Recorder:
     def transaction(self) -> Any:
         yield self
 
+    @contextmanager
+    def pipeline(self) -> Any:
+        yield self
+
     def writes_to(self, table: str) -> list[str]:
         pattern = re.compile(rf"^(INSERT INTO|UPDATE)\s+{re.escape(table)}\b", re.IGNORECASE)
         return [item for item in self.statements if pattern.match(item)]

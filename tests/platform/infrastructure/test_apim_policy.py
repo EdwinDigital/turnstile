@@ -59,10 +59,14 @@ def test_apim_model_path_never_calls_back_into_this_application() -> None:
     assert "X-APIM-Policy-Key" not in policy
     assert "azurewebsites.net" not in policy
     # Person admission uses one read and one reservation write. Application admission
-    # adds a Subscription mapping read, one Application partition read, and one write.
+    # adds Subscription mapping, TPM and monthly reads, and one reservation write.
     # Every request remains inside Table Storage; none calls the Turnstile API.
-    assert policy.count("<send-request") == 5
-    assert policy.count('resource="https://storage.azure.com/"') == 5
+    assert policy.count("<send-request") == 6
+    assert policy.count('resource="https://storage.azure.com/"') == 6
+    rate = ElementTree.fromstring(policy).find(
+        ".//send-request[@response-variable-name='applicationRateLimitRead']",
+    )
+    assert rate is not None and rate.findtext("set-method") == "GET"
 
 
 def test_internal_attribution_headers_never_reach_a_provider() -> None:
@@ -341,8 +345,8 @@ def test_every_event_hub_message_carries_the_admission_outcome() -> None:
     assert policy.count('new JProperty(&quot;budget_admission&quot;') == 5
     assert policy.count('new JProperty(&quot;model_admission&quot;') == 5
 
-    # All five platform calls target Table Storage. No request calls the application.
-    assert policy.count("<send-request") == 5
+    # All six platform calls target Table Storage. No request calls the application.
+    assert policy.count("<send-request") == 6
 
     # Membership is delimited on both ends so one identifier cannot match a prefix of a
     # longer one, and it is tested against the delimited set the Function projects.
@@ -420,20 +424,32 @@ def test_application_output_clamp_uses_monthly_budget_not_tpm() -> None:
     assert any("finops:employee:" in limit.attrib["counter-key"] for limit in limits)
 
 
-def test_application_tpm_uses_validated_quota_and_preserves_default_protection() -> None:
+def test_application_tpm_uses_independent_validated_row_and_fails_closed() -> None:
     root = ElementTree.fromstring(POLICY_PATH.read_text())
     variable = root.find(".//set-variable[@name='applicationTokensPerMinute']")
     assert variable is not None
     expression = " ".join(variable.attrib["value"].split())
-    assert "long defaultRate = __TOKENS_PER_MINUTE__;" in expression
-    assert 'GetValueOrDefault<string>("applicationAdmission", "") != "ok"' in expression
-    assert '!context.Variables.ContainsKey("applicationLedgerState")' in expression
-    assert '!((bool?)state["available"] ?? false)' in expression
-    assert '(string)state["budgetStatus"] != "ok"' in expression
-    assert 'long configured = (long?)state["tokensPerMinute"] ?? 0;' in expression
-    assert "configured > 0 && configured <= int.MaxValue ? configured : defaultRate" in expression
+    assert 'GetValueOrDefault<IResponse>("applicationRateLimitRead", null)' in expression
+    assert "response == null || response.StatusCode != 200" in expression
+    assert 'GetValueOrDefault("ETag", "")' in expression
+    assert 'string.IsNullOrWhiteSpace(version) || version == "*"' in expression
+    assert '(string)row["PartitionKey"]' in expression
+    assert 'context.Variables["applicationRateLimitPartition"]' in expression
+    assert '(string)row["RowKey"] != "T"' in expression
+    assert 'var configuredRate = row["TokensPerMinute"];' in expression
+    assert "configuredRate.Type == JTokenType.Integer" in expression
+    assert "int.TryParse((string)configuredRate, out rate) && rate > 0" in expression
+    assert "? (long)rate : 0L;" in expression
+    assert "catch (Exception) { return 0L; }" in expression
+    assert "applicationLedgerState" not in expression
+    assert "__TOKENS_PER_MINUTE__" not in expression
     assert "Request.Headers" not in expression
     assert "model" not in expression.casefold()
+    partition = root.find(".//set-variable[@name='applicationRateLimitPartition']")
+    assert partition is not None
+    assert '"app-tpm|"' in partition.attrib["value"]
+    assert 'context.Variables["applicationMapState"]' in partition.attrib["value"]
+    assert "application_tpm_unavailable" in ElementTree.tostring(root, encoding="unicode")
 
     limits = root.findall(".//llm-token-limit")
     employee = next(node for node in limits if "finops:employee:" in node.attrib["counter-key"])
@@ -446,7 +462,9 @@ def test_application_tpm_uses_validated_quota_and_preserves_default_protection()
     )
     assert subscription.attrib["estimate-prompt-tokens"] == "true"
     assert subscription.attrib["tokens-consumed-variable-name"] == "tokensConsumed"
-    assert root.findall(".//rate-limit-by-key")[1].attrib["calls"] == "__TOKENS_PER_MINUTE__"
+    assert root.findall(".//rate-limit-by-key")[1].attrib["calls"] == (
+        '@((int)(long)context.Variables["applicationTokensPerMinute"])'
+    )
 
 
 def test_apim_token_metrics_have_only_the_fixed_api_dimension() -> None:
@@ -645,7 +663,10 @@ def test_apim_token_limits_use_product_subscription_identity() -> None:
         'tokens-per-minute="@((int)(long)context.Variables[&quot;applicationTokensPerMinute&quot;])"'
         in policy
     )
-    assert "long defaultRate = __TOKENS_PER_MINUTE__;" in policy
+    limiter = next(node for node in ElementTree.fromstring(policy).iter("llm-token-limit")
+                   if "finops:subscription:" in node.attrib["counter-key"])
+    assert '"applicationTokensPerMinute"' in limiter.attrib["tokens-per-minute"]
+    assert "??" not in limiter.attrib["tokens-per-minute"]
     assert "finops:user:" not in policy
     assert "Microsoft.ApiManagement/service/products@" in module
     assert "Microsoft.ApiManagement/service/products/apis@" in module

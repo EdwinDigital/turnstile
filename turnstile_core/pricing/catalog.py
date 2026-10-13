@@ -28,23 +28,30 @@ of hiding it.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import urllib.parse
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from importlib.resources import files
 from typing import Any, NamedTuple, Protocol
 
 import httpx
 
 from turnstile_core.domain.runtime_models import (
     PriceCatalogContextTier,
+    PriceCatalogInputRange,
+    PriceCatalogRuleSource,
     PriceSource,
 )
 
 AZURE_RETAIL_ENDPOINT = "https://prices.azure.com/api/retail/prices"
-ANTHROPIC_PRICING_URL = "https://docs.claude.com/en/docs/about-claude/pricing"
+ANTHROPIC_PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing.md"
 CATALOG_TTL_SECONDS = 6 * 60 * 60
+_CONTEXT_RULES: dict[str, Any] = json.loads(
+    files("turnstile_core.pricing").joinpath("context-rules.json").read_text(encoding="utf-8")
+)
 
 # The index is read from one region because a model's Global rate is identical in every region --
 # measured across 24 to 28 regions per model, always one figure. This region is chosen for
@@ -96,6 +103,7 @@ _TWO_WORD_DEPLOYMENT = re.compile(r"\bdata\s+zone\b", re.IGNORECASE)
 
 _DEPLOYMENT_ORDER = {"Global": 0, "Data Zone": 1, "Regional": 2}
 UNSPECIFIED_DEPLOYMENT = "Standard"
+_AZURE_FREE_OUTPUT_MODELS = {("Microsoft Decision Models", "Microsoft Decision 1")}
 
 
 @dataclass(frozen=True)
@@ -107,10 +115,36 @@ class CatalogModel:
     product: str
     source: PriceSource
     context_tier: PriceCatalogContextTier | None = None
+    text_to_image: bool = False
 
     @property
     def resolved_context_tier(self) -> PriceCatalogContextTier | None:
-        return self.context_tier
+        descriptor = self.context_tier
+        if descriptor is None or descriptor.input_range is not None:
+            return descriptor
+        matching = [
+            rule for rule in _CONTEXT_RULES["rules"]
+            if rule["basis"] == "request_input_tokens" and any(
+                match["source"] == self.source and match["product"] == self.product
+                and match["group_key"] == descriptor.group_key
+                and match["service_tier"] == descriptor.service_tier
+                for match in rule["matches"]
+            )
+        ]
+        if len(matching) != 1:
+            return descriptor
+        rule = matching[0]
+        tier = next((tier for tier in rule["tiers"] if tier["key"] == descriptor.key), None)
+        if tier is None:
+            return descriptor
+        return descriptor.model_copy(update={
+            "input_range": PriceCatalogInputRange.model_validate(tier["input_range"]),
+            "input_range_source": PriceCatalogRuleSource(
+                rule_id=rule["id"], url=rule["source_url"],
+                revision=rule["source_revision"], verified_on=rule["verified_on"],
+                origin=rule.get("origin", "reference"), note=rule.get("note"),
+            ),
+        })
 
     @property
     def search_text(self) -> str:
@@ -147,6 +181,7 @@ class CatalogEntry:
     # into a rate turns a transient 503 into a silent repricing. Readers that only display the
     # entry can ignore this; anything that writes a charged rate must not.
     complete: bool = True
+    text_to_image: bool = False
 
     @property
     def priced(self) -> bool:
@@ -346,6 +381,18 @@ def _per_million(price: Any, unit: Any) -> float | None:
     return round(scaled, 8)
 
 
+def _text_to_image_meter(parsed: _ParsedMeter) -> _ParsedMeter | None:
+    if parsed.product not in {"Azure OpenAI", "Azure OpenAI Media"}:
+        return None
+    stem, _, modality = parsed.stem.rpartition(" ")
+    if not stem.lower().startswith(("gpt image ", "image ")):
+        return None
+    if (modality == "txt" and parsed.slot in {"input", "cached"}
+            or modality == "img" and parsed.slot == "output"):
+        return replace(parsed, stem=stem)
+    return None
+
+
 # --------------------------------------------------------------------------------------------
 # Azure
 # --------------------------------------------------------------------------------------------
@@ -391,21 +438,26 @@ class AzureRetailCatalog:
             parsed = self._parse_row(row)
             if parsed is None:
                 continue
-            key = (parsed.product, parsed.stem)
-            slots.setdefault(key, set()).add(parsed.slot)
-            seen.setdefault(
-                key,
-                CatalogModel(
-                    key=f"azure_retail:{parsed.product}:{parsed.stem}",
-                    label=parsed.stem,
-                    product=parsed.product,
-                    source=PriceSource.AZURE_RETAIL,
-                    context_tier=parse_context_tier(parsed.stem),
-                ),
-            )
+            for candidate in (parsed, _text_to_image_meter(parsed)):
+                if candidate is None:
+                    continue
+                key = (candidate.product, candidate.stem)
+                slots.setdefault(key, set()).add(candidate.slot)
+                seen.setdefault(
+                    key,
+                    CatalogModel(
+                        key=f"azure_retail:{candidate.product}:{candidate.stem}",
+                        label=candidate.stem,
+                        product=candidate.product,
+                        source=PriceSource.AZURE_RETAIL,
+                        context_tier=parse_context_tier(candidate.stem),
+                        text_to_image=candidate is not parsed,
+                    ),
+                )
         # A model with only one side of the trade cannot price a request, so it is left out of
         # the picker rather than offered and then found wanting.
-        return [model for key, model in sorted(seen.items()) if {"input", "output"} <= slots[key]]
+        return [model for key, model in sorted(seen.items()) if "input" in slots[key]
+            and ("output" in slots[key] or key in _AZURE_FREE_OUTPUT_MODELS)]
 
     # -- one model ---------------------------------------------------------------------------
 
@@ -432,9 +484,16 @@ class AzureRetailCatalog:
         buckets: dict[tuple[str, str], dict[str, float]] = {}
         unreadable: set[str] = set()
         other_meters: set[str] = set()
+        text_to_image = False
         for row in rows:
             name = str(row.get("meterName") or "")
             parsed = self._parse_row(row)
+            if parsed is not None and parsed.stem != model.label:
+                candidate = _text_to_image_meter(parsed)
+                if candidate is None or candidate.stem != model.label:
+                    continue
+                parsed = candidate
+                text_to_image = True
             if parsed is None:
                 if not str(row.get("meterName") or "").strip():
                     continue
@@ -459,6 +518,8 @@ class AzureRetailCatalog:
         for (deployment, region), slot_prices in buckets.items():
             input_rate = slot_prices.get("input")
             output_rate = slot_prices.get("output")
+            if output_rate is None and (model.product, model.label) in _AZURE_FREE_OUTPUT_MODELS:
+                output_rate = 0.0
             if input_rate is None or output_rate is None:
                 continue
             rates: Rates = (
@@ -497,6 +558,7 @@ class AzureRetailCatalog:
                                 model.resolved_context_tier or parse_context_tier(model.label)
                             ),
                             complete=fetched.complete,
+                            text_to_image=text_to_image,
                         ),
                         regions=regions_sorted,
                         region_required=region_required,
@@ -515,7 +577,7 @@ class AzureRetailCatalog:
             )
         )
         return CatalogOptions(
-            model=model,
+            model=replace(model, text_to_image=text_to_image),
             options=tuple(options),
             unreadable=tuple(sorted(unreadable)),
             other_meters=tuple(sorted(other_meters)),
@@ -549,7 +611,11 @@ class AzureRetailCatalog:
 
     def _parse_row(self, row: dict[str, Any]) -> _ParsedMeter | None:
         name = str(row.get("meterName") or "")
+        product = str(row.get("productName") or "Azure")
         parsed = parse_meter_name(name)
+        stem = name.removesuffix(" 1M Tokens")
+        if name.endswith(" 1M Tokens") and (product, stem) in _AZURE_FREE_OUTPUT_MODELS:
+            parsed = (stem, "input", "Global")
         if parsed is None:
             return None
         per_million = _per_million(row.get("retailPrice"), row.get("unitOfMeasure"))
@@ -562,7 +628,7 @@ class AzureRetailCatalog:
             deployment=deployment,
             region=str(row.get("armRegionName") or "global"),
             per_million=per_million,
-            product=str(row.get("productName") or "Azure"),
+            product=product,
         )
 
     def _fetch(self, filter_expression: str) -> _Fetched:
@@ -627,21 +693,24 @@ def _meter_name_filter(label: str) -> str:
 # --------------------------------------------------------------------------------------------
 
 _ANTHROPIC_MODEL = re.compile(r"^Claude\s+[A-Z][A-Za-z]*\s+[\d.]+", re.IGNORECASE)
-_ANTHROPIC_PRICE = re.compile(r"^\$\s?([\d,]+(?:\.\d+)?)\s*/\s*MTok$", re.IGNORECASE)
+_ANTHROPIC_PRICE = re.compile(r"^\$\s?([\d,]+(?:\.\d+)?)\s*/\s*MTok", re.IGNORECASE)
 _TAG = re.compile(r"<[^>]+>")
-_DROP = re.compile(r"<(script|style).*?</\1>", re.IGNORECASE | re.DOTALL)
+_MARKDOWN_LINK = re.compile(r"\[([^]]+)]\([^)]+\)")
+_ANTHROPIC_MODEL_PRICING_HEADER = (
+    "model", "base input tokens", "5m cache writes", "1h cache writes",
+    "cache hits and refreshes", "output tokens",
+)
 ANTHROPIC_PRODUCT = "Anthropic"
 
 
 class AnthropicCatalog:
-    """Anthropic's published list, parsed from the pricing page.
+    """Anthropic's published list, parsed from its Markdown pricing table.
 
     The page prints five figures per model in a fixed order -- input, cache write at the
-    5-minute TTL, cache write at the 1-hour TTL, cache read, output -- and those figures are
-    fixed multiples of the input rate (1.25x, 2x, 0.1x). The multiples are checked on parse: if
-    the page is restructured the arithmetic stops holding, and a row that fails the check is
-    dropped rather than published as a price. That is the whole defence against a layout change
-    quietly rewriting someone's bill.
+    5-minute TTL, cache write at the 1-hour TTL, cache read, output. The table header binds each
+    value to its meaning. Cache writes retain their documented 1.25x/2x relationship; cache reads
+    are only bounded because Anthropic now publishes model-specific 0.025x and 0.05x exceptions.
+    A malformed row is dropped rather than published as a price.
     """
 
     source = PriceSource.ANTHROPIC
@@ -707,22 +776,26 @@ class AnthropicCatalog:
             headers={"User-Agent": "turnstile-price-sync"},
         )
         response.raise_for_status()
-        lines = _visible_lines(response.text)
         seen: set[str] = set()
-        for index, line in enumerate(lines):
-            if len(line) > 48 or not _ANTHROPIC_MODEL.match(line):
+        built: list[CatalogEntry] = []
+        for row in _anthropic_model_pricing_rows(response.text):
+            name = _markdown_cell_text(row[0]).split("(")[0].strip()
+            if len(name) > 48 or not _ANTHROPIC_MODEL.match(name) or name in seen:
                 continue
-            name = line.split("(")[0].strip()
-            if name in seen:
+            base = _anthropic_price(row[1])
+            write_5m = _anthropic_price(row[2])
+            write_1h = _anthropic_price(row[3])
+            read = _anthropic_price(row[4])
+            output = _anthropic_price(row[5])
+            if (
+                base is None or write_5m is None or write_1h is None
+                or read is None or output is None
+            ):
                 continue
-            figures = _following_prices(lines, index + 1, count=5)
-            if len(figures) < 5:
-                continue
-            base, write_5m, write_1h, read, output = figures
-            if not _multiples_hold(base, write_5m, write_1h, read):
+            if not _anthropic_prices_hold(base, write_5m, write_1h, read, output):
                 continue
             seen.add(name)
-            yield CatalogEntry(
+            built.append(CatalogEntry(
                 reference=f"anthropic:{ANTHROPIC_PRODUCT}:{name}:List price:*",
                 label=name,
                 source=PriceSource.ANTHROPIC,
@@ -732,36 +805,55 @@ class AnthropicCatalog:
                 cached_per_million=read,
                 # The 5-minute TTL is what a request gets unless it asks for the hourly one.
                 cache_write_per_million=write_5m,
-            )
+            ))
+        if not built:
+            raise ValueError("Anthropic model pricing table is empty or unrecognized")
+        yield from built
 
 
-def _visible_lines(html: str) -> list[str]:
-    text = _TAG.sub("\n", _DROP.sub(" ", html))
-    return [line.strip() for line in text.split("\n") if line.strip()]
-
-
-def _following_prices(lines: Sequence[str], start: int, *, count: int) -> list[float]:
-    found: list[float] = []
-    for line in lines[start : start + 40]:
-        match = _ANTHROPIC_PRICE.match(line)
-        if match is not None:
-            found.append(float(match.group(1).replace(",", "")))
-            if len(found) == count:
-                break
+def _anthropic_model_pricing_rows(markdown: str) -> Iterable[list[str]]:
+    in_model_pricing = False
+    header_found = False
+    for raw_line in markdown.splitlines():
+        line = raw_line.strip()
+        if line == "## Model pricing":
+            in_model_pricing = True
             continue
-        if _ANTHROPIC_MODEL.match(line) and len(line) <= 48:
-            break
-    return found
+        if in_model_pricing and line.startswith("## "):
+            return
+        if not in_model_pricing or not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        normalized = tuple(_markdown_cell_text(cell).lower() for cell in cells)
+        if not header_found:
+            header_found = normalized[:6] == _ANTHROPIC_MODEL_PRICING_HEADER
+            continue
+        if len(cells) < 6 or all(re.fullmatch(r":?-+:?", cell) for cell in cells[:6]):
+            continue
+        yield cells
 
 
-def _multiples_hold(base: float, write_5m: float, write_1h: float, read: float) -> bool:
-    if base <= 0:
+def _markdown_cell_text(value: str) -> str:
+    text = _MARKDOWN_LINK.sub(r"\1", value)
+    text = _TAG.sub("", text)
+    return re.sub(r"\s+", " ", text).strip().strip("*_`")
+
+
+def _anthropic_price(value: str) -> float | None:
+    match = _ANTHROPIC_PRICE.match(_markdown_cell_text(value))
+    return None if match is None else float(match.group(1).replace(",", ""))
+
+
+def _anthropic_prices_hold(
+    base: float, write_5m: float, write_1h: float, read: float, output: float,
+) -> bool:
+    if base <= 0 or read <= 0 or output < base:
         return False
 
     def close(value: float, expected: float) -> bool:
         return abs(value - expected) <= max(expected * 0.02, 0.005)
 
-    return close(write_5m, base * 1.25) and close(write_1h, base * 2) and close(read, base * 0.1)
+    return close(write_5m, base * 1.25) and close(write_1h, base * 2) and read <= base
 
 
 # --------------------------------------------------------------------------------------------

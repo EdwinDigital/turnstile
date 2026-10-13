@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 from ..domain.anomaly_engine import evaluate_anomaly_rules
-from ..domain.application_access import UsageApplicationAttribution
-from ..domain.billable_requests import BillableRequestAttempt
+from ..domain.application_access import (
+    GatewayApplicationLedgerState,
+    UsageApplicationAttribution,
+)
 from ..domain.enterprise import enterprise_catalog
+from ..domain.gateway_targets import UsageGatewayAttribution
 from ..domain.ledger import (
     BudgetReservationAdmission,
     BudgetReservationFinalization,
@@ -86,48 +90,79 @@ def metric(et: float, input_: int, cached: int, output: int, calls: int) -> dict
 
 class InMemoryRepository(
     InMemoryRegistryRepositoryMixin,
+    InMemoryGatewayTargetRepositoryMixin,
     InMemoryApplicationRepositoryMixin,
     InMemoryPublicationRepositoryMixin,
     InMemoryAssistantRepositoryMixin,
     InMemoryBudgetRepositoryMixin,
     InMemoryBillableRequestRepositoryMixin,
-    InMemoryGatewayTargetRepositoryMixin,
     QueryRepository,
 ):
     def begin_platform_invocation(self, attempt: PlatformInvocationAttempt) -> None:
-        if attempt.request_id in self.invocation_attempts:
-            raise ValueError("Platform invocation attempt already exists")
-        self.invocation_attempts[attempt.request_id] = attempt.model_copy(deep=True)
+        with self.invocation_attempt_lock:
+            if attempt.request_id in self.invocation_attempts:
+                raise ValueError("Platform invocation request ID has already been used")
+            self.invocation_attempts[attempt.request_id] = attempt.model_copy(deep=True)
 
     def finish_platform_invocation(self, completion: PlatformInvocationCompletion) -> None:
-        if completion.request_id not in self.invocation_attempts:
-            raise ValueError("Platform invocation attempt does not exist")
-        previous = self.invocation_completions.get(completion.request_id)
-        if previous is not None and previous != completion:
-            raise ValueError("Platform invocation completion is immutable")
-        self.invocation_completions[completion.request_id] = completion.model_copy(deep=True)
+        with self.invocation_attempt_lock:
+            previous = self.invocation_completions.get(completion.request_id)
+            if completion.request_id not in self.invocation_attempts or (
+                previous is not None and previous != completion
+            ):
+                raise ValueError("Platform invocation completion is missing or immutable")
+            self.invocation_completions[completion.request_id] = completion.model_copy(deep=True)
+
+    def budget_scope_confirmed_tokens(
+        self, scope_type: str, scope_id: str, period_start: date, period_end: date,
+    ) -> int:
+        return super().budget_scope_confirmed_tokens(
+            scope_type, scope_id, period_start, period_end
+        ) + self._billable_budget_adjustment(scope_type, scope_id, period_start, period_end)
+
+    def gateway_application_ledger_snapshot(
+        self, period_start: date, period_end: date
+    ) -> Sequence[dict[str, Any]]:
+        return [{**row, "confirmed_tokens": self.budget_scope_confirmed_tokens(
+            "application", str(row["application_id"]), period_start, period_end
+        )} for row in super().gateway_application_ledger_snapshot(period_start, period_end)]
+
+    def settled_reservation_correlations(
+        self, correlation_ids: Sequence[str], *, scope_type: str, scope_id: str | None = None,
+    ) -> set[str]:
+        return super().settled_reservation_correlations(
+            correlation_ids, scope_type=scope_type, scope_id=scope_id
+        ) | self.settled_billable_requests(list(correlation_ids), scope_type, scope_id)
 
     def __init__(self) -> None:
+        from ..domain.billable_requests import BillableRequestAttempt
+
         self.invocation_attempts: dict[str, PlatformInvocationAttempt] = {}
         self.invocation_completions: dict[str, PlatformInvocationCompletion] = {}
-        self.apim_targets: dict[UUID, dict[str, Any]] = {}
-        self.gateway_deployments: dict[UUID, dict[str, Any]] = {}
-        self.apim_target_route_bindings: dict[UUID, dict[str, Any]] = {}
-        self.gateway_deployment_inventories: dict[UUID, dict[str, Any]] = {}
-        self.gateway_instance_observations: dict[tuple[UUID, str], dict[str, Any]] = {}
-        self.billable_request_lock = threading.RLock()
-        self.budget_evidence_received_at: dict[str, datetime] = {}
-        self.budget_evidence_conflicts: set[tuple[str, str, str, int, int]] = set()
-        self.reconciled_usage_ids: set[str] = set()
+        self.invocation_attempt_lock = threading.RLock()
         self.billable_requests: dict[UUID, BillableRequestAttempt] = {}
+        self.billable_request_lock = threading.RLock()
         self.evidence_policy_effective_at: datetime | None = None
         self.budget_reservation_admissions: dict[
             tuple[str, str, str], BudgetReservationAdmission
         ] = {}
+        self.budget_evidence_conflicts: set[tuple[str, str, str, int, int]] = set()
+        self.budget_evidence_received_at: dict[str, datetime] = {}
+        self.reconciled_usage_ids: set[str] = set()
         now = datetime(2026, 7, 17, 8, tzinfo=UTC)
         self.reconciliation_state: dict[str, datetime] = {}
         self.apim_api_id = "turnstile-llm"
         self.apim_cache_read_buckets: dict[tuple[str, str, str, datetime], int] = {}
+        self.budget_reservation_finalizations: dict[
+            tuple[str, str, str, str, str, datetime], BudgetReservationFinalization
+        ] = {}
+        self.gateway_application_ledger_states: dict[
+            tuple[date, UUID], GatewayApplicationLedgerState
+        ] = {}
+        self.gateway_application_ledger_finalization_states: dict[
+            tuple[date, UUID], dict[str, Any]
+        ] = {}
+        self.application_owner_rows: list[dict[str, Any]] = []
         self.findings = [
             {
                 "id": UUID("a1000000-0000-4000-8000-000000000001"),
@@ -153,12 +188,10 @@ class InMemoryRepository(
             )
         ]
         self.usage_records: list[TokenUsageRecord] = []
-        self.budget_reservation_finalizations: list[BudgetReservationFinalization] = []
         self.usage_application_attributions: dict[str, UsageApplicationAttribution] = {}
         self.pinned_reports: list[dict[str, Any]] = []
         self.pinned_charts: list[dict[str, Any]] = []
         self.conversations: list[dict[str, Any]] = []
-        self.application_owner_rows: list[dict[str, Any]] = []
         # Mirrors the single seeded row migration 027 creates.
         self.assistant_setting: dict[str, Any] = {
             "model_id": None,
@@ -174,6 +207,14 @@ class InMemoryRepository(
         self.gateway_publications: list[dict[str, Any]] = []
         self.multi_target_rollouts: list[dict[str, Any]] = []
         self.multi_target_rollout_children: list[dict[str, Any]] = []
+        self.apim_targets: dict[UUID, dict[str, Any]] = {}
+        self.gateway_deployments: dict[UUID, dict[str, Any]] = {}
+        self.gateway_instance_observations: dict[
+            tuple[UUID, str], dict[str, Any]
+        ] = {}
+        self.gateway_deployment_inventories: dict[UUID, dict[str, Any]] = {}
+        self.apim_target_route_bindings: dict[UUID, dict[str, Any]] = {}
+        self.usage_gateway_attributions: dict[str, dict[str, Any]] = {}
         self.gateway_publication_audit: list[dict[str, Any]] = []
         self.gateway_publication_outbox: list[dict[str, Any]] = []
         self.gateway_publication_secrets: dict[UUID, bytes] = {}
@@ -189,7 +230,6 @@ class InMemoryRepository(
         self.gateway_application_avatars: dict[UUID, dict[str, Any]] = {}
         self.gateway_application_subscriptions: list[dict[str, Any]] = []
         self.gateway_application_budgets: dict[tuple[date, UUID], dict[str, Any]] = {}
-        self.gateway_application_ledger_states: dict[tuple[date, UUID], dict[str, Any]] = {}
         self.gateway_application_model_policies: dict[UUID, dict[str, Any]] = {}
         self.gateway_application_model_access: dict[UUID, set[UUID]] = {}
         self.gateway_application_audit: list[dict[str, Any]] = []
@@ -250,7 +290,7 @@ class InMemoryRepository(
                 "id": UUID("10000000-0000-4000-8000-000000000001"),
                 "name": "Azure API Management",
                 "implementation": "apim",
-                "base_url": "http://127.0.0.1:8000/mock-apim",
+                "base_url": "https://gateway.example.test/mock-apim",
                 "auth_type": "api_key",
                 "credential_ciphertext": None,
                 "credential_hint": None,
@@ -395,28 +435,64 @@ class InMemoryRepository(
         record: TokenUsageRecord,
         application: UsageApplicationAttribution | None = None,
         *,
+        gateway: UsageGatewayAttribution | None = None,
+        terminal_observation: dict[str, Any] | None = None,
         execution_receipts: Sequence[LedgerAdmissionReceipt] = (),
         usage_complete: bool = False,
         gateway_profile_id: UUID | None = None,
         native_gateway_id: str | None = None,
         evidence_source: str = "apim",
     ) -> None:
-        if execution_receipts:
+        if execution_receipts or terminal_observation is not None:
             raise RuntimeError("Budget execution requires the durable PostgreSQL repository")
         with self.billable_request_lock:
-            self._write_token_usage(record, application)
+            if gateway is not None and gateway.usage_id != record.id:
+                raise ValueError("Gateway attribution must match the canonical usage ID")
+            original_records = list(self.usage_records)
+            original_applications = deepcopy(self.usage_application_attributions)
+            original_gateways = deepcopy(self.usage_gateway_attributions)
+            original_receipts = dict(self.budget_evidence_received_at)
+            original_conflicts = set(self.budget_evidence_conflicts)
+            try:
+                usage_id = self._write_token_usage(record, application, gateway)
+                if gateway is not None:
+                    self.upsert_usage_gateway_attribution(gateway.model_copy(update={
+                        "usage_id": usage_id,
+                    }))
+            except Exception:
+                self.usage_records = original_records
+                self.usage_application_attributions = original_applications
+                self.usage_gateway_attributions = original_gateways
+                self.budget_evidence_received_at = original_receipts
+                self.budget_evidence_conflicts = original_conflicts
+                raise
 
     def _write_token_usage(
-        self,
-        record: TokenUsageRecord,
-        application: UsageApplicationAttribution | None,
-    ) -> None:
+        self, record: TokenUsageRecord, application: UsageApplicationAttribution | None,
+        gateway: UsageGatewayAttribution | None = None,
+    ) -> str:
         if record.usage_domain == "apim":
             candidates = [
-                item
-                for item in self.usage_records
-                if (item.usage_domain == "apim" and item.correlation_id == record.correlation_id)
-                or item.id == record.id
+                existing
+                for existing in self.usage_records
+                if (
+                    existing.usage_domain == "apim"
+                    and existing.correlation_id == record.correlation_id
+                    and (
+                        gateway is None
+                        or (
+                            self.usage_gateway_attributions.get(existing.id, {}).get(
+                                "apim_target_id"
+                            )
+                            == gateway.apim_target_id
+                            and self.usage_gateway_attributions.get(existing.id, {}).get(
+                                "native_gateway_id"
+                            )
+                            == gateway.native_gateway_id
+                        )
+                    )
+                )
+                or existing.id == record.id
             ]
             if len(candidates) > 1:
                 raise ValueError("APIM correlation identity is ambiguous")
@@ -429,17 +505,55 @@ class InMemoryRepository(
                 ):
                     raise ValueError("APIM correlation identity conflicts with stored usage")
                 record = record.model_copy(update={"id": existing.id})
-        if application is not None:
-            self._write_usage_application_attribution(record.id, application)
+        attributed = self.usage_application_attributions.get(record.id)
+        if (
+            application is not None
+            and attributed is not None
+            and (
+                application.model_copy(
+                    update={"application_admission": None, "application_name_snapshot": ""}
+                )
+                != attributed.model_copy(
+                    update={"application_admission": None, "application_name_snapshot": ""}
+                )
+            )
+        ):
+            raise ValueError("Usage application attribution is immutable")
         self.budget_evidence_received_at.setdefault("usage:" + record.id, datetime.now(UTC))
         for index, existing in enumerate(self.usage_records):
             if existing.id != record.id:
                 continue
             if existing.estimated and not record.estimated:
-                record = record.model_copy(update=ModelPrice.restore_usage_prices(
-                    existing.model_dump(), record.input_tokens, record.cached_tokens,
-                    record.output_tokens, record.cache_write_tokens,
-                ))
+                original_price = (
+                    ModelPrice.from_usage_snapshot(existing.model_dump())
+                    if existing.price_context_snapshot is not None
+                    or existing.input_price_per_million is not None
+                    or existing.output_price_per_million is not None
+                    else None
+                )
+                if original_price is not None:
+                    prices = original_price.snapshot_prices(
+                        record.input_tokens, record.cached_tokens,
+                        record.output_tokens, record.cache_write_tokens,
+                    )
+                    prices["price_context_snapshot"] = existing.price_context_snapshot
+                    prices["usd_cost"] = original_price.cost_decimal(
+                        record.input_tokens,
+                        record.cached_tokens,
+                        record.output_tokens,
+                        record.cache_write_tokens,
+                    )
+                    record = record.model_copy(update=prices)
+                else:
+                    record = record.model_copy(update={
+                        field: getattr(existing, field) for field in (
+                            "input_price_per_million", "cached_price_per_million",
+                            "cache_write_price_per_million", "output_price_per_million",
+                            "price_context_tier", "price_context_snapshot", "estimated_cost",
+                            "usd_cost",
+                            "usd_price_sha256", "usd_price_updated_at",
+                        )
+                    })
                 self.usage_records[index] = record.model_copy(
                     update={
                         "budget_admission": record.budget_admission
@@ -454,15 +568,10 @@ class InMemoryRepository(
                 )
                 incoming_tokens = record.input_tokens + record.cached_tokens + record.output_tokens
                 if existing_tokens != incoming_tokens:
-                    self.budget_evidence_conflicts.add(
-                        (
-                            "person",
-                            existing.user_id,
-                            existing.correlation_id,
-                            existing_tokens,
-                            incoming_tokens,
-                        )
-                    )
+                    self.budget_evidence_conflicts.add((
+                        "person", existing.user_id, existing.correlation_id,
+                        existing_tokens, incoming_tokens,
+                    ))
                 updates = {
                     field: getattr(record, field)
                     for field in ("budget_admission", "model_admission")
@@ -472,8 +581,13 @@ class InMemoryRepository(
                     updates["runtime"] = record.runtime
                 if updates:
                     self.usage_records[index] = existing.model_copy(update=updates)
-            return
+            if application is not None:
+                self._write_usage_application_attribution(record.id, application)
+            return record.id
         self.usage_records.append(record)
+        if application is not None:
+            self._write_usage_application_attribution(record.id, application)
+        return record.id
 
     def model_prices(self) -> dict[str, ModelPrice]:
         prices: dict[str, ModelPrice] = {}
@@ -548,6 +662,16 @@ class InMemoryRepository(
                 ) if record.price_context_snapshot is not None and item.cached_tokens is not None
                 else {}
             )
+            exact_usd_cost = None
+            if not cache_unknown:
+                usage_price = ModelPrice.from_usage_snapshot(record.model_dump())
+                if usage_price is not None:
+                    exact_usd_cost = usage_price.cost_decimal(
+                        item.input_tokens,
+                        item.cached_tokens or 0,
+                        item.output_tokens,
+                        record.cache_write_tokens,
+                    )
             self.usage_records[index] = record.model_copy(
                 update={
                     "input_tokens": item.input_tokens,
@@ -556,6 +680,7 @@ class InMemoryRepository(
                         record.cached_tokens if cache_unknown else item.cached_tokens
                     ),
                     "estimated_cost": _repriced(record, item),
+                    "usd_cost": exact_usd_cost,
                     "estimated": cache_unknown,
                     "ingest_error": (
                         "stream_cache_usage_unavailable" if cache_unknown else None
@@ -655,8 +780,7 @@ class InMemoryRepository(
             int(totals["total_tokens"]) + corrected - database_cache, 0
         )
 
-    @staticmethod
-    def _matches(record: TokenUsageRecord, filters: UsageFilters) -> bool:
+    def _matches(self, record: TokenUsageRecord, filters: UsageFilters) -> bool:
         if record.usage_domain != "apim":
             return False
         for field, value in (
@@ -678,7 +802,19 @@ class InMemoryRepository(
                 continue
             if actual != value:
                 return False
-        return True
+        gateway = self.usage_gateway_attributions.get(record.id)
+        if filters.apim_target_id is not None and (
+            gateway is None or gateway["apim_target_id"] != filters.apim_target_id
+        ):
+            return False
+        return not (
+            filters.gateway_deployment_id is not None
+            and (
+                gateway is None
+                or gateway["gateway_deployment_id"]
+                != filters.gateway_deployment_id
+            )
+        )
 
     def _usage_between(
         self, from_: datetime, to: datetime, filters: UsageFilters
@@ -872,11 +1008,29 @@ class InMemoryRepository(
             return None
         candidates = []
         for record in self.usage_records:
-            if (record.request_id != attempt.request_id or record.usage_domain != "apim"
-                    or record.correlation_id != completion.gateway_correlation_id
-                    or record.user_id != attempt.metadata.user_id
-                    or record.model_id != str(attempt.model_id)
-                    or record.runtime != attempt.runtime_name):
+            if (
+                record.request_id != attempt.request_id
+                or record.usage_domain != "apim"
+                or record.user_id != attempt.metadata.user_id
+                or record.model_id != str(attempt.model_id)
+                or (
+                    completion is not None
+                    and completion.gateway_correlation_id is not None
+                    and completion.gateway_correlation_id != record.correlation_id
+                )
+            ):
+                continue
+            gateway = self.usage_gateway_attributions.get(record.id)
+            if gateway is None:
+                if attempt.gateway_deployment_id is not None:
+                    continue
+            elif (
+                gateway["apim_target_id"] != attempt.apim_target_id
+                or gateway["gateway_deployment_id"] != attempt.gateway_deployment_id
+                or gateway["native_gateway_id"] != attempt.native_gateway_id
+                or str(gateway["apim_service_id"]).casefold()
+                != str(attempt.apim_service_id).casefold()
+            ):
                 continue
             application = self.usage_application_attributions.get(record.id)
             if attempt.application_id is not None and (
@@ -890,30 +1044,51 @@ class InMemoryRepository(
         completion = self.invocation_completions.get(attempt.request_id)
         metadata = attempt.metadata
         return UsageRequestDetail(
-            request_id=attempt.request_id, trace_id="platform:" + attempt.request_id,
+            request_id=attempt.request_id,
+            trace_id="platform:" + attempt.request_id,
             correlation_id=completion.gateway_correlation_id if completion else None,
             timestamp=attempt.started_at,
-            organization_id=metadata.organization_id, organization_name=metadata.organization,
-            department_id=metadata.department_id, department_name=metadata.department,
-            project_id=metadata.project_id, project_name=metadata.project,
-            agent_id=metadata.agent_id, agent_name=metadata.agent,
-            user_id=metadata.user_id, user_name=metadata.user,
-            model_id=str(attempt.model_id), model_name=attempt.model_name,
-            request_source=metadata.request_source, runtime=attempt.runtime_name,
+            organization_id=metadata.organization_id,
+            organization_name=metadata.organization,
+            department_id=metadata.department_id,
+            department_name=metadata.department,
+            project_id=metadata.project_id,
+            project_name=metadata.project,
+            agent_id=metadata.agent_id,
+            agent_name=metadata.agent,
+            user_id=metadata.user_id,
+            user_name=metadata.user,
+            model_id=str(attempt.model_id),
+            model_name=attempt.model_name,
+            request_source=metadata.request_source,
+            runtime=attempt.runtime_name,
             apim_target_id=attempt.apim_target_id,
             gateway_deployment_id=attempt.gateway_deployment_id,
             native_gateway_id=attempt.native_gateway_id,
-            prompt_tokens=0, completion_tokens=0, total_tokens=0, cached_tokens=0,
+            gateway_is_managed=attempt.native_gateway_id == "managed"
+            if attempt.native_gateway_id
+            else None,
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            cached_tokens=0,
             latency_ms=completion.latency_ms if completion else 0,
             status_code=completion.status_code if completion else None,
-            estimated_cost=0, cost_available=False, usage_available=False,
+            estimated_cost=0,
+            cost_available=False,
+            usage_available=False,
             platform_outcome=completion.outcome if completion else "dispatched",
             upstream_request_id=completion.upstream_request_id if completion else None,
             error_message="Platform invocation " + str(completion.failure_kind)
-            if completion and completion.outcome == "failed" else None,
-            provider=attempt.provider_name, workflow=metadata.workflow,
-            run_id=metadata.run_id, turn_index=metadata.turn_index,
-            estimated=True, ingest_source="platform", ingest_error="platform_usage_unavailable",
+            if completion and completion.outcome == "failed"
+            else None,
+            provider=attempt.provider_name,
+            workflow=metadata.workflow,
+            run_id=metadata.run_id,
+            turn_index=metadata.turn_index,
+            estimated=True,
+            ingest_source="platform",
+            ingest_error="platform_usage_unavailable",
         ).model_dump()
 
     @staticmethod
@@ -929,26 +1104,26 @@ class InMemoryRepository(
         return True
 
     def _request_summary(self, record: TokenUsageRecord) -> dict[str, Any]:
+        gateway = self.usage_gateway_attributions.get(record.id) or {}
         attempt = self.invocation_attempts.get(record.request_id)
         if attempt is not None:
             matched = self._platform_usage(attempt)
             if matched is None or matched.id != record.id:
                 attempt = None
         completion = self.invocation_completions.get(record.request_id) if attempt else None
-        available = not record.estimated or (
-            record.input_tokens + record.cached_tokens + record.output_tokens > 0
-        )
         return {
             "request_id": record.request_id,
             "correlation_id": record.correlation_id,
             "trace_id": "platform:" + attempt.request_id if attempt else record.id,
-            "usage_available": available,
-            "platform_outcome": completion.outcome if completion else None,
+            "usage_available": not record.estimated
+            or record.input_tokens + record.cached_tokens + record.output_tokens > 0,
+            "platform_outcome": completion.outcome
+            if completion
+            else "dispatched"
+            if attempt
+            else None,
             "gateway_status_code": record.status_code,
             "upstream_request_id": completion.upstream_request_id if completion else None,
-            "apim_target_id": attempt.apim_target_id if attempt else None,
-            "gateway_deployment_id": attempt.gateway_deployment_id if attempt else None,
-            "native_gateway_id": attempt.native_gateway_id if attempt else None,
             "timestamp": record.ts,
             "organization_id": record.organization_id,
             "organization_name": record.organization,
@@ -964,22 +1139,36 @@ class InMemoryRepository(
             "model_name": record.model,
             "request_source": record.request_source,
             "runtime": record.runtime,
+            "apim_target_id": gateway.get("apim_target_id"),
+            "gateway_deployment_id": gateway.get("gateway_deployment_id"),
+            "native_gateway_id": gateway.get("native_gateway_id"),
+            "native_gateway_instance_id": gateway.get("native_instance_id"),
+            "gateway_is_managed": gateway.get("is_managed"),
+            "apim_region": gateway.get("apim_region"),
+            "api_revision": gateway.get("api_revision"),
             "prompt_tokens": record.input_tokens,
             "completion_tokens": record.output_tokens,
             "total_tokens": record.input_tokens + record.cached_tokens + record.output_tokens,
             "latency_ms": completion.latency_ms if completion else record.latency_ms,
             "status_code": completion.status_code if completion else record.status_code,
             "estimated_cost": record.estimated_cost,
-            "cost_available": available and (record.estimated_cost > 0 or (
-                record.input_price_per_million is not None
-                and record.output_price_per_million is not None
-            )),
+            "cost_available": (
+                not record.estimated
+                or record.input_tokens + record.cached_tokens + record.output_tokens > 0
+            ) and (
+                record.estimated_cost > 0 or (
+                    record.input_price_per_million is not None
+                    and record.output_price_per_million is not None
+                )
+            ),
             "error_message": "Platform invocation " + str(completion.failure_kind)
-            if completion and completion.outcome == "failed" else record.error_message,
+            if completion and completion.outcome == "failed"
+            else record.error_message,
         }
 
     def list_usage_requests(
-        self, from_: datetime, to: datetime, filters: UsageFilters, limit: int
+        self, from_: datetime, to: datetime, filters: UsageFilters, limit: int,
+        after: tuple[datetime, str] | None = None,
     ) -> list[dict[str, Any]]:
         summaries = [self._request_summary(record)
                      for record in self._usage_between(from_, to, UsageFilters())]
@@ -988,30 +1177,30 @@ class InMemoryRepository(
                 detail = self._unmatched_invocation(attempt)
                 summaries.append({key: value for key, value in detail.items()
                                   if key in UsageRequestSummary.model_fields})
-        return sorted((row for row in summaries if self._matches_trace(row, filters)),
-                      key=lambda row: row["timestamp"], reverse=True)[:limit]
+        return sorted((row for row in summaries if self._matches_trace(row, filters)
+                   and (after is None or (row["timestamp"], row["trace_id"]) < after)),
+                  key=lambda row: (row["timestamp"], row["trace_id"]), reverse=True)[:limit]
 
     def get_usage_request(self, request_id: str) -> dict[str, Any] | None:
         platform = self.invocation_attempts.get(request_id.removeprefix("platform:"))
-        matched = self._platform_usage(platform) if platform else None
-        if platform is not None and matched is None:
+        if platform is not None and self._platform_usage(platform) is None:
             return self._unmatched_invocation(platform)
         records = [
             record
             for record in self.usage_records
             if record.usage_domain == "apim"
-              and (record.correlation_id == request_id or record.request_id == request_id
-                  or record.id == request_id or (matched is not None and matched.id == record.id))
+            and (
+                record.id == request_id
+                or (platform is not None and record == self._platform_usage(platform))
+                or record.correlation_id == request_id
+                or record.request_id == request_id
+            )
         ]
-        exact_matches = [record for record in records if record.correlation_id == request_id]
-        record = max(
-            exact_matches or records,
-            key=lambda item: (item.ts, item.id),
-            default=None,
-        )
+        exact = [record for record in records if record.correlation_id == request_id]
+        record = max(exact or records, key=lambda item: item.ts, default=None)
         if record is None:
             return None
-        return {
+        result = {
             **self._request_summary(record),
             "provider": record.provider,
             "workflow": record.workflow,
@@ -1024,13 +1213,14 @@ class InMemoryRepository(
             "cache_write_price_per_million": record.cache_write_price_per_million,
             "output_price_per_million": record.output_price_per_million,
             "price_context_tier": record.price_context_tier,
-            "price_context_snapshot": record.price_context_snapshot,
+            "price_context_snapshot": deepcopy(record.price_context_snapshot),
             "estimated": record.estimated,
             "ingest_source": record.ingest_source,
             "ingest_error": record.ingest_error,
             "budget_admission": record.budget_admission,
             "model_admission": record.model_admission,
         }
+        return result
 
     def observed_users(self) -> list[dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}

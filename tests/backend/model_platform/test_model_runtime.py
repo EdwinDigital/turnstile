@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import UTC, date, datetime
+from inspect import signature
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import UUID
 
 import httpx
@@ -15,18 +16,30 @@ from fastapi import HTTPException
 from pydantic import HttpUrl, SecretStr
 
 from backend.services.runtime_service import ModelRuntimeService
+from tests.backend.model_platform.test_gateway_targets import deployment, target
 from turnstile_core.config import Settings
 from turnstile_core.domain.control_plane import (
+    ApiFormat,
     GatewayCredentialRotation,
     GatewayPublicationRetry,
     GatewayReleaseDependencies,
+    ModelCreateTarget,
     RuntimeTarget,
+)
+from turnstile_core.domain.gateway_targets import (
+    SelfHostedGatewayCreate,
+    SelfHostedGatewayProvisionSpec,
+    gateway_deployment_id_for,
+    gateway_provision_digest,
+    self_hosted_gateway_native_id_for,
 )
 from turnstile_core.domain.models import TokenUsageRecord
 from turnstile_core.domain.runtime_models import (
     AuthType,
     BrandKey,
     ChatMessage,
+    DecisionInvocationRequest,
+    DecisionRequest,
     GatewayKind,
     GatewayProfileWrite,
     InvocationMetadata,
@@ -53,7 +66,9 @@ from turnstile_core.integrations.gateway import (
     CliGatewayAdapter,
     GatewayInvocationError,
     GatewayRouter,
+    MicrosoftDecisionGatewayAdapter,
     OpenAICompatibleGatewayAdapter,
+    _decision_usage,
     _openai_usage,
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
@@ -65,6 +80,188 @@ from turnstile_core.pricing.catalog import (
     CompositeCatalog,
 )
 from turnstile_core.security import CredentialCipher
+
+
+def test_native_decision_contract_retains_json_state_and_three_question_kinds() -> None:
+    payload: dict[str, Any] = {
+        "model": "unit-decision", "state": {"service": "checkout", "status": 500},
+        "questions": {
+            "urgent": {"type": "noul", "instructions": "Is this urgent?"},
+            "team": {"type": "choice", "instructions": "Choose a team", "criteria": {
+                "billing": "Charges", "engineering": "Errors",
+            }},
+            "severity": {"type": "score", "instructions": "Rate severity",
+                         "criteria": ["Minor", "Critical"]},
+        },
+    }
+    decision = DecisionRequest.model_validate(payload)
+    assert decision.model_dump(mode="json") == payload
+    assert ApiFormat.MICROSOFT_DECISION.value == "microsoft_decision"
+    for field, value in [("messages", []), ("stream", True), ("max_output_tokens", 64)]:
+        with pytest.raises(ValueError):
+            DecisionRequest.model_validate({**payload, field: value})
+    selected = DecisionInvocationRequest(
+        model_id=UUID(int=901), metadata=request().metadata, state=payload["state"],
+        questions=decision.questions,
+    )
+    assert "router_id" not in selected.model_dump()
+    with pytest.raises(ValueError, match="selected together"):
+        DecisionInvocationRequest.model_validate({
+            **selected.model_dump(), "gateway_profile_id": UUID(int=903),
+        })
+
+
+@pytest.mark.parametrize("change", [
+    {"is_default": True}, {"capabilities": ["decision", "chat"]},
+    {"capabilities": ["decision", "streaming"]},
+])
+def test_decision_model_cannot_be_chat_default_or_advertise_chat_fields(
+    change: dict[str, Any],
+) -> None:
+    with pytest.raises(ValueError):
+        ManagedModelWrite.model_validate({
+            "provider_id": UUID(int=1), "runtime_id": UUID(int=2),
+            "model_key": "unit-decision", "display_name": "Decision",
+            "capabilities": ["decision"], **change,
+        })
+
+
+def test_native_decision_management_requires_publication_and_preserves_operation() -> None:
+    repository = InMemoryRepository()
+    service = ModelRuntimeService(repository, Settings())
+    assert service.registry().decision_supported is True
+    write = ManagedModelWrite(provider_id=UUID(int=1), runtime_id=UUID(int=2),
+                              model_key="unit-decision", display_name="Unit Decision",
+                              capabilities=["decision"])
+    with pytest.raises(HTTPException, match="Publish Decision") as created:
+        service.save_model(write)
+    assert created.value.status_code == 409
+    existing = repository.models[0]
+    with pytest.raises(HTTPException, match="Changing model operation") as changed:
+        service.save_model(write.model_copy(update={
+            "provider_id": existing["provider_id"], "runtime_id": existing["runtime_id"],
+        }), existing["id"])
+    assert changed.value.status_code == 409
+
+
+def test_native_decision_publication_requires_existing_deployment_and_supported_prices() -> None:
+    target = ModelCreateTarget(operation="decision", deployment_name="unit-decision")
+    assert target.operation == "decision"
+    with pytest.raises(ValueError, match="existing Foundry deployment"):
+        ModelCreateTarget(operation="decision", model_key="unit", display_name="Unit",
+                          upstream_model_id="unit")
+    with pytest.raises(ValueError, match="manual or Azure"):
+        ModelCreateTarget(operation="decision", deployment_name="unit-decision",
+                          price_source=PriceSource.ANTHROPIC,
+                          price_reference="anthropic:unit")
+
+
+@pytest.mark.parametrize("usage,expected", [
+    ({"input_tokens": 93, "output_tokens": 3}, (93, 0, 0, 3)),
+    ({"input_tokens": 100, "output_tokens": 3, "total_tokens": 103,
+      "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 5}}, (75, 25, 5, 3)),
+    ({"input_tokens": 93, "output_tokens": 3, "total_tokens": 95}, None),
+    ({"input_tokens": 93, "output_tokens": True}, None),
+    ({"input_tokens": 93}, None), (None, None),
+])
+def test_native_decision_usage_handles_missing_total_without_guessing(
+    usage: Any, expected: tuple[int, int, int, int] | None,
+) -> None:
+    actual = _decision_usage(usage)
+    if expected is None:
+        assert actual is None
+    else:
+        assert actual is not None and actual.estimated is False
+        assert (actual.input_tokens, actual.cached_tokens,
+                actual.cache_write_tokens, actual.output_tokens) == expected
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_native_decision_http_sends_only_alias_state_questions_and_preserves_answers(
+    complete: bool,
+) -> None:
+    calls: list[httpx.Request] = []
+    questions = {"urgent": {"type": "noul", "instructions": "Is it urgent?"}}
+    decision = DecisionInvocationRequest.model_validate({
+        "metadata": request().metadata.model_dump(), "model_id": str(UUID(int=901)),
+        "state": {"status": 500}, "questions": questions,
+    })
+    answers = {"urgent": {"type": "noul", "probability": 0.8}}
+    route = {
+        "runtime_kind": "foundry", "gateway_implementation": "apim",
+        "model_id": UUID(int=901), "runtime_id": UUID(int=902),
+        "model_key": "unit-decision-alias", "runtime_name": "Unit Foundry",
+        "gateway_base_url": "https://unit-apim.example/llm", "gateway_auth_type": "api_key",
+        "gateway_config": {"header_name": "Ocp-Apim-Subscription-Key"},
+        "gateway_credential": "unit-subscription-key",
+        "runtime_config": {"api_format": "microsoft_decision", "control_plane_managed": True},
+    }
+
+    def handler(outgoing: httpx.Request) -> httpx.Response:
+        calls.append(outgoing)
+        assert outgoing.url.path == "/llm/providers/microsoft/v1/systemone"
+        assert outgoing.headers["Ocp-Apim-Subscription-Key"] == "unit-subscription-key"
+        assert json.loads(outgoing.content) == {
+            "model": "unit-decision-alias", "state": {"status": 500}, "questions": questions,
+        }
+        return httpx.Response(200, json={"answers": answers, **({"usage": {
+            "input_tokens": 93, "output_tokens": 3,
+        }} if complete else {})}, headers={"x-correlation-id": "unit-gateway-correlation"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        adapter = GatewayRouter(client).adapter(route)
+        assert isinstance(adapter, MicrosoftDecisionGatewayAdapter)
+        result = adapter.invoke(decision, route)
+        assert result.answers == answers and result.content == ""
+        assert result.correlation_id == "unit-gateway-correlation"
+        assert (result.usage is not None) is complete
+        with pytest.raises(GatewayInvocationError, match="Decision invocation endpoint"):
+            adapter.invoke(request(), route)
+    assert len(calls) == 1
+
+
+def test_native_decision_service_reuses_governance_and_platform_trace() -> None:
+    encryption_key = Fernet.generate_key()
+    cipher = CredentialCipher(encryption_key)
+    repository = Mock(spec=InMemoryRepository)
+    route = {
+        "model_id": UUID(int=901), "runtime_id": UUID(int=902), "gateway_id": UUID(int=903),
+        "model_key": "unit-decision", "display_name": "Unit Decision", "runtime_name": "Foundry",
+        "runtime_kind": "foundry", "provider_name": "Microsoft Foundry",
+        "provider_kind": "microsoft_foundry", "model_capabilities": ["decision"],
+        "gateway_implementation": "apim", "native_gateway_id": "managed",
+        "gateway_base_url": "https://unit-apim.example/llm", "gateway_auth_type": "api_key",
+        "gateway_config": {"header_name": "Ocp-Apim-Subscription-Key"},
+        "gateway_credential_ciphertext": cipher.encrypt("unit-subscription-key"),
+        "runtime_config": {"control_plane_managed": True},
+    }
+    decision = DecisionInvocationRequest.model_validate({
+        "model_id": str(route["model_id"]), "metadata": request().metadata.model_dump(),
+        "state": "Unit outage", "questions": {"urgent": {
+            "type": "noul", "instructions": "Is it urgent?",
+        }},
+    })
+    answers = {"urgent": {"type": "noul", "probability": 0.8}}
+    with httpx.Client(transport=httpx.MockTransport(lambda outgoing: httpx.Response(200, json={
+        "answers": answers, "usage": {"input_tokens": 93, "output_tokens": 3},
+    }, headers={"x-correlation-id": "unit-gateway-correlation"}))) as client:
+        service = ModelRuntimeService(
+            repository, Settings(credential_encryption_key=SecretStr(encryption_key.decode())),
+            GatewayRouter(client),
+        )
+        with patch.object(service, "_invocation_route", return_value=route), \
+                patch.object(service, "_assert_model_allowed") as allowed, \
+                patch.object(service, "_prepare_budget_delegation") as delegated, \
+                patch.object(service, "_assert_budget_available") as budget:
+            result = service.invoke_decision(decision)
+    assert result.answers == answers
+    assert result.usage is not None and result.usage.input_tokens == 93
+    assert result.correlation_id == "unit-gateway-correlation"
+    allowed.assert_called_once()
+    delegated.assert_called_once()
+    budget.assert_called_once()
+    repository.begin_platform_invocation.assert_called_once()
+    repository.finish_platform_invocation.assert_called_once()
 
 
 def test_http_runtime_requests_reuse_the_price_catalog() -> None:
@@ -185,7 +382,7 @@ def test_openai_connection_contract_does_not_mix_provider_or_authentication_shap
     assert "api_key" not in ModelConnectionCreate.model_fields
     with pytest.raises(ValueError, match="accepts only its Base URL"):
         ModelConnectionCreate.model_validate({**values, "auth_mode": "managed_identity"})
-    with pytest.raises(ValueError, match="select one"):
+    with pytest.raises(ValueError, match="select exactly one"):
         ModelConnectionCreate.model_validate({
             **values,
             "bedrock_runtime_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
@@ -278,10 +475,14 @@ def test_foundry_connections_on_different_gateways_have_unique_names(tmp_path: P
         item for item in registry.runtimes if item.config.get("project_endpoint") == endpoint
     ]
     assert len(connections) == 2
-    assert len({item.name for item in connections}) == 2
+    assert len({item.id for item in connections}) == 2
+    assert {item.gateway_profile_id for item in connections} == {
+        first_gateway["id"], second_gateway_id,
+    }
     assert next(item for item in connections if item.id == first.id) == first
     second = next(item for item in connections if item.gateway_profile_id == second_gateway_id)
-    assert second.name == f"{first.name} [{second_gateway_id}]"
+    assert second.name == first.name
+    assert second.id != first.id
     assert second.provider_id == first.provider_id
     assert second.config["auth_strategy"] == "managed_identity"
     with pytest.raises(HTTPException) as duplicate:
@@ -610,10 +811,8 @@ def test_dynamic_model_does_not_allow_legacy_health_identity_to_bypass_assignmen
     assert error.value.detail == "model_not_assigned"
     assert calls == 0
 
-    assert (
-        service.invoke(person_request, enforce_user_model_access=False).content == "OK"
-    )
-    assert calls == 1
+    assert "enforce_user_model_access" not in signature(service.invoke).parameters
+    assert calls == 0
 
     health_request = person_request.model_copy(
         update={
@@ -628,7 +827,7 @@ def test_dynamic_model_does_not_allow_legacy_health_identity_to_bypass_assignmen
     with pytest.raises(HTTPException) as health_error:
         service.invoke(health_request)
     assert health_error.value.detail == "model_not_assigned"
-    assert calls == 1
+    assert calls == 0
 
 
 def test_a_denial_trace_names_the_runtime_it_routed_to() -> None:
@@ -902,6 +1101,37 @@ def _seed_budget(repository: InMemoryRepository, *, limit: int, used: int, mode:
             ingest_source="eventhub",
         )
     )
+
+
+@pytest.mark.parametrize("mode", ["audit", "block"])
+def test_internal_usd_budget_requires_verified_atomic_admission_even_in_audit(mode: str) -> None:
+    repository = Mock(spec=InMemoryRepository)
+    repository.person_budget_state.return_value = {
+        "budget_mode": "usd", "token_limit": None, "mode": mode, "used_tokens": 100,
+    }
+    service = ModelRuntimeService(repository, Settings())
+    with pytest.raises(HTTPException, match="atomic APIM admission") as error:
+        service._assert_budget_available(request(), {}, "unit-usd-preflight")
+    assert error.value.status_code == 503
+    repository.person_budget_state.reset_mock()
+    service._assert_budget_available(
+        request(), {"budget_delegation_token": SecretStr("unit-only")}, "unit-delegated",
+    )
+    repository.person_budget_state.assert_not_called()
+
+
+def test_atomic_budget_delegation_never_bypasses_person_model_assignment() -> None:
+    repository = Mock(spec=InMemoryRepository)
+    repository.list_user_model_policies.return_value = []
+    service = ModelRuntimeService(repository, Settings())
+    route = {
+        "budget_delegation_token": SecretStr("unit-only"), "assignment_required": True,
+        "model_id": UUID(int=77), "display_name": "Unit model", "runtime_name": "Unit runtime",
+    }
+    with pytest.raises(HTTPException) as error:
+        service._assert_model_allowed(request(), route, "unit-assignment")
+    assert error.value.status_code == 403 and error.value.detail == "model_not_assigned"
+    repository.list_user_model_policies.assert_called_once_with([request().metadata.user_id])
 
 
 def test_internal_invocation_enforces_monthly_budget() -> None:
@@ -2073,7 +2303,7 @@ def test_registry_redacts_secret_and_invocation_records_attribution(
     assert service.invoke(request()).content == "SERVICE_OK"
 
 
-def test_apim_invocation_uses_configured_gateway_when_registry_url_is_empty(
+def test_apim_invocation_does_not_fallback_when_registry_url_is_empty(
     tmp_path: Path,
 ) -> None:
     def handler(incoming: httpx.Request) -> httpx.Response:
@@ -2108,9 +2338,9 @@ def test_apim_invocation_uses_configured_gateway_when_registry_url_is_empty(
         }
     )
 
-    response = service.invoke(invocation)
-
-    assert response.content == "CONFIGURED_GATEWAY_OK"
+    with pytest.raises(HTTPException) as error:
+        service.invoke(invocation)
+    assert error.value.status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -2120,8 +2350,19 @@ def test_apim_invocation_uses_configured_gateway_when_registry_url_is_empty(
 def test_invocation_uses_only_a_trusted_serving_deployment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
-    endpoint = "https://edge.test/turnstile/llm"
-    deployment_id = UUID(int=71)
+    registered = target(
+        api_path="turnstile/llm", drift_state="in_sync",
+        last_inventory_sync_at=datetime(2026, 9, 23, tzinfo=UTC),
+        capabilities={"self_hosted_gateway": "supported"},
+    )
+    request_id = UUID(int=72)
+    native_id = "managed" if mode == "managed" else self_hosted_gateway_native_id_for(
+        registered.gateway_profile_id, request_id,
+    )
+    endpoint = "https://unit-service.azure-api.net/turnstile/llm" if mode == "managed" else (
+        "https://edge.test/turnstile/llm"
+    )
+    deployment_id = gateway_deployment_id_for(registered.gateway_profile_id, native_id)
     sent: list[httpx.Request] = []
 
     def handler(incoming: httpx.Request) -> httpx.Response:
@@ -2138,14 +2379,44 @@ def test_invocation_uses_only_a_trusted_serving_deployment(
     runtime_id = UUID("30000000-0000-4000-8000-000000000003")
     route = repository.invocation_route(runtime_id, model_id)
     assert route is not None
-    route["gateway_deployments"] = [] if mode == "empty" else [{
-        "deployment_id": str(deployment_id), "endpoint_url": endpoint,
-        "kind": "managed" if mode == "managed" else "self_hosted",
-        "hostnames": ["edge.test"] if mode == "inventory" else [],
-        "approved_endpoint_url": endpoint if mode == "provisioned" else (
-            "https://another-edge.test/turnstile/llm" if mode == "approval_mismatch" else None
-        ),
-    }]
+    selected = deployment(
+        id=deployment_id, native_gateway_id=native_id, endpoint_url=endpoint,
+        kind="managed" if mode == "managed" else "self_hosted",
+        hosting_mode="azure_managed" if mode == "managed" else "docker",
+        declared_state="present", last_arm_sync_at=datetime(2026, 9, 23, tzinfo=UTC),
+        provisioning_operation_id=UUID(int=73)
+        if mode in {"provisioned", "approval_mismatch"} else None,
+    )
+    inventory: dict[str, Any] = {
+        "associated_api_ids": [registered.api_id],
+        "hostname_configurations": [{"hostname": "edge.test"}] if mode == "inventory" else [],
+    }
+    if mode in {"provisioned", "approval_mismatch"}:
+        spec = SelfHostedGatewayProvisionSpec(
+            request_id=request_id, target=registered, native_gateway_id=native_id,
+            deployment_id=deployment_id,
+            configuration=SelfHostedGatewayCreate(
+                display_name="Unit edge", endpoint_url=HttpUrl(endpoint),
+                endpoint_control_confirmed=True,
+            ),
+        )
+        inventory["provisioning_operation"] = {
+            "id": selected.provisioning_operation_id,
+            "gateway_profile_id": registered.gateway_profile_id,
+            "operation_kind": "self_hosted_gateway_provision",
+            "status": "succeeded",
+            "semantic_preview": spec.model_dump(mode="json"),
+            "confirmation_sha256": gateway_provision_digest(spec)
+            if mode == "provisioned"
+            else "f" * 64,
+        }
+    route.update(
+        gateway_id=registered.gateway_profile_id, gateway_base_url=endpoint,
+        gateway_deployment_id=deployment_id, native_gateway_id=native_id,
+        gateway_target=registered.model_dump(mode="python"),
+        gateway_deployment=None if mode == "empty" else selected.model_dump(mode="python"),
+        gateway_inventory=inventory,
+    )
     monkeypatch.setattr(repository, "invocation_route", Mock(return_value=route))
     settings = Settings(
         credential_key_file=tmp_path / "key",
@@ -2157,6 +2428,11 @@ def test_invocation_uses_only_a_trusted_serving_deployment(
     )
     service = ModelRuntimeService(
         repository, settings, GatewayRouter(httpx.Client(transport=httpx.MockTransport(handler))),
+    )
+    route.update(
+        gateway_auth_type="api_key",
+        gateway_config={"header_name": "Ocp-Apim-Subscription-Key"},
+        gateway_credential_ciphertext=service._cipher.encrypt("dashboard-key"),
     )
     invocation = request().model_copy(update={"model_id": model_id, "runtime_id": runtime_id})
     if mode in {"untrusted", "empty", "disabled", "approval_mismatch"}:

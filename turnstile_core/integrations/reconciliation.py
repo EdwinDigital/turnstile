@@ -54,26 +54,31 @@ ApiManagementGatewayLlmLog
 
 _RESERVATION_TERMINAL_QUERY = """
 let wanted = dynamic(__CORRELATION_IDS__);
-let api_id = __API_ID__;
 let gateway = ApiManagementGatewayLogs
-| where ApiId == api_id and CorrelationId in (wanted)
+| where ApiId == "__API_ID__"
+| where CorrelationId in (wanted)
 | summarize arg_max(TimeGenerated, ResponseCode, LastErrorReason) by CorrelationId
-| project CorrelationId, GatewayObservedAt = TimeGenerated,
-          StatusCode = toint(ResponseCode), LastErrorReason = tostring(LastErrorReason);
+| project CorrelationId,
+          GatewayObservedAt = TimeGenerated,
+          StatusCode = toint(ResponseCode),
+          LastErrorReason = tostring(LastErrorReason);
 let llm = ApiManagementGatewayLlmLog
 | where CorrelationId in (wanted)
-| where isnotnull(PromptTokens) and isnotnull(CompletionTokens) and isnotnull(TotalTokens)
-| summarize arg_max(TimeGenerated, PromptTokens, CompletionTokens, TotalTokens) by CorrelationId
-| project CorrelationId, LlmObservedAt = TimeGenerated,
-          PromptTokens = tolong(PromptTokens), CompletionTokens = tolong(CompletionTokens),
-          TotalTokens = tolong(TotalTokens);
+| where isnotnull(PromptTokens)
+    and isnotnull(CompletionTokens)
+    and isnotnull(TotalTokens)
+| summarize LlmObservedAt = max(TimeGenerated),
+            PromptTokens = max(tolong(PromptTokens)),
+            CompletionTokens = max(tolong(CompletionTokens)),
+            TotalTokens = max(tolong(TotalTokens))
+    by CorrelationId;
 gateway
 | join kind=fullouter llm on CorrelationId
 | project CorrelationId = coalesce(CorrelationId, CorrelationId1),
           ObservedAt = coalesce(LlmObservedAt, GatewayObservedAt),
-          StatusCode, LastErrorReason, PromptTokens, CompletionTokens, TotalTokens
+          StatusCode, LastErrorReason,
+          PromptTokens, CompletionTokens, TotalTokens
 """
-
 
 def _cache_read_query() -> str:
     base = """let base = AppMetrics
@@ -96,7 +101,9 @@ _CACHE_READ_QUERY = _cache_read_query()
 
 
 class GatewayUsageLog(Protocol):
-    def fetch(self, window_start: datetime, window_end: datetime) -> Sequence[ReconciledUsage]: ...
+    def fetch(
+        self, window_start: datetime, window_end: datetime
+    ) -> Sequence[ReconciledUsage]: ...
 
 
 class CacheReadLog(Protocol):
@@ -107,7 +114,10 @@ class CacheReadLog(Protocol):
 
 class ReservationTerminalLog(Protocol):
     def fetch_correlations(
-        self, correlation_ids: Sequence[str], window_start: datetime, window_end: datetime
+        self,
+        correlation_ids: Sequence[str],
+        window_start: datetime,
+        window_end: datetime,
     ) -> Sequence[ReservationTerminalEvidence]: ...
 
 
@@ -205,94 +215,54 @@ class LogAnalyticsReservationTerminalLog:
         api_id: str,
         token_provider: ManagedIdentityTokenProvider | None = None,
         client: httpx.Client | None = None,
+        timeout: float = 30.0,
         max_batch_size: int = 500,
     ) -> None:
-        if not 1 <= max_batch_size <= 500:
-            raise ValueError("terminal evidence batch size must be between 1 and 500")
         self._workspace_id = workspace_id
         self._api_id = api_id
         self._token_provider = token_provider or ManagedIdentityTokenProvider()
         self._client = client
+        self._timeout = timeout
         self._max_batch_size = max_batch_size
 
     def fetch_correlations(
-        self, correlation_ids: Sequence[str], window_start: datetime, window_end: datetime
+        self,
+        correlation_ids: Sequence[str],
+        window_start: datetime,
+        window_end: datetime,
     ) -> Sequence[ReservationTerminalEvidence]:
         wanted = sorted({value for value in correlation_ids if value})
         if not wanted or window_start >= window_end:
             return []
         token = self._token_provider.token(_LOG_ANALYTICS_RESOURCE)
-        client = self._client or httpx.Client(timeout=30.0)
+        client = self._client or httpx.Client(timeout=self._timeout)
         items: list[ReservationTerminalEvidence] = []
         try:
             for offset in range(0, len(wanted), self._max_batch_size):
                 chunk = wanted[offset : offset + self._max_batch_size]
                 query = _RESERVATION_TERMINAL_QUERY.replace(
                     "__CORRELATION_IDS__", json.dumps(chunk)
-                ).replace("__API_ID__", json.dumps(self._api_id))
+                ).replace("__API_ID__", _kql_string(self._api_id))
                 response = client.post(
-                    f"{_LOG_ANALYTICS_RESOURCE}/v1/workspaces/{self._workspace_id}/query",
+                    f"{_LOG_ANALYTICS_RESOURCE}/v1/workspaces/"
+                    f"{self._workspace_id}/query",
                     json={
                         "query": query,
-                        "timespan": f"{_isoformat(window_start)}/{_isoformat(window_end)}",
+                        "timespan": (
+                            f"{_isoformat(window_start)}/{_isoformat(window_end)}"
+                        ),
                     },
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 response.raise_for_status()
                 batch = _parse_terminal_rows(response.json())
                 if any(item.correlation_id not in chunk for item in batch):
-                    raise RuntimeError("terminal evidence contains an unexpected correlation")
+                    raise RuntimeError("Terminal evidence contains an unexpected correlation")
                 items.extend(batch)
         finally:
             if self._client is None:
                 client.close()
         return items
-
-
-def _parse_terminal_rows(payload: dict[str, Any]) -> list[ReservationTerminalEvidence]:
-    if not isinstance(payload, dict) or "error" in payload or "partialError" in payload:
-        raise RuntimeError("terminal evidence query was incomplete")
-    tables = payload.get("tables")
-    if not isinstance(tables, list) or len(tables) != 1 or not isinstance(tables[0], dict):
-        raise RuntimeError("terminal evidence response has no result table")
-    table = tables[0]
-    raw_columns = table.get("columns")
-    if not isinstance(raw_columns, list) or any(
-        not isinstance(column, dict) for column in raw_columns
-    ):
-        raise RuntimeError("terminal evidence response has invalid columns")
-    columns = [column.get("name") for column in raw_columns]
-    fields = {
-        "correlation_id": "CorrelationId",
-        "observed_at": "ObservedAt",
-        "status_code": "StatusCode",
-        "last_error_reason": "LastErrorReason",
-        "prompt_tokens": "PromptTokens",
-        "completion_tokens": "CompletionTokens",
-        "total_tokens": "TotalTokens",
-    }
-    if (
-        any(not isinstance(name, str) for name in columns)
-        or len(columns) != len(set(columns))
-        or any(name not in columns for name in fields.values())
-        or not isinstance(table.get("rows"), list)
-    ):
-        raise RuntimeError("terminal evidence response has an invalid schema")
-    items = []
-    correlations: set[str] = set()
-    for row in table["rows"]:
-        if not isinstance(row, list) or len(row) != len(columns):
-            raise RuntimeError("terminal evidence response has an invalid row")
-        item = ReservationTerminalEvidence.model_validate(
-            {field: row[columns.index(column)] for field, column in fields.items()}
-        )
-        if not item.correlation_id.strip() or item.observed_at.utcoffset() is None:
-            raise RuntimeError("terminal evidence requires an identity and timezone")
-        if item.correlation_id in correlations:
-            raise RuntimeError("terminal evidence correlation is ambiguous")
-        correlations.add(item.correlation_id)
-        items.append(item)
-    return items
 
 
 class LogAnalyticsCacheReadLog:
@@ -340,7 +310,9 @@ def _kql_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _parse_cache_read_rows(payload: dict[str, Any], api_id: str) -> list[ApimCacheReadBucket]:
+def _parse_cache_read_rows(
+    payload: dict[str, Any], api_id: str
+) -> list[ApimCacheReadBucket]:
     tables = payload.get("tables") or []
     if not tables:
         return []
@@ -394,10 +366,8 @@ class CacheReadSyncService:
         window_end = current - timedelta(minutes=self._safety_lag_minutes)
         earliest = current - timedelta(hours=self._backfill_hours)
         watermark = self._repository.reconciliation_watermark(CACHE_READ_SOURCE)
-        window_start = (
-            earliest
-            if watermark is None
-            else max(watermark - timedelta(hours=self._overlap_hours), earliest)
+        window_start = earliest if watermark is None else max(
+            watermark - timedelta(hours=self._overlap_hours), earliest
         )
         window_start = window_start.replace(minute=0, second=0, microsecond=0)
         if window_start >= window_end:
@@ -450,6 +420,70 @@ def _parse_rows(payload: dict[str, Any]) -> list[ReconciledUsage]:
                 cached_tokens=cached_tokens,
             )
         )
+    return items
+
+
+def _parse_terminal_rows(
+    payload: dict[str, Any],
+) -> list[ReservationTerminalEvidence]:
+    if not isinstance(payload, dict) or "error" in payload or "partialError" in payload:
+        raise RuntimeError("Terminal evidence query did not return a complete result")
+    tables = payload.get("tables")
+    if not isinstance(tables, list) or len(tables) != 1 or not isinstance(tables[0], dict):
+        raise RuntimeError("Terminal evidence result table is missing or ambiguous")
+    table = tables[0]
+    raw_columns = table.get("columns")
+    if not isinstance(raw_columns, list) or any(not isinstance(item, dict) for item in raw_columns):
+        raise RuntimeError("Terminal evidence columns are invalid")
+    columns = [column.get("name") for column in raw_columns]
+    required = (
+        "CorrelationId", "ObservedAt", "StatusCode", "LastErrorReason",
+        "PromptTokens", "CompletionTokens", "TotalTokens",
+    )
+    if (
+        any(not isinstance(name, str) for name in columns)
+        or len(columns) != len(set(columns))
+        or any(name not in columns for name in required)
+        or not isinstance(table.get("rows"), list)
+    ):
+        raise RuntimeError("Terminal evidence result schema is incomplete")
+    indexes = {name: columns.index(name) for name in columns}
+
+    def value(row: Sequence[Any], name: str) -> Any:
+        index = indexes.get(name)
+        return None if index is None else row[index]
+
+    items: list[ReservationTerminalEvidence] = []
+    correlations: set[str] = set()
+    for row in table["rows"]:
+        if not isinstance(row, list) or len(row) != len(columns):
+            raise RuntimeError("Terminal evidence result row is incomplete")
+        correlation_id = value(row, "CorrelationId")
+        observed_at = value(row, "ObservedAt")
+        if not isinstance(correlation_id, str) or not correlation_id.strip() or observed_at is None:
+            raise RuntimeError("Terminal evidence requires a correlation and timestamp")
+        if correlation_id in correlations:
+            raise RuntimeError("Terminal evidence correlation is ambiguous")
+        correlations.add(correlation_id)
+        if isinstance(observed_at, str):
+            observed_at = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        if not isinstance(observed_at, datetime) or observed_at.utcoffset() is None:
+            raise RuntimeError("Terminal evidence requires an explicit timezone")
+        items.append(
+            ReservationTerminalEvidence.model_validate(
+                {
+                    "correlation_id": correlation_id,
+                    "observed_at": observed_at,
+                    "status_code": value(row, "StatusCode"),
+                    "last_error_reason": value(row, "LastErrorReason") or None,
+                    "prompt_tokens": value(row, "PromptTokens"),
+                    "completion_tokens": value(row, "CompletionTokens"),
+                    "total_tokens": value(row, "TotalTokens"),
+                }
+            )
+        )
+        if items[-1].observed_at.utcoffset() is None:
+            raise RuntimeError("Terminal evidence requires an explicit timezone")
     return items
 
 

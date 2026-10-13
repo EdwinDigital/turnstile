@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 from xml.etree import ElementTree
 
@@ -16,6 +17,9 @@ from tests.backend.model_platform.control_plane_support import (
     external_tenant_foundry_publication,
     foundry_publication,
     publisher_settings,
+)
+from tests.backend.model_platform.control_plane_support import (
+    GatewayControlPlaneService as LegacyGatewayControlPlaneService,
 )
 from tests.backend.model_platform.test_image_options import _limits
 from turnstile_core.domain.control_plane import (
@@ -35,6 +39,7 @@ from turnstile_core.domain.control_plane import (
 from turnstile_core.domain.runtime_models import ProviderTarget
 from turnstile_core.integrations.apim_control_plane_contract import (
     PolicyCompilationError,
+    ProbeVerificationDeferred,
     RetryablePublicationError,
 )
 from turnstile_core.integrations.apim_policy_compiler import ApimPolicyCompiler
@@ -45,7 +50,7 @@ from turnstile_core.services.control_plane import (
     GatewayControlPlaneService,
 )
 from turnstile_core.services.gateway_publication_worker import GatewayPublicationWorker
-from turnstile_core.services.probe_journal import PersistentProbeJournal
+from turnstile_core.services.probe_journal import PersistentProbeJournal, PublicationProbeProgress
 from turnstile_core.services.worker_lease import WorkerLease
 
 
@@ -161,6 +166,54 @@ def test_image_prices_are_explicit(field: str) -> None:
         service.publish(request, "owner@example.com")
 
 
+def test_probe_progress_slices_persist_before_dispatch_and_skip_completed() -> None:
+    changes: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
+    requests: list[str] = []
+    progress = PublicationProbeProgress(
+        "a" * 64, None, lambda old, new: changes.append((old, new)), maximum_steps=1,
+        clock=lambda: 100,
+    )
+
+    def verify() -> None:
+        assert changes[-1][1]["steps"]["b" * 64] == "started"
+        assert progress.request_timeout(200) == 120
+        requests.append("verify")
+
+    progress.run_step("b" * 64, verify)
+    assert changes[0][0] is None and changes[1][0] == changes[0][1]
+    progress.run_step("b" * 64, verify)
+    with pytest.raises(ProbeVerificationDeferred):
+        progress.run_step("c" * 64, verify)
+    assert requests == ["verify"]
+    resumed = PublicationProbeProgress(
+        "a" * 64, progress.snapshot(), lambda old, new: changes.append((old, new)),
+        clock=lambda: 100,
+    )
+    resumed.run_step("b" * 64, verify)
+    assert requests == ["verify"]
+    with pytest.raises(PolicyCompilationError, match="context changed"):
+        PublicationProbeProgress("d" * 64, progress.snapshot(), lambda old, new: None)
+
+
+def test_probe_progress_unknown_never_replays_and_requires_explicit_recovery() -> None:
+    progress = PublicationProbeProgress("a" * 64, None, lambda old, new: None)
+    requests: list[str] = []
+
+    def unknown() -> None:
+        requests.append("sent")
+        raise TimeoutError("unit-only unconfirmed response")
+
+    with pytest.raises(TimeoutError):
+        progress.run_step("b" * 64, unknown)
+    assert progress.snapshot()["steps"] == {"b" * 64: "started"}
+    resumed = PublicationProbeProgress("a" * 64, progress.snapshot(), lambda old, new: None)
+    with pytest.raises(PolicyCompilationError, match="no request was replayed"):
+        resumed.run_step("b" * 64, unknown)
+    resumed.run_step("b" * 64, unknown, recover=lambda: requests.append("readback"))
+    assert requests == ["sent", "readback"]
+    assert resumed.snapshot()["steps"] == {"b" * 64: "passed"}
+
+
 def test_probe_journal_reuses_only_same_verified_plan() -> None:
     repository = InMemoryRepository()
     publication = GatewayControlPlaneService(
@@ -224,9 +277,10 @@ def test_image_retry_capability_is_failed_only_and_bounded(
     status: str, limit: int, available: bool
 ) -> None:
     repository = InMemoryRepository()
-    publication = GatewayControlPlaneService(
+    service = GatewayControlPlaneService(
         repository, apim_principal_id="unit-principal"
-    ).publish(image_publication(repository), "owner@example.com")
+    )
+    publication = service.publish(image_publication(repository), "owner@example.com")
     publication = publication.model_copy(update={
         "status": PublicationStatus(status),
         "resource_manifest": {
@@ -513,7 +567,7 @@ def test_image_worker_checks_parent_and_journals_before_activation() -> None:
         worker.run_once("unit-worker")
     row = repository.get_gateway_publication(publication.id)
     assert row is not None and row["status"] == "active"
-    assert row["resource_manifest"]["images_generations_operation"] is True
+    assert row["resource_manifest"]["images_generations_operation"] == "images-generations"
     assert len(repository.billable_requests) == 1
     attempt = next(iter(repository.billable_requests.values()))
     assert attempt.state == "exact" and attempt.actual_tokens == 30
@@ -524,8 +578,8 @@ def test_image_worker_checks_parent_and_journals_before_activation() -> None:
 
 def test_rotation_uses_shared_connection_id_for_chat_and_image() -> None:
     repository = InMemoryRepository()
-    service = GatewayControlPlaneService(repository, TEST_CIPHER)
-    text = service.publish(
+    service = LegacyGatewayControlPlaneService(repository, TEST_CIPHER)
+    text = service.seed_legacy_publication(
         external_tenant_foundry_publication(
             repository, account="unit-account", project="unit", deployment="unit-text"
         ),
@@ -540,7 +594,7 @@ def test_rotation_uses_shared_connection_id_for_chat_and_image() -> None:
     old_name = runtime["config"]["named_value_name"]
     image = image_publication(repository)
     image.runtime = RuntimeTarget(existing_id=runtime["id"])
-    published = service.publish(image, "owner@example.com")
+    published = service.seed_legacy_publication(image, "owner@example.com")
     image_row = repository.get_gateway_publication(published.id)
     assert image_row is not None
     image_row["status"] = "promoting"

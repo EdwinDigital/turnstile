@@ -1,11 +1,5 @@
 import type { ApimTargetTopology, ApimTargetTopologyList, GatewayProfile, GatewayPublication, GatewayReleaseOperation, ManagedModel, ModelRuntime } from "../data-sources/apim/types"
 
-export const MODEL_MANAGEMENT_TABS = ["models", "connections", "gateways", "apim"] as const
-export type ModelManagementTab = typeof MODEL_MANAGEMENT_TABS[number]
-export const MODEL_MANAGEMENT_TAB_LABELS: Record<ModelManagementTab, string> = {
-  models: "模型", connections: "连接", gateways: "网关", apim: "APIM 实例",
-}
-
 export type GatewayEntry = ApimTargetTopology["deployments"][number] & { target: ApimTargetTopology }
 export type GatewayEvidence = {
   state: "ready" | "warning" | "unavailable"
@@ -15,47 +9,90 @@ export type GatewayEvidence = {
 }
 
 export function apimGatewayEntries(target: ApimTargetTopology): GatewayEntry[] {
-  return target.deployments.filter(({ deployment }) => !deployment.retired_at)
+  return target.deployments
+    .filter(({ deployment }) => !deployment.retired_at)
     .map(entry => ({ ...entry, target }))
     .sort((left, right) => Number(right.deployment.kind === "managed") - Number(left.deployment.kind === "managed"))
 }
 
-export function gatewayEntries(topology: ApimTargetTopologyList | null): GatewayEntry[] {
-  return (topology?.items ?? []).flatMap(target => target.deployments
+/** Inventory membership is not readiness. Keep discovered, unconfigured and absent
+ * deployments visible; only retired entries and the Azure-managed gateway are excluded. */
+export function targetGateways(target: ApimTargetTopology): GatewayEntry[] {
+  return target.deployments
     .filter(({ deployment }) => deployment.kind === "self_hosted" && !deployment.retired_at)
-    .map(entry => ({ ...entry, target })))
+    .map((entry) => ({ ...entry, target }))
+}
+
+export function gatewayEntries(topology: ApimTargetTopologyList | null): GatewayEntry[] {
+  return (topology?.items ?? []).flatMap(targetGateways)
+}
+
+export type GatewayProvisionItem = { operation: GatewayReleaseOperation; target: ApimTargetTopology }
+
+export function gatewayProvisionDetails(operation: Pick<GatewayReleaseOperation, "semantic_preview">) {
+  const preview = operation.semantic_preview
+  const configuration = preview.configuration !== null && typeof preview.configuration === "object"
+    && !Array.isArray(preview.configuration) ? preview.configuration as Record<string, unknown> : {}
+  const text = (value: unknown) => typeof value === "string" ? value : ""
+  return { name: text(configuration.display_name), endpoint: text(configuration.endpoint_url),
+    location: text(configuration.location), hostingMode: text(configuration.hosting_mode),
+    nativeId: text(preview.native_gateway_id), deploymentId: text(preview.deployment_id) }
+}
+
+export function gatewayProvisionRows(operations: readonly GatewayReleaseOperation[], targets: readonly ApimTargetTopology[]): GatewayProvisionItem[] {
+  const latest = new Map<string, GatewayReleaseOperation>()
+  for (const operation of operations) {
+    if (operation.operation_kind !== "self_hosted_gateway_provision") continue
+    const previous = latest.get(operation.id)
+    if (!previous || operation.updated_at >= previous.updated_at) latest.set(operation.id, operation)
+  }
+  return [...latest.values()].flatMap(operation => {
+    const target = targets.find(item => item.target.gateway_profile_id === operation.gateway_profile_id)
+    if (!target || operation.status === "succeeded" || operation.status === "restored") return []
+    const details = gatewayProvisionDetails(operation)
+    const deployment = target.deployments.find(entry => entry.deployment.id === details.deploymentId)?.deployment
+    if (deployment?.retired_at || deployment?.provisioning_operation_id === operation.id) return []
+    return [{ operation, target }]
+  })
+}
+
+export function gatewayProvisionMatches(item: GatewayProvisionItem, search: string) {
+  const details = gatewayProvisionDetails(item.operation)
+  return [details.name, details.endpoint, details.nativeId, details.location, details.hostingMode,
+    item.target.target.service_name, item.target.target.api_id, item.target.target.resource_group,
+    item.operation.id].join(" ").toLowerCase().includes(search.trim().toLowerCase())
 }
 
 export function gatewayApiAssociated(entry: GatewayEntry) {
   return Boolean(entry.inventory?.associated_api_ids.some(
-    identity => identity.toLowerCase() === entry.target.target.api_id.toLowerCase(),
+    (id) => id.toLowerCase() === entry.target.target.api_id.toLowerCase(),
   ))
 }
 
+/** Historical probe evidence, never a claim about continuous runtime health. */
 export function gatewayEvidence(entry: GatewayEntry): GatewayEvidence {
   const { deployment } = entry
-  const result = (state: GatewayEvidence["state"], label: string, detail: string): GatewayEvidence => ({
-    state, label, detail, probedAt: deployment.last_probe_at,
-  })
-  if (deployment.retired_at) return result("unavailable", "已退役", "网关已从 Turnstile 移除")
-  if (deployment.declared_state === "unsupported") return result("unavailable", "不支持", "APIM 不支持此网关")
-  if (deployment.declared_state === "absent") return result("unavailable", "未发现", "APIM 清单中未发现网关")
-  if (!deployment.endpoint_url) return result("warning", "未配置", "端点未配置")
+  const probedAt = deployment.last_probe_at
+  const result = (state: GatewayEvidence["state"], label: string, detail: string): GatewayEvidence => ({ state, label, detail, probedAt })
+  if (deployment.retired_at) return result("unavailable", "已退役", "Gateway 已从 Turnstile 移除")
+  if (deployment.declared_state === "unsupported") return result("unavailable", "不支持", "APIM 不支持此 Gateway")
+  if (deployment.declared_state === "absent") return result("unavailable", "未发现", "APIM 清单中未发现 Gateway")
+  if (!deployment.endpoint_url) return result("warning", "未配置", "Endpoint 未配置")
   if (deployment.declared_state !== "present") return result("warning", "待同步", "请先同步 APIM 清单")
   if (deployment.kind === "self_hosted" && !gatewayApiAssociated(entry)) return result("warning", "未关联", "API 未关联")
-  if (deployment.provisioning_operation_id && !deployment.last_probe_at) return result("warning", "待启动", "APIM 配置已创建，等待容器接入")
-  if (!deployment.last_probe_at || deployment.reachability_state === "unknown") return result("warning", "待验证", "尚未运行校验")
+  if (!probedAt && deployment.provisioning_operation_id) return result("warning", "待启动", "APIM 配置已创建；尚无容器接入验证")
+  if (!probedAt || deployment.reachability_state === "unknown") return result("warning", "待验证", "尚未运行校验")
   if (deployment.reachability_state === "unreachable") return result("unavailable", "不可达", "上次探测未通过；并非实时健康状态")
   return result("ready", "已验证", "上次探测通过；并非实时健康状态")
 }
 
-export function apimTargetDisplayName(target: ApimTargetTopology, profiles: readonly GatewayProfile[]) {
-  return profiles.find(profile => profile.id === target.target.gateway_profile_id)?.name.trim() || target.target.service_name
+export function apimGatewayProfiles(profiles: GatewayProfile[], topology: ApimTargetTopologyList | null, topologyAvailable: boolean) {
+  return profiles.filter((profile) => profile.enabled && profile.implementation === "apim"
+    && (!topologyAvailable || topology?.items.some((item) => item.target.gateway_profile_id === profile.id)))
 }
 
-export function apimGatewayProfiles(profiles: GatewayProfile[], topology: ApimTargetTopologyList | null, topologyAvailable: boolean) {
-  return profiles.filter(profile => profile.enabled && profile.implementation === "apim"
-    && (!topologyAvailable || topology?.items.some(item => item.target.gateway_profile_id === profile.id)))
+export function apimTargetDisplayName(target: ApimTargetTopology, profiles: readonly GatewayProfile[]) {
+  return profiles.find(profile => profile.id === target.target.gateway_profile_id)?.name.trim() || target.target.service_name
 }
 
 export function publicationTargetDetails(publication: Pick<GatewayPublication, "gateway_profile_id" | "target_deployments">, profiles: readonly GatewayProfile[], topology: ApimTargetTopologyList | null) {
@@ -85,6 +122,31 @@ export function modelTargetDetails(model: Pick<ManagedModel, "id">, runtime: Pic
   })) }, profiles, topology)
 }
 
+export function connectionTargetDetails(runtime: Pick<ModelRuntime, "id" | "gateway_profile_id">, models: readonly Pick<ManagedModel, "id" | "runtime_id">[], profiles: readonly GatewayProfile[], topology: ApimTargetTopologyList | null) {
+  const ownedModels = models.filter(model => model.runtime_id === runtime.id)
+  const targets = ownedModels.map(model => modelTargetDetails(model, runtime, profiles, topology))
+  const parent = publicationTargetDetails({ gateway_profile_id: runtime.gateway_profile_id ?? "", target_deployments: [] }, profiles, topology)
+  const gateways = [...new Map(targets.flatMap(target => target.gateways).map(gateway => [gateway.id, gateway])).values()]
+  const modelIdsByGateway = new Map<string, Set<string>>()
+  targets.forEach((target, index) => target.gateways.forEach(gateway => {
+    const modelIds = modelIdsByGateway.get(gateway.id) ?? new Set<string>()
+    modelIds.add(ownedModels[index].id)
+    modelIdsByGateway.set(gateway.id, modelIds)
+  }))
+  const gatewayModelIds = Object.fromEntries(gateways.map(gateway => [
+    gateway.id,
+    [...(modelIdsByGateway.get(gateway.id) ?? [])],
+  ]))
+  return {
+    ...parent,
+    gateways,
+    gatewayModelCounts: Object.fromEntries(gateways.map(gateway => [gateway.id, modelIdsByGateway.get(gateway.id)?.size ?? 0])),
+    gatewayModelIds,
+    modelCount: ownedModels.length,
+    unrecordedModelCount: targets.filter(target => !target.gateways.length).length,
+  }
+}
+
 export function apimOnboardingOperationName(operation: Pick<GatewayReleaseOperation, "semantic_preview" | "gateway_profile_id">) {
   const request = operation.semantic_preview.request
   if (request !== null && typeof request === "object" && !Array.isArray(request)
@@ -102,7 +164,8 @@ export function apimOnboardingDetails(operation: Pick<GatewayReleaseOperation, "
   const apiPath = typeof preview.api_path === "string" ? preview.api_path : ""
   return {
     serviceName: typeof preview.service_name === "string" ? preview.service_name : "",
-    resourceGroup: resourceId.split("/")[4] ?? "", resourceId,
+    resourceGroup: resourceId.split("/")[4] ?? "",
+    resourceId,
     serviceTier: typeof preview.service_tier === "string" ? preview.service_tier : "",
     location: typeof preview.location === "string" ? preview.location : "",
     apiId: typeof preview.api_id === "string" ? preview.api_id : "",
@@ -112,6 +175,7 @@ export function apimOnboardingDetails(operation: Pick<GatewayReleaseOperation, "
 
 export function apimOnboardingRows<Operation extends Pick<GatewayReleaseOperation, "gateway_profile_id" | "created_at" | "status">>(
   operations: readonly Operation[], targets: readonly ApimTargetTopology[],
+  profiles: readonly Pick<GatewayProfile, "id" | "enabled">[] = [],
 ): Operation[] {
   const latest = new Map<string, Operation>()
   for (const operation of operations) {
@@ -119,84 +183,87 @@ export function apimOnboardingRows<Operation extends Pick<GatewayReleaseOperatio
     if (!previous || operation.created_at > previous.created_at) latest.set(operation.gateway_profile_id, operation)
   }
   const registered = new Set(targets.map(item => item.target.gateway_profile_id))
-  return [...latest.values()].filter(operation => operation.status !== "succeeded" || !registered.has(operation.gateway_profile_id))
+  const disabled = new Set(profiles.filter(item => !item.enabled).map(item => item.id))
+  return [...latest.values()].filter(operation => operation.status !== "succeeded"
+    || !registered.has(operation.gateway_profile_id) && !disabled.has(operation.gateway_profile_id))
 }
 
-export function pendingInventorySyncId(operations: readonly Pick<GatewayReleaseOperation, "id" | "operation_kind" | "status" | "created_at">[]) {
-  return operations.filter(operation => operation.operation_kind === "target_inventory_sync"
-    && !["succeeded", "failed", "restored"].includes(operation.status))
-    .sort((left, right) => right.created_at.localeCompare(left.created_at))[0]?.id ?? null
-}
-
+/** Match _resolve_publication_deployments: every required deployment gates the
+ * release, including siblings not selected for this model. Optional reachability
+ * is not a release gate. Candidate probes still run before promotion. */
 export function gatewayPublicationIssue(entry: GatewayEntry): string | null {
   const { deployment, target } = entry
   if (target.target.drift_state !== "in_sync") return "APIM 清单尚未验证"
-  if (deployment.kind === "self_hosted" && target.target.capabilities.self_hosted_gateway !== "supported") return "APIM 未确认支持自托管网关"
-  const required = apimGatewayEntries(target).filter(item => item.deployment.release_gate === "required")
-  if (required.some(({ deployment: item }) => item.declared_state !== "present" || !item.endpoint_url || item.reachability_state !== "reachable")) return "必需网关未就绪"
-  if (deployment.retired_at) return "网关已退役"
-  if (deployment.declared_state !== "present") return "网关未就绪"
-  if (!deployment.endpoint_url) return "端点未配置"
+  if (deployment.kind === "self_hosted" && target.target.capabilities.self_hosted_gateway !== "supported") return "APIM 未确认支持 Self-hosted Gateway"
+  const required = target.deployments.filter(({ deployment: item }) => !item.retired_at && item.release_gate === "required")
+  if (required.some(({ deployment: item }) => item.declared_state !== "present" || !item.endpoint_url || item.reachability_state !== "reachable")) {
+    return "Required Gateway 未就绪"
+  }
+  if (deployment.retired_at) return "Gateway 已退役"
+  if (deployment.declared_state !== "present") return "Gateway 未就绪"
+  if (!deployment.endpoint_url) return "Endpoint 未配置"
   if (deployment.kind === "self_hosted" && !gatewayApiAssociated(entry)) return "API 未关联"
-  if (required.some(item => item.deployment.kind === "self_hosted" && !gatewayApiAssociated(item))) return "必需网关未关联 API"
+  if (targetGateways(target).some((item) => item.deployment.release_gate === "required" && !gatewayApiAssociated(item))) return "Required Gateway 未关联 API"
   return null
 }
 
 export type GatewayPublicationChoice = {
-  value: string; targetId: string; deploymentId: string | null
-  name: string; kind: "managed" | "self_hosted"; endpoint: string | null
-  serviceName: string; selectable: boolean; reason: string | null
+  value: string
+  targetId: string
+  deploymentId: string | null
+  name: string
+  kind: "managed" | "self_hosted"
+  endpoint: string | null
+  serviceName: string
+  selectable: boolean
+  reason: string | null
 }
 
-export function gatewayPublicationChoices(
-  profiles: GatewayProfile[], topology: ApimTargetTopologyList | null, topologyAvailable: boolean,
-): GatewayPublicationChoice[] {
-  const enabled = profiles.filter(profile => profile.enabled && profile.implementation === "apim")
-  if (!topologyAvailable) return enabled.map(profile => ({
-    value: `compat:${profile.id}`, targetId: profile.id, deploymentId: null, name: profile.name,
-    kind: "managed", endpoint: profile.base_url, serviceName: profile.name, selectable: true, reason: null,
+export function gatewayPublicationChoices(profiles: GatewayProfile[], topology: ApimTargetTopologyList | null, topologyAvailable: boolean): GatewayPublicationChoice[] {
+  const targets = apimGatewayProfiles(profiles, topology, topologyAvailable)
+  if (!topologyAvailable) return targets.map((profile) => ({
+    value: `compat:${profile.id}`, targetId: profile.id, deploymentId: null,
+    name: profile.name, kind: "managed", endpoint: profile.base_url,
+    serviceName: profile.name, selectable: true, reason: null,
   }))
-  return (topology?.items ?? []).filter(target => enabled.some(profile => profile.id === target.target.gateway_profile_id))
-    .flatMap(apimGatewayEntries).map(entry => {
-      const reason = gatewayPublicationIssue(entry)
-      return {
-        value: `${entry.target.target.gateway_profile_id}:${entry.deployment.id}`,
-        targetId: entry.target.target.gateway_profile_id, deploymentId: entry.deployment.id,
-        name: entry.deployment.display_name, kind: entry.deployment.kind, endpoint: entry.deployment.endpoint_url,
-        serviceName: entry.target.target.service_name, selectable: reason === null, reason,
-      }
-    })
+  const entries: GatewayEntry[] = (topology?.items ?? []).flatMap((target) => target.deployments
+    .filter(({ deployment }) => !deployment.retired_at)
+    .map((entry) => ({ ...entry, target })))
+  return entries.filter((entry) => targets.some((target) => target.id === entry.target.target.gateway_profile_id)).map((entry) => {
+    const reason = gatewayPublicationIssue(entry)
+    return {
+      value: `${entry.target.target.gateway_profile_id}:${entry.deployment.id}`,
+      targetId: entry.target.target.gateway_profile_id,
+      deploymentId: entry.deployment.id,
+      name: entry.deployment.display_name,
+      kind: entry.deployment.kind,
+      endpoint: entry.deployment.endpoint_url,
+      serviceName: entry.target.target.service_name,
+      selectable: reason === null,
+      reason,
+    }
+  })
 }
 
-export function resolveGatewaySelection(
-  profiles: GatewayProfile[], choices: GatewayPublicationChoice[],
-  selection: { targetId: string | null; deploymentId: string | null },
-) {
-  const preferred = profiles.find(profile => profile.is_default) ?? profiles[0]
-  const targetId = selection.targetId ?? preferred?.id ?? ""
-  const targetChoices = choices.filter(choice => choice.targetId === targetId)
-  const choice = selection.deploymentId === null
-    ? targetChoices.find(item => item.selectable)
-    : targetChoices.find(item => item.deploymentId === selection.deploymentId)
-  return { targetId, choice, targetChoices }
-}
+export type GatewaySelection = { targetId: string | null; deploymentId: string | null }
 
-export function resolveInvocationModel<Model extends Pick<ManagedModel, "id" | "enabled" | "capabilities" | "is_default">>(models: readonly Model[], modelId: string | null, imageMode: boolean) {
-  const candidates = models.filter(model => model.enabled && model.capabilities.includes("image_generation") === imageMode)
+export function resolveInvocationModel<Model extends Pick<ManagedModel, "id" | "enabled" | "capabilities" | "is_default">>(models: readonly Model[], modelId: string | null, imageMode: boolean, decisionMode = false) {
+  const candidates = models.filter(model => model.enabled && model.capabilities.includes("image_generation") === imageMode
+    && model.capabilities.includes("decision") === decisionMode)
   if (modelId !== null) return candidates.find(model => model.id === modelId)
-  if (!imageMode && models.some(model => model.is_default && !model.enabled)) return undefined
-  return imageMode ? undefined : candidates.find(model => model.is_default) ?? candidates[0]
+  if (!imageMode && !decisionMode && models.some(model => model.is_default && !model.enabled)) return undefined
+  return imageMode || decisionMode ? undefined : candidates.find(model => model.is_default) ?? candidates[0]
 }
 
 export function gatewayInvocationChoices(profiles: GatewayProfile[], topology: ApimTargetTopologyList | null, modelId: string): GatewayPublicationChoice[] {
-  const enabled = profiles.filter(profile => profile.enabled && profile.implementation === "apim")
-  return (topology?.items ?? []).filter(target => enabled.some(profile => profile.id === target.target.gateway_profile_id))
-    .flatMap(target => target.deployments.filter(entry => entry.published_models_available !== false
-      && entry.published_models.some(model => model.id === modelId) && !entry.deployment.retired_at
-      && entry.deployment.apim_target_id === target.target.gateway_profile_id).map(entry => {
+  const targets = apimGatewayProfiles(profiles, topology, true)
+  return (topology?.items ?? []).filter((target) => targets.some((profile) => profile.id === target.target.gateway_profile_id))
+    .flatMap((target) => target.deployments.filter((entry) => entry.published_models_available !== false
+      && entry.published_models.some((model) => model.id === modelId)
+      && !entry.deployment.retired_at).map((entry) => {
       const { deployment } = entry
       const reason = target.target.drift_state === "drifted" ? "APIM 清单尚未验证"
-        : deployment.declared_state !== "present" || deployment.reachability_state === "unreachable" ? "Gateway 未就绪"
+        : deployment.declared_state !== "present" ? "Gateway 未就绪"
         : !deployment.endpoint_url ? "Endpoint 未配置"
         : deployment.kind === "self_hosted" && !gatewayApiAssociated({ ...entry, target }) ? "API 未关联"
         : null
@@ -204,4 +271,22 @@ export function gatewayInvocationChoices(profiles: GatewayProfile[], topology: A
         deploymentId: deployment.id, name: deployment.display_name, kind: deployment.kind,
         endpoint: deployment.endpoint_url, serviceName: target.target.service_name, selectable: reason === null, reason }
     }))
+}
+
+export function pendingInventorySyncId(operations: readonly Pick<GatewayReleaseOperation, "id" | "operation_kind" | "status" | "created_at">[]) {
+  return operations.filter((operation) => operation.operation_kind === "target_inventory_sync"
+    && !["succeeded", "failed", "restored"].includes(operation.status))
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0]?.id ?? null
+}
+
+/** Defaults are derived, not copied into an effect. An explicit parent never jumps
+ * to another APIM. A selection invalidated by refresh stays invalid until replaced. */
+export function resolveGatewaySelection(profiles: GatewayProfile[], choices: GatewayPublicationChoice[], selection: GatewaySelection) {
+  const preferred = profiles.find((profile) => profile.is_default) ?? profiles[0]
+  const targetId = selection.targetId ?? preferred?.id ?? ""
+  const targetChoices = choices.filter((choice) => choice.targetId === targetId)
+  const choice = selection.deploymentId === null
+    ? targetChoices.find((item) => item.selectable)
+    : targetChoices.find((item) => item.deploymentId === selection.deploymentId)
+  return { targetId, choice, targetChoices }
 }

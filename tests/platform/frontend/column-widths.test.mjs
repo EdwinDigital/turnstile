@@ -148,12 +148,12 @@ test("resize portals are isolated and retired headers release their containers",
   } finally { harness.close() }
 })
 
-test("public header signature changes still reset stale widths", () => {
+test("replaced header cells reset stale widths", () => {
   const harness = resizeHarness()
   try {
     harness.render().portals[0].element.props.onKeyDown({ key: "ArrowRight", preventDefault() {}, stopPropagation() {} })
     assert.ok(harness.render().widths)
-    harness.cells[0].textContent = "Changed column"
+    harness.header.children = [new Element("Changed column", 240), harness.cells[1]]
     assert.equal(harness.render().widths, null)
   } finally { harness.close() }
 })

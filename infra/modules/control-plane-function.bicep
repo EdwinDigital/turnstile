@@ -6,6 +6,7 @@ param suffix string
 param virtualNetworkName string = 'vnet-turnstile-${suffix}'
 param functionSubnetName string = 'snet-flex-control'
 param keyVaultName string
+param credentialVaultName string
 param databaseUrlSecretUri string
 param apimProbeSubscriptionKeySecretUri string
 param credentialEncryptionKeySecretUri string
@@ -267,6 +268,35 @@ resource ledgerTableService 'Microsoft.Storage/storageAccounts/tableServices@202
 resource ledgerTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' existing = {
   parent: ledgerTableService
   name: ledgerTableName
+}
+
+resource routeTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' existing = {
+  parent: ledgerTableService
+  name: 'ModelRoutes'
+}
+
+resource credentialVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+  name: credentialVaultName
+}
+
+resource routeContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (effectiveEnabled) {
+  name: guid(routeTable.id, functionApp.id, 'route-table-contributor')
+  scope: routeTable
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3')
+  }
+}
+
+resource routeCredentialWriter 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (effectiveEnabled) {
+  name: guid(credentialVault.id, functionApp.id, 'route-credential-writer')
+  scope: credentialVault
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')
+  }
 }
 
 resource applicationLedgerContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (applicationProvisioningEnabled) {

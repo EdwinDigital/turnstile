@@ -5,8 +5,10 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast, runtime_checkable
 from uuid import UUID
+
+from pydantic import SecretStr
 
 from ..domain.application_access import (
     GatewayApplicationDiscovery,
@@ -14,11 +16,28 @@ from ..domain.application_access import (
 )
 from ..domain.billable_requests import BillableRequestOutcome
 from ..domain.control_plane import (
+    PUBLICATION_OAUTH_ACTIONS as PUBLICATION_OAUTH_ACTIONS,
+)
+from ..domain.control_plane import (
+    PUBLICATION_PROBE_ACTIONS as PUBLICATION_PROBE_ACTIONS,
+)
+from ..domain.control_plane import (
+    PUBLICATION_RECOVERY_ACTIONS as PUBLICATION_RECOVERY_ACTIONS,
+)
+from ..domain.control_plane import (
+    PUBLICATION_REQUIRED_ACTIONS as PUBLICATION_REQUIRED_ACTIONS,
+)
+from ..domain.control_plane import (
     GatewayModelBinding,
     GatewayPublication,
     GatewayReleaseDependencies,
 )
-from ..domain.gateway_targets import GatewayEndpointProbeResult
+from ..domain.gateway_targets import (
+    ApimTargetArmInventory,
+    SelfHostedGatewayBootstrap,
+    SelfHostedGatewayBootstrapRequest,
+    SelfHostedGatewayProvisionSpec,
+)
 from ..domain.runtime_models import OAuthClientCredentialsConfig
 
 
@@ -47,7 +66,8 @@ class PublisherPermissionError(PolicyCompilationError):
         super().__init__("Publisher permission preflight failed: " + json.dumps({
             "code": "publisher_permissions_missing"
             if self.missing_actions else "publisher_permissions_unverified",
-            "missing_actions": list(self.missing_actions), "request_id": request_id,
+            "missing_actions": list(self.missing_actions),
+            "request_id": request_id,
         }, separators=(",", ":")))
 
 
@@ -61,10 +81,11 @@ def missing_management_actions(payload: object, required: Sequence[str]) -> tupl
     for permission in permissions:
         if not isinstance(permission, dict) or permission.get("condition"):
             raise ValueError("Permission conditions cannot be verified")
-        actions = permission.get("actions")
-        excluded = permission.get("notActions", [])
-        if (not isinstance(actions, list) or not isinstance(excluded, list)
-                or any(not isinstance(action, str) for action in [*actions, *excluded])):
+        actions, excluded = permission.get("actions"), permission.get("notActions", [])
+        if (
+            not isinstance(actions, list) or not isinstance(excluded, list)
+            or any(not isinstance(action, str) for action in [*actions, *excluded])
+        ):
             raise ValueError("Permission inventory has invalid actions")
         granted.update(action for action in required if any(
             fnmatchcase(action.casefold(), allowed.casefold()) for allowed in actions
@@ -78,68 +99,50 @@ class RetryablePublicationError(RuntimeError):
     pass
 
 
+class ProbeVerificationDeferred(RetryablePublicationError):
+    pass
+
+
+class ProbeVerificationJournal(Protocol):
+    def run_step(self, key: str, verify: Callable[[], None]) -> None: ...
+
+    def request_timeout(self, maximum: float) -> float: ...
+
+
+class ProbeRequestLimitExceeded(PolicyCompilationError):
+    pass
+
+
 class AuthorizationRequiredError(RuntimeError):
     def __init__(self, message: str, *, billable_outcome: BillableRequestOutcome | None = None):
         super().__init__(message)
         self.billable_outcome = billable_outcome
 
 
-@dataclass(frozen=True)
-class ResolvedApimPublisherClient:
-    gateway_profile_id: UUID
-    target_identity_sha256: str
-    enforce_identity_snapshot: bool
-    client: ApimPublisherClient
-    usage_observer: tuple[str | None, str | None] | None = None
-
-
-class ApimPublisherClientResolver(Protocol):
-    def resolve(
-        self, gateway_profile_id: UUID, *, include_probe_credentials: bool = True,
-    ) -> ResolvedApimPublisherClient: ...
-
-
-class ApimSubscriptionKeyClientResolver(Protocol):
-    def resolve(self, gateway_profile_id: UUID) -> ApimSubscriptionKeyClient: ...
-
-
-class FixedApimPublisherClientResolver:
-    def __init__(self, client: ApimPublisherClient) -> None:
-        self._client = client
-
-    def resolve(
-        self, gateway_profile_id: UUID, *, include_probe_credentials: bool = True,
-    ) -> ResolvedApimPublisherClient:
-        del include_probe_credentials
-        return ResolvedApimPublisherClient(
-            gateway_profile_id=gateway_profile_id,
-            target_identity_sha256=hashlib.sha256(
-                f"fixed-client:{gateway_profile_id}".encode()
-            ).hexdigest(),
-            enforce_identity_snapshot=False, client=self._client,
-        )
-
-
-def coerce_apim_publisher_client_resolver(
-    value: ApimPublisherClient | ApimPublisherClientResolver,
-) -> ApimPublisherClientResolver:
-    if callable(getattr(value, "resolve", None)):
-        return cast(ApimPublisherClientResolver, value)
-    return FixedApimPublisherClientResolver(cast(ApimPublisherClient, value))
+class ManagementTokenProvider(Protocol):
+    def token(self, resource: str) -> str: ...
 
 
 class ImageProbeJournal(Protocol):
     def heartbeat(self) -> None: ...
 
+    def record_request(self, method: str, endpoint: str) -> None: ...
+
     def run(
-        self,
-        binding: GatewayModelBinding,
-        revision: str,
-        body: Mapping[str, Any],
+        self, binding: GatewayModelBinding, revision: str, body: Mapping[str, Any],
         send: Callable[[str, str], dict[str, Any]],
-        *,
-        gateway_endpoint: str | None = None,
+        *, gateway_endpoint: str | None = None,
     ) -> None: ...
+
+
+@dataclass(frozen=True)
+class GatewayEndpointProbeResult:
+    deployment_id: UUID
+    native_gateway_id: str
+    required: bool
+    status: Literal["succeeded", "optional_pending"]
+    error_code: str | None = None
+    error_message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +227,38 @@ class ReleaseGcPlanEvidence:
     reference_graph_sha256: str
 
 
+class ApimClientSettings(Protocol):
+    @property
+    def apim_gateway_profile_id(self) -> UUID | None: ...
+
+    @property
+    def ledger_table_endpoint(self) -> str | None: ...
+
+    @property
+    def ledger_table_name(self) -> str | None: ...
+
+    databricks_oauth_enabled: bool
+    apim_principal_id: str | None
+    azure_subscription_id: str | None
+    apim_resource_group: str | None
+    apim_service_name: str | None
+    apim_api_id: str
+    apim_gateway_url: str | None
+    apim_probe_subscription_key: SecretStr | None
+    apim_probe_subscription_id: str
+    @property
+    def apim_regression_model_key(self) -> str | None: ...
+    apim_usage_observer_url: str | None
+    apim_usage_observer_key_named_value: str | None
+    apim_subscription_agent_map: dict[str, dict[str, str]]
+    apim_chat_completions_operation_id: str
+    apim_responses_operation_id: str
+    apim_responses_compact_operation_id: str
+    apim_messages_operation_id: str
+    apim_count_tokens_operation_id: str
+    apim_models_operation_id: str
+
+
 class ApimSubscriptionKeyClient(Protocol):
     def application_subscription_keys(
         self, apim_subscription_id: str
@@ -236,10 +271,30 @@ class ApimSubscriptionKeyClient(Protocol):
     ) -> None: ...
 
 
+class ApimSubscriptionKeyClientResolver(Protocol):
+    def resolve(self, gateway_profile_id: UUID) -> ApimSubscriptionKeyClient: ...
+
+
+@runtime_checkable
+class SelfHostedGatewayManagementClient(Protocol):
+    def ensure_self_hosted_gateway(
+        self, spec: SelfHostedGatewayProvisionSpec, before_write: Callable[[], None],
+    ) -> None: ...
+
+    def self_hosted_gateway_bootstrap(
+        self, spec: SelfHostedGatewayProvisionSpec, request: SelfHostedGatewayBootstrapRequest,
+        image: str,
+    ) -> SelfHostedGatewayBootstrap: ...
+
+
 class ApimPublisherClient(Protocol):
     def verify_publication_permissions(
         self, compiled: CompiledGatewayRelease, *, recovery_only: bool = False,
     ) -> None: ...
+
+    def discover_apim_target_inventory(
+        self, gateway_profile_id: UUID
+    ) -> ApimTargetArmInventory: ...
 
     def ensure_backend(self, backend: BackendResource) -> None: ...
 
@@ -261,6 +316,7 @@ class ApimPublisherClient(Protocol):
         publication: GatewayPublication,
         *,
         journal: ImageProbeJournal | None = None,
+        baseline_publication: GatewayPublication | None = None,
     ) -> tuple[GatewayEndpointProbeResult, ...] | None: ...
 
     def promote_revision(self, revision: str, release_name: str) -> None: ...
@@ -279,6 +335,7 @@ class ApimPublisherClient(Protocol):
         self,
         releases: Sequence[GatewayPublication],
         retained_release_ids: set[str],
+        *, fixed_dependencies: Mapping[str, GatewayReleaseDependencies] | None = None,
     ) -> ReleaseGcPlanEvidence: ...
 
     def discover_gateway_applications(
@@ -298,3 +355,67 @@ class ApimPublisherClient(Protocol):
         primary_key: str,
         secondary_key: str,
     ) -> None: ...
+
+
+@dataclass(frozen=True)
+class ResolvedApimPublisherClient:
+    gateway_profile_id: UUID
+    target_identity_sha256: str
+    enforce_identity_snapshot: bool
+    client: ApimPublisherClient
+    usage_observer: tuple[str | None, str | None] | None = None
+
+
+class ApimPublisherClientResolver(Protocol):
+    def resolve(
+        self, gateway_profile_id: UUID, *, include_probe_credentials: bool = True,
+    ) -> ResolvedApimPublisherClient: ...
+
+
+class FixedApimPublisherClientResolver:
+    """Compatibility adapter for isolated tests and one-client callers."""
+
+    def __init__(self, client: ApimPublisherClient) -> None:
+        self._client = client
+
+    def resolve(
+        self, gateway_profile_id: UUID, *, include_probe_credentials: bool = True,
+    ) -> ResolvedApimPublisherClient:
+        del include_probe_credentials
+        return ResolvedApimPublisherClient(
+            gateway_profile_id=gateway_profile_id,
+            target_identity_sha256=hashlib.sha256(
+                f"fixed-client:{gateway_profile_id}".encode()
+            ).hexdigest(),
+            enforce_identity_snapshot=False,
+            client=self._client,
+        )
+
+
+class FixedApimSubscriptionKeyClientResolver:
+    """Compatibility adapter for isolated tests and one-client callers."""
+
+    def __init__(self, client: ApimSubscriptionKeyClient) -> None:
+        self._client = client
+
+    def resolve(self, gateway_profile_id: UUID) -> ApimSubscriptionKeyClient:
+        del gateway_profile_id
+        return self._client
+
+
+def coerce_apim_publisher_client_resolver(
+    value: ApimPublisherClient | ApimPublisherClientResolver,
+) -> ApimPublisherClientResolver:
+    if callable(getattr(value, "resolve", None)):
+        return cast(ApimPublisherClientResolver, value)
+    return FixedApimPublisherClientResolver(cast(ApimPublisherClient, value))
+
+
+def coerce_apim_subscription_key_client_resolver(
+    value: ApimSubscriptionKeyClient | ApimSubscriptionKeyClientResolver,
+) -> ApimSubscriptionKeyClientResolver:
+    if callable(getattr(value, "resolve", None)):
+        return cast(ApimSubscriptionKeyClientResolver, value)
+    return FixedApimSubscriptionKeyClientResolver(
+        cast(ApimSubscriptionKeyClient, value)
+    )

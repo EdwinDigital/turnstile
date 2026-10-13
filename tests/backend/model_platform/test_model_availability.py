@@ -8,8 +8,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Barrier, Lock
 from typing import Any
-from unittest.mock import MagicMock, Mock
-from uuid import UUID
+from unittest.mock import MagicMock, Mock, patch
+from uuid import UUID, uuid4
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -41,7 +41,6 @@ from turnstile_core.domain.model_availability import (
     ModelAvailabilityConfirmationPlan,
     ModelAvailabilityConflict,
     ModelAvailabilityCoverage,
-    ModelAvailabilityNodeEnrollment,
     ModelAvailabilityNodeLease,
     ModelAvailabilityOperation,
     ModelAvailabilityPolicyAdoption,
@@ -98,6 +97,7 @@ from turnstile_core.integrations.model_availability_verifier import (
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository_model_availability import (
     PostgreSqlModelAvailabilityRepositoryMixin,
+    _model_inventory,
 )
 from turnstile_core.persistence.repository_registry import PostgreSqlRegistryRepositoryMixin
 from turnstile_core.services.gateway_release_operation_worker import GatewayReleaseOperationWorker
@@ -106,6 +106,89 @@ from turnstile_core.services.model_availability import (
     ModelAvailabilityWorker,
     project_model_availability,
 )
+
+
+@pytest.mark.parametrize("task_status", ["pending", "leased", "failed"])
+def test_model_readback_isolates_gateway_failure_and_exposes_initial_confirmation(
+    task_status: str,
+) -> None:
+    model_id, target, other_model, unrelated = [UUID(int=value) for value in (801, 802, 803, 804)]
+    own = {"model_id": model_id, "revision": 2, "enabled": True, "lifecycle": "active",
+           "effective_revision": None, "effective_enabled": None, "verified_at": None}
+    now = datetime.now(UTC)
+    proof = ModelAvailabilityCoverage(
+        target_id=target, inventory_digest="a" * 64, policy_digest="b" * 64,
+        serving_surfaces=("managed/current/responses",),
+        verified_surfaces=("managed/current/responses",),
+        verified_at=now - timedelta(seconds=1), expires_at=now + timedelta(seconds=119),
+    )
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.execute.return_value.fetchall.side_effect = [
+        [own, {**own, "model_id": other_model}], [],
+        [{"model_id": model_id, "revision": 2, "status": task_status}],
+        [{"model_id": model_id, "target_id": target},
+         {"model_id": other_model, "target_id": unrelated}],
+        [{"target_id": target, "inventory_digest": "a" * 64},
+         {"target_id": unrelated, "inventory_digest": "c" * 64}],
+        [{"target_id": target, "coverage": proof.model_dump()}],
+    ]
+    repository = PostgreSqlModelAvailabilityRepositoryMixin()
+    with patch.object(repository, "_connection", return_value=connection):
+        result, blocked = repository.list_model_availability()
+    assert result.command_ready
+    assert result.status == ("failed" if task_status == "failed" else "pending")
+    assert result.reason == ("model_availability_initialization_failed"
+                             if task_status == "failed" else None)
+    assert result.effective_revision is None and result.verified_at is None
+    assert not blocked.command_ready
+    assert blocked.reason == "model_availability_capability_unverified"
+    assert all(call.args[0].lstrip().startswith(("SELECT", "SET"))
+               for call in connection.execute.call_args_list)
+
+
+def test_model_inventory_requires_every_own_target_without_unrelated_targets() -> None:
+    model_id, own, other = UUID(int=801), UUID(int=802), UUID(int=803)
+    inventory = {own: "a" * 64, other: "b" * 64}
+    assert _model_inventory(model_id, inventory, {model_id: {own}}) == {own: "a" * 64}
+    assert _model_inventory(model_id, inventory, {model_id: {own, UUID(int=804)}}) == {}
+    assert _model_inventory(model_id, inventory, {}) == {}
+
+
+@pytest.mark.parametrize("related", [False, True])
+def test_model_command_does_not_depend_on_unrelated_gateway_coverage(related: bool) -> None:
+    model_id, own, other = UUID(int=801), UUID(int=802), UUID(int=803)
+    repository = PostgreSqlModelAvailabilityRepositoryMixin()
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.execute.return_value.fetchone.side_effect = [
+        {"id": model_id, "enabled": True}, None,
+        {"revision": 7, "lifecycle": "active"}, None, None,
+    ]
+    connection.execute.return_value.fetchall.return_value = [
+        {"model_id": model_id, "target_id": own},
+        {"model_id": model_id if related else UUID(int=804), "target_id": other},
+    ]
+    now = datetime.now(UTC)
+    proof = ModelAvailabilityCoverage(
+        target_id=own, inventory_digest="a" * 64, policy_digest="b" * 64,
+        serving_surfaces=("managed/current/responses",),
+        verified_surfaces=("managed/current/responses",),
+        verified_at=now - timedelta(seconds=1), expires_at=now + timedelta(seconds=119),
+    )
+    command = ModelAvailabilityCommand(enabled=False, expected_revision=7, idempotency_key=uuid4())
+    with patch.object(repository, "_connection", return_value=connection), \
+            patch("turnstile_core.persistence.repository_model_availability._coverage",
+                  return_value=({own: "a" * 64, other: "c" * 64}, {own: proof})):
+        if related:
+            with pytest.raises(ModelAvailabilityConflict, match="capability is not verified"):
+                repository.change_model_availability(model_id, command, "unit-owner")
+            assert all(call.args[0].lstrip().startswith("SELECT")
+                       for call in connection.execute.call_args_list)
+        else:
+            operation = repository.change_model_availability(model_id, command, "unit-owner")
+            assert [target.target_id for target in operation.targets] == [own]
+            assert operation.desired_revision == 8 and operation.desired_enabled is False
 
 
 def test_projection_retries_conflicts_and_reads_back_the_exact_revision() -> None:
@@ -226,7 +309,10 @@ def test_native_admission_rejects_policy_tampering(change: str) -> None:
         assert node is not None
         node.append(parse_policy("<cache-lookup />"))
     with pytest.raises(PolicyCompilationError):
-        validate_availability_parent(root)
+        if change == "cache":
+            compose_availability_parent(serialize_policy(root))
+        else:
+            validate_availability_parent(root)
 
 
 @pytest.mark.parametrize("retired", [False, True])
@@ -906,25 +992,11 @@ def test_retired_but_associated_gateway_remains_subject_to_complete_node_enrollm
         "retired_at": "2026-01-01T00:00:00Z",
     }
     with verifier.client:
-        excluded = verifier._retired_deployments([deployment])
-        assert excluded == ()
-        with pytest.raises(ModelAvailabilityUnavailable, match="coverage_unverified"):
-            verifier._enrollments([deployment], excluded)
-        enrollment = ModelAvailabilityNodeEnrollment.model_validate({
-            "enrollment_id": str(UUID(int=6)), "target_id": str(verifier.target_id),
-            "deployment_id": deployment["id"], "api_id": verifier.api_id,
-            "native_gateway_id": "unit-node", "revision": 1,
-            "controller_evidence_sha256": "a" * 64, "fenced_installation_sha256": "b" * 64,
-            "rejoin_contract": "enrolled_nodes_only_guarded_bootstrap",
-            "enrolled_at": datetime.now(UTC),
-            "nodes": [{"instance_id": "unit-instance", "endpoint_url": "https://unit.test/llm"}],
-        })
-        verifier.node_enrollment_reader = lambda: [enrollment]
-        verifier.node_store = Mock(spec=TableStorageLedger)
-        assert verifier._enrollments([deployment], excluded) == (enrollment,)
-        verifier.node_enrollment_reader = lambda: []
-        with pytest.raises(ModelAvailabilityUnavailable, match="coverage_unverified"):
-            verifier._enrollments([deployment], excluded)
+        with pytest.raises(ModelAvailabilityUnavailable, match="Retired Gateway still serves"):
+            verifier._retired_deployments([deployment])
+        with pytest.raises(ModelAvailabilityUnavailable):
+            verifier._enrollments([deployment])
+    assert _requests == []
 
 
 @pytest.mark.parametrize("expired", [False, True])
@@ -1051,14 +1123,10 @@ def test_empty_revision_endpoint_uses_complete_identity_checked_api_inventory(
 
     verifier.list_resources = inventory
     with verifier.client:
-        if defect:
-            with pytest.raises(ModelAvailabilityUnavailable):
-                verifier.verify("a" * 64, [])
-        else:
-            coverage = verifier.verify("a" * 64, [])
-            assert coverage.serving_surfaces
-            assert verifier.confirmation_plan is not None
-            assert {item.revision for item in verifier.confirmation_plan.catalogs} == {revision}
+        with pytest.raises(ModelAvailabilityUnavailable, match="revision inventory is empty"):
+            verifier.verify("a" * 64, [])
+        assert verifier.confirmation_plan is None
+        assert _requests == []
 
 
 def test_node_attestation_does_not_follow_redirects_or_publish_a_lease() -> None:
@@ -1234,9 +1302,10 @@ def test_coordinator_refresh_bounds_parallel_targets_and_holds_exact_proof_guard
     assert maximum == 3 and not held
     assert guard_modes == [not renew] * 6
     assert repository.save_model_availability_coverage.call_count == 5
-    assert "error=ModelAvailabilityUnavailable location=test_model_availability.py:" in caplog.text
+    assert "error=ModelAvailabilityUnavailable" in caplog.text
+    assert "locations=" in caplog.text and "test_model_availability.py:" in caplog.text
     assert ":check" in caplog.text
-    assert "Test target unavailable" not in caplog.text
+    assert "reason=Test target unavailable" in caplog.text
     if renew:
         client.verify_model_availability.assert_not_called()
     else:
@@ -1531,9 +1600,13 @@ def test_publication_worker_projects_before_probes_and_recovers_promotion_read_o
     result = worker.run_once("unit-worker")
     assert result is not None and result.status.value == "active"
     assert client.permission_checks[-1] is True
-    assert client.calls == []
-    projector.assert_not_called()
-    staging.assert_not_called()
+    assert client.calls == [("parent-readback", result.apim_revision)]
+    assert [item.args for item in projector.call_args_list] == [
+        (model_id,) for model_id in snapshot.models.values()
+    ]
+    assert [item.args for item in staging.call_args_list] == [
+        (model_id, result.id) for model_id in snapshot.models.values()
+    ]
     probe.assert_not_called()
 
 
@@ -1607,12 +1680,22 @@ def test_publication_probe_requires_exact_disabled_contract_without_normal_infer
             update={"apim_probe_subscription_key": SecretStr("unit")}
         )
         client = AzureApimPublisherClient(settings, token_provider=Mock(), client=transport)
+        def check_disabled() -> None:
+            if kind == "images":
+                client._probe_disabled_model(
+                    str(settings.apim_gateway_url).rstrip("/"), {},
+                    publication.desired_spec.bindings[-1],
+                )
+            else:
+                client.probe_revision(snapshot.revision, publication)
         if status == 403 and code == "model_disabled":
-            client.probe_revision(snapshot.revision, publication)
+            check_disabled()
         else:
             with pytest.raises(PolicyCompilationError, match="Disabled model"):
-                client.probe_revision(snapshot.revision, publication)
-    assert [request.method for request in requests] == ["GET", "POST"]
+                check_disabled()
+    assert [request.method for request in requests] == (
+        ["POST"] if kind == "images" else ["GET", "POST"]
+    )
 
 
 def test_rollback_keeps_current_disabled_state_and_rejects_unenforced_old_revision(
@@ -1625,6 +1708,7 @@ def test_rollback_keeps_current_disabled_state_and_rejects_unenforced_old_revisi
     snapshot = ModelAvailabilityPublication.capture(publication, repository.registry(), "unit-api")
     canonical = client.policy
     client.policy = compose_availability_parent(canonical)
+    client.api_policies[snapshot.revision] = client.policy
     publication = publication.model_copy(
         update={
             "apim_revision": snapshot.revision,
@@ -1645,14 +1729,15 @@ def test_rollback_keeps_current_disabled_state_and_rejects_unenforced_old_revisi
             model_id=model_id, revision=3, enabled=False
         ),
     )
-    prepared = worker._validate_rollback_parent(publication)
+    prepared = worker._validate_rollback_parent(publication, client)
     assert prepared.resource_manifest["availability_probe_states"] == {
         alias: False for alias in snapshot.models
     }
     client.policy = canonical
+    client.api_policies[snapshot.revision] = canonical
     with pytest.raises(PolicyCompilationError, match="cannot remove"):
-        worker._validate_rollback_parent(publication)
-    assert client.calls == []
+        worker._validate_rollback_parent(publication, client)
+    assert client.calls == [("parent-readback", snapshot.revision)] * 2
 
 
 def test_general_model_save_preserves_omitted_enabled_and_rejects_explicit_toggle(
@@ -2113,6 +2198,7 @@ def test_postgres_command_enqueues_exact_intent_before_mutating_enabled() -> Non
             None,
             [{"target_id": capability.target_id, "inventory_digest": capability.inventory_digest}],
             [{"target_id": capability.target_id, "coverage": capability.model_dump()}],
+            [{"model_id": UUID(int=2), "target_id": capability.target_id}],
         ]
     )
     result = repository.change_model_availability(

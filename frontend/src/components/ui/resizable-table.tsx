@@ -45,25 +45,21 @@ function useResizableColumns({
   const defaultWidthsRef = useRef<number[] | null>(null)
   const lastVisibleWidthsRef = useRef<number[] | null>(null)
   const cleanupDragRef = useRef<(() => void) | null>(null)
-  const headerSignatureRef = useRef("")
 
   useLayoutEffect(() => {
     const header = rootRef.current?.querySelector<HTMLElement>(headerSelector)
     const nextCells = header ? Array.from(header.children).filter((cell): cell is HTMLElement => cell instanceof HTMLElement) : []
-    const signature = nextCells.map((cell) => cell.getAttribute("aria-label") ?? cell.textContent?.trim() ?? "").join("\u0000")
     const cellsChanged = headerCells.length !== nextCells.length
       || headerCells.some((cell, index) => cell !== nextCells[index])
-    const signatureChanged = Boolean(headerSignatureRef.current) && headerSignatureRef.current !== signature
     if (cellsChanged) cleanupDragRef.current?.()
     setHeaderCells((current) => current.length === nextCells.length && current.every((cell, index) => cell === nextCells[index])
       ? current
       : nextCells)
-    if (signatureChanged || (cellsChanged && headerCells.length > 0) || (widths && widths.length !== nextCells.length)) {
+    if ((cellsChanged && headerCells.length > 0) || (widths && widths.length !== nextCells.length)) {
       setWidths(null)
       defaultWidthsRef.current = null
       lastVisibleWidthsRef.current = null
     }
-    headerSignatureRef.current = signature
   })
 
   useLayoutEffect(() => {
