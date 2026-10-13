@@ -55,4 +55,5 @@
 - 测试脚本 `/tmp/ts-plugin-namespace-check/native.py`；成功结果保留在
   `/var/folders/_n/vxzws45j78148dvlcyxmc7680000gn/T/ts-namespace-native-5rj64mt7/result.json`。
   临时网关和模拟平台已停止，日常插件、Agent 配置和历史日志未改动。
-- 本次未提交 Git、未部署线上；用户界面现有旧包不会因本地模板修改而自动改名。
+- 以上为本地命名空间验证阶段记录；后续已提交并部署，见
+  [2026-10-13 上线验收](release-2026-10-13.md)。现有旧包不会因平台模板发布而自动改名。

@@ -55,4 +55,6 @@
   截图及结果：`/var/folders/_n/vxzws45j78148dvlcyxmc7680000gn/T/ts-quota-browser-1CmfjX/`。
 - “查看额度趋势”的授权动作、文件 URL、原凭据返回与不改账号文件已在 JS 测试验证。
   没有在用户日常桌面窗口点击该入口或改 WorkBuddy/Codex 配置。
-- 本次没有修改 magpie 源码、APIM、Core、数据库迁移或生产配置；代码尚未提交/上线。
+- 以上为开发阶段验证；提交、上线、真实调用与首次价格同步的边界见
+  [2026-10-13 上线验收](release-2026-10-13.md)。没有修改 magpie 源码、APIM、Core、
+  数据库迁移或生产配置。
