@@ -8,6 +8,7 @@ import { LocaleProvider } from "./locales/index"
 import { AuthProvider, useAuth } from "./providers/auth-provider"
 import { ThemeProvider } from "./providers/theme-provider"
 import { TimezoneProvider } from "./providers/timezone-provider"
+import "@xyflow/react/dist/style.css"
 import "./styles.css"
 
 /** Local development only: move the whole page to `localhost` before anything else runs.

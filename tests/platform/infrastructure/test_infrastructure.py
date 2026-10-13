@@ -544,6 +544,14 @@ def test_application_creation_is_gated_and_uses_the_exact_platform_ledger() -> N
     assert "union(currentApiSettings" in release
     assert "union(currentControlPlaneSettings" in release
     assert release.count("GATEWAY_RELEASE_WORKER_ENABLED: string(releaseWorkerEnabled)") == 2
+    for parameter, setting in (
+        ("apimTargetRegistryEnabled", "APIM_TARGET_REGISTRY_ENABLED"),
+        ("selfHostedGatewayEnabled", "SELF_HOSTED_GATEWAY_ENABLED"),
+        ("selfHostedGatewayProvisioningEnabled", "SELF_HOSTED_GATEWAY_PROVISIONING_ENABLED"),
+        ("multiApimTargetRolloutEnabled", "MULTI_APIM_TARGET_ROLLOUT_ENABLED"),
+    ):
+        assert f"param {parameter} bool = true" in release
+        assert release.count(f"{setting}: string({parameter})") == 2
     role = CONTROL_PLANE.split("resource applicationLedgerContributor", 1)[1].split(
         "resource functionDatabaseSecretReader", 1
     )[0]
