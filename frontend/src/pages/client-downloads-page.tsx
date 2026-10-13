@@ -58,7 +58,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
   }
   async function download(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!canDownloadSubscription || !selected || activeDownload.current) return
+    if (!canDownloadSubscription || !selected || activeDownload.current || !acknowledged) return
     const controller = new AbortController()
     activeDownload.current = controller
     setBusy(true); setError(""); setNotice("")
@@ -123,7 +123,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
             <div className="client-downloads-warning" id="client-secret-warning"><ShieldCheck size={18} /><p>下载包包含订阅密钥。请妥善保管，不要上传到公共仓库或分享给他人。</p></div>
             <label className="client-downloads-consent"><input type="checkbox" name="acknowledged" required checked={acknowledged} disabled={busy} aria-describedby="client-secret-warning" onChange={(event) => setAcknowledged(event.target.checked)} />我已了解下载包包含密钥</label>
             {!query.data?.key_management_available && <p role="alert">暂时无法读取订阅密钥，请联系管理员。</p>}
-            <Button type="submit" disabled={busy || !query.data?.key_management_available || !selected?.models.length}><Download size={16} />{busy ? "正在生成安装包" : "下载插件安装包"}</Button>
+            <Button type="submit" disabled={busy || !acknowledged || !query.data?.key_management_available || !selected?.models.length}><Download size={16} />{busy ? "正在生成安装包" : "下载插件安装包"}</Button>
           </form>}
       </section>}
       </div>

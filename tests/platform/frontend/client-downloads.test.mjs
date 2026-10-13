@@ -175,3 +175,51 @@ test("download permission defaults preserve legacy behavior and never restrict O
   assert.equal(authHelpers.canDownloadPlugin({ role: "owner", download_permissions: [] }, "subscription-plugin"), true)
   assert.equal(authHelpers.canDownloadPlugin(null, "user-plugin"), false)
 })
+
+for (const [userConsent, subscriptionConsent] of [[false, false], [true, false], [false, true], [true, true]]) {
+  test(`both download buttons require their own consent: user=${userConsent}, subscription=${subscriptionConsent}`, async () => {
+    const view = api('attachment; filename="aigateway-proxy-Test.zip"')
+    let stateIndex = 0
+    const jsx = (type, props) => ({ type, props })
+    const page = load(pageCode, name => {
+      if (name === "react") return { useEffect: () => {}, useRef: value => ({ current: value }),
+        useState: value => {
+          const index = stateIndex++
+          return [index === 2 ? subscriptionConsent : index === 3 ? userConsent : value, () => {}]
+        } }
+      if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" }
+      if (name === "@tanstack/react-query") return { useQuery: options => ({ data:
+        options.queryKey[0] === "client-downloads"
+          ? { items: [{ ...item, models: [{ id: "text-model" }] }], key_management_available: true }
+          : { enabled: true, user_name: "Edwin" } }) }
+      if (name === "../api/client-downloads") return { clientDownloadsApi: view.downloads }
+      if (name === "../api/auth") return authHelpers
+      if (name === "../providers/auth-provider") return { useAuth: () => ({ user: { id: "owner", role: "owner" } }) }
+      if (name === "../components/ui/button") return { Button: "button" }
+      if (name === "lucide-react") return { Download: "icon", PanelLeft: "icon", RefreshCw: "icon", ShieldCheck: "icon" }
+      throw new Error(`Unexpected import ${name}`)
+    }, {
+      document: { body: { append() {} }, createElement: () => ({ click() {}, remove() {} }) },
+      URL: { createObjectURL: () => "blob:zip", revokeObjectURL() {} },
+      window: { setTimeout: callback => callback() },
+    })
+    const nodes = []
+    function visit(node) {
+      if (Array.isArray(node)) { node.forEach(visit); return }
+      if (!node || typeof node !== "object") return
+      nodes.push(node); visit(node.props?.children)
+    }
+    visit(page.ClientDownloadsPage({ onToggleSidebar: () => {} }))
+    const userButton = nodes.find(n => n.type === "button" && Array.isArray(n.props.children) && n.props.children.includes("下载用户版插件"))
+    const subscriptionButton = nodes.find(n => n.type === "button" && Array.isArray(n.props.children) && n.props.children.includes("下载插件安装包"))
+    assert.equal(userButton.props.disabled, !userConsent)
+    assert.equal(subscriptionButton.props.disabled, !subscriptionConsent)
+    assert.equal(userButton.props.variant, subscriptionButton.props.variant)
+    // Exercise handlers directly, bypassing native form validation and disabled-button behavior.
+    await nodes.find(n => n.type === "form").props.onSubmit({ preventDefault() {} })
+    await new Promise(resolve => setImmediate(resolve))
+    userButton.props.onClick()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(view.calls.length, Number(userConsent) + Number(subscriptionConsent))
+  })
+}
