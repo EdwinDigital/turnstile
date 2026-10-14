@@ -30,8 +30,11 @@ test("private trends capture only real personal snapshots, keep audit mode and n
     assert.ok(html.includes("Edwin&lt;script&gt;"));
     assert.ok(!html.includes("<script>alert(1)</script>"));
     assert.ok(!html.includes("stable-user"));
-    assert.equal((await stat(file)).mode & 0o777, 0o600);
-    assert.equal((await stat(join(directory, "quota-history.json"))).mode & 0o777, 0o600);
+    // POSIX modes are not an ACL assertion on Windows.
+    if (process.platform !== "win32") {
+      assert.equal((await stat(file)).mode & 0o777, 0o600);
+      assert.equal((await stat(join(directory, "quota-history.json"))).mode & 0o777, 0o600);
+    }
     assert.ok(!quotaHTML(history, { ...first, windows: [] }).includes("<polyline"));
     await assert.rejects(recordQuota(directory, { userId: "other-user" }, first), /does not belong/);
     assert.equal(JSON.parse(await readFile(join(directory, "quota-history.json"), "utf8")).userId, cfg.userId);

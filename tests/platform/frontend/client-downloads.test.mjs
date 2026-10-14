@@ -1,11 +1,11 @@
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
 import test from "node:test"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import vm from "node:vm"
 
 const require = createRequire(new URL("../../../frontend/package.json", import.meta.url))
-const { rolldown } = await import(require.resolve("rolldown"))
+const { rolldown } = await import(pathToFileURL(require.resolve("rolldown")).href)
 
 async function compile(path) {
   const entry = fileURLToPath(new URL(`../../../frontend/src/${path}`, import.meta.url))

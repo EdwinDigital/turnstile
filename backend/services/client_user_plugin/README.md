@@ -5,6 +5,10 @@ Keep its extracted directory in a permanent location. From 0.4.4, the directory
 matches the ZIP filename without `.zip`: `aigateway-proxy-user-Edwin.zip` contains
 `aigateway-proxy-user-Edwin/`. Do not copy it over a subscription installation.
 
+From 0.4.5, the image companion recognizes native absolute plugin paths on both
+Windows and macOS/Linux. Canonical directory ownership and login checks remain
+required; disabling/removing the plugin or signing out still stops the companion.
+
 From 0.4.1, model namespaces use the username plus a short hashed disambiguator,
 not the user's UUID. The UUID remains inside the private authorization config.
 Existing downloaded packages keep their namespace: refreshing models or signing

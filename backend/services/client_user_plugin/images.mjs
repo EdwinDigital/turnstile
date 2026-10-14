@@ -1,6 +1,6 @@
 import { readFile, realpath, unlink, writeFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { localQuotaControl, quotaReader, quotaRefusal } from "./quota.mjs";
 
 export function localMagpieURL(address = "127.0.0.1:3425") {
@@ -15,6 +15,17 @@ export async function ownLogin(settingsDirectory, providerId, userId) {
   const auth = JSON.parse(await readFile(join(settingsDirectory, "plugin-auth.json"), "utf8"));
   return Object.entries(auth).some(([id, value]) => (id === providerId || id.startsWith(providerId + "#"))
     && value?.type === "oauth" && value.uid === userId && value.access);
+}
+
+export async function imagePluginEnabled(state) {
+  if (!await ownLogin(state.settingsDirectory, state.providerId, state.userId)) return false;
+  const plugins = JSON.parse(await readFile(join(state.settingsDirectory, "plugins.json"), "utf8"));
+  const canonical = await realpath(state.spec);
+  for (const entry of plugins.plugins ?? []) {
+    if (typeof entry?.spec !== "string" || !isAbsolute(entry.spec)) continue;
+    if (await realpath(entry.spec).catch(() => "") === canonical) return !entry.off;
+  }
+  return false;
 }
 
 export function imageQuotaGuard() {
@@ -65,16 +76,6 @@ export async function pictureBridge(statePath, readyPath) {
     const a = Buffer.from(value ?? ""); const b = Buffer.from("Bearer " + nonce);
     return a.length === b.length && timingSafeEqual(a, b);
   };
-  const enabled = async (state) => {
-    if (!await ownLogin(state.settingsDirectory, state.providerId, state.userId)) return false;
-    const plugins = JSON.parse(await readFile(join(state.settingsDirectory, "plugins.json"), "utf8"));
-    const canonical = await realpath(state.spec);
-    for (const entry of plugins.plugins ?? []) {
-      if (!entry.spec?.startsWith("/")) continue;
-      if (await realpath(entry.spec).catch(() => "") === canonical) return !entry.off;
-    }
-    return false;
-  };
   let stopping = false;
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, maxRequestBodySize: 4 * 1024 * 1024,
     async fetch(request) {
@@ -83,7 +84,7 @@ export async function pictureBridge(statePath, readyPath) {
       const path = new URL(request.url).pathname;
       if (path === "/health") return Response.json({ providerId: initial.providerId, bridgeVersion: 3, pid: process.pid });
       let state;
-      try { state = await descriptor(statePath); if (!await enabled(state)) throw new Error(); }
+      try { state = await descriptor(statePath); if (!await imagePluginEnabled(state)) throw new Error(); }
       catch { return Response.json({ error: "The user plugin is disabled or signed out" }, { status: 403 }); }
       if (request.method === "POST" && path === "/mcp") {
         const rpc = await request.json().catch(() => null);
@@ -132,7 +133,7 @@ export async function pictureBridge(statePath, readyPath) {
     server.stop(true); process.exit(0);
   };
   const timer = setInterval(async () => {
-    try { if (!await enabled(await descriptor(statePath))) await stop(); } catch { await stop(); }
+    try { if (!await imagePluginEnabled(await descriptor(statePath))) await stop(); } catch { await stop(); }
   }, 2000);
   timer.unref?.();
   process.on("SIGTERM", () => void stop());

@@ -113,7 +113,10 @@ def test_personal_package_has_bound_authorization_and_distinct_identity(name: st
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
         package = json.loads(archive.read(f"{archive_root}/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.4.4"
+        assert package["version"] == "0.4.5"
+        image_source = archive.read(f"{archive_root}/images.mjs").decode()
+        assert "isAbsolute(entry.spec)" in image_source
+        assert 'entry.spec?.startsWith("/")' not in image_source
         assert package["magpie"]["icon"] == config["icon"]
         assert f"{archive_root}/icons/icon.svg" in archive.namelist()
         icon_manifest = json.loads(archive.read(f"{archive_root}/icons/manifest.json"))

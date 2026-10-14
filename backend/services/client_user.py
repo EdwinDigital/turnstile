@@ -38,7 +38,7 @@ from .client_user_store import ClientUserStore
 from .download_filename import plugin_filename
 from .gateway_credentials import with_platform_gateway_credential
 
-USER_PLUGIN_VERSION = "0.4.4"
+USER_PLUGIN_VERSION = "0.4.5"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 

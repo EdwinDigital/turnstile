@@ -127,10 +127,11 @@ test("magpie automatically imports once, preserves accounts and respects logout"
     assert.equal(auth.copilot.key, "existing-other-provider");
     assert.equal(auth[config.providerId].key, "bundled-key");
     assert.equal(auth[config.providerId].accountId, "Subscription");
-    assert.equal((await stat(authPath)).mode & 0o777, 0o600);
+    // Windows stat modes do not represent its ACL-based file permissions.
+    if (process.platform !== "win32") assert.equal((await stat(authPath)).mode & 0o777, 0o600);
     assert.equal(await readFile(authPath + ".bak", "utf8"), original);
     const marker = join(home, "aigateway-proxy-imports", config.providerId + ".json");
-    assert.equal((await stat(marker)).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal((await stat(marker)).mode & 0o777, 0o600);
     assert.equal((await readFile(marker, "utf8")).includes("bundled-key"), false);
     auth[config.providerId].key = "rotated-key";
     await writeFile(authPath, JSON.stringify(auth));

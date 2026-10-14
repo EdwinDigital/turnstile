@@ -57,7 +57,9 @@ test("one click toggles audit-mode blocking without prompts, policy changes or c
     assert.equal(await localQuotaControl(directory, cfg), true);
     await choice.callback();
     assert.equal(await localQuotaControl(directory, cfg), true);
-    assert.equal((await stat(join(directory, "quota-control.json"))).mode & 0o777, 0o600);
+    // POSIX modes are not an ACL assertion on Windows.
+    if (process.platform !== "win32")
+      assert.equal((await stat(join(directory, "quota-control.json"))).mode & 0o777, 0o600);
     assert.equal((await plugin.auth.usage(async () => auth)).windows[0].aside, false);
     assert.equal(current.usage.windows[0].aside, true);
     const history = JSON.parse(await readFile(join(directory, "quota-history.json"), "utf8"));

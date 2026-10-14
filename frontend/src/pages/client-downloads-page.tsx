@@ -103,7 +103,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
       </>}
       {!catalogLoading && <>
       {canDownloadUser && <section className="client-downloads-card">
-        <div className="client-downloads-heading"><span className="client-downloads-edition-icon"><ShieldCheck size={18} aria-hidden="true" /></span><div><h2>AIGateway-Proxy 用户版</h2><p>使用个人授权和默认订阅，安装后即可使用。</p></div><Badge variant="outline" data-no-localize>v{personal.data?.plugin_version ?? "0.4.4"}</Badge></div>
+        <div className="client-downloads-heading"><span className="client-downloads-edition-icon"><ShieldCheck size={18} aria-hidden="true" /></span><div><h2>AIGateway-Proxy 用户版</h2><p>使用个人授权和默认订阅，安装后即可使用。</p></div><Badge variant="outline" data-no-localize>v{personal.data?.plugin_version ?? "0.4.5"}</Badge></div>
         <div className="client-downloads-body">
           <dl className="client-downloads-facts">
             <div><dt>当前用户</dt><dd data-no-localize>{personal.data?.user_name ?? user?.name ?? user?.email}</dd></div>
