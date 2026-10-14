@@ -112,18 +112,26 @@ method labels without changing magpie application code.
 仅图片权限、可撤销的用户能力凭据，不使用 APIM Key 或共享 OAuth Refresh Token。
 普通图片供应商配置中只包含本机服务的随机凭据。
 
-桌面 magpie 的推理端口没有供应商配置写入 API，因此不宣称自动注册原生图片选择器。
-插件在 magpie 配置目录下的 `aigateway-proxy-user/<providerId>/` 生成两个私密文件：
+从 0.4.6 起，插件使用 magpie 原生命令自动登记独立图片供应商，保留平台返回的原始模型 ID。
+模型出现在「设置 / 模型 / 生图模型」中，不修改当前默认选择、其他供应商或 Agent 配置。
+刷新模型同步本人授权列表及本机图片服务地址，不再调用桌面推理端口上不存在的配置 API。
+插件在 magpie 配置目录下的 `aigateway-proxy-user/<providerId>/` 生成两个私密备用文件：
 
 - `images-mcp.json`：将其中本插件的 MCP 条目加入所用 Agent 的 MCP 配置；不要覆盖其其他条目。
-- `images-provider.json`：需要原生图片入口时，通过 magpie 现有供应商导入/编辑界面配置
-  该独立的 Images 供应商，使用文件中的本地地址、模型清单和本地 Key。
+- `images-provider.json`：没有可用原生 CLI 时，可通过供应商编辑界面手动配置该独立图片供应商。
+  原生同步状态见同目录的 `native-images-status.json`；失败不会丢弃有效登录或 HTTP MCP。
+
+原生 CLI 优先使用 `AIGATEWAY_MAGPIE_EXECUTABLE`，否则定位运行中的宿主、PATH 或标准 macOS
+安装。无法确认配置目录或遇到便携安装时保留 MCP 备用，不直接改写 magpie 配置文件。
+原生 CLI 子进程只接收本机图片服务的随机 Key，不接收平台 OAuth、图片能力或 APIM 凭据。
+命令行参数和原始子进程错误不写入日志。私有管理记录限制登记、更新及清理为本安装所拥有的
+供应商；同名冲突、手动修改或手动关闭不会被强制覆盖，也不会接管旧的手工导入供应商。
 
 MCP 提供 `generate_image` 工具，模型枚举随本人模型目录更新。刷新模型会替换本插件
 生成的图片配置；桥接每次调用检查当前插件仍启用且已登录。退出/停用/移除后桥接停止，
-旧本地地址不能绕过用户登录继续调用平台。宿主没有配置写入入口时，手动登记的原生
-Images 卡片可能需要手动移除，但旧图片服务已经不可调用。重新加载服务导致地址变化时，
-重新导入生成的 MCP 条目，不把失效地址伪装为可用连接。
+旧本地地址不能绕过用户登录继续调用平台。自动登记且未被手工修改的图片供应商会通过 CLI
+清理；手动登记或修改后的卡片可能需要手动移除，但旧服务不可继续调用平台。CLI 不可用时，
+重新加载服务导致地址变化需要重新导入备用配置，不把失效地址伪装为可用连接。
 
 这些运行时文件包含本地凭据，请保密；不要上传、分享或写入 Git。
 No magpie application source or existing Agent configuration is modified automatically.

@@ -18,7 +18,7 @@ async function fixture(run) {
   const previous = globalThis.fetch;
   try {
     await mkdir(folder);
-    for (const file of ["index.mjs", "images.mjs", "helpers.mjs", "quota.mjs"])
+    for (const file of ["index.mjs", "images.mjs", "native-images.mjs", "helpers.mjs", "quota.mjs"])
       await copyFile(new URL("../../../backend/services/client_user_plugin/" + file, import.meta.url), join(folder, file));
     await copyFile(new URL("../../../backend/services/client_plugin/pricing.mjs", import.meta.url), join(folder, "pricing.mjs"));
     await writeFile(join(folder, "aigateway-user.config.json"), JSON.stringify({ version: 4, platformOrigin: "https://platform.example",

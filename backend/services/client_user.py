@@ -38,7 +38,7 @@ from .client_user_store import ClientUserStore
 from .download_filename import plugin_filename
 from .gateway_credentials import with_platform_gateway_credential
 
-USER_PLUGIN_VERSION = "0.4.5"
+USER_PLUGIN_VERSION = "0.4.6"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
@@ -148,7 +148,10 @@ class ClientUserService:
         root = Path(__file__).with_name("client_user_plugin")
         files = {
             name: (root / name).read_bytes()
-            for name in ("index.mjs", "helpers.mjs", "images.mjs", "quota.mjs", "README.md")
+            for name in (
+                "index.mjs", "helpers.mjs", "images.mjs", "native-images.mjs",
+                "quota.mjs", "README.md",
+            )
         }
         files["pricing.mjs"] = (root.parent / "client_plugin" / "pricing.mjs").read_bytes()
         files.update(icons.package_files())

@@ -11,7 +11,7 @@ test("user namespaces accept readable names and preserve stable authorization id
   const folder = await mkdtemp(join(tmpdir(), "ts-user-namespace-"));
   const nativeFetch = globalThis.fetch;
   try {
-    for (const file of ["index.mjs", "images.mjs", "helpers.mjs", "quota.mjs"])
+    for (const file of ["index.mjs", "images.mjs", "native-images.mjs", "helpers.mjs", "quota.mjs"])
       await copyFile(new URL("../../../backend/services/client_user_plugin/" + file, import.meta.url), join(folder, file));
     await copyFile(new URL("../../../backend/services/client_plugin/pricing.mjs", import.meta.url), join(folder, "pricing.mjs"));
     const factory = (await import(pathToFileURL(join(folder, "index.mjs")))).default;
@@ -51,12 +51,13 @@ test("entry exports only the plugin factory, not helpers the host would execute 
   assert.deepEqual(Object.keys(entry), ["default"]);
 });
 
-test("native pricing workers do not bootstrap, rename accounts or start image companions", async () => {
+for (const workerFlag of ["AIGATEWAY_PRICING_WORKER", "AIGATEWAY_NATIVE_IMAGE_WORKER"])
+test(`${workerFlag} workers do not bootstrap, rename accounts or start image companions`, async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-pricing-worker-")), folder = join(root, "magpie");
-  const previousFlag = process.env.AIGATEWAY_PRICING_WORKER, previousFetch = globalThis.fetch;
+  const previousFlag = process.env[workerFlag], previousFetch = globalThis.fetch;
   try {
     await mkdir(folder);
-    for (const file of ["index.mjs", "images.mjs", "helpers.mjs", "quota.mjs"])
+    for (const file of ["index.mjs", "images.mjs", "native-images.mjs", "helpers.mjs", "quota.mjs"])
       await copyFile(new URL("../../../backend/services/client_user_plugin/" + file, import.meta.url), join(folder, file));
     await copyFile(new URL("../../../backend/services/client_plugin/pricing.mjs", import.meta.url), join(folder, "pricing.mjs"));
     const providerId = "aigateway-user-worker-fixture", state = join(folder, "aigateway-proxy-user", providerId);
@@ -69,19 +70,22 @@ test("native pricing workers do not bootstrap, rename accounts or start image co
       platformOrigin: "https://platform.example", providerId, userId: "uid", userName: "Edwin", name: "User" }));
     const auth = '{"aigateway-user-worker-fixture":{"type":"oauth","uid":"uid","accountId":"Keep manual label","access":"fixture-access"}}';
     await writeFile(join(folder, "plugin-auth.json"), auth);
-    process.env.AIGATEWAY_PRICING_WORKER = "1";
+    process.env[workerFlag] = "1";
     globalThis.fetch = async () => { throw new Error("Pricing worker must not call the platform here"); };
     const factory = (await import(pathToFileURL(join(folder, "index.mjs")))).default;
     const plugin = await factory({ project: { id: "magpie" }, directory: folder });
     const models = await plugin.provider.models({}, { auth: { type: "oauth", access: "fixture-access" } });
     assert.equal(models.m.cost.cache.read, .2);
+    const tokens = { access: "unchanged-access", refresh: "unchanged-refresh", expires: 1 };
+    assert.deepEqual(await plugin.auth.refresh(tokens), tokens);
+    await assert.rejects(plugin.auth.usage(async () => tokens), /maintenance worker/);
     assert.equal(await readFile(join(folder, "plugin-auth.json"), "utf8"), auth);
     assert.equal(await readFile(join(state, "installation.json"), "utf8"), '{"id":"keep-installation"}');
     await assert.rejects(readFile(join(state, "bootstrap-imported.json")), { code: "ENOENT" });
     await assert.rejects(readFile(join(state, "images-ready.json")), { code: "ENOENT" });
   } finally {
-    if (previousFlag === undefined) delete process.env.AIGATEWAY_PRICING_WORKER;
-    else process.env.AIGATEWAY_PRICING_WORKER = previousFlag;
+    if (previousFlag === undefined) delete process.env[workerFlag];
+    else process.env[workerFlag] = previousFlag;
     globalThis.fetch = previousFetch;
     await rm(root, { recursive: true, force: true });
   }
@@ -108,6 +112,7 @@ test("user plugin has OAuth only, dynamically replaces models and isolates crede
   try {
     await copyFile(new URL("../../../backend/services/client_user_plugin/index.mjs", import.meta.url), join(folder, "index.mjs"));
     await copyFile(new URL("../../../backend/services/client_user_plugin/images.mjs", import.meta.url), join(folder, "images.mjs"));
+    await copyFile(new URL("../../../backend/services/client_user_plugin/native-images.mjs", import.meta.url), join(folder, "native-images.mjs"));
     await copyFile(new URL("../../../backend/services/client_user_plugin/helpers.mjs", import.meta.url), join(folder, "helpers.mjs"));
     await copyFile(new URL("../../../backend/services/client_user_plugin/quota.mjs", import.meta.url), join(folder, "quota.mjs"));
     await copyFile(new URL("../../../backend/services/client_plugin/pricing.mjs", import.meta.url), join(folder, "pricing.mjs"));
@@ -229,7 +234,7 @@ test("first authorized import replaces stale unauthenticated installation and ca
   const folder = await mkdtemp(join(tmpdir(), "ts-user-stale-bootstrap-"));
   try {
     const providerId = "aigateway-user-platform-user";
-    for (const name of ["index.mjs", "helpers.mjs", "images.mjs", "quota.mjs"]) await copyFile(new URL(`../../../backend/services/client_user_plugin/${name}`, import.meta.url), join(folder, name));
+    for (const name of ["index.mjs", "helpers.mjs", "images.mjs", "native-images.mjs", "quota.mjs"]) await copyFile(new URL(`../../../backend/services/client_user_plugin/${name}`, import.meta.url), join(folder, name));
     await copyFile(new URL("../../../backend/services/client_plugin/pricing.mjs", import.meta.url), join(folder, "pricing.mjs"));
     const state = join(folder, "aigateway-proxy-user", providerId);
     await mkdir(state, { recursive: true });

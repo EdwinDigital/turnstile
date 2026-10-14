@@ -79,7 +79,8 @@ interface can improve this without weakening ownership or login checks.
   0.4.6. Keep the subscription plugin unchanged.
 - Patch the locally installed plugin only after isolated tests pass. Back up code
   and package metadata without copying private bootstrap/runtime files into Git.
-- Do not deploy the server, push the new implementation, alter APIM, change user
+- The user authorizes committing and pushing this feature branch after local
+  tests pass. Do not merge main, deploy the server, alter APIM, change user
   permissions/budgets, or edit WorkBuddy's trust/approval records automatically.
 
 ## Test plan
@@ -122,8 +123,39 @@ The user permits a low-cost real test, preferably initiated from WorkBuddy.
 - [x] Inspect current plugin, Magpie CLI and registration limitations.
 - [x] Select the independent native-provider approach and preserve model IDs.
 - [x] Record real-test request/cost boundaries and self-review this specification.
-- [ ] Obtain review of this written specification before implementation.
-- [ ] Implement registration, ownership, worker guards and lifecycle integration.
-- [ ] Run isolated tests, patch the local plugin and verify native discovery.
+- [x] Obtain review of this written specification before implementation.
+- [x] Implement registration, ownership, worker guards and lifecycle integration.
+- [x] Run isolated tests, patch the local plugin and verify native discovery.
 - [ ] Perform at most one authorized real-image test if WorkBuddy is ready.
-- [ ] Record results, skipped cases and remaining limitations.
+- [x] Record results, skipped cases and remaining limitations.
+
+## Implementation and verification (2026-10-14)
+
+- User package version is 0.4.6. The download includes `native-images.mjs` and the
+  installed local copy uses the same source. No server deployment was performed.
+- Native registration uses add/set/rm with explicit ownership, readback and
+  sanitized status. The legacy ID-only marker cannot adopt an existing provider.
+  Original model IDs, manual edits, manually disabled cards and defaults remain
+  protected. CLI save success can be recovered if later discovery times out.
+- Windows native testing revealed that a companion started by a short-lived CLI
+  host could die with that host. The companion now uses a detached, unreferenced
+  child with hidden Windows startup; its own login/registration checks still stop
+  it and clean up the owned native provider.
+- JS regression: 80 passed, zero failed/skipped. This includes native CLI/Bun
+  registration, automatic image-model selection, one simulated generation and
+  cleanup against an isolated loopback platform. The original gateway model ID
+  reaches the platform fixture without renaming.
+- Targeted Python package/API/frontend harness: 29 passed, eight skipped because
+  local PostgreSQL is unavailable. Ruff and the TypeScript/Vite build pass. The
+  existing Starlette deprecation and large-chunk warnings remain.
+- Local desktop readback: exactly one owned native image provider, three image
+  IDs visible on the gateway, five text models retained, native status `applied`,
+  image companion version 4. Existing provider records, settings, plugin
+  registrations, private bootstrap and WorkBuddy MCP/trust files are unchanged.
+- WorkBuddy's approval file remains empty and its tool cache does not contain
+  `magpie-image`. Real WorkBuddy acceptance is deferred until the human trusts
+  the MCP inside WorkBuddy. No trust bypass, built-in ImageGen fallback, actual
+  upstream generation or real generation fee was incurred (zero paid requests).
+- Native macOS execution was not available; platform-neutral contracts are tested
+  but do not constitute a macOS acceptance result. Private runtime proof stays in
+  ignored local storage and no credentials are included in this repository.

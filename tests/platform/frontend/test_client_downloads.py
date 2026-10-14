@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 from tests.support.paths import FRONTEND_SOURCE, REPOSITORY_ROOT
 
@@ -30,6 +31,8 @@ def test_image_bridge_paths_and_lifecycle() -> None:
         [
             "node", "--test",
             str(REPOSITORY_ROOT / "tests/platform/frontend/client-image-lifecycle.test.mjs"),
+            str(REPOSITORY_ROOT / "tests/platform/frontend/client-native-images.test.mjs"),
+            str(Path(__file__).with_name("client-native-image-integration.test.mjs")),
         ],
         check=True,
     )

@@ -179,7 +179,6 @@ for (const change of ["disable", "remove", "logout", "foreign-user"]) {
     await assert.rejects(readFile(f.readyPath), { code: "ENOENT" });
     assert.deepEqual(f.requests, [
       { path: "/api/v1/client-auth/revoke", method: "POST", authorization: "Bearer tsci_fixture" },
-      { path: "/api/provider/remove", method: "POST", authorization: undefined },
     ]);
   });
 }

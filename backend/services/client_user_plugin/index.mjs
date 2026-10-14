@@ -1,15 +1,17 @@
 import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { localMagpieURL } from "./images.mjs";
+import { imagePluginEnabled, localMagpieURL } from "./images.mjs";
+import { imageFileLock, removeNativeImages, syncNativeImages } from "./native-images.mjs";
 import { adaptModelResponse, importBootstrap, privateJSON, syncAccountProfile } from "./helpers.mjs";
 import { costForHost, syncPricing } from "./pricing.mjs";
 import { localQuotaControl, personalQuota, quotaForMagpie, quotaReader, quotaRefusal, recordQuota, saveQuotaControl } from "./quota.mjs";
 
 export default async function AIGatewayUserPlugin(input) {
   const nativeMagpie = input.project?.id === "magpie";
-  const pricingWorker = process.env.AIGATEWAY_PRICING_WORKER === "1";
+  const pricingWorker = process.env.AIGATEWAY_PRICING_WORKER === "1" || process.env.AIGATEWAY_NATIVE_IMAGE_WORKER === "1";
   const cfg = JSON.parse(await readFile(new URL("./aigateway-user.config.json", import.meta.url), "utf8"));
   const origin = new URL(cfg.platformOrigin);
   const local = origin.protocol === "http:" && ["localhost", "127.0.0.1"].includes(origin.hostname);
@@ -95,68 +97,93 @@ export default async function AIGatewayUserPlugin(input) {
       };
     },
   });
+  let imageSync;
   const syncImages = async (images, access) => {
-    if (pricingWorker) return;
-    if (input.project?.id !== "magpie" || typeof Bun === "undefined") return;
-    const magpie = localMagpieURL(process.env.MAGPIE_ADDR);
-    const imageId = cfg.providerId + "-images";
-    const ownership = join(directory, "images-owned.json");
-    const statePath = join(directory, "images-runtime.json");
-    const readyPath = join(directory, "images-ready.json");
-    const existing = await fetch(magpie + "/api/providers", { signal: AbortSignal.timeout(5000) })
-      .then((r) => r.ok ? r.json() : null).catch(() => null);
-    const present = existing?.providers?.some((p) => p.id === imageId);
-    let owned = false;
-    try { owned = JSON.parse(await readFile(ownership, "utf8")).providerId === imageId; } catch { /* Only our own manifest can grant replacement. */ }
-    if (present && !owned) throw new Error("The picture provider ID is already owned by another configuration");
-    if (!images.length) {
-      if (owned) await fetch(magpie + "/api/provider/remove", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: imageId }), signal: AbortSignal.timeout(2000) }).catch(() => {});
-      await unlink(statePath).catch(() => {});
-      return;
-    }
-    const capability = await call("/api/v1/client-runtime/image-capabilities", {}, access);
-    let ready;
-    try {
-      ready = JSON.parse(await readFile(readyPath, "utf8"));
-      if (!Number.isInteger(ready.port) || ready.port < 1 || ready.port > 65535) throw new Error();
-      const live = await fetch(`http://127.0.0.1:${ready.port}/health`, { headers: { Authorization: "Bearer " + ready.nonce }, signal: AbortSignal.timeout(2000) }).then((r) => r.json());
-      if (live.providerId !== cfg.providerId) throw new Error();
-      if (live.bridgeVersion !== 3) {
-        process.kill(ready.pid, "SIGTERM");
-        for (let i = 0; i < 50; i++) {
-          try { process.kill(ready.pid, 0); await new Promise((r) => setTimeout(r, 100)); }
-          catch { break; }
+    if (pricingWorker || !nativeMagpie || typeof Bun === "undefined") return;
+    if (imageSync) { await imageSync.catch(() => {}); return; }
+    imageSync = (async () => {
+      const release = await imageFileLock(join(directory, "images-sync.lock"));
+      try {
+        localMagpieURL(process.env.MAGPIE_ADDR);
+        const owner = { providerId: cfg.providerId, userId: cfg.userId, installationId: installation };
+        const scope = { ...owner, settingsDirectory: input.directory, spec: fileURLToPath(new URL(".", import.meta.url)) };
+        const imageId = cfg.providerId + "-images", statePath = join(directory, "images-runtime.json");
+        const readyPath = join(directory, "images-ready.json");
+        let previous;
+        try { previous = JSON.parse(await readFile(statePath, "utf8")); } catch { /* Optional previous runtime. */ }
+        let ready;
+        try {
+          ready = JSON.parse(await readFile(readyPath, "utf8"));
+          if (!Number.isInteger(ready.port) || ready.port < 1 || ready.port > 65535
+              || !Number.isInteger(ready.pid) || ready.pid < 1) throw new Error();
+          const live = await fetch(`http://127.0.0.1:${ready.port}/health`, {
+            headers: { Authorization: "Bearer " + ready.nonce }, signal: AbortSignal.timeout(2000),
+          }).then(r => r.json());
+          if (live.providerId !== cfg.providerId || live.pid !== ready.pid) throw new Error();
+          if (live.bridgeVersion !== 4 || !images.length) {
+            if (previous?.providerId === cfg.providerId && previous.userId === cfg.userId
+                && previous.platformOrigin === base && previous.capability?.startsWith("tsci_"))
+              await call("/api/v1/client-auth/revoke", {}, previous.capability).catch(() => {});
+            process.kill(ready.pid, "SIGTERM");
+            let stopped = false;
+            for (let i = 0; i < 100; i++) {
+              try { process.kill(ready.pid, 0); } catch { stopped = true; break; }
+              await new Promise(r => setTimeout(r, 100));
+            }
+            if (!stopped) return;
+            ready = undefined;
+          }
+        } catch { ready = undefined; }
+        if (!images.length) {
+          if (previous?.providerId === cfg.providerId && previous.userId === cfg.userId
+              && previous.platformOrigin === base && previous.capability?.startsWith("tsci_"))
+            await call("/api/v1/client-auth/revoke", {}, previous.capability).catch(() => {});
+          await removeNativeImages(input, owner);
+          await unlink(statePath).catch(() => {});
+          return;
         }
-        ready = undefined;
+        if (!await imagePluginEnabled(scope)) { await removeNativeImages(input, owner); return; }
+        const capability = await call("/api/v1/client-runtime/image-capabilities", {}, access);
+        const nonce = ready?.nonce ?? randomUUID() + randomUUID();
+        const state = { ...owner, images, capability: capability.key, nonce, platformOrigin: base,
+          settingsDirectory: input.directory, magpieAddress: process.env.MAGPIE_ADDR ?? "127.0.0.1:3425",
+          spec: scope.spec,
+          nativeCli: previous?.userId === cfg.userId ? previous.nativeCli : undefined };
+        await privateJSON(statePath, state);
+        if (!ready) {
+          await unlink(readyPath).catch(() => {});
+          const helper = spawn(process.execPath, ["run", fileURLToPath(new URL("./images.mjs", import.meta.url)), statePath, readyPath],
+            { stdio: "ignore", detached: true, windowsHide: true });
+          helper.unref();
+          for (let i = 0; i < 50; i++) {
+            try { ready = JSON.parse(await readFile(readyPath, "utf8")); break; } catch { await new Promise(r => setTimeout(r, 100)); }
+          }
+          if (!ready) throw new Error("The private image helper could not start");
+        }
+        const picture = { id: imageId, name: (cfg.name ?? "AIGateway User").replace(/^AIGateway User/, "AIGateway User Images"),
+          key: nonce, chat: `http://127.0.0.1:${ready.port}/v1`, models: images.map(m => m.id), new: false };
+        await privateJSON(join(directory, "images-provider.json"), picture);
+        await privateJSON(join(directory, "images-mcp.json"), { mcpServers: { [imageId]: {
+          url: `http://127.0.0.1:${ready.port}/mcp`, headers: { Authorization: "Bearer " + nonce },
+        } } });
+        if (!await imagePluginEnabled(scope)) { await removeNativeImages(input, owner); return; }
+        const registered = await syncNativeImages(input, owner, picture);
+        if (!await imagePluginEnabled(scope)) { await removeNativeImages(input, owner); return; }
+        if (registered.cli && registered.cli !== state.nativeCli)
+          await privateJSON(statePath, { ...state, nativeCli: registered.cli });
+        await privateJSON(join(directory, "image-sync-status.json"), { state: "applied", modelCount: images.length });
+      } finally { await release(); }
+    })();
+    try { return await imageSync; }
+    catch (error) {
+      if (error.code !== "EEXIST") {
+        const status = { state: "pending", reason: "image-companion-unavailable" };
+        let old;
+        try { old = JSON.parse(await readFile(join(directory, "image-sync-status.json"), "utf8")); } catch { /* First failure. */ }
+        if (old?.state !== status.state) console.warn("AIGateway image companion synchronization pending; text models remain available.");
+        await privateJSON(join(directory, "image-sync-status.json"), status).catch(() => {});
       }
-    } catch { ready = undefined; }
-    const nonce = ready?.nonce ?? randomUUID() + randomUUID();
-    await privateJSON(ownership, { providerId: imageId });
-    await privateJSON(statePath, { providerId: cfg.providerId, userId: cfg.userId, images, capability: capability.key,
-      nonce, platformOrigin: base, settingsDirectory: input.directory, magpieAddress: process.env.MAGPIE_ADDR ?? "127.0.0.1:3425",
-      spec: fileURLToPath(new URL(".", import.meta.url)).replace(/\/$/, "") });
-    if (!ready) {
-      await unlink(readyPath).catch(() => {});
-      const helper = Bun.spawn([process.execPath, "run", fileURLToPath(new URL("./images.mjs", import.meta.url)), statePath, readyPath], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
-      helper.unref();
-      for (let i = 0; i < 50; i++) {
-        try { ready = JSON.parse(await readFile(readyPath, "utf8")); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
-      }
-      if (!ready) throw new Error("The private image helper could not start");
-    }
-    const picture = { id: imageId, name: cfg.name.replace(/^AIGateway User/, "AIGateway User Images"),
-      key: nonce, chat: `http://127.0.0.1:${ready.port}/v1`, models: images.map((m) => m.id), new: false };
-    await privateJSON(join(directory, "images-provider.json"), picture);
-    await privateJSON(join(directory, "images-mcp.json"), { mcpServers: { [imageId]: {
-      url: `http://127.0.0.1:${ready.port}/mcp`, headers: { Authorization: "Bearer " + nonce },
-    } } });
-    // Desktop magpie does not expose GUI mutation APIs on its inference port.
-    // A compatible GUI API can register directly; otherwise the owned MCP file is used.
-    if (existing) {
-      const saved = await fetch(magpie + "/api/provider/save", { method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify(picture), signal: AbortSignal.timeout(10_000) });
-      if (!saved.ok) throw new Error("The picture provider could not be registered");
-    }
+    } finally { imageSync = undefined; }
   };
   const updateCatalog = async (access, fresh = false) => {
     const data = await call(fresh ? "/api/v1/client-runtime/refresh-models" : "/api/v1/client-runtime/catalog", fresh ? {} : undefined, access);
@@ -256,6 +283,7 @@ export default async function AIGatewayUserPlugin(input) {
       methods: [refreshModels, method("重新登录", "reauth"), quotaTrend, quotaControl],
       refreshLead: 60_000,
       async refresh(auth) {
+        if (pricingWorker) return { access: auth.access, refresh: auth.refresh, expires: auth.expires };
         const next = await refreshAuthorization(auth);
         // Renew the image-only capability without ever sharing the main refresh token.
         // A local companion failure must not discard a successfully rotated OAuth token.
@@ -263,6 +291,7 @@ export default async function AIGatewayUserPlugin(input) {
         return { access: next.access, refresh: next.refresh, expires: next.expires };
       },
       async usage(getAuth) {
+        if (pricingWorker) throw new Error("Usage is unavailable in a maintenance worker");
         const auth = await getAuth(); if (auth?.type !== "oauth" || !auth.access) throw expired();
         const usage = await readQuota(auth.access);
         await recordQuota(directory, cfg, usage).catch(() => {});
@@ -305,11 +334,11 @@ export default async function AIGatewayUserPlugin(input) {
       if (auth?.type !== "oauth" || !auth.access) return {};
       if (!hasCatalog) await updateCatalog(auth.access);
       await syncImages(cached.images, auth.access);
-      const pricing = await syncPricing(input, cfg, cached.models);
+      const pricing = pricingWorker ? { state: "external", resolved: [] } : await syncPricing(input, cfg, cached.models);
       // config uses Config.Model, but provider.models returns normalized Model.Info.
       return Object.fromEntries(Object.entries(cached.models).map(([id, model]) => [id, {
         id, providerID: cfg.providerId, name: model.name ?? id,
-        cost: costForHost(input, cfg.providerId, id, model.cost, pricing),
+        cost: costForHost(pricingWorker ? null : input, cfg.providerId, id, model.cost, pricing),
         api: { id, url: model.provider?.api ?? runtime, npm: model.provider?.npm ?? "@ai-sdk/openai-compatible" },
         limit: model.limit ?? { context: 32768, output: 8192 },
         options: {}, headers: {}, variants: {},

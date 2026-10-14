@@ -2,6 +2,7 @@ import { readFile, realpath, unlink, writeFile } from "node:fs/promises";
 import { timingSafeEqual } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import { localQuotaControl, quotaReader, quotaRefusal } from "./quota.mjs";
+import { removeNativeImages, resolveNativeMagpie } from "./native-images.mjs";
 
 export function localMagpieURL(address = "127.0.0.1:3425") {
   const url = new URL(address.includes("://") ? address : "http://" + address);
@@ -70,7 +71,7 @@ async function descriptor(path) {
 export async function pictureBridge(statePath, readyPath) {
   const quotaGuard = imageQuotaGuard();
   const initial = await descriptor(statePath);
-  const http = localMagpieURL(initial.magpieAddress);
+  localMagpieURL(initial.magpieAddress);
   const nonce = initial.nonce;
   const matchNonce = (value) => {
     const a = Buffer.from(value ?? ""); const b = Buffer.from("Bearer " + nonce);
@@ -82,7 +83,7 @@ export async function pictureBridge(statePath, readyPath) {
       if (!matchNonce(request.headers.get("authorization")) || request.headers.get("origin"))
         return Response.json({ error: "Unauthorized" }, { status: 401 });
       const path = new URL(request.url).pathname;
-      if (path === "/health") return Response.json({ providerId: initial.providerId, bridgeVersion: 3, pid: process.pid });
+      if (path === "/health") return Response.json({ providerId: initial.providerId, bridgeVersion: 4, pid: process.pid });
       let state;
       try { state = await descriptor(statePath); if (!await imagePluginEnabled(state)) throw new Error(); }
       catch { return Response.json({ error: "The user plugin is disabled or signed out" }, { status: 403 }); }
@@ -124,16 +125,19 @@ export async function pictureBridge(statePath, readyPath) {
   // The helper outlives an idle plugin host, but never an enabled, signed-in installation.
   const stop = async () => {
     if (stopping) return; stopping = true;
+    let state;
+    try { state = await descriptor(statePath); } catch { state = initial; }
     try {
-      const state = await descriptor(statePath);
       await fetch(state.platformOrigin + "/api/v1/client-auth/revoke", { method: "POST", headers: { Authorization: "Bearer " + state.capability }, signal: AbortSignal.timeout(2000) });
-      await fetch(http + "/api/provider/remove", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: state.providerId + "-images" }), signal: AbortSignal.timeout(2000) });
     } catch { /* Never log private bridge state or credentials. */ }
+    await removeNativeImages({ directory: state.settingsDirectory, project: { id: "magpie" } }, state,
+      { resolveExecutable: () => resolveNativeMagpie(state.nativeCli) }).catch(() => {});
     await unlink(readyPath).catch(() => {});
     server.stop(true); process.exit(0);
   };
   const timer = setInterval(async () => {
-    try { if (!await imagePluginEnabled(await descriptor(statePath))) await stop(); } catch { await stop(); }
+    try { const state = await descriptor(statePath); if (!state.images.length || !await imagePluginEnabled(state)) await stop(); }
+    catch { await stop(); }
   }, 2000);
   timer.unref?.();
   process.on("SIGTERM", () => void stop());
