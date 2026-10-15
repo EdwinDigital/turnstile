@@ -137,9 +137,11 @@ test("native CLI auto-registers image IDs and automatic image selection routes o
   const registered = JSON.parse(await readFile(join(settings, "providers.json"), "utf8"));
   assert.deepEqual(registered.providers.find(p => p.id === "keep"), { id: "keep", name: "Keep", off: true, key: "keep-private" });
   assert.equal(await readFile(join(settings, "settings.json"), "utf8"), preferences);
-  const nativeStatus = JSON.parse(await readFile(join(directory, "native-images-status.json"), "utf8"));
-  assert.equal(nativeStatus.state, "applied");
-  assert.equal(nativeStatus.modelCount, 3);
+  await eventually(async () => {
+    const nativeStatus = JSON.parse(await readFile(join(directory, "native-images-status.json"), "utf8"));
+    assert.equal(nativeStatus.state, "applied");
+    assert.equal(nativeStatus.modelCount, 3);
+  }, "native registration status did not settle");
   const ready = JSON.parse(await readFile(readyPath, "utf8"));
   assert.ok(ready.pid > 0);
 
