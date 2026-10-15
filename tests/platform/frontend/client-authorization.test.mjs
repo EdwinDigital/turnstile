@@ -25,7 +25,7 @@ function load(code, require, globals = {}) {
   return module.exports
 }
 
-function render(purpose, { fail = false } = {}) {
+function render(purpose, { fail = false, state = "pending" } = {}) {
   const calls = [], states = [], removed = []
   const client = load(clientCode, null, {
     fetch: async (url, init) => {
@@ -49,7 +49,7 @@ function render(purpose, { fail = false } = {}) {
     }
     if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" }
     if (name === "@tanstack/react-query") return { useQuery: () => ({
-      data: { purpose, state: "pending", subscription: selected },
+      data: { purpose, state, subscription: selected },
     }) }
     if (name === "../api/client") return client
     if (name === "../providers/auth-provider") return { useAuth: () => ({ user: { id: "user-1" } }) }
@@ -91,13 +91,25 @@ for (const purpose of ["login", "import", "reauth"]) {
         user_code: "ABCD-EFGH", approve,
       })
       assert.equal(view.states[0], false)
-      assert.notEqual(view.states[1], "")
+      assert.equal(view.states[1], approve
+        ? "验证已完成，请回到客户端。插件将自动接收结果。"
+        : "已拒绝授权，原有有效配置不变。")
       assert.equal(view.states[2], "")
       assert.equal(view.nodes.filter(node => node.type === "select").length, 0)
       assert.deepEqual(view.removed, ["turnstile-client-authorization"])
     })
   }
 }
+
+test("pending and processed authorization instructions use generic client wording", () => {
+  const pending = render("login")
+  assert.ok(pending.nodes.some(node => node.type === "p"
+    && node.props.children === "只确认你本人刚从客户端发起的请求。"))
+  const processed = render("login", { state: "approved" })
+  assert.ok(processed.nodes.some(node => node.props.role === "status"
+    && node.props.children === "这次申请已处理，请回到客户端或重新发起验证。"))
+  assert.equal(processed.nodes.some(node => node.type === "form"), false)
+})
 
 test("a failed decision retains the pending authorization and reports an error", async () => {
   const view = render("login", { fail: true })

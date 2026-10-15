@@ -76,7 +76,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
       link.href = url; link.download = filename
       document.body.append(link); link.click(); link.remove()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-      setNotice("插件已下载，请解压后在 magpie 中导入文件夹。")
+      setNotice("插件已下载，请解压后在客户端中导入文件夹。")
     } catch (reason) {
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "下载失败，请重试。")
     } finally {
@@ -110,7 +110,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
             {personal.data?.default_subscription && <div><dt>平台默认订阅</dt><dd data-no-localize>{personal.data.default_subscription.application_name} / {personal.data.default_subscription.subscription_name}</dd></div>}
           </dl>
           <section className="client-downloads-section"><h3>安装与使用</h3>
-            <ol className="client-user-steps"><li>解压安装包，在 magpie「插件」页面添加文件夹。</li><li>首次安装自动导入授权、默认订阅和模型，无需再次选择订阅。</li><li>点击「刷新模型」更新模型目录；点击「重新登录」更新授权及默认订阅。</li></ol>
+            <ol className="client-user-steps"><li>解压安装包，在客户端「插件」页面添加文件夹。</li><li>首次安装自动导入授权、默认订阅和模型，无需再次选择订阅。</li><li>点击「刷新模型」更新模型目录；点击「重新登录」更新授权及默认订阅。</li></ol>
             <p className="client-downloads-help">解压目录与 ZIP 文件名一致（不含 .zip）。</p>
           </section>
           <section className="client-downloads-section"><h3>文生图接入</h3><p className="client-downloads-help">文生图通过配套 MCP 工具使用；首次需登记插件生成的 images-mcp.json，不会自动改写 Agent 配置。</p></section>

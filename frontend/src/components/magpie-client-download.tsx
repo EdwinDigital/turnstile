@@ -12,10 +12,10 @@ export function MagpieClientDownload() {
   }, [])
   return <div className="client-downloads-client-actions">
     <a className={buttonVariants({ variant: "default", className: "client-downloads-client-button" })}
-      href={download.href} target="_blank" rel="noopener noreferrer" title="从 magpie 官网下载；在新标签页打开">
+      href={download.href} target="_blank" rel="noopener noreferrer" title="从客户端官网下载；在新标签页打开">
       <Download size={16} aria-hidden="true" /><span>{download.label}</span>
     </a>
     <a className="client-downloads-other-versions" href={MAGPIE_DOWNLOAD_PAGE} target="_blank" rel="noopener noreferrer"
-      title="在 magpie 官网选择系统和处理器版本；在新标签页打开">其他版本</a>
+      title="在客户端官网选择系统和处理器版本；在新标签页打开">其他版本</a>
   </div>
 }

@@ -34,11 +34,20 @@ const authHelpers = load(authCode, () => ({ apiUrl: path => path, ApiError: Erro
 
 for (const locale of ["en", "ja", "ko"]) {
   test(`download layout and action labels are localized in ${locale}`, async () => {
-    const { CLIENT_USER_PHRASES: phrases } = await import(new URL(`../../../frontend/src/locales/${locale}/phrases-client-user.ts`, import.meta.url))
+    const { CLIENT_USER_PHRASES } = await import(new URL(`../../../frontend/src/locales/${locale}/phrases-client-user.ts`, import.meta.url))
+    const { USER_SETTINGS_PHRASES } = await import(new URL(`../../../frontend/src/locales/${locale}/phrases-user-settings.ts`, import.meta.url))
+    const phrases = { ...USER_SETTINGS_PHRASES, ...CLIENT_USER_PHRASES }
     for (const label of ["当前用户", "平台默认订阅", "安装与使用", "文生图接入", "下载订阅版插件", "下载 macOS 客户端", "其他版本",
-      "从 magpie 官网下载；在新标签页打开", "在 magpie 官网选择系统和处理器版本；在新标签页打开"]) {
+      "从客户端官网下载；在新标签页打开", "在客户端官网选择系统和处理器版本；在新标签页打开", "下载客户端",
+      "解压安装包，在客户端「插件」页面添加文件夹。", "插件已下载，请解压后在客户端中导入文件夹。",
+      "只确认你本人刚从客户端发起的请求。", "这次申请已处理，请回到客户端或重新发起验证。",
+      "验证已完成，请回到客户端。插件将自动接收结果。"]) {
       assert.ok(phrases[label], label)
       assert.notEqual(phrases[label], label)
+    }
+    for (const [source, translated] of Object.entries(phrases)) {
+      assert.doesNotMatch(source, /magpie/i)
+      assert.doesNotMatch(translated, /magpie/i)
     }
   })
 }
@@ -70,6 +79,8 @@ for (const [userMode, prefix, label] of [
     assert.equal(view.calls[0].init.signal, signal)
     assert.equal(view.calls[0].init.credentials, "include")
     assert.equal(view.calls[0].init.cache, "no-store")
+    assert.equal(view.calls[0].url, userMode
+      ? "/api/v1/client-downloads/magpie-user" : "/api/v1/client-downloads/magpie")
     assert.equal(view.calls[0].init.headers["Content-Type"], "application/json")
     assert.deepEqual(JSON.parse(view.calls[0].init.body), userMode ? { acknowledged: true }
       : { application_id: item.application_id, subscription_id: item.subscription_id,
@@ -78,12 +89,17 @@ for (const [userMode, prefix, label] of [
 
   test(`${prefix} page saves the API filename instead of any internal ID`, async () => {
     const view = api(`attachment; filename="${filename}"`)
-    const anchors = [], revoked = []
+    const anchors = [], revoked = [], states = []
     let stateIndex = 0
     const jsx = (type, props) => ({ type, props })
     const page = load(pageCode, name => {
       if (name === "react") return { useEffect: () => {}, useRef: value => ({ current: value }),
-        useState: value => [([2, 3].includes(stateIndex++) ? true : value), () => {}] }
+        useState: value => {
+          const index = stateIndex++
+          const initial = [2, 3].includes(index) ? true : value
+          states[index] = initial
+          return [initial, next => { states[index] = next }]
+        } }
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" }
       if (name === "@tanstack/react-query") return { useQuery: options => ({ data:
         options.queryKey[0] === "client-downloads" ? { items: [item], key_management_available: true }
@@ -108,6 +124,8 @@ for (const [userMode, prefix, label] of [
     }
     visit(page.ClientDownloadsPage({ onToggleSidebar: () => {} }))
     assert.ok(nodes.some(node => node.type === "magpie-client-download"))
+    assert.ok(nodes.some(node => node.type === "li" && node.props.children ===
+      "解压安装包，在客户端「插件」页面添加文件夹。"))
     assert.ok(nodes.some(node => node.type === "p" && node.props.children ===
       "解压目录与 ZIP 文件名一致（不含 .zip）。"))
     assert.ok(nodes.some(node => node.type === "p" && node.props.children ===
@@ -126,6 +144,9 @@ for (const [userMode, prefix, label] of [
     assert.equal(anchors.length, 1)
     assert.equal(anchors[0].download, filename)
     assert.deepEqual(revoked, ["blob:zip"])
+    assert.equal(states[6], userMode
+      ? "用户版已下载。安装后自动导入授权和默认订阅；需要更新模型时点击「刷新模型」。"
+      : "插件已下载，请解压后在客户端中导入文件夹。")
   })
 }
 
@@ -183,7 +204,7 @@ for (const permissions of [[], ["user-plugin"], ["subscription-plugin"], ["user-
     assert.equal(titles.includes("AIGateway-Proxy 订阅版"), permissions.includes("subscription-plugin"))
     assert.equal(queries.find(q => q.queryKey[0] === "client-user-options").enabled, permissions.includes("user-plugin"))
     assert.equal(queries.find(q => q.queryKey[0] === "client-downloads").enabled, permissions.includes("subscription-plugin"))
-    assert.equal(titles.includes("订阅版导入 magpie"), false)
+    assert.equal(titles.includes("订阅版导入客户端"), false)
   })
 }
 

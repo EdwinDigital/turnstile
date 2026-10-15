@@ -44,7 +44,7 @@ for (const [name, browser] of [
 ]) {
   test(`unsupported systems open the official selector: ${name}`, () => {
     assert.equal(magpieDownload(browser).href, MAGPIE_DOWNLOAD_PAGE)
-    assert.equal(magpieDownload(browser).label, "下载 magpie 客户端")
+    assert.equal(magpieDownload(browser).label, "下载客户端")
   })
 }
 

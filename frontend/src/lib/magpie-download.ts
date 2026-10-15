@@ -13,7 +13,7 @@ type BrowserInfo = {
 export type MagpieDownload = { href: string; label: string }
 
 export function magpieDownload(browser?: BrowserInfo, architecture?: string): MagpieDownload {
-  const fallback = { href: MAGPIE_DOWNLOAD_PAGE, label: "下载 magpie 客户端" }
+  const fallback = { href: MAGPIE_DOWNLOAD_PAGE, label: "下载客户端" }
   if (!browser) return fallback
   const ua = browser.userAgent
   if (browser.userAgentData?.mobile || /Android|iPhone|iPad|iPod/i.test(ua)
