@@ -12,8 +12,9 @@ Use this checklist for each release. Record resource identifiers and request IDs
 
 ## Platform bootstrap
 
-- [ ] Apply `001_initial_schema`
-- [ ] Re-run the migration command and confirm zero pending migrations
+- [ ] Apply the complete candidate chain with `uv run python -m backend.migrate`
+- [ ] Verify one ledger row and matching checksum per full version in the [migration inventory](testing.md#migration-inventory)
+- [ ] Re-run the migration command and confirm zero pending migrations, unchanged checksums and applied timestamps
 - [ ] Start the API and frontend
 - [ ] Create the first password account with `python -m backend.accounts <email> --role owner`
 - [ ] Sign in through the real web page with that email and password
