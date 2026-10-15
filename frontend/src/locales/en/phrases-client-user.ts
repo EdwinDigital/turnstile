@@ -1,4 +1,6 @@
 export const CLIENT_USER_PHRASES: Record<string, string> = {
+  "从 magpie 官网下载；在新标签页打开": "Download from the magpie website; opens in a new tab",
+  "在 magpie 官网选择系统和处理器版本；在新标签页打开": "Choose your system and processor on the magpie website; opens in a new tab",
   "使用个人授权和默认订阅，安装后即可使用。": "Uses your personal authorization and default subscription. Ready after installation.",
   "使用指定应用订阅与密钥，导入已授权模型。": "Uses a specific application subscription and key to import authorized models.",
   "当前用户": "Current user",

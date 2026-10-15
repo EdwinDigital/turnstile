@@ -35,7 +35,8 @@ const authHelpers = load(authCode, () => ({ apiUrl: path => path, ApiError: Erro
 for (const locale of ["en", "ja", "ko"]) {
   test(`download layout and action labels are localized in ${locale}`, async () => {
     const { CLIENT_USER_PHRASES: phrases } = await import(new URL(`../../../frontend/src/locales/${locale}/phrases-client-user.ts`, import.meta.url))
-    for (const label of ["当前用户", "平台默认订阅", "安装与使用", "文生图接入", "下载订阅版插件", "下载 macOS 客户端", "其他版本"]) {
+    for (const label of ["当前用户", "平台默认订阅", "安装与使用", "文生图接入", "下载订阅版插件", "下载 macOS 客户端", "其他版本",
+      "从 magpie 官网下载；在新标签页打开", "在 magpie 官网选择系统和处理器版本；在新标签页打开"]) {
       assert.ok(phrases[label], label)
       assert.notEqual(phrases[label], label)
     }
