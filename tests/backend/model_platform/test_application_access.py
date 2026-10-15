@@ -1043,6 +1043,33 @@ def test_missing_subscription_is_marked_cancelled_and_stale() -> None:
     assert application.active_subscription_count == 0
 
 
+def test_application_ledger_sql_initializes_retained_finalization_placeholders() -> None:
+    moment = datetime.now(UTC)
+    state = GatewayApplicationLedgerState(
+        period_start=moment.date().replace(day=1),
+        application_id=UUID(int=99),
+        token_limit=100_000,
+        confirmed_tokens=125,
+        pending_reserved_tokens=0,
+        pending_reservation_count=0,
+        stale_reservation_count=0,
+        oldest_reservation_at=None,
+        available_tokens=99_875,
+        snapshot_at=moment,
+    )
+    connection = MagicMock()
+    repository = PostgreSqlApplicationRepositoryMixin()
+
+    repository._write_application_ledger_states(connection, [state])
+
+    cursor = connection.cursor.return_value.__enter__.return_value
+    statement, records = cursor.executemany.call_args.args
+    normalized = " ".join(statement.split())
+    assert "finalized_upper_bound_tokens, finalized_upper_bound_count," in normalized
+    assert "%(pending_reservation_count)s, 0, 0," in normalized
+    assert records == [state.model_dump(mode="python")]
+
+
 def test_usage_application_attribution_is_immutable_and_drives_ledger() -> None:
     repository = InMemoryRepository()
     service = ApplicationAccessService(repository, sync_available=True)

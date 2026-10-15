@@ -1578,3 +1578,25 @@ def test_the_inherited_allowance_is_audited_as_its_own_act() -> None:
     assert actors == {"system-budget-roll-forward"}
     # A machine identity with no `@` can never be listed as a person who owns a budget.
     assert not any("@" in actor for actor in actors)
+
+
+def test_usd_user_budgets_are_skipped_by_legacy_token_ledger_snapshot() -> None:
+    from decimal import Decimal
+
+    repository = InMemoryRepository()
+    period = PERIOD_START.date()
+    repository.upsert_token_budget(
+        period, "organization", "org-contoso-global", None, None, 80, "owner",
+        budget_mode="usd", usd_limit=Decimal("500.00"),
+    )
+    repository.upsert_token_budget(
+        period, "department", "department-platform", "org-contoso-global", None, 80, "owner",
+        budget_mode="usd", usd_limit=Decimal("100.00"),
+    )
+    repository.upsert_token_budget(
+        period, "user", USER, "department-platform", None, 80, "owner",
+        budget_mode="usd", usd_limit=Decimal("20.00"),
+    )
+    store = FakeLedgerStore()
+    service = LedgerSyncService(repository, store)
+    assert service.snapshot(datetime(2026, 7, 27, 12, 0, tzinfo=UTC)) == []

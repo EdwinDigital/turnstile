@@ -780,12 +780,13 @@ class PostgreSqlApplicationRepositoryMixin:
                 """INSERT INTO gateway_application_ledger_state (
                        period_start, application_id, token_limit, confirmed_tokens,
                       pending_reserved_tokens, pending_reservation_count,
+                       finalized_upper_bound_tokens, finalized_upper_bound_count,
                        stale_reservation_count, oldest_reservation_at,
                        available_tokens, snapshot_at
                    ) VALUES (
                        %(period_start)s, %(application_id)s, %(token_limit)s,
                        %(confirmed_tokens)s, %(pending_reserved_tokens)s,
-                       %(pending_reservation_count)s, %(stale_reservation_count)s,
+                       %(pending_reservation_count)s, 0, 0, %(stale_reservation_count)s,
                        %(oldest_reservation_at)s, %(available_tokens)s, %(snapshot_at)s
                    ) ON CONFLICT (period_start, application_id) DO UPDATE SET
                        token_limit = EXCLUDED.token_limit,

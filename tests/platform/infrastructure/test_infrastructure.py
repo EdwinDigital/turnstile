@@ -47,6 +47,7 @@ def test_self_hosted_access_is_opt_in_and_separates_creation_from_tokens() -> No
         assert f"Microsoft.ApiManagement/service/{action}" not in CONTROL_PLANE_APIM_RBAC
     provisioner, bootstrap = access.split("resource bootstrapRole", 1)
     assert "generateToken" not in provisioner
+    assert "Microsoft.Authorization/permissions/read" in bootstrap
     assert "gateways/write" not in bootstrap and "gateways/apis/write" not in bootstrap
     assert all(value not in access for value in ("listSecrets", "listKeys", "/delete", "'*'"))
 
@@ -544,6 +545,10 @@ def test_application_creation_is_gated_and_uses_the_exact_platform_ledger() -> N
     assert "union(currentApiSettings" in release
     assert "union(currentControlPlaneSettings" in release
     assert release.count("GATEWAY_RELEASE_WORKER_ENABLED: string(releaseWorkerEnabled)") == 2
+    assert release.count("APIM_USAGE_OBSERVER_URL: usageObserverUrl") == 2
+    assert release.count("APIM_USAGE_OBSERVER_KEY_NAMED_VALUE: usageObserverKeyNamedValue") == 2
+    assert "resource applicationProduct " in APIM_INTEGRATION
+    assert "name: 'turnstile-ai-consumers'" in APIM_INTEGRATION
     for parameter, setting in (
         ("apimTargetRegistryEnabled", "APIM_TARGET_REGISTRY_ENABLED"),
         ("selfHostedGatewayEnabled", "SELF_HOSTED_GATEWAY_ENABLED"),
@@ -568,10 +573,12 @@ def test_application_creation_is_gated_and_uses_the_exact_platform_ledger() -> N
         ):
             assert f"name: '{setting}'" in template
     for action in (
+        "Microsoft.Authorization/permissions/read",
         "Microsoft.ApiManagement/service/subscriptions/read",
         "Microsoft.ApiManagement/service/subscriptions/write",
         "Microsoft.ApiManagement/service/products/apis/read",
         "Microsoft.ApiManagement/service/apis/policies/read",
+        "Microsoft.ApiManagement/service/gateways/read",
     ):
         assert action in CONTROL_PLANE_APIM_RBAC
     assert "listSecrets" not in CONTROL_PLANE_APIM_RBAC
@@ -632,6 +639,32 @@ def test_application_key_management_role_is_least_privilege() -> None:
     assert "scope: apim" in APPLICATION_KEY_MANAGEMENT_RBAC
 
 
+def test_apim_inventory_role_is_read_only_and_resource_scoped() -> None:
+    inventory_role = APPLICATION_KEY_MANAGEMENT_RBAC.split("resource inventoryReaderRole ", 1)[1]
+    actions = {
+        line.strip().strip("'")
+        for line in inventory_role.split("actions: [", 1)[1].split("]", 1)[0].splitlines()
+        if line.strip().startswith("'")
+    }
+    assert actions == {
+        "Microsoft.Authorization/permissions/read",
+        "Microsoft.ApiManagement/service/read",
+        "Microsoft.ApiManagement/service/apis/read",
+        "Microsoft.ApiManagement/service/apis/operations/read",
+        "Microsoft.ApiManagement/service/apis/policies/read",
+        "Microsoft.ApiManagement/service/apis/operations/policies/read",
+        "Microsoft.ApiManagement/service/gateways/read",
+        "Microsoft.ApiManagement/service/gateways/apis/read",
+        "Microsoft.ApiManagement/service/gateways/hostnameConfigurations/read",
+        "Microsoft.ApiManagement/service/gateways/certificateAuthorities/read",
+    }
+    assignment = inventory_role.split("resource apiInventoryReaders ", 1)[1]
+    assert "scope: apim" in assignment
+    assert "principalId: apiPrincipalId" in assignment
+    assert "roleDefinitionId: inventoryReaderRole.id" in assignment
+    assert "dataActions: []" in inventory_role
+
+
 def test_control_plane_role_has_no_subscription_or_resource_group_scope() -> None:
     assert "scope: apim" in CONTROL_PLANE_APIM_RBAC
     assert "assignableScopes: [" in CONTROL_PLANE_APIM_RBAC
@@ -666,3 +699,22 @@ def test_example_parameters_are_non_secret_and_environment_neutral() -> None:
     serialized = json.dumps(PARAMETERS)
     for forbidden in ("xle-", "sebpvmm", "2b04b108", "azurewebsites.net"):
         assert forbidden not in serialized
+
+
+def test_platform_identities_can_delegate_scoped_apim_dependency_roles() -> None:
+    expected_roles = (
+        ("usageEventHub", "2b629674-e913-4c01-ae53-ef4638d8f975"),
+        ("ledgerTable", "0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3"),
+        ("routeTable", "76199698-9eea-4c19-bc75-cec21354c6b6"),
+        ("credentialVault", "4633458b-17de-408a-b874-0445c86b69e6"),
+    )
+    for template in (DATA_PLANE, CONTROL_PLANE):
+        assert "f58310d9-a9f6-439a-9e8d-f62e7b41a168" in template
+        assert "312a565d-c81f-4fd8-895a-4e21e48d571c" in template
+        assert "conditionVersion: '2.0'" in template
+        for scope_name, role_id in expected_roles:
+            assert f"scope: {scope_name}" in template
+            assert f"GuidEquals {{{role_id}}}" in template
+    assert "312a565d-c81f-4fd8-895a-4e21e48d571c" in MAIN
+    assert "eventHubNamespaceName: dataPlane.outputs.eventHubNamespaceName" in MAIN
+    assert "eventHubName: dataPlane.outputs.eventHubName" in MAIN

@@ -2,9 +2,8 @@
 
 ## Version scope
 
-**v1.1 is the current public release; v1.2 is in preparation.** The v1.2 documentation below
-describes implemented workflows and prerequisites, not a declaration of release readiness.
-Model availability still requires complete protocol installation and end-to-end acceptance.
+**Turnstile v1.2 is the current public release.** The v1.2 documentation below
+describes the release workflows and operational boundaries.
 
 | v1.2 task | Start here | Important boundary |
 | --- | --- | --- |
@@ -13,7 +12,7 @@ Model availability still requires complete protocol installation and end-to-end 
 | Create or associate a Self-hosted Gateway | [Create a Gateway](configuration.md#create-a-self-hosted-gateway-from-turnstile) | An APIM Gateway configuration is not a running container; HTTPS, persistent proxy configuration and token renewal remain operator responsibilities. |
 | Diagnose a Connection | [Connection diagnostics](configuration.md#connection-diagnostics) | Planning is non-inference; a confirmed check may incur provider charges. |
 | Select a Gateway and inspect a failed invocation | [Platform invocation trace](configuration.md#platform-invocation-trace) | A request-attempt record is not billing evidence; unknown usage must remain unknown. |
-| Understand a disabled model switch | [Availability](configuration.md#versioned-model-availability) and [troubleshooting](troubleshooting.md#model-switch-is-disabled-or-unverified) | Accepted intent is not verified Gateway enforcement; the v1.2 availability rollout remains pending acceptance. |
+| Understand a disabled model switch | [Availability](configuration.md#versioned-model-availability) and [troubleshooting](troubleshooting.md#model-switch-is-disabled-or-unverified) | Accepted intent is not verified Gateway enforcement; availability requires verified Gateway coverage. |
 | Prepare an existing installation | [v1.2 preparation](deployment.md#prepare-for-v12) | Review application, migration and Gateway protocol changes separately; retain existing state and history. |
 
 ## Operator references

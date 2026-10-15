@@ -424,7 +424,11 @@ class InMemoryBudgetRepositoryMixin(InMemoryBudgetEvidenceRepositoryMixin):
         people: list[dict[str, Any]] = []
         active_user_ids: set[str] = set()
         for (period, scope_type, scope_id), budget in sorted(self.token_budgets.items()):
-            if period != period_start or scope_type != "user":
+            if (
+                period != period_start
+                or scope_type != "user"
+                or budget.get("budget_mode", "tokens") != "tokens"
+            ):
                 continue
             active_user_ids.add(scope_id)
             department_id = str(budget.get("parent_scope_id") or "")

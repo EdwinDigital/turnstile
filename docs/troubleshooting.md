@@ -37,7 +37,7 @@ Color alone is not an authoritative status indicator.
 	 fresh state read; an unknown response must not create a duplicate intent. Do not replace this
 	 workflow with a general model edit or direct database update.
 
-The v1.2 availability rollout remains pending end-to-end acceptance. Do not remove historical
+The v1.2 availability protocol requires verified Gateway coverage. Do not remove historical
 Revisions, skip nodes, fabricate proof or force `command_ready` to make the control clickable.
 See [availability installation](deployment.md#model-availability-installation).
 

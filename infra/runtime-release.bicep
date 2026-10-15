@@ -48,6 +48,8 @@ resource apiSettings 'Microsoft.Web/sites/config@2024-11-01' = {
   properties: union(currentApiSettings, {
     APIM_GATEWAY_URL: apimGatewayUrl
     APIM_DASHBOARD_SUBSCRIPTION_KEY: apimSubscriptionKey
+    APIM_USAGE_OBSERVER_URL: usageObserverUrl
+    APIM_USAGE_OBSERVER_KEY_NAMED_VALUE: usageObserverKeyNamedValue
     GATEWAY_RELEASE_WORKER_ENABLED: string(releaseWorkerEnabled)
     APIM_TARGET_REGISTRY_ENABLED: string(apimTargetRegistryEnabled)
     SELF_HOSTED_GATEWAY_ENABLED: string(selfHostedGatewayEnabled)

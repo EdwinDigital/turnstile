@@ -245,7 +245,7 @@ def record(
         correlation_id=correlation_id,
         ts=NOW - timedelta(minutes=30),
         team="AI Platform",
-        user="lei@contoso.com",
+        user="alex@contoso.com",
         agent="agent-delivery",
         workflow="unattributed",
         run_id=correlation_id,

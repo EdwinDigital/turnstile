@@ -116,7 +116,7 @@ def event(**overrides: object) -> dict[str, object]:
         "id": "usage-1",
         "ts": datetime(2026, 7, 17, tzinfo=UTC).isoformat(),
         "team": "platform",
-        "user": "lei",
+        "user": "alex",
         "agent": "delivery-engineer",
         "workflow": "pull-request-review",
         "run_id": "run-1",

@@ -35,6 +35,8 @@ param databricksOAuthEnabled bool = false
 param applicationDefaultMonthlyTokenLimit int = 100000
 @minValue(1)
 param applicationDefaultTokensPerMinute int = 100000
+param eventHubNamespaceName string = ''
+param eventHubName string = 'llm-usage'
 param ledgerStorageName string
 param ledgerTableName string = 'TurnstileLedger'
 param ledgerTableEndpoint string
@@ -279,6 +281,17 @@ resource credentialVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
   name: credentialVaultName
 }
 
+resource eventHubNamespace 'Microsoft.EventHub/namespaces@2024-01-01' existing = if (!empty(eventHubNamespaceName)) {
+  name: eventHubNamespaceName
+}
+
+resource usageEventHub 'Microsoft.EventHub/namespaces/eventhubs@2024-01-01' existing = if (!empty(eventHubNamespaceName)) {
+  parent: eventHubNamespace
+  name: eventHubName
+}
+
+var rbacAdminRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'f58310d9-a9f6-439a-9e8d-f62e7b41a168')
+
 resource routeContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (effectiveEnabled) {
   name: guid(routeTable.id, functionApp.id, 'route-table-contributor')
   scope: routeTable
@@ -328,6 +341,64 @@ resource functionCredentialSecretReader 'Microsoft.Authorization/roleAssignments
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
   }
 }
+resource onboardingEventHubRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (effectiveReleaseWorkerEnabled && !empty(eventHubNamespaceName)) {
+  name: guid(usageEventHub.id, functionApp.id, 'onboarding-event-hub-rbac-delegator')
+  scope: usageEventHub
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {2b629674-e913-4c01-ae53-ef4638d8f975} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource onboardingLedgerRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (effectiveReleaseWorkerEnabled) {
+  name: guid(ledgerTable.id, functionApp.id, 'onboarding-ledger-rbac-delegator')
+  scope: ledgerTable
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource onboardingRouteRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (effectiveReleaseWorkerEnabled) {
+  name: guid(routeTable.id, functionApp.id, 'onboarding-route-rbac-delegator')
+  scope: routeTable
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {76199698-9eea-4c19-bc75-cec21354c6b6} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource onboardingCredentialVaultRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (effectiveReleaseWorkerEnabled) {
+  name: guid(credentialVault.id, functionApp.id, 'onboarding-credential-vault-rbac-delegator')
+  scope: credentialVault
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {4633458b-17de-408a-b874-0445c86b69e6} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource controlPlaneResourceGroupApimContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (effectiveEnabled) {
+  name: guid(resourceGroup().id, functionApp.id, 'apim-service-contributor')
+  scope: resourceGroup()
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '312a565d-c81f-4fd8-895a-4e21e48d571c')
+  }
+}
+
 
 resource functionProbeSecretReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(apimProbeSubscriptionKeySecret.id, functionApp.id, 'key-vault-secrets-user')

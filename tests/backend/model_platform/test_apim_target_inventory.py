@@ -10,7 +10,10 @@ import httpx
 import pytest
 from pydantic import HttpUrl
 
-from backend.services.gateway_targets import register_existing_apim_target
+from backend.services.gateway_targets import (
+    DEFAULT_SEEDED_APIM_GATEWAY_ID,
+    register_existing_apim_target,
+)
 from tests.backend.model_platform.control_plane_support import (
     TEST_CIPHER,
     FakeApimClient,
@@ -330,6 +333,113 @@ def test_registration_persists_only_after_connection_probe(probe_fails: bool) ->
             assert "unit-key" not in result.model_dump_json()
             saved = repository.gateways[0]
             assert TEST_CIPHER.decrypt(saved["credential_ciphertext"]) == "unit-key"
+
+
+def test_registration_adopts_seeded_unconfigured_apim_gateway_profile() -> None:
+    repository = InMemoryRepository()
+    repository.gateways = [
+        {
+            "id": DEFAULT_SEEDED_APIM_GATEWAY_ID,
+            "name": "Azure API Management",
+            "implementation": "apim",
+            "base_url": None,
+            "auth_type": "api_key",
+            "enabled": True,
+            "is_default": True,
+            "config": {"header_name": "Ocp-Apim-Subscription-Key"},
+            "credential_ciphertext": None,
+            "credential_hint": None,
+        }
+    ]
+    registration = ApimTargetWrite.model_validate(
+        {
+            "name": "Platform Initial APIM",
+            "tenant_id": str(target().tenant_id),
+            "subscription_id": str(target().subscription_id),
+            "resource_group": "unit-group",
+            "service_name": "unit-service",
+            "api_id": "unit-api",
+            "management_endpoint": "https://management.azure.com" + target().arm_resource_id,
+            "gateway_endpoint": "https://unit.azure-api.net/unit/llm",
+        }
+    )
+    with (
+        patch(
+            "backend.services.gateway_targets.CredentialCipher.from_settings",
+            return_value=TEST_CIPHER,
+        ),
+        patch("backend.services.gateway_targets.AzureApimPublisherClient") as publisher,
+        patch("backend.services.gateway_targets.AzureApimSubscriptionKeyClient") as keys,
+        patch("backend.services.gateway_targets.GatewayConnectionProbe"),
+    ):
+        publisher.return_value.discover_apim_target_inventory.return_value = arm_inventory(
+            gateway_profile_id=DEFAULT_SEEDED_APIM_GATEWAY_ID,
+            managed_gateway_url=registration.gateway_endpoint,
+        )
+        keys.return_value.application_subscription_keys.return_value = ("unit-key", "unit-other")
+        result = register_existing_apim_target(
+            registration,
+            settings=Settings(),
+            repository=repository,
+        )
+    assert result.target.gateway_profile_id == DEFAULT_SEEDED_APIM_GATEWAY_ID
+    assert len(repository.gateways) == 1
+    assert repository.gateways[0]["id"] == DEFAULT_SEEDED_APIM_GATEWAY_ID
+    assert repository.gateways[0]["name"] == "Platform Initial APIM"
+    assert repository.gateways[0]["base_url"] == "https://unit.azure-api.net/unit/llm"
+    assert repository.gateways[0]["is_default"] is True
+
+
+def test_registration_provisions_platform_dependency_roles_for_secondary_apim() -> None:
+    repository = InMemoryRepository()
+    repository.gateways = []
+    principal_id = UUID("50000000-0000-4000-8000-000000000099")
+    registration = ApimTargetWrite.model_validate(
+        {
+            "gateway_profile_id": TARGET,
+            "name": "Secondary APIM",
+            "tenant_id": str(target().tenant_id),
+            "subscription_id": str(target().subscription_id),
+            "resource_group": "unit-group",
+            "service_name": "unit-service",
+            "api_id": "unit-api",
+            "management_endpoint": "https://management.azure.com" + target().arm_resource_id,
+            "gateway_endpoint": "https://unit.azure-api.net/unit/llm",
+        }
+    )
+    settings = Settings(
+        azure_subscription_id=str(target().subscription_id),
+        apim_resource_group="platform-group",
+        apim_service_name="platform-apim",
+        apim_api_id="turnstile-llm",
+    )
+    with (
+        patch(
+            "backend.services.gateway_targets.CredentialCipher.from_settings",
+            return_value=TEST_CIPHER,
+        ),
+        patch("backend.services.gateway_targets.AzureApimPublisherClient") as publisher,
+        patch(
+            "backend.services.gateway_targets.AzureApimPlatformConfigurationClient"
+        ) as platform_config,
+        patch("backend.services.gateway_targets.AzureApimSubscriptionKeyClient") as keys,
+        patch("backend.services.gateway_targets.GatewayConnectionProbe"),
+    ):
+        publisher.return_value.discover_apim_target_inventory.return_value = arm_inventory(
+            principal_id=principal_id,
+            managed_gateway_url=registration.gateway_endpoint,
+        )
+        keys.return_value.application_subscription_keys.return_value = ("unit-key", "unit-other")
+        register_existing_apim_target(
+            registration,
+            settings=settings,
+            repository=repository,
+        )
+        platform_config.return_value.ensure_apim_dependency_roles.assert_called_once_with(
+            TARGET,
+            principal_id,
+            platform_config.return_value.configuration.return_value,
+        )
 
 
 @pytest.mark.parametrize("status", [200, 302, 401, 503])

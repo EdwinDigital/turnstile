@@ -8,9 +8,8 @@ The API, telemetry and control-plane Functions, observer, and budget ledger requ
 
 ## Prepare for v1.2
 
-v1.2 is an upcoming release. Do not interpret the presence of a UI control or a successful package
-upload as completed feature acceptance. The v1.1 installation and upgrade instructions below remain
-the published-release instructions; this section identifies the additional v1.2 preparation work.
+Turnstile v1.2 is the current public release. Upgrading an existing v1.1 installation requires
+reviewing the migrations and protocol steps below in addition to uploading application packages.
 
 | Change | Required preparation | Verify before use |
 | --- | --- | --- |
@@ -18,7 +17,7 @@ the published-release instructions; this section identifies the additional v1.2 
 | Registered targets, initialization and multi-target API publication | Migrations 011-013 and target-specific worker configuration | Exact APIM identity, endpoint trust, declared capabilities and per-target results; multi-target publication is an API workflow, not a multi-select Add Model form. |
 | Create a Self-hosted Gateway | Migration 014 and the separately reviewed Gateway-management permissions | API association, a running operator-managed container, HTTPS, restart-persistent ingress and configuration-token renewal. |
 | Platform invocation attempts and explicit Gateway selection | Migration 015 and compatible API readers | Failures remain visible; selected Gateway scope is respected; incomplete usage is not billed as zero. |
-| Versioned model availability | Migration 016, compatible workers, Table access, all retained Revision policies and self-hosted enrollment | Full fresh coverage, disabled rejection and enabled recovery. End-to-end acceptance remains pending; leave controls unavailable until it passes. |
+| Versioned model availability | Migration 016, compatible workers, Table access, all retained Revision policies and self-hosted enrollment | Full fresh coverage, disabled rejection and enabled recovery across all serving Gateways. |
 | Atomic budget execution | Separate opt-in flags, identities and reviewed cutover | Existing balances, admission, completion and recovery; an application update does not activate the protocol. |
 
 1. Back up the existing private deployment state in an approved secret store. Keep the database,

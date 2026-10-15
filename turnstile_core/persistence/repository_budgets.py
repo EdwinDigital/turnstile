@@ -682,6 +682,7 @@ class PostgreSqlBudgetRepositoryMixin:
                       token_limit
                   FROM token_budget
                   WHERE period_start = %(period_start)s AND scope_type = 'user'
+                    AND budget_mode = 'tokens'
                  ),
                  retired AS (
                   SELECT DISTINCT audit.scope_id AS user_id
@@ -728,6 +729,7 @@ class PostgreSqlBudgetRepositoryMixin:
                               token_limit
                        FROM token_budget
                        WHERE period_start = %(period_start)s AND scope_type = 'user'
+                         AND budget_mode = 'tokens'
                    ),
                                      retired AS (
                                              SELECT DISTINCT audit.scope_id AS user_id

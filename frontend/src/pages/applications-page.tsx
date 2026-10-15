@@ -61,6 +61,7 @@ import {
 } from "../components/applications/application-create-form"
 import { ApiError, dataSource } from "../data-sources/apim/api"
 import { applicationBudgetPending, finopsKeys, finopsQueries, storeGatewayApplicationBudget } from "../data-sources/apim/queries"
+import { apimGatewayProfiles } from "../lib/gateway-topology"
 import type {
   BudgetMode,
   GatewayApplicationAuditEvent,
@@ -838,10 +839,13 @@ export function ApplicationsPage() {
     mutationFn: (gatewayId: string) => dataSource.syncGatewayApplications(gatewayId),
     onSuccess: trackOperation,
   })
-  const syncTargets = (registry.data?.gateways ?? []).filter(gateway => gateway.enabled && gateway.implementation === "apim")
+  const topology = registry.data?.apim_target_topology ?? null
+  const topologyAvailable = registry.data?.apim_target_topology_available === true
+  const registeredApimGateways = apimGatewayProfiles(registry.data?.gateways ?? [], topology, topologyAvailable)
+  const syncTargets = registeredApimGateways.filter(gateway => gateway.enabled && gateway.implementation === "apim")
   const syncTitle = applications.data?.sync_available ? "从 APIM 刷新订阅库存" : applications.data?.sync_unavailable_reason ?? "发布工作进程未部署"
-  const gatewayId = registry.data?.gateways.find((gateway) => gateway.enabled && gateway.implementation === "apim" && gateway.is_default)?.id
-    ?? registry.data?.gateways.find((gateway) => gateway.enabled && gateway.implementation === "apim")?.id
+  const gatewayId = registeredApimGateways.find((gateway) => gateway.enabled && gateway.implementation === "apim" && gateway.is_default)?.id
+    ?? registeredApimGateways.find((gateway) => gateway.enabled && gateway.implementation === "apim")?.id
     ?? null
   const busy = syncMutation.isPending || Boolean(operation.data?.worker_available && !operationTerminal)
   const modelNames = useMemo(() => new Map((registry.data?.models ?? []).map((model) => [model.id, model.display_name])), [registry.data?.models])
@@ -852,7 +856,7 @@ export function ApplicationsPage() {
     { id: "attention", label: "需关注", count: targetItems.filter((item) => item.status !== "active" || item.stale_subscription_count > 0).length },
     { id: "system", label: "系统", count: targetItems.filter((item) => item.system_managed).length },
   ]
-  const apimInstances = (registry.data?.gateways ?? []).filter(gateway => gateway.implementation === "apim")
+  const apimInstances = registeredApimGateways.filter(gateway => gateway.implementation === "apim")
   const apimCards = [
     { id: null, name: "全部", items },
     ...apimInstances.map(gateway => ({ id: gateway.id, name: gateway.name, items: items.filter(item => item.gateway_profile_id === gateway.id) })),
@@ -928,7 +932,7 @@ export function ApplicationsPage() {
       </section>
     </div>
     {createOpen && user?.role === "owner" && <ApplicationCreateDialog
-      gateways={registry.data?.gateways ?? []}
+      gateways={registeredApimGateways}
       inventory={applications.data}
       inventoryError={applications.isError || registry.isError}
       applicationType="service"

@@ -23,7 +23,7 @@ import {
   publicationConnections,
 } from "../../../frontend/src/components/model-management/model-publication-connections.ts"
 
-const gateway = (id, overrides = {}) => ({ id, implementation: "apim", enabled: true, ...overrides })
+const gateway = (id, overrides = {}) => ({ id, implementation: "apim", enabled: true, base_url: `https://${id}.azure-api.net/models`, ...overrides })
 const provider = (id, overrides = {}) => ({ id, enabled: true, ...overrides })
 const connection = (id, gatewayId, overrides = {}) => ({
   id,
@@ -1766,7 +1766,7 @@ test("runtime diagnostic rejects wrong identities and invalid timestamps without
   assert.equal(runtimeWithTelemetryHealth(runtime, [record]).diagnostic.error_code, "application_model_not_assigned")
 })
 
-function gatewayAttachmentHarness({ role = "owner", save = async () => ({}), rename = async () => {}, remove = async () => ({}), create = async () => ({}), retryProvision = async () => ({}), bootstrap = async () => { throw new Error("Unexpected bootstrap") }, provisions, provisionError = null, onboardingError = null, operationError = null } = {}) {
+function gatewayAttachmentHarness({ role = "owner", save = async () => ({}), rename = async () => {}, remove = async () => ({}), create = async () => ({}), retryProvision = async () => ({}), bootstrap = async () => { throw new Error("Unexpected bootstrap") }, provisions, provisionError = null, onboardingError = null, operationError = null, locale = "en-US", translateForLocale = async value => value } = {}) {
   const target = id => ({
     target: { gateway_profile_id: id, service_name: id, resource_group: "unit", subscription_id: "unit",
       api_id: "models", api_path: "models", ownership_mode: "adopted", drift_state: "in_sync", capabilities: { self_hosted_gateway: "supported" }, last_inventory_sync_at: null },
@@ -1845,7 +1845,7 @@ function gatewayAttachmentHarness({ role = "owner", save = async () => ({}), ren
     "../../lib/gateway-topology": gatewayTopology,
     "../../providers/auth-provider": { useAuth: () => ({ user: { role } }) },
     "../../providers/timezone-provider": { useTimezone: () => ({ timezone: "UTC" }) },
-    "../../locales": { useLocale: () => ({ locale: "en-US" }) },
+    "../../locales": { useLocale: () => ({ locale }), translateForLocale },
   }
   const dialogs = {}
   runInNewContext(gatewayDialogModule, { exports: dialogs, URL, crypto: globalThis.crypto, AbortController, AbortSignal,
@@ -1890,9 +1890,30 @@ function gatewayAttachmentHarness({ role = "owner", save = async () => ({}), ren
     fill("网关端点", "https://gateway.example.test/models")
   }
   return { props, calls, creations, retries, bootstrapCalls, downloads, queries, refreshes, syncs, renames, removals, nameUpdates, all, find, input, fill, submit, attach, adopt, createDialog, form, validDraft,
+    setLocale(value) { locale = value },
     setProvisions(value) { provisionData = value },
     async flush() { for (let index = 0; index < tasks.length; index++) await tasks[index] } }
 }
+
+test("APIM management authentication follows the selected display locale", async () => {
+  const translations = []
+  const harness = gatewayAttachmentHarness({ locale: "en", translateForLocale: async (source, locale) => {
+    translations.push({ source, locale })
+    return locale === "en" ? "System-managed identity" : source
+  } })
+  harness.find(node => node.type === "button" && Array.isArray(node.props.children)
+    && node.props.children.some(child => child === "添加 APIM 实例" || child?.props?.children === "添加 APIM 实例")).props.onClick()
+  harness.find(node => node.type === "ApimOnboardingDialog").props.onAdopt()
+  harness.all()
+  await Promise.resolve()
+  assert.equal(harness.input("管理身份验证").props.value, "System-managed identity")
+  assert.equal(harness.input("管理身份验证").props.disabled, true)
+  harness.setLocale("zh-CN")
+  harness.all()
+  await Promise.resolve()
+  assert.equal(harness.input("管理身份验证").props.value, "系统托管身份")
+  assert.deepEqual(translations, [{ source: "系统托管身份", locale: "en" }, { source: "系统托管身份", locale: "zh-CN" }])
+})
 
 function gatewayNameHarness(options) {
   const harness = gatewayAttachmentHarness(options)
@@ -2850,4 +2871,18 @@ test("endpoint summary exposes only HTTPS origin and path", () => {
     project_endpoint: "not a URL", base_url: "http://invalid.test", backend_url: "https://valid.test/",
   } })), "https://valid.test")
   assert.equal(publicationConnectionEndpoint(connection("sample", "gateway-a")), null)
+})
+
+test("apimGatewayProfiles excludes unconfigured placeholder gateway profiles", () => {
+  const placeholder = gateway("10000000-0000-4000-8000-000000000001", { name: "Azure API Management", base_url: null })
+  const registered = gateway("gateway-a", { name: "Registered APIM" })
+  const topology = { items: [{ target: { gateway_profile_id: "gateway-a" } }] }
+  assert.deepEqual(
+    gatewayTopology.apimGatewayProfiles([placeholder, registered], topology, true).map(item => item.id),
+    ["gateway-a"],
+  )
+  assert.deepEqual(
+    gatewayTopology.apimGatewayProfiles([placeholder, registered], null, false).map(item => item.id),
+    ["gateway-a"],
+  )
 })

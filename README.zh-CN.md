@@ -13,7 +13,7 @@
 <p align="center"><strong>通过一个自托管控制平面统一治理 AI 访问、支出与运营。</strong></p>
 
 <p align="center">
-   <a href="https://github.com/xuleihive/turnstile/releases/tag/v1.1"><img alt="Turnstile v1.1 版本" src="https://img.shields.io/badge/release-v1.1-2f6fdd.svg"></a>
+   <a href="https://github.com/xuleihive/turnstile/releases/tag/v1.2"><img alt="Turnstile v1.2 版本" src="https://img.shields.io/badge/release-v1.2-2f6fdd.svg"></a>
    <a href="LICENSE"><img alt="MIT 许可证" src="https://img.shields.io/badge/license-MIT-2f6fdd.svg"></a>
    <a href="#前置条件"><img alt="Python 3.11 或更高版本" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&amp;logoColor=white"></a>
    <a href="#前置条件"><img alt="Node.js 20.19.x 或 22.12 及更高版本" src="https://img.shields.io/badge/Node.js-20.19.x%20%7C%2022.12%2B-339933?logo=node.js&amp;logoColor=white"></a>
@@ -32,7 +32,7 @@
 Turnstile 是一个用于治理 AI 模型访问的自托管控制平面。它整合了 Azure API Management 网关、Token 与成本遥测、预算、应用访问、模型接入、发布控制和运维 Web 控制台。
 
 > [!NOTE]
-> **Turnstile v1.1** 是当前公开版本。项目正在快速迭代，API、配置项和部署流程可能会随着项目成熟而变化。升级生产部署前，请仔细审阅相关变更。
+> **Turnstile v1.2** 是当前公开版本。项目正在快速迭代，API、配置项和部署流程可能会随着项目成熟而变化。升级生产部署前，请仔细审阅相关变更。
 
 > [!IMPORTANT]
 > 本仓库包含的基础设施模板只部署 Turnstile 平台，不会创建 Azure AI Foundry 项目、部署提供商模型，也不会预置客户连接和模型。平台运行后，运维人员需要连接自己的 Foundry 或其他兼容提供商资源。
@@ -63,9 +63,7 @@ Turnstile 是一个用于治理 AI 模型访问的自托管控制平面。它整
 
 Model Intelligent Router 未包含在此版本中，未来可能作为可选扩展重新加入。
 
-## v1.2 预览
-
-**v1.2 正在准备中，尚未正式发布。** 本文档介绍当前实现及安装要求；v1.1 仍是最新公开版本。
+## v1.2 新增特性
 
 - **模型价格管理：** 提供商目录与手工定价、连接及模型折扣、区域价格引用、明确的长短上下文分档、
    需审阅的价格同步，以及保留适用价格快照的历史请求成本。
@@ -73,8 +71,8 @@ Model Intelligent Router 未包含在此版本中，未来可能作为可选扩�
    诊断，以及每个模型独立的服务网关范围。
 - **发布与请求诊断：** 明确展示目标 Gateway、验证 API Revision、恢复凭据，
    通过调用尝试记录区分失败、用量未知与已确认的提供商遥测。
-- **模型操作：** 清单筛选、独立编辑器、连接诊断和独立版本化的模型启停命令。
-   启停升级**尚未完成端到端验收**，仅更新应用包不会使开关可用。
+- **模型操作：** 清单筛选、独立编辑器、连接诊断，以及跨托管网关与自托管网关独立版本化的模型启停控制。
+- **原子级 USD 与 Token 预算执行：** 实时准入预扣、USD 与 Token 月度限额控制，以及自动结算对账。
 
 开关不可用表示该部署尚未建立所需的网关覆盖证明，并不表示模型已经停用。不要绕过此检查。
 启停协议需要兼容的工作进程、迁移 016、所有保留 Revision 的策略、主 Table 访问、
@@ -184,9 +182,9 @@ git diff --check
 
 Bicep 模板会创建 PostgreSQL、Event Hubs、Storage、Key Vault、Application Insights、Web App、Functions 和 APIM 集成等 Turnstile 平台资源，但不会创建 Azure AI Foundry 项目或提供商模型部署。
 
-对于 **Turnstile v1.1**，请先选择对应路径：
+对于 **Turnstile v1.2**，请先选择对应路径：
 
-- **已安装 v1.0：**按照[升级指南](docs/deployment.md#upgrade-v10-to-v11)操作。保留原部署状态、数据库、账本、APIM、身份和历史；除应用包外，还需补齐必要的基础设施配置。
+- **升级已有安装：**按照[升级指南](docs/deployment.md#prepare-for-v12)操作。保留原部署状态、数据库、账本、APIM、身份和历史；除应用包外，还需补齐必要的基础设施配置。
 - **完全从零安装：**按照[全新部署指南](docs/deployment.md#deploy-v11-from-zero)操作。使用独立前缀和新状态，默认新建 StandardV2 APIM；提供商模型与凭据需要另行准备。
 
 以下快速步骤用于新安装。已有安装不能用新生成的文件替换原部署状态。
@@ -214,13 +212,14 @@ uv run python -m scripts.deploy deploy \
 
 ## 部署后模型接入
 
-全新 Turnstile 部署不包含提供商连接、运行时或业务模型。
+全新 Turnstile 部署会在首次启动时自动注册平台预配的初始 APIM 实例，但不预置客户提供商连接、运行时或业务模型。
 
 1. 使用部署脚本创建的密码Owner登录。
-2. 在Model Management中添加指向现有Foundry项目或受支持提供商的连接，再通过Add Model选择已有的provider deployment。
-3. 根据需要配置 APIM 原生后端池，以实现故障转移、均衡或加权路由。
-4. 发布并等待candidate验证。同tenant的Foundry managed identity若缺少授权，发布对话框会显示准确的APIM principal、`Cognitive Services User`角色和Foundry资源scope；由有权限的Azure用户完成IAM授权后，在对话框中继续验证。
-5. 执行一次小规模、带归因信息的调用，并确认其遥测记录。
+2. 在 **Model Management → APIM instances** 中确认初始 APIM 实例已就绪（如需接入更多 APIM 实例，点击 **Add APIM instance** 即可；同订阅 APIM 已自动具备管理权限，且平台会自动为新 APIM 的托管身份授予访问平台 Ledger 账本表、路由表、Event Hub 与凭据 Key Vault 的权限）。
+3. 在Model Management中添加指向现有Foundry项目或受支持提供商的连接，再通过Add Model选择已有的provider deployment。
+4. 根据需要配置 APIM 原生后端池，以实现故障转移、均衡或加权路由。
+5. 发布并等待candidate验证。同tenant的Foundry managed identity若缺少授权，发布对话框会显示准确的APIM principal、`Cognitive Services User`角色和Foundry资源scope；由有权限的Azure用户完成IAM授权后，在对话框中继续验证。
+6. 执行一次小规模、带归因信息的调用，并确认其遥测记录。
 
 Turnstile不会创建或修改客户的Foundry项目；执行IAM授权的Azure用户必须原本就对该资源有权限。
 

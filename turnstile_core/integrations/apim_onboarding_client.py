@@ -68,6 +68,54 @@ class AzureApimPlatformConfigurationClient(AzureApimPublisherClient):
                 "The platform governance configuration is invalid"
             ) from None
 
+    def ensure_apim_dependency_roles(
+        self,
+        gateway_profile_id: UUID,
+        principal_id: UUID,
+        configuration: ApimOnboardingConfiguration,
+    ) -> None:
+        for scope, role in AzureApimOnboardingClient._dependency_roles(configuration):
+            identifier = uuid5(
+                gateway_profile_id,
+                f"{scope.casefold()}:{principal_id}:{role}",
+            )
+            role_path = f"{scope}/providers/Microsoft.Authorization/roleAssignments/{identifier}"
+            definition = (
+                f"/subscriptions/{scope.split('/')[2]}/providers/Microsoft.Authorization/"
+                f"roleDefinitions/{role}"
+            )
+            expected = {"principalId": str(principal_id), "roleDefinitionId": definition}
+            current = self._client.request(
+                "GET",
+                f"{self._MANAGEMENT_ORIGIN}{role_path}",
+                params={"api-version": "2022-04-01"},
+                headers=self._headers(),
+            )
+            if current.status_code == 404:
+                put_response = self._client.request(
+                    "PUT",
+                    f"{self._MANAGEMENT_ORIGIN}{role_path}",
+                    params={"api-version": "2022-04-01"},
+                    headers={**self._headers(), "If-None-Match": "*"},
+                    json={
+                        "properties": {
+                            **expected,
+                            "principalType": "ServicePrincipal",
+                        }
+                    },
+                )
+                if put_response.status_code == 409 and "RoleAssignmentExists" in put_response.text:
+                    continue
+                if put_response.status_code == 429 or put_response.status_code >= 500:
+                    raise RetryablePublicationError(
+                        "An initialization dependency is temporarily unavailable"
+                    )
+                if put_response.is_error:
+                    raise PolicyCompilationError(
+                        f"Initialization dependency returned HTTP {put_response.status_code}; "
+                        "check the platform identity's scoped permissions"
+                    )
+
 
 def onboarding_configuration(request: ApimOnboardingRequest) -> ApimTargetClientConfig:
     settings = Settings.model_construct(

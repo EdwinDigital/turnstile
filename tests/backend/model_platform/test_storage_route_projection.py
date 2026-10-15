@@ -42,6 +42,96 @@ from turnstile_core.integrations.storage_route_projection import (
 from turnstile_core.integrations.table_batch import conditional_batch
 
 
+@pytest.mark.parametrize("fault", [None, "target", "api", "publisher", "endpoint", "operations"])
+@pytest.mark.parametrize("current_capabilities", [False, True])
+def test_public_fixed_installation_descriptor_keeps_target_binding(
+    fault: str | None, current_capabilities: bool,
+) -> None:
+    from pydantic import ValidationError
+
+    from backend.bootstrap_storage_route import FixedInstallationDescriptor, installation_record
+    from turnstile_core.integrations.apim_storage_routes import fixed_operation_contracts
+
+    target_id = str(UUID(int=970))
+    descriptor: dict[str, Any] = {
+        "database_name": "turnstile",
+        "expected_server": "public-test.postgres.database.azure.com",
+        "api_name": "public-test-api",
+        "epoch": str(UUID(int=971)),
+        "registration": {
+            "gateway_profile_id": target_id,
+            "name": "Public test gateway",
+            "tenant_id": str(UUID(int=972)),
+            "subscription_id": str(UUID(int=973)),
+            "resource_group": "public-test-rg",
+            "service_name": "public-test-apim",
+            "service_principal_id": str(UUID(int=974)),
+            "api_id": "turnstile-llm",
+            "api_path": "turnstile/llm",
+            "managed_gateway_url": "https://public-test-apim.azure-api.net/turnstile/llm",
+            "dashboard_subscription_id": "turnstile-dashboard",
+            "probe_subscription_id": "turnstile-publisher-probe",
+        },
+        "binding": {
+            "scope": {"target_id": target_id, "api_id": "turnstile-llm", "gateway_id": "managed"},
+            "api_revision": "initial-fixed",
+            "table_endpoint": "https://publictest.table.core.windows.net",
+            "table_name": "ModelRoutes",
+            "ledger_table_endpoint": "https://publictest.table.core.windows.net",
+            "ledger_table_name": "TurnstileLedger",
+            "trust_binding_sha256": "a" * 64,
+            "program_sha256": "b" * 64,
+            "trusted_vault_origins": ["https://public-test-kv.vault.azure.net"],
+            "observer_key_named_value": "turnstile-observer-cache-key",
+            "publisher_subscription_id": "turnstile-publisher-probe",
+        },
+        "parent_policy_sha256": "c" * 64,
+        "operation_policies_sha256": {name: "d" * 64 for name in fixed_operation_contracts()},
+    }
+    if current_capabilities:
+        descriptor["binding"].update({
+            "supported_profiles": ["openai-v1", "anthropic-messages", "microsoft-decision"],
+            "decision_enabled": True,
+            "model_additions_enabled": True,
+            "native_gateway_scope": True,
+            "legacy_program_sha256": "e" * 64,
+            "predecessor_program_sha256": ["f" * 64],
+            "retired_operations": {"old-messages": ["POST", "/_turnstile/retired/old-messages"]},
+        })
+        descriptor["operation_policies_sha256"] = {
+            name: "d" * 64 for name in fixed_operation_contracts(
+                retired_operations={"old-messages": ("POST", "/_turnstile/retired/old-messages")},
+                decision_enabled=True,
+            )
+        }
+    if fault == "target":
+        descriptor["binding"]["scope"]["target_id"] = str(UUID(int=975))
+    elif fault == "api":
+        descriptor["binding"]["scope"]["api_id"] = "other-api"
+    elif fault == "publisher":
+        descriptor["binding"]["publisher_subscription_id"] = "other-publisher"
+    elif fault == "endpoint":
+        descriptor["registration"]["managed_gateway_url"] = "https://other.example.test/api"
+    elif fault == "operations":
+        policies = descriptor["operation_policies_sha256"]
+        policies.pop(next(iter(policies)))
+    if fault:
+        with pytest.raises(ValidationError):
+            FixedInstallationDescriptor.model_validate_json(json.dumps(descriptor))
+    else:
+        parsed = FixedInstallationDescriptor.model_validate_json(json.dumps(descriptor))
+        assert parsed.database_name == "turnstile"
+        assert parsed.program.api_revision == "initial-fixed"
+        assert parsed.binding.scope.target_id == target_id
+        installed = installation_record(parsed, "9" * 64)
+        assert installed.decision_enabled is current_capabilities
+        assert installed.model_additions_enabled is current_capabilities
+        assert installed.native_gateway_scope is current_capabilities
+        assert installed.legacy_program_sha256 == parsed.binding.legacy_program_sha256
+        assert installed.predecessor_program_sha256 == parsed.binding.predecessor_program_sha256
+        assert installed.retired_operations == parsed.binding.retired_operations
+
+
 @pytest.mark.parametrize("fault", [None, "target", "api", "gateway", "nonce", "instance"])
 def test_native_binding_discovery_rejects_wrong_authenticated_identity(
     monkeypatch: pytest.MonkeyPatch, fault: str | None,

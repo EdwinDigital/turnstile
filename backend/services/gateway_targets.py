@@ -17,6 +17,9 @@ from turnstile_core.domain.gateway_targets import (
     GatewayDeploymentKind,
     GatewayReachabilityState,
 )
+from turnstile_core.integrations.apim_onboarding_client import (
+    AzureApimPlatformConfigurationClient,
+)
 from turnstile_core.integrations.apim_publisher_client import AzureApimPublisherClient
 from turnstile_core.integrations.apim_subscription_key_client import AzureApimSubscriptionKeyClient
 from turnstile_core.integrations.apim_target_client_factory import resolve_apim_target_settings
@@ -24,6 +27,8 @@ from turnstile_core.integrations.gateway_connection_probe import GatewayConnecti
 from turnstile_core.persistence.repository_contract import QueryRepository
 from turnstile_core.security import CredentialCipher, credential_hint
 from turnstile_core.services.control_plane import GatewayControlPlaneService
+
+DEFAULT_SEEDED_APIM_GATEWAY_ID = UUID("10000000-0000-4000-8000-000000000001")
 
 
 def register_existing_apim_target(
@@ -48,6 +53,25 @@ def register_existing_apim_target(
                 "gateway_profile_id": UUID(str(matches[0]["id"])),
             }
         )
+    else:
+        registered_target_ids = {
+            UUID(str(row["gateway_profile_id"])) for row in repository.list_apim_targets()
+        }
+        seeded = next(
+            (
+                row
+                for row in registry["gateways"]
+                if UUID(str(row["id"])) == DEFAULT_SEEDED_APIM_GATEWAY_ID
+                and row["implementation"] == "apim"
+                and row.get("base_url") is None
+                and DEFAULT_SEEDED_APIM_GATEWAY_ID not in registered_target_ids
+            ),
+            None,
+        )
+        if seeded is not None:
+            registration = registration.model_copy(
+                update={"gateway_profile_id": DEFAULT_SEEDED_APIM_GATEWAY_ID}
+            )
     resource_id = (registration.management_endpoint.path or "").rstrip("/")
     for profile in registry["gateways"]:
         configuration = profile.get("config") or {}
@@ -107,6 +131,31 @@ def register_existing_apim_target(
         inventory = AzureApimPublisherClient(
             scoped, client=management_http
         ).discover_apim_target_inventory(registration.gateway_profile_id)
+        target_identity = (
+            str(inventory.subscription_id),
+            inventory.resource_group.casefold(),
+            inventory.service_name.casefold(),
+            inventory.api_id.casefold(),
+        )
+        if (
+            resolved.legacy_apim_identity is not None
+            and inventory.principal_id is not None
+            and target_identity != resolved.legacy_apim_identity
+        ):
+            platform_settings = resolved.model_copy(
+                update={
+                    "apim_gateway_url": resolved.apim_gateway_url
+                    or f"https://{resolved.apim_service_name}.azure-api.net",
+                }
+            )
+            platform_client = AzureApimPlatformConfigurationClient(
+                platform_settings, client=management_http
+            )
+            platform_client.ensure_apim_dependency_roles(
+                registration.gateway_profile_id,
+                inventory.principal_id,
+                platform_client.configuration(),
+            )
         if existing is None or existing.get("credential_ciphertext") is None:
             primary_key, _ = AzureApimSubscriptionKeyClient(
                 scoped,
@@ -156,7 +205,7 @@ def register_existing_apim_target(
     else:
         if existing["implementation"] != "apim":
             raise ValueError("The target ID belongs to a non-APIM Gateway profile")
-        if existing["enabled"]:
+        if existing["enabled"] and existing.get("base_url") is not None:
             if (
                 existing["name"] != registration.name
                 or str(existing.get("base_url") or "").rstrip("/") != endpoint
@@ -167,7 +216,33 @@ def register_existing_apim_target(
                     "gateway", registration.gateway_profile_id, credential_values
                 )
         else:
-            repository.update_registry_item("gateway", registration.gateway_profile_id, values)
+            repository.update_registry_item(
+                "gateway",
+                registration.gateway_profile_id,
+                {**values, "is_default": bool(existing.get("is_default"))},
+            )
+    if registration.gateway_profile_id != DEFAULT_SEEDED_APIM_GATEWAY_ID:
+        registered_target_ids = {
+            UUID(str(row["gateway_profile_id"])) for row in repository.list_apim_targets()
+        }
+        seeded_placeholder = next(
+            (
+                row
+                for row in registry["gateways"]
+                if UUID(str(row["id"])) == DEFAULT_SEEDED_APIM_GATEWAY_ID
+                and row["implementation"] == "apim"
+                and row.get("base_url") is None
+                and row.get("enabled")
+                and DEFAULT_SEEDED_APIM_GATEWAY_ID not in registered_target_ids
+            ),
+            None,
+        )
+        if seeded_placeholder is not None:
+            repository.update_registry_item(
+                "gateway",
+                DEFAULT_SEEDED_APIM_GATEWAY_ID,
+                {"enabled": False, "is_default": False},
+            )
     capabilities = inventory.capabilities.model_copy(
         update={
             "response_observer": CapabilitySupport.SUPPORTED

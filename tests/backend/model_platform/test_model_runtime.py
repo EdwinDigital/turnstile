@@ -321,8 +321,8 @@ def request(*, model: str = "gpt-4.1", runtime: str = "Foundry Test") -> ModelIn
             project="finops",
             agent_id="agent-delivery-engineer",
             agent="delivery-engineer",
-            user_id="lei@contoso.com",
-            user="lei@contoso.com",
+            user_id="alex@contoso.com",
+            user="alex@contoso.com",
             workflow="release-review",
             model_id=model,
             model=model,
@@ -743,7 +743,7 @@ def test_internal_invocation_enforces_user_model_policy() -> None:
         [],
         80,
         "owner",
-        selected_user_ids=["lei@contoso.com"],
+        selected_user_ids=["alex@contoso.com"],
         model_ids=[],
     )
     service = ModelRuntimeService(
@@ -848,7 +848,7 @@ def test_a_denial_trace_names_the_runtime_it_routed_to() -> None:
         [],
         80,
         "owner",
-        selected_user_ids=["lei@contoso.com"],
+        selected_user_ids=["alex@contoso.com"],
         model_ids=[],
     )
     service = ModelRuntimeService(
@@ -1068,7 +1068,7 @@ def _seed_budget(repository: InMemoryRepository, *, limit: int, used: int, mode:
     repository.bulk_upsert_user_budgets(
         period,
         "department-platform",
-        [("lei@contoso.com", limit)],
+        [("alex@contoso.com", limit)],
         80,
         "owner",
     )
@@ -1080,8 +1080,8 @@ def _seed_budget(repository: InMemoryRepository, *, limit: int, used: int, mode:
             correlation_id="seeded-usage",
             ts=now,
             team="platform",
-            user="lei@contoso.com",
-            user_id="lei@contoso.com",
+            user="alex@contoso.com",
+            user_id="alex@contoso.com",
             agent="delivery-engineer",
             workflow="release-review",
             run_id="run-seed",
@@ -1371,7 +1371,7 @@ def test_http_adapter_injects_business_metadata() -> None:
         assert incoming.headers["x-hive-department"] == "platform"
         assert incoming.headers["x-hive-project"] == "finops"
         assert incoming.headers["x-hive-agent"] == "delivery-engineer"
-        assert incoming.headers["x-hive-user"] == "lei@contoso.com"
+        assert incoming.headers["x-hive-user"] == "alex@contoso.com"
         assert incoming.headers["x-hive-model"] == "gpt-4.1"
         assert incoming.headers["x-hive-runtime"] == "Foundry Test"
         assert incoming.headers["x-org-id"] == "org-contoso"
@@ -1379,7 +1379,7 @@ def test_http_adapter_injects_business_metadata() -> None:
         assert incoming.headers["x-department-id"] == "department-platform"
         assert incoming.headers["x-project-id"] == "project-finops"
         assert incoming.headers["x-agent-id"] == "agent-delivery-engineer"
-        assert incoming.headers["x-user-id"] == "lei@contoso.com"
+        assert incoming.headers["x-user-id"] == "alex@contoso.com"
         assert incoming.headers["x-request-source"] == "test-suite"
         assert incoming.headers["x-request-id"] == "request-123"
         assert incoming.headers["authorization"] == "Bearer gateway-secret"

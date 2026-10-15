@@ -76,6 +76,15 @@ export function ApimOnboardingDialog({ available, onClose, onAdopt, onAccepted, 
             <label className="registry-field"><span className="registry-field-label">Turnstile 显示名称（可选）</span><Input value={value.name ?? ""} maxLength={120} disabled={busy} onChange={event => update("name", event.target.value)} autoFocus /></label>
             <label className="registry-field"><span className="registry-field-label">Tenant ID</span><Input value={value.tenant_id} disabled={busy} onChange={event => update("tenant_id", event.target.value)} /></label>
             <label className="registry-field"><span className="registry-field-label">APIM 资源 ID</span><Input value={value.resource_id} maxLength={1024} disabled={busy} onChange={event => update("resource_id", event.target.value)} placeholder="/subscriptions/.../resourceGroups/.../providers/Microsoft.ApiManagement/service/..." /></label>
+            <details className="runtime-diagnostic-access" open>
+              <summary>部署授权详情</summary>
+              <dl className="runtime-diagnostic-facts">
+                <div><dt>所需权限</dt><dd><code data-no-localize>API Management Service Contributor (312a565d-c81f-4fd8-895a-4e21e48d571c)</code></dd></div>
+                <div><dt>平台资源</dt><dd>Ledger、路由表、Event Hub 与 Key Vault 权限由平台自动授权</dd></div>
+                <div><dt>授权说明</dt><dd>同订阅 APIM 已自动具备权限；跨订阅 APIM 请在该实例 IAM 中将上述角色授予平台 API 与 Control Plane 托管身份</dd></div>
+                <div><dt>部署模板</dt><dd><code data-no-localize>infra/modules/control-plane-apim-rbac.bicep</code></dd></div>
+              </dl>
+            </details>
           </>}
           {plan && <section className="apim-onboarding-plan" aria-label="APIM 初始化计划">
             <div className="apim-onboarding-target"><ApimLogo size={20} /><strong data-no-localize>{plan.request.name ?? plan.service_name}</strong><span data-no-localize>{plan.service_tier} · {plan.location}</span></div>

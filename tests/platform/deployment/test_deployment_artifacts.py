@@ -166,6 +166,7 @@ def test_api_staging_contains_runtime_contract(tmp_path: Path, staging_root: Pat
     assert (destination / "backend/migrate.py").is_file()
     assert (destination / "turnstile_core/config.py").is_file()
     assert (destination / "frontend/dist/index.html").is_file()
+    assert (destination / "policies/foundry-finops-policy.xml").is_file()
     assert (destination / "migrations/001_token_observability.up.sql").is_file()
     assert list((destination / "migrations").glob("040_*.up.sql"))
     assert not list(destination.rglob("__pycache__"))

@@ -181,6 +181,8 @@ def resolve_apim_target_settings(repository: QueryRepository, settings: Settings
             target.api_id.casefold(),
         ) == identity:
             matches.append(target)
+    if not matches:
+        return settings
     if len(matches) != 1:
         raise PolicyCompilationError(
             "Legacy APIM identity must match exactly one registered target"

@@ -45,7 +45,7 @@ CORE_ROOT_MODULES = {"config", "security"}
 # change; `accounts` is run by an operator over a shell and is free to move, but it is an
 # entry point by the same definition -- it wires config to persistence and is invoked with
 # `python -m` rather than imported by anything.
-ENTRY_POINTS = {"api", "bootstrap", "migrate", "accounts"}
+ENTRY_POINTS = {"api", "bootstrap", "bootstrap_storage_route", "migrate", "accounts"}
 DEPLOYMENT_ENTRY_POINTS = {"api", "bootstrap", "migrate"}
 
 def _imports_package(source: str, package: str) -> bool:

@@ -26,7 +26,7 @@ import { dataSource } from "../../data-sources/apim/api"
 import { finopsKeys, finopsQueries, storeGatewayDeploymentName, storeGatewayName, storeRegistry } from "../../data-sources/apim/queries"
 import { apimFormPayload, apimFormValid, gatewayFormPayload, gatewayFormValid, gatewayNameFormValid, isGatewayEndpoint } from "../../lib/gateway-forms"
 import { apimGatewayEntries, apimOnboardingDetails, apimOnboardingOperationName, apimOnboardingRows, apimTargetDisplayName, gatewayEntries, gatewayEvidence, gatewayProvisionDetails, gatewayProvisionMatches, gatewayProvisionRows, pendingInventorySyncId, type GatewayEntry, type GatewayProvisionItem } from "../../lib/gateway-topology"
-import { useLocale } from "../../locales"
+import { translateForLocale, useLocale } from "../../locales"
 import { useTimezone } from "../../providers/timezone-provider"
 import { useAuth } from "../../providers/auth-provider"
 import type {
@@ -748,6 +748,15 @@ function ApimEditor({ busy, error, onClose, onSubmit }: {
   onClose: () => void
   onSubmit: (value: ApimTargetWrite) => void
 }) {
+  const { locale } = useLocale()
+  const [managementAuthentication, setManagementAuthentication] = useState("")
+  useEffect(() => {
+    let active = true
+    void translateForLocale("系统托管身份", locale).then(text => {
+      if (active) setManagementAuthentication(text)
+    })
+    return () => { active = false }
+  }, [locale])
   const [value, setValue] = useState(emptyApimForm)
   const update = (field: keyof ApimTargetWrite, next: string) => setValue((current) => ({ ...current, [field]: next }))
   const valid = apimFormValid(value)
@@ -762,7 +771,7 @@ function ApimEditor({ busy, error, onClose, onSubmit }: {
           <div className="infrastructure-field-grid"><Field label="租户 ID"><Input value={value.tenant_id} onChange={(event) => update("tenant_id", event.target.value)} /></Field><Field label="订阅 ID"><Input value={value.subscription_id} onChange={(event) => update("subscription_id", event.target.value)} /></Field></div>
           <div className="infrastructure-field-grid"><Field label="资源组"><Input value={value.resource_group} onChange={(event) => update("resource_group", event.target.value)} /></Field><Field label="APIM 服务名称"><Input value={value.service_name} onChange={(event) => update("service_name", event.target.value)} /></Field></div>
           <Field label="网关端点"><Input value={value.gateway_endpoint} onChange={(event) => update("gateway_endpoint", event.target.value)} placeholder="https://example.azure-api.net/api-path" /></Field>
-          <div className="infrastructure-field-grid"><Field label="API ID"><Input value={value.api_id} onChange={(event) => update("api_id", event.target.value)} /></Field><Field label="管理身份验证"><Input value="系统托管身份" disabled /></Field></div>
+          <div className="infrastructure-field-grid"><Field label="API ID"><Input value={value.api_id} onChange={(event) => update("api_id", event.target.value)} /></Field><Field label="管理身份验证"><Input value={managementAuthentication} disabled /></Field></div>
           <div className="infrastructure-field-grid"><Field label="仪表板订阅"><Input value={value.dashboard_subscription_id} onChange={(event) => update("dashboard_subscription_id", event.target.value)} /></Field><Field label="探测订阅"><Input value={value.probe_subscription_id} onChange={(event) => update("probe_subscription_id", event.target.value)} /></Field></div>
           {Boolean(error) && <div className="registry-error">{errorMessage(error)}</div>}
         </div>

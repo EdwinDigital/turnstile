@@ -719,6 +719,7 @@ resource api 'Microsoft.Web/sites@2024-11-01' = {
         { name: 'MANAGEMENT_API_KEY', value: managementApiKey }
         { name: 'APIM_PRINCIPAL_ID', value: apimPrincipalId }
         { name: 'DATABRICKS_OAUTH_ENABLED', value: string(databricksOAuthEnabled) }
+        { name: 'AZURE_TENANT_ID', value: subscription().tenantId }
         { name: 'AZURE_SUBSCRIPTION_ID', value: subscription().subscriptionId }
         { name: 'APIM_RESOURCE_GROUP', value: apimResourceGroupName }
         { name: 'APIM_SERVICE_NAME', value: apimName }
@@ -964,6 +965,66 @@ resource apimEventHubSender 'Microsoft.Authorization/roleAssignments@2022-04-01'
     principalId: apimPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '2b629674-e913-4c01-ae53-ef4638d8f975')
+  }
+}
+
+var rbacAdminRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'f58310d9-a9f6-439a-9e8d-f62e7b41a168')
+
+resource apiEventHubRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(usageEventHub.id, api.id, 'apim-event-hub-rbac-delegator')
+  scope: usageEventHub
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {2b629674-e913-4c01-ae53-ef4638d8f975} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource apiLedgerRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(ledgerTable.id, api.id, 'apim-ledger-rbac-delegator')
+  scope: ledgerTable
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource apiRouteRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(routeTable.id, api.id, 'apim-route-rbac-delegator')
+  scope: routeTable
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {76199698-9eea-4c19-bc75-cec21354c6b6} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource apiCredentialVaultRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(credentialVault.id, api.id, 'apim-credential-vault-rbac-delegator')
+  scope: credentialVault
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {4633458b-17de-408a-b874-0445c86b69e6} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource apiResourceGroupApimContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(resourceGroup().id, api.id, 'apim-service-contributor')
+  scope: resourceGroup()
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '312a565d-c81f-4fd8-895a-4e21e48d571c')
   }
 }
 

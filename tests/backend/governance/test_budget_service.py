@@ -739,7 +739,7 @@ def test_legacy_user_cache_metric_is_ignored_by_budget_surfaces() -> None:
     repository = InMemoryRepository()
     period_start = date(2026, 7, 1)
     period_end = date(2026, 8, 1)
-    user_id = "lei@contoso.com"
+    user_id = "alex@contoso.com"
     repository.upsert_token_budget(
         period_start,
         "user",
@@ -781,7 +781,7 @@ def test_apim_budget_surfaces_exclude_copilot_cli_usage() -> None:
     repository = InMemoryRepository()
     period_start = date(2026, 7, 1)
     period_end = date(2026, 8, 1)
-    user_id = "lei@contoso.com"
+    user_id = "alex@contoso.com"
     repository.upsert_token_budget(
         period_start,
         "user",

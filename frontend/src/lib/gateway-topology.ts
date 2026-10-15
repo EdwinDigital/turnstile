@@ -87,7 +87,7 @@ export function gatewayEvidence(entry: GatewayEntry): GatewayEvidence {
 }
 
 export function apimGatewayProfiles(profiles: GatewayProfile[], topology: ApimTargetTopologyList | null, topologyAvailable: boolean) {
-  return profiles.filter((profile) => profile.enabled && profile.implementation === "apim"
+  return profiles.filter((profile) => profile.enabled && profile.implementation === "apim" && profile.base_url !== null
     && (!topologyAvailable || topology?.items.some((item) => item.target.gateway_profile_id === profile.id)))
 }
 

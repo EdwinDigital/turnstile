@@ -1590,7 +1590,7 @@ class InMemoryRepository(
             "started_at": started,
             "ended_at": rows[-1]["ts"],
             "team": "commerce-platform" if abnormal else "developer-experience",
-            "user": "release-bot@smarthive.local" if abnormal else "lei@smarthive.local",
+            "user": "release-bot@turnstile.local" if abnormal else "operator@turnstile.local",
             "agent": "release-steward" if abnormal else "delivery-engineer",
             "workflow": "release-regression-check" if abnormal else "pull-request-review",
             "provider": "microsoft_foundry",

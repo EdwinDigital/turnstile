@@ -360,6 +360,8 @@ module controlPlane 'modules/control-plane-function.bicep' = if (provisionContro
     databricksOAuthEnabled: databricksOAuthEnabled
     applicationDefaultMonthlyTokenLimit: gatewayApplicationDefaultMonthlyTokenLimit
     applicationDefaultTokensPerMinute: gatewayApplicationDefaultTokensPerMinute
+    eventHubNamespaceName: dataPlane.outputs.eventHubNamespaceName
+    eventHubName: dataPlane.outputs.eventHubName
     ledgerStorageName: dataPlane.outputs.ledgerStorageName
     ledgerTableName: ledgerTableName
     ledgerTableEndpoint: dataPlane.outputs.ledgerTableEndpoint
@@ -384,6 +386,26 @@ module applicationKeyManagementRbac 'modules/application-key-management-rbac.bic
     apiPrincipalIds: [
       dataPlane.outputs.apiPrincipalId
     ]
+  }
+}
+
+var apimServiceContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '312a565d-c81f-4fd8-895a-4e21e48d571c')
+
+resource apiSubscriptionApimContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(subscription().id, resourceGroupName, 'api-apim-service-contributor')
+  properties: {
+    principalId: dataPlane.outputs.apiPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: apimServiceContributorRoleDefinitionId
+  }
+}
+
+resource controlPlaneSubscriptionApimContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (provisionControlPlane) {
+  name: guid(subscription().id, resourceGroupName, 'control-plane-apim-service-contributor')
+  properties: {
+    principalId: controlPlane!.outputs.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: apimServiceContributorRoleDefinitionId
   }
 }
 

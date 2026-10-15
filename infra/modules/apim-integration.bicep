@@ -341,6 +341,24 @@ resource productApi 'Microsoft.ApiManagement/service/products/apis@2024-05-01' =
   name: api.name
 }
 
+resource applicationProduct 'Microsoft.ApiManagement/service/products@2024-05-01' = if (productId != 'turnstile-ai-consumers') {
+  parent: apim
+  name: 'turnstile-ai-consumers'
+  properties: {
+    displayName: 'turnstile-ai-consumers | Turnstile AI'
+    description: 'Product-scoped access to governed model provider integrations.'
+    approvalRequired: false
+    subscriptionRequired: true
+    state: 'published'
+    subscriptionsLimit: 1000
+  }
+}
+
+resource applicationProductApi 'Microsoft.ApiManagement/service/products/apis@2024-05-01' = if (productId != 'turnstile-ai-consumers') {
+  parent: applicationProduct
+  name: api.name
+}
+
 resource proxyOperation 'Microsoft.ApiManagement/service/apis/operations@2024-05-01' = {
   parent: api
   name: 'chat-completions'

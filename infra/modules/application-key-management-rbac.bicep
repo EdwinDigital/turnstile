@@ -43,3 +43,42 @@ resource apiKeyOperators 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
     roleDefinitionId: keyOperatorRole.id
   }
 }]
+
+resource inventoryReaderRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
+  name: guid(resourceGroup().id, 'turnstile-apim-inventory-reader')
+  properties: {
+    roleName: 'Turnstile APIM Inventory Reader ${roleNameSuffix}'
+    description: 'Reads registered APIM service, API, policy and Gateway inventory for Turnstile.'
+    type: 'CustomRole'
+    permissions: [
+      {
+        actions: [
+          'Microsoft.Authorization/permissions/read'
+          'Microsoft.ApiManagement/service/read'
+          'Microsoft.ApiManagement/service/apis/read'
+          'Microsoft.ApiManagement/service/apis/operations/read'
+          'Microsoft.ApiManagement/service/apis/policies/read'
+          'Microsoft.ApiManagement/service/apis/operations/policies/read'
+          'Microsoft.ApiManagement/service/gateways/read'
+          'Microsoft.ApiManagement/service/gateways/apis/read'
+          'Microsoft.ApiManagement/service/gateways/hostnameConfigurations/read'
+          'Microsoft.ApiManagement/service/gateways/certificateAuthorities/read'
+        ]
+        notActions: []
+        dataActions: []
+        notDataActions: []
+      }
+    ]
+    assignableScopes: [resourceGroup().id]
+  }
+}
+
+resource apiInventoryReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for apiPrincipalId in apiPrincipalIds: {
+  name: guid(apim.id, apiPrincipalId, 'turnstile-apim-inventory-reader')
+  scope: apim
+  properties: {
+    principalId: apiPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: inventoryReaderRole.id
+  }
+}]

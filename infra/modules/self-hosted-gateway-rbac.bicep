@@ -47,6 +47,7 @@ resource bootstrapRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
     permissions: [
       {
         actions: [
+          'Microsoft.Authorization/permissions/read'
           'Microsoft.ApiManagement/service/gateways/read'
           'Microsoft.ApiManagement/service/gateways/apis/read'
           'Microsoft.ApiManagement/service/gateways/generateToken/action'
