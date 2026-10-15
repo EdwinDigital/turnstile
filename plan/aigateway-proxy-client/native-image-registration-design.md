@@ -159,3 +159,13 @@ The user permits a low-cost real test, preferably initiated from WorkBuddy.
 - Native macOS execution was not available; platform-neutral contracts are tested
   but do not constitute a macOS acceptance result. Private runtime proof stays in
   ignored local storage and no credentials are included in this repository.
+
+## Subsequent merge and production release (2026-10-16)
+
+The user subsequently authorized merging `codex/plugin-windows-paths` into
+`codex/aigateway-proxy-client` and publishing the plugin. User version 0.4.6 is now
+deployed; subscription version 0.1.4 is unchanged. The production ZIP passed
+isolated native macOS CLI/Bun registration and one simulated generation. No new
+Windows-device or paid WorkBuddy generation acceptance is claimed. See
+[the release record](release-plugin-windows-2026-10-16.md) for exact source,
+package checksums, business-health checks, activation caveats and remaining limits.
