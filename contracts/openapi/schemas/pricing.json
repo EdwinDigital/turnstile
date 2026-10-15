@@ -1,5 +1,417 @@
 {
   "schemas": {
+    "ApimTarget": {
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 1,
+          "title": "Schema Version",
+          "default": 1
+        },
+        "gateway_profile_id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Gateway Profile Id"
+        },
+        "arm_resource_id": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Arm Resource Id"
+        },
+        "tenant_id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Tenant Id"
+        },
+        "subscription_id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Subscription Id"
+        },
+        "resource_group": {
+          "type": "string",
+          "maxLength": 90,
+          "minLength": 1,
+          "title": "Resource Group"
+        },
+        "service_name": {
+          "type": "string",
+          "maxLength": 50,
+          "minLength": 1,
+          "title": "Service Name"
+        },
+        "api_id": {
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Api Id"
+        },
+        "api_path": {
+          "type": "string",
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Api Path"
+        },
+        "service_tier": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Service Tier"
+        },
+        "tier_family": {
+          "$ref": "#/schemas/ApimTierFamily"
+        },
+        "service_location": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Service Location"
+        },
+        "principal_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Principal Id"
+        },
+        "management_auth_profile_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 255,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Management Auth Profile Ref"
+        },
+        "probe_subscription_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 255,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Probe Subscription Id"
+        },
+        "probe_secret_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2083,
+              "minLength": 1,
+              "format": "uri"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Probe Secret Ref"
+        },
+        "ownership_mode": {
+          "$ref": "#/schemas/ApimTargetOwnershipMode"
+        },
+        "capabilities": {
+          "$ref": "#/schemas/ApimTargetCapabilitySnapshot"
+        },
+        "last_inventory_sync_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Inventory Sync At"
+        },
+        "last_validated_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Validated At"
+        },
+        "drift_state": {
+          "$ref": "#/schemas/ApimTargetDriftState",
+          "default": "unknown"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "gateway_profile_id",
+        "arm_resource_id",
+        "tenant_id",
+        "subscription_id",
+        "resource_group",
+        "service_name",
+        "api_id",
+        "api_path",
+        "service_tier",
+        "tier_family",
+        "service_location",
+        "ownership_mode"
+      ],
+      "title": "ApimTarget"
+    },
+    "ApimTargetCapabilitySnapshot": {
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 1,
+          "title": "Schema Version",
+          "default": 1
+        },
+        "self_hosted_gateway": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "backend_pools": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "managed_identity_policy": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "event_hub_logger": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "table_ledger": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "responses": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "anthropic_messages": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "response_observer": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "source_api_version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Api Version"
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Observed At"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "title": "ApimTargetCapabilitySnapshot"
+    },
+    "ApimTargetConnectionState": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "connected",
+        "unavailable"
+      ],
+      "title": "ApimTargetConnectionState"
+    },
+    "ApimTargetDriftState": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "in_sync",
+        "drifted"
+      ],
+      "title": "ApimTargetDriftState"
+    },
+    "ApimTargetOwnershipMode": {
+      "type": "string",
+      "enum": [
+        "turnstile_managed",
+        "adopted",
+        "read_only"
+      ],
+      "title": "ApimTargetOwnershipMode"
+    },
+    "ApimTargetTopology": {
+      "properties": {
+        "target": {
+          "$ref": "#/schemas/ApimTarget"
+        },
+        "deployments": {
+          "items": {
+            "$ref": "#/schemas/GatewayDeploymentTopology"
+          },
+          "type": "array",
+          "title": "Deployments"
+        },
+        "management_endpoint": {
+          "type": "string",
+          "maxLength": 2083,
+          "minLength": 1,
+          "format": "uri",
+          "title": "Management Endpoint"
+        },
+        "gateway_endpoint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2083,
+              "minLength": 1,
+              "format": "uri"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Gateway Endpoint"
+        },
+        "configuration_endpoint": {
+          "type": "string",
+          "maxLength": 2083,
+          "minLength": 1,
+          "format": "uri",
+          "title": "Configuration Endpoint"
+        },
+        "connection_state": {
+          "$ref": "#/schemas/ApimTargetConnectionState"
+        },
+        "self_hosted_gateway_count": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Self Hosted Gateway Count"
+        },
+        "published_model_count": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Published Model Count"
+        },
+        "published_models": {
+          "items": {
+            "$ref": "#/schemas/GatewayPublishedModelSummary"
+          },
+          "type": "array",
+          "title": "Published Models",
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "target",
+        "deployments",
+        "management_endpoint",
+        "configuration_endpoint",
+        "connection_state",
+        "self_hosted_gateway_count",
+        "published_model_count"
+      ],
+      "title": "ApimTargetTopology"
+    },
+    "ApimTargetTopologyList": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/schemas/ApimTargetTopology"
+          },
+          "type": "array",
+          "title": "Items"
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Total"
+        },
+        "inventory_sync_available": {
+          "type": "boolean",
+          "title": "Inventory Sync Available"
+        },
+        "inventory_sync_unavailable_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Inventory Sync Unavailable Reason"
+        },
+        "resource_lifecycle_available": {
+          "type": "boolean",
+          "title": "Resource Lifecycle Available"
+        },
+        "onboarding_available": {
+          "type": "boolean",
+          "title": "Onboarding Available",
+          "default": false
+        },
+        "self_hosted_gateway_name_edit_supported": {
+          "type": "boolean",
+          "title": "Self Hosted Gateway Name Edit Supported",
+          "default": false
+        },
+        "self_hosted_gateway_provisioning_available": {
+          "type": "boolean",
+          "title": "Self Hosted Gateway Provisioning Available",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "items",
+        "total",
+        "inventory_sync_available",
+        "resource_lifecycle_available"
+      ],
+      "title": "ApimTargetTopologyList"
+    },
+    "ApimTierFamily": {
+      "type": "string",
+      "enum": [
+        "classic",
+        "v2"
+      ],
+      "title": "ApimTierFamily"
+    },
     "AuthType": {
       "type": "string",
       "enum": [
@@ -24,6 +436,411 @@
       ],
       "title": "BrandKey"
     },
+    "CapabilitySupport": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "supported",
+        "unsupported"
+      ],
+      "title": "CapabilitySupport"
+    },
+    "ContextPriceRule": {
+      "properties": {
+        "short_context_max_tokens": {
+          "type": "integer",
+          "maximum": 9007199254740990.0,
+          "exclusiveMinimum": 0.0,
+          "title": "Short Context Max Tokens"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 500,
+          "title": "Note",
+          "default": ""
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2000
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Url"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "short_context_max_tokens"
+      ],
+      "title": "ContextPriceRule"
+    },
+    "GatewayCertificateAuthorityInventory": {
+      "properties": {
+        "authority_id": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Authority Id"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Name"
+        },
+        "is_trusted": {
+          "type": "boolean",
+          "title": "Is Trusted"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "authority_id",
+        "name",
+        "is_trusted"
+      ],
+      "title": "GatewayCertificateAuthorityInventory"
+    },
+    "GatewayDeclaredState": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "present",
+        "absent",
+        "unsupported"
+      ],
+      "title": "GatewayDeclaredState"
+    },
+    "GatewayDeployment": {
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "const": 1,
+          "title": "Schema Version",
+          "default": 1
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Id"
+        },
+        "apim_target_id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Apim Target Id"
+        },
+        "native_gateway_id": {
+          "type": "string",
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Native Gateway Id"
+        },
+        "kind": {
+          "$ref": "#/schemas/GatewayDeploymentKind"
+        },
+        "display_name": {
+          "type": "string",
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Display Name"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 128,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Location"
+        },
+        "endpoint_url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2083,
+              "minLength": 1,
+              "format": "uri"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Endpoint Url"
+        },
+        "hosting_mode": {
+          "$ref": "#/schemas/GatewayHostingMode"
+        },
+        "lifecycle_ownership": {
+          "$ref": "#/schemas/GatewayLifecycleOwnership"
+        },
+        "release_gate": {
+          "$ref": "#/schemas/GatewayReleaseGate",
+          "default": "required"
+        },
+        "declared_state": {
+          "$ref": "#/schemas/GatewayDeclaredState",
+          "default": "unknown"
+        },
+        "reachability_state": {
+          "$ref": "#/schemas/GatewayReachabilityState",
+          "default": "unknown"
+        },
+        "observation_state": {
+          "$ref": "#/schemas/GatewayObservationState",
+          "default": "unknown"
+        },
+        "runtime_version_support": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "rate_limit_synchronization": {
+          "$ref": "#/schemas/CapabilitySupport",
+          "default": "unknown"
+        },
+        "last_arm_sync_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Arm Sync At"
+        },
+        "last_probe_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Probe At"
+        },
+        "last_observed_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Observed At"
+        },
+        "retired_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Retired At"
+        },
+        "provisioning_operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Provisioning Operation Id"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "apim_target_id",
+        "native_gateway_id",
+        "kind",
+        "display_name",
+        "hosting_mode",
+        "lifecycle_ownership"
+      ],
+      "title": "GatewayDeployment"
+    },
+    "GatewayDeploymentInventory": {
+      "properties": {
+        "deployment_id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Deployment Id"
+        },
+        "associated_api_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "title": "Associated Api Ids",
+          "default": []
+        },
+        "hostname_configurations": {
+          "items": {
+            "$ref": "#/schemas/GatewayHostnameConfigurationInventory"
+          },
+          "type": "array",
+          "title": "Hostname Configurations",
+          "default": []
+        },
+        "certificate_authorities": {
+          "items": {
+            "$ref": "#/schemas/GatewayCertificateAuthorityInventory"
+          },
+          "type": "array",
+          "title": "Certificate Authorities",
+          "default": []
+        },
+        "source_api_version": {
+          "type": "string",
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Source Api Version"
+        },
+        "synced_at": {
+          "type": "string",
+          "format": "date-time",
+          "title": "Synced At"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "deployment_id",
+        "source_api_version",
+        "synced_at"
+      ],
+      "title": "GatewayDeploymentInventory"
+    },
+    "GatewayDeploymentKind": {
+      "type": "string",
+      "enum": [
+        "managed",
+        "self_hosted"
+      ],
+      "title": "GatewayDeploymentKind"
+    },
+    "GatewayDeploymentTopology": {
+      "properties": {
+        "deployment": {
+          "$ref": "#/schemas/GatewayDeployment"
+        },
+        "inventory": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/GatewayDeploymentInventory"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configuration_endpoint": {
+          "type": "string",
+          "maxLength": 2083,
+          "minLength": 1,
+          "format": "uri",
+          "title": "Configuration Endpoint"
+        },
+        "published_models": {
+          "items": {
+            "$ref": "#/schemas/GatewayPublishedModelSummary"
+          },
+          "type": "array",
+          "title": "Published Models",
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "deployment",
+        "configuration_endpoint"
+      ],
+      "title": "GatewayDeploymentTopology"
+    },
+    "GatewayHostingMode": {
+      "type": "string",
+      "enum": [
+        "azure_managed",
+        "aks",
+        "kubernetes",
+        "arc",
+        "container_apps",
+        "docker",
+        "other"
+      ],
+      "title": "GatewayHostingMode"
+    },
+    "GatewayHostnameConfigurationInventory": {
+      "properties": {
+        "configuration_id": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1,
+          "title": "Configuration Id"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Name"
+        },
+        "hostname": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Hostname"
+        },
+        "certificate_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Certificate Id"
+        },
+        "negotiate_client_certificate": {
+          "type": "boolean",
+          "title": "Negotiate Client Certificate",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "configuration_id",
+        "name",
+        "hostname"
+      ],
+      "title": "GatewayHostnameConfigurationInventory"
+    },
     "GatewayKind": {
       "type": "string",
       "enum": [
@@ -32,6 +849,24 @@
         "direct"
       ],
       "title": "GatewayKind"
+    },
+    "GatewayLifecycleOwnership": {
+      "type": "string",
+      "enum": [
+        "customer",
+        "turnstile_iac",
+        "external"
+      ],
+      "title": "GatewayLifecycleOwnership"
+    },
+    "GatewayObservationState": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "observed",
+        "stale"
+      ],
+      "title": "GatewayObservationState"
     },
     "GatewayProfile": {
       "properties": {
@@ -123,6 +958,52 @@
       ],
       "title": "GatewayProfile"
     },
+    "GatewayPublishedModelSummary": {
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Id"
+        },
+        "model_key": {
+          "type": "string",
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Model Key"
+        },
+        "display_name": {
+          "type": "string",
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Display Name"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "id",
+        "model_key",
+        "display_name"
+      ],
+      "title": "GatewayPublishedModelSummary"
+    },
+    "GatewayReachabilityState": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "reachable",
+        "unreachable"
+      ],
+      "title": "GatewayReachabilityState"
+    },
+    "GatewayReleaseGate": {
+      "type": "string",
+      "enum": [
+        "required",
+        "optional"
+      ],
+      "title": "GatewayReleaseGate"
+    },
     "HealthStatus": {
       "type": "string",
       "enum": [
@@ -169,102 +1050,9 @@
       ],
       "title": "ImageGenerationLimits"
     },
-    "ImageGenerationProfile": {
-      "properties": {
-        "max_request_bytes": {
-          "type": "integer",
-          "maximum": 16777216.0,
-          "minimum": 1.0,
-          "title": "Max Request Bytes"
-        },
-        "max_response_bytes": {
-          "type": "integer",
-          "maximum": 16777216.0,
-          "minimum": 1.0,
-          "title": "Max Response Bytes"
-        },
-        "output_reservation_tokens": {
-          "type": "integer",
-          "maximum": 2147483647.0,
-          "minimum": 1.0,
-          "title": "Output Reservation Tokens"
-        },
-        "timeout_seconds": {
-          "type": "integer",
-          "maximum": 240.0,
-          "minimum": 1.0,
-          "title": "Timeout Seconds"
-        },
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "title": "Id"
-        },
-        "version": {
-          "type": "integer",
-          "const": 4,
-          "title": "Version"
-        },
-        "display_name": {
-          "type": "string",
-          "minLength": 1,
-          "title": "Display Name"
-        },
-        "provider_kind": {
-          "type": "string",
-          "const": "microsoft_foundry",
-          "title": "Provider Kind"
-        },
-        "provider_model": {
-          "type": "string",
-          "minLength": 1,
-          "title": "Provider Model"
-        },
-        "protocol": {
-          "type": "string",
-          "const": "openai_images",
-          "title": "Protocol"
-        },
-        "api_version": {
-          "type": "string",
-          "minLength": 1,
-          "title": "Api Version"
-        },
-        "backend_path": {
-          "type": "string",
-          "pattern": "^/",
-          "title": "Backend Path"
-        },
-        "public_path": {
-          "type": "string",
-          "pattern": "^/",
-          "title": "Public Path"
-        },
-        "usage_format": {
-          "type": "string",
-          "const": "text-input-image-output-v1",
-          "title": "Usage Format"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "max_request_bytes",
-        "max_response_bytes",
-        "output_reservation_tokens",
-        "timeout_seconds",
-        "id",
-        "version",
-        "display_name",
-        "provider_kind",
-        "provider_model",
-        "protocol",
-        "api_version",
-        "backend_path",
-        "public_path",
-        "usage_format"
-      ],
-      "title": "ImageGenerationProfile"
+    "ImageGenerationProfile-Output": {
+      "additionalProperties": true,
+      "type": "object"
     },
     "ManagedModel": {
       "properties": {
@@ -332,7 +1120,8 @@
               "reasoning",
               "streaming",
               "embeddings",
-              "image_generation"
+              "image_generation",
+              "decision"
             ]
           },
           "type": "array",
@@ -422,6 +1211,29 @@
           ],
           "title": "Price Reference"
         },
+        "context_price_references": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "maxItems": 32,
+          "title": "Context Price References"
+        },
+        "context_price_refresh": {
+          "type": "boolean",
+          "title": "Context Price Refresh",
+          "default": false
+        },
+        "context_price_rule": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/ContextPriceRule"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "price_discount_percent": {
           "anyOf": [
             {
@@ -480,12 +1292,22 @@
         "image_profile": {
           "anyOf": [
             {
-              "$ref": "#/schemas/ImageGenerationProfile"
+              "$ref": "#/schemas/ImageGenerationProfile-Output"
             },
             {
               "type": "null"
             }
           ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "title": "Created At"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "title": "Updated At"
         },
         "list_input_cost_per_million": {
           "anyOf": [
@@ -574,6 +1396,28 @@
             }
           ]
         },
+        "context_price_tiers": {
+          "items": {
+            "$ref": "#/schemas/StoredContextPriceTier"
+          },
+          "type": "array",
+          "maxItems": 32,
+          "title": "Context Price Tiers"
+        },
+        "pending_context_price_tiers": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/schemas/StoredContextPriceTier"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Pending Context Price Tiers"
+        },
         "effective_discount_percent": {
           "anyOf": [
             {
@@ -625,16 +1469,6 @@
             }
           ],
           "title": "Source Snapshot"
-        },
-        "created_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Created At"
-        },
-        "updated_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Updated At"
         }
       },
       "additionalProperties": false,
@@ -714,6 +1548,97 @@
       "title": "PendingListPrice",
       "description": "A published price waiting for a person, in the same four buckets as the accepted one."
     },
+    "PriceCatalogContextTier": {
+      "properties": {
+        "group_key": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Group Key"
+        },
+        "model_label": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Model Label"
+        },
+        "service_tier": {
+          "type": "string",
+          "title": "Service Tier",
+          "default": ""
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Key"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Label"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Order"
+        },
+        "input_range": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/PriceCatalogInputRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_range_source": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/PriceCatalogRuleSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "group_key",
+        "model_label",
+        "key",
+        "label",
+        "order"
+      ],
+      "title": "PriceCatalogContextTier"
+    },
+    "PriceCatalogInputRange": {
+      "properties": {
+        "min_input_tokens": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Min Input Tokens"
+        },
+        "max_input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0.0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Max Input Tokens"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "min_input_tokens"
+      ],
+      "title": "PriceCatalogInputRange"
+    },
     "PriceCatalogModel": {
       "properties": {
         "key": {
@@ -730,6 +1655,21 @@
         },
         "source": {
           "$ref": "#/schemas/PriceSource"
+        },
+        "context_tier": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/PriceCatalogContextTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text_to_image": {
+          "type": "boolean",
+          "title": "Text To Image",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -910,6 +1850,85 @@
         "model_entry"
       ],
       "title": "PriceCatalogOptionsResponse"
+    },
+    "PriceCatalogRuleSource": {
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Rule Id"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^https://"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Url"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Revision"
+        },
+        "verified_on": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Verified On"
+        },
+        "origin": {
+          "type": "string",
+          "enum": [
+            "official",
+            "reference",
+            "custom"
+          ],
+          "title": "Origin",
+          "default": "official"
+        },
+        "configured_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Configured At"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "rule_id",
+        "revision"
+      ],
+      "title": "PriceCatalogRuleSource"
     },
     "PriceMatch": {
       "properties": {
@@ -1583,6 +2602,21 @@
     },
     "RegistryResponse": {
       "properties": {
+        "gateway_name_edit_supported": {
+          "type": "boolean",
+          "title": "Gateway Name Edit Supported",
+          "default": true
+        },
+        "runtime_diagnostics_supported": {
+          "type": "boolean",
+          "title": "Runtime Diagnostics Supported",
+          "default": false
+        },
+        "failed_publication_archive_supported": {
+          "type": "boolean",
+          "title": "Failed Publication Archive Supported",
+          "default": false
+        },
         "providers": {
           "items": {
             "$ref": "#/schemas/Provider"
@@ -1626,6 +2660,11 @@
           "title": "Databricks Oauth Supported",
           "default": false
         },
+        "decision_supported": {
+          "type": "boolean",
+          "title": "Decision Supported",
+          "default": false
+        },
         "image_generation_supported": {
           "type": "boolean",
           "title": "Image Generation Supported",
@@ -1646,6 +2685,46 @@
           "const": 4,
           "title": "Image Configuration Schema Version",
           "default": 4
+        },
+        "apim_target_topology_available": {
+          "type": "boolean",
+          "title": "Apim Target Topology Available",
+          "default": false
+        },
+        "apim_target_topology": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/ApimTargetTopologyList"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "explicit_gateway_selection_supported": {
+          "type": "boolean",
+          "title": "Explicit Gateway Selection Supported",
+          "default": false
+        },
+        "self_hosted_gateway_enabled": {
+          "type": "boolean",
+          "title": "Self Hosted Gateway Enabled",
+          "default": false
+        },
+        "multi_apim_target_rollout_enabled": {
+          "type": "boolean",
+          "title": "Multi Apim Target Rollout Enabled",
+          "default": false
+        },
+        "context_pricing_supported": {
+          "type": "boolean",
+          "title": "Context Pricing Supported",
+          "default": false
+        },
+        "context_price_rules_supported": {
+          "type": "boolean",
+          "title": "Context Price Rules Supported",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -1771,6 +2850,16 @@
           ],
           "title": "Last Checked At"
         },
+        "diagnostic": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/RuntimeHealth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "created_at": {
           "type": "string",
           "format": "date-time",
@@ -1799,6 +2888,224 @@
       ],
       "title": "Runtime"
     },
+    "RuntimeCheckOption": {
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Model Id"
+        },
+        "gateway_deployment_id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Gateway Deployment Id"
+        },
+        "model_key": {
+          "type": "string",
+          "title": "Model Key"
+        },
+        "model_name": {
+          "type": "string",
+          "title": "Model Name"
+        },
+        "gateway_profile_id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Gateway Profile Id"
+        },
+        "gateway_name": {
+          "type": "string",
+          "title": "Gateway Name"
+        },
+        "native_gateway_id": {
+          "type": "string",
+          "title": "Native Gateway Id"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "model_id",
+        "gateway_deployment_id",
+        "model_key",
+        "model_name",
+        "gateway_profile_id",
+        "gateway_name",
+        "native_gateway_id"
+      ],
+      "title": "RuntimeCheckOption"
+    },
+    "RuntimeHealth": {
+      "properties": {
+        "runtime_id": {
+          "type": "string",
+          "format": "uuid",
+          "title": "Runtime Id"
+        },
+        "status": {
+          "$ref": "#/schemas/HealthStatus"
+        },
+        "message": {
+          "type": "string",
+          "title": "Message"
+        },
+        "checked_at": {
+          "type": "string",
+          "format": "date-time",
+          "title": "Checked At"
+        },
+        "check_kind": {
+          "type": "string",
+          "enum": [
+            "legacy",
+            "model_inference"
+          ],
+          "title": "Check Kind",
+          "default": "legacy"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "passed",
+                "blocked",
+                "configuration_error",
+                "upstream_error",
+                "inconclusive"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Outcome"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/RuntimeCheckOption"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Request Id"
+        },
+        "correlation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Correlation Id"
+        },
+        "http_status": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Http Status"
+        },
+        "latency_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Latency Ms"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Error Code"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Valid Until",
+          "description": "Legacy expiry; historical diagnostic outcomes do not expire."
+        },
+        "configuration_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 80
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Configuration Fingerprint",
+          "description": "Server-owned digest of the selected persisted call configuration, not secrets."
+        },
+        "configuration_status": {
+          "type": "string",
+          "enum": [
+            "current",
+            "changed",
+            "unverified"
+          ],
+          "title": "Configuration Status",
+          "description": "Configuration comparison only; not a current availability or permission claim.",
+          "default": "unverified"
+        },
+        "configuration_checked_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Configuration Checked At"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "runtime_id",
+        "status",
+        "message",
+        "checked_at"
+      ],
+      "title": "RuntimeHealth"
+    },
     "RuntimeKind": {
       "type": "string",
       "enum": [
@@ -1807,6 +3114,127 @@
         "openai_compatible"
       ],
       "title": "RuntimeKind"
+    },
+    "StoredContextPriceTier": {
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Key"
+        },
+        "min_input_tokens": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Min Input Tokens"
+        },
+        "max_input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0.0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Max Input Tokens"
+        },
+        "input_price_per_million": {
+          "type": "number",
+          "minimum": 0.0,
+          "title": "Input Price Per Million"
+        },
+        "cached_price_per_million": {
+          "type": "number",
+          "minimum": 0.0,
+          "title": "Cached Price Per Million"
+        },
+        "cache_write_price_per_million": {
+          "type": "number",
+          "minimum": 0.0,
+          "title": "Cache Write Price Per Million"
+        },
+        "output_price_per_million": {
+          "type": "number",
+          "minimum": 0.0,
+          "title": "Output Price Per Million"
+        },
+        "input_range_source": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/PriceCatalogRuleSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reference": {
+          "type": "string",
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Reference"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Label"
+        },
+        "list_prices": {
+          "$ref": "#/schemas/PendingListPrice"
+        },
+        "model_key": {
+          "type": "string",
+          "title": "Model Key",
+          "default": ""
+        },
+        "model_label": {
+          "type": "string",
+          "title": "Model Label",
+          "default": ""
+        },
+        "product": {
+          "type": "string",
+          "title": "Product",
+          "default": ""
+        },
+        "group_key": {
+          "type": "string",
+          "title": "Group Key",
+          "default": ""
+        },
+        "service_tier": {
+          "type": "string",
+          "title": "Service Tier",
+          "default": ""
+        },
+        "deployment": {
+          "type": "string",
+          "title": "Deployment",
+          "default": ""
+        },
+        "regions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "title": "Regions"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "key",
+        "min_input_tokens",
+        "input_price_per_million",
+        "cached_price_per_million",
+        "cache_write_price_per_million",
+        "output_price_per_million",
+        "reference",
+        "label",
+        "list_prices"
+      ],
+      "title": "StoredContextPriceTier"
     }
   }
 }

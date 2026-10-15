@@ -1,20 +1,31 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from backend.services.runtime_service import ModelRuntimeService
 from tests.backend.model_platform.test_image_options import _limits
 from turnstile_core.config import Settings
 from turnstile_core.domain.control_plane import ApiFormat, ModelCreateTarget, ModelTarget
 from turnstile_core.domain.image_profiles import create_image_profile
-from turnstile_core.domain.runtime_models import ManagedModelWrite, RegistryResponse
+from turnstile_core.domain.runtime_models import ManagedModelWrite
+from turnstile_core.persistence.in_memory import InMemoryRepository
 
 
-def test_image_feature_is_disabled_by_default_and_advertises_v4_shape() -> None:
-    settings = Settings.model_construct()
-    assert settings.image_generation_enabled is False
+@pytest.mark.parametrize("legacy_value", [None, "false", "true"])
+def test_image_capability_preserves_the_explicit_feature_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, legacy_value: str | None,
+) -> None:
+    if legacy_value is None:
+        monkeypatch.delenv("IMAGE_GENERATION_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("IMAGE_GENERATION_ENABLED", legacy_value)
+    settings = Settings(credential_key_file=tmp_path / "key")
+    assert settings.image_generation_enabled is (legacy_value == "true")
     assert settings.image_generation_defaults.output_reservation_tokens == 8192
-    registry = RegistryResponse(providers=[], gateways=[], runtimes=[], models=[])
-    assert registry.image_generation_supported is False
+    registry = ModelRuntimeService(InMemoryRepository(), settings).registry()
+    assert registry.image_generation_supported is (legacy_value == "true")
     assert registry.image_configuration_schema_version == 4
     assert ApiFormat.OPENAI_IMAGES.value == "openai_images"
 

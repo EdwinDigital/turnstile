@@ -1,21 +1,111 @@
 paths:
-  /api/v1/budgets:
+  /api/v1/budgets/reservations:
     get:
-      tags:
-      - Budgets
-      operationId: getTokenBudgets
-      summary: Get monthly organization, department, and user Token budgets
-      description: Returns assigned limits, actual usage, remaining allowance, forecast, status, and audit
-        history to any authenticated application user.
+      summary: Review Budget Reservations
+      operationId: review_budget_reservations_api_v1_budgets_reservations_get
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/BudgetPeriod
-      - name: include_users
+      - name: scope_type
         in: query
-        description: Include every user in the hierarchy. Defaults to false; large directories should
-          use the paginated people endpoint.
+        required: true
+        schema:
+          enum:
+          - person
+          - application
+          type: string
+          title: Scope Type
+      - name: scope_id
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+          title: Scope Id
+      - name: period
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+          title: Period
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 20
+          minimum: 1
+          default: 20
+          title: Limit
+      - name: include_resolved
+        in: query
+        required: false
         schema:
           type: boolean
           default: false
+          title: Include Resolved
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: ../../openapi.yaml#/components/schemas/LedgerAttempt
+                title: Response Review Budget Reservations Api V1 Budgets Reservations Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/budgets/reservations/resolve:
+    post:
+      summary: Approve Budget Reservation Resolution
+      operationId: approve_budget_reservation_resolution_api_v1_budgets_reservations_resolve_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/BudgetReservationResolutionWrite
+        required: true
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/BudgetReservationResolution
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/budgets:
+    get:
+      summary: Get monthly organization, department, and user Token budgets
+      operationId: getTokenBudgets
+      parameters:
+      - name: period
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+          title: Period
+      - name: include_users
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Include Users
       responses:
         '200':
           description: Monthly hierarchical budget state
@@ -23,48 +113,81 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/TokenBudgetResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/budgets/users:
-    get:
+      security:
+      - sessionCookie: []
+      description: Returns assigned limits, actual usage, remaining allowance, forecast, status, and audit
+        history to any authenticated application user.
       tags:
       - Budgets
-      operationId: getPeopleBudgets
+  /api/v1/budgets/users:
+    get:
       summary: Search and page people budgets within one department
+      operationId: getPeopleBudgets
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/BudgetPeriod
+      - name: period
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+          title: Period
       - name: department_id
         in: query
         required: true
         schema:
           type: string
-          minLength: 1
+          title: Department Id
       - name: query
         in: query
+        required: false
         schema:
-          type:
-          - string
-          - 'null'
-          maxLength: 200
+          anyOf:
+          - type: string
+            maxLength: 200
+          - type: 'null'
+          title: Query
       - name: status
         in: query
+        required: false
         schema:
-          $ref: ../../openapi.yaml#/components/schemas/PeopleBudgetFilter
+          enum:
+          - all
+          - assigned
+          - unallocated
+          - unverified
+          - healthy
+          - warning
+          - exceeded
+          type: string
+          default: all
+          title: Status
       - name: offset
         in: query
+        required: false
         schema:
           type: integer
           minimum: 0
           default: 0
+          title: Offset
       - name: limit
         in: query
+        required: false
         schema:
           type: integer
-          minimum: 1
           maximum: 200
+          minimum: 1
           default: 50
+          title: Limit
       responses:
         '200':
           description: Bounded page of people budgets and department allocation totals
@@ -72,20 +195,34 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/TokenBudgetPeopleResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/budgets/users/bulk:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Budgets
-      operationId: bulkSavePeopleBudgets
+  /api/v1/budgets/users/bulk:
+    post:
       summary: Atomically allocate budgets to selected or all matching people
+      operationId: bulkSavePeopleBudgets
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/BudgetPeriod
+      - name: period
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+          title: Period
       requestBody:
         required: true
         content:
@@ -99,6 +236,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/TokenBudgetBulkResult
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -107,18 +250,77 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/budgets/{scope_type}/{scope_id}:
-    put:
+      security:
+      - sessionCookie: []
       tags:
       - Budgets
-      operationId: saveTokenBudget
-      summary: Assign or update one monthly Token budget
-      description: Direct child allocations may not exceed the parent budget, and a parent may not be
-        reduced below its existing child allocations. Owner access only.
+  /api/v1/budgets/enforcement/{department_id}:
+    put:
+      summary: Save Department Enforcement
+      operationId: save_department_enforcement_api_v1_budgets_enforcement__department_id__put
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/BudgetScopeType
-      - $ref: ../../openapi.yaml#/components/parameters/BudgetScopeId
-      - $ref: ../../openapi.yaml#/components/parameters/BudgetPeriod
+      - name: department_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Department Id
+      - name: period
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+          title: Period
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/DepartmentEnforcementWrite
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/TokenBudgetResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/budgets/{scope_type}/{scope_id}:
+    put:
+      summary: Assign or update one monthly Token budget
+      operationId: saveTokenBudget
+      parameters:
+      - name: scope_type
+        in: path
+        required: true
+        schema:
+          enum:
+          - organization
+          - department
+          - user
+          type: string
+          title: Scope Type
+      - name: scope_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Scope Id
+      - name: period
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+          title: Period
       requestBody:
         required: true
         content:
@@ -132,6 +334,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/TokenBudgetResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -144,17 +352,39 @@ paths:
                 $ref: ../../openapi.yaml#/components/schemas/Error
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
+      security:
+      - sessionCookie: []
+      description: Direct child allocations may not exceed the parent budget, and a parent may not be
+        reduced below its existing child allocations. Owner access only.
       tags:
       - Budgets
-      operationId: deleteTokenBudget
+    delete:
       summary: Remove one monthly Token budget
-      description: A parent budget cannot be removed while direct child budgets remain assigned. Owner
-        access only.
+      operationId: deleteTokenBudget
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/BudgetScopeType
-      - $ref: ../../openapi.yaml#/components/parameters/BudgetScopeId
-      - $ref: ../../openapi.yaml#/components/parameters/BudgetPeriod
+      - name: scope_type
+        in: path
+        required: true
+        schema:
+          enum:
+          - organization
+          - department
+          - user
+          type: string
+          title: Scope Type
+      - name: scope_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Scope Id
+      - name: period
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+          title: Period
       responses:
         '200':
           description: Updated monthly budget state
@@ -162,6 +392,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/TokenBudgetResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -170,3 +406,9 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: A parent budget cannot be removed while direct child budgets remain assigned. Owner
+        access only.
+      tags:
+      - Budgets

@@ -1,8 +1,14 @@
 import type {
+  ApimOnboardingOperations,
+  ApimOnboardingPlan,
+  ApimOnboardingRequest,
   AnomalyRule,
   AnomalyRuleWrite,
   AuditFinding,
   AuditStatus,
+  ApimTargetTopologyList,
+  BudgetDelegationReadiness,
+  BudgetExecutionVerification,
   BudgetScopeType,
   DistributionDimension,
   DistributionResponse,
@@ -13,6 +19,7 @@ import type {
   GatewayPublicationAccepted,
   GatewayPublicationCreate,
   GatewayPublicationList,
+  GatewayProgramUpgradePreview,
   GatewayReleaseDetail,
   GatewayReleaseDiff,
   GatewayReleaseIntegrity,
@@ -35,9 +42,14 @@ import type {
   GatewayApplicationSubscriptionKeySecret,
   GatewayApplicationSubscriptionProvisionAccepted,
   MetricTotals,
+  ModelAvailabilityAccepted,
+  ModelAvailabilityCommand,
+  ModelAvailabilityList,
   ModelConnectionCreate,
   ModelConnectionUpdate,
   ModelInvocationResponse,
+  DecisionInvocationRequest,
+  DecisionInvocationResponse,
   ImageInvocationRequest,
   ImageInvocationResponse,
   ModelRegistry,
@@ -50,6 +62,8 @@ import type {
   OptimizationEvent,
   PeopleBudgetFilter,
   RunDetail,
+  RuntimeCheckPlan,
+  RuntimeCheckSelection,
   RuntimeHealth,
   TokenBudgetResponse,
   EnforcementMode,
@@ -66,33 +80,29 @@ import type {
   UsageAnomaly,
   UsageFilters,
   UsageRequestDetail,
+  UsageRequestPage,
   UsageRequestSummary,
+  MultiTargetPublicationCreate,
+  MultiTargetPublicationAccepted,
+  MultiTargetRollout,
+  MultiTargetRolloutList,
 } from "./types"
 import { getIntlLocale } from "../../locales/index"
-import { ApiError, request, writeJson } from "../../api/client"
-import { isUnsupportedOpenAICompatibleDetails } from "../../components/model-management/openai-compatible"
+import { ApiError, request, requestSensitiveJson, writeJson } from "../../api/client"
 
 export { ApiError } from "../../api/client"
 
-const DAY_MS = 24 * 60 * 60 * 1000
-
-async function requireOpenAICompatibleApi<Value>(operation: Promise<Value>): Promise<Value> {
-  try {
-    return await operation
-  } catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 422) throw error
-    const payloadStart = error.message.indexOf("{")
-    if (payloadStart < 0) throw error
-    let unsupported = false
-    try {
-      unsupported = isUnsupportedOpenAICompatibleDetails(JSON.parse(error.message.slice(payloadStart)))
-    } catch {
-      throw error
-    }
-    if (!unsupported) throw error
-    throw new ApiError(422, "当前 API 尚未部署 OpenAI-compatible 连接支持。表单内容已保留，请在后端更新后重试。")
-  }
+export async function requestGatewayBootstrap(
+  deploymentId: string, value: import("./types").SelfHostedGatewayBootstrapRequest,
+  signal: AbortSignal,
+): Promise<import("./types").SelfHostedGatewayBootstrap> {
+  return requestSensitiveJson(`/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(deploymentId)}/bootstrap`, {
+    method: "POST", signal,
+    headers: { "content-type": "application/json" }, body: JSON.stringify(value),
+  })
 }
+
+const DAY_MS = 24 * 60 * 60 * 1000
 
 export const usageWindow = (days: number, now = Date.now()): UsageFilters => {
   const to = new Date(now)
@@ -117,6 +127,7 @@ const params = (filters: UsageFilters, extra: Record<string, string | number> = 
 
 const saveRegistry = <T,>(path: string, value: T, id?: string) =>
   writeJson<ModelRegistry>(`${path}${id ? `/${id}` : ""}`, value, id ? "PUT" : "POST")
+    .then(normalizeRegistry)
 
 // TODO: 疑似废弃补丁，待确认：仅在所有受支持环境均已应用 Cloud Code 清理迁移，且
 // Registry API 不再可能返回这些历史 ID 后删除。
@@ -132,12 +143,20 @@ function normalizeRegistry(registry: ModelRegistry): ModelRegistry {
   )
   const runtimeIds = new Set(runtimes.map((runtime) => runtime.id))
   return {
+    ...registry,
+    gateway_name_edit_supported: registry.gateway_name_edit_supported === true,
+    context_pricing_supported: registry.context_pricing_supported === true,
+    context_price_rules_supported: registry.context_price_rules_supported === true,
     backend_pool_session_affinity_supported: registry.backend_pool_session_affinity_supported === true,
-    databricks_connections_supported: registry.databricks_connections_supported === true,
-    databricks_oauth_supported: registry.databricks_oauth_supported === true,
     image_generation_supported: registry.image_generation_supported === true,
-    image_configuration_defaults: registry.image_configuration_defaults,
-    image_configuration_schema_version: registry.image_configuration_schema_version,
+    apim_target_topology_available: registry.apim_target_topology_available === true,
+    apim_target_topology: registry.apim_target_topology_available === true
+      ? registry.apim_target_topology
+        ? normalizeApimTargetTopologies(registry.apim_target_topology)
+        : registry.apim_target_topology
+      : null,
+    self_hosted_gateway_enabled: registry.self_hosted_gateway_enabled === true,
+    multi_apim_target_rollout_enabled: registry.multi_apim_target_rollout_enabled === true,
     gateways: registry.gateways.filter(
       (gateway) => gateway.id !== RETIRED_LITELLM_GATEWAY_ID,
     ),
@@ -152,6 +171,7 @@ function normalizeRegistry(registry: ModelRegistry): ModelRegistry {
     runtimes: runtimes.map((runtime) => ({
       ...runtime,
       brand_key: runtime.brand_key ?? "generic",
+      price_discount_percent: runtime.price_discount_percent ?? null,
     })),
     models: registry.models
       .filter((model) => runtimeIds.has(model.runtime_id)
@@ -162,16 +182,125 @@ function normalizeRegistry(registry: ModelRegistry): ModelRegistry {
         upstream_model_id: model.upstream_model_id ?? model.model_key,
         assignment_required: model.assignment_required ?? false,
         publication_id: model.publication_id ?? null,
+        price_source: model.price_source ?? "manual",
+        price_reference: model.price_reference ?? null,
+        price_discount_percent: model.price_discount_percent ?? null,
+        effective_discount_percent: model.effective_discount_percent ?? null,
+        list_input_cost_per_million: model.list_input_cost_per_million ?? null,
+        list_output_cost_per_million: model.list_output_cost_per_million ?? null,
+        list_cached_cost_per_million: model.list_cached_cost_per_million ?? null,
+        list_cache_write_cost_per_million: model.list_cache_write_cost_per_million ?? null,
+        price_synced_at: model.price_synced_at ?? null,
+        price_sync_status: model.price_sync_status ?? null,
+        price_sync_message: model.price_sync_message ?? null,
+        pending_list_price: model.pending_list_price ?? null,
+        context_price_references: model.context_price_references ?? [],
+        context_price_tiers: model.context_price_tiers ?? [],
+        context_price_rule: model.context_price_rule ?? null,
+        pending_context_price_tiers: model.pending_context_price_tiers ?? null,
       })),
   }
 }
+
+function normalizeApimTargetTopologies(
+  topology: ApimTargetTopologyList,
+): ApimTargetTopologyList {
+  return {
+    ...topology,
+    resource_lifecycle_available: topology.resource_lifecycle_available ?? false,
+    items: topology.items.map((item) => {
+      const configurationEndpoint = item.configuration_endpoint
+        ?? `https://${item.target.service_name}.configuration.azure-api.net`
+      const managed = item.deployments.find(
+        ({ deployment }) => deployment.kind === "managed",
+      )
+      const publishedModelsAvailable = Array.isArray(item.published_models)
+      const publishedModels = item.published_models ?? []
+      return {
+        ...item,
+        deployments: item.deployments.map((entry) => ({
+          ...entry,
+          configuration_endpoint: entry.configuration_endpoint ?? configurationEndpoint,
+          published_models_available: Array.isArray(entry.published_models),
+          published_models: entry.published_models ?? [],
+        })),
+        management_endpoint: item.management_endpoint
+          ?? `https://management.azure.com${item.target.arm_resource_id}`,
+        gateway_endpoint: item.gateway_endpoint ?? managed?.deployment.endpoint_url ?? null,
+        configuration_endpoint: configurationEndpoint,
+        connection_state: item.connection_state ?? (
+          item.target.drift_state === "in_sync"
+            ? "connected"
+            : item.target.drift_state === "drifted" ? "unavailable" : "unknown"
+        ),
+        // Count inventory, including discovered entries awaiting an endpoint.
+        // Older APIs counted only configured endpoints; the complete inventory
+        // is the same source of truth used by both hierarchy and flat list.
+        self_hosted_gateway_count: item.deployments.filter(({ deployment }) => (
+          deployment.kind === "self_hosted" && !deployment.retired_at
+        )).length,
+        published_model_count: item.published_model_count ?? publishedModels.length,
+        published_models: publishedModels,
+        published_models_available: publishedModelsAvailable,
+      }
+    }),
+  }
+}
+
+
+
+
+
+
+
+function isUnsupportedOpenAICompatibleSchema(error: unknown) {
+  if (!(error instanceof ApiError) || error.status !== 422) return false
+  const payloadStart = error.message.indexOf("{")
+  if (payloadStart < 0) return false
+  try {
+    const payload = JSON.parse(error.message.slice(payloadStart)) as {
+      detail?: Array<{
+        type?: string
+        loc?: unknown[]
+        input?: unknown
+      }>
+    }
+    const issues = payload.detail ?? []
+    const rejectsProvider = issues.some((issue) =>
+      issue.type === "literal_error"
+      && issue.input === "openai_compatible"
+      && issue.loc?.at(-2) === "provider"
+      && issue.loc?.at(-1) === "template",
+    )
+    const rejectsBaseUrl = issues.some((issue) =>
+      issue.type === "extra_forbidden"
+      && issue.loc?.at(-1) === "openai_base_url",
+    )
+    return rejectsProvider && rejectsBaseUrl
+  } catch {
+    return false
+  }
+}
+
+async function requireOpenAICompatibleApi<T>(operation: Promise<T>) {
+  try {
+    return await operation
+  } catch (error) {
+    if (!isUnsupportedOpenAICompatibleSchema(error)) throw error
+    throw new ApiError(
+      422,
+      "当前 API 尚未部署 OpenAI-compatible 连接支持。表单内容已保留，请在后端更新后重试。",
+    )
+  }
+}
+
+
 
 const normalizeGatewayPublication = (publication: GatewayPublication): GatewayPublication => ({
   ...publication,
   publication_kind: publication.publication_kind ?? "model_add",
   authorization: publication.authorization ?? null,
   retry_requires_credential: publication.retry_requires_credential ?? false,
-  retry_can_authorize_image_probes: publication.retry_can_authorize_image_probes === true,
 })
 
 const normalizeGatewayPublicationAccepted = (
@@ -234,6 +363,9 @@ export const dataSource = {
   requests: (filters: UsageFilters, limit = 50) => request<{ items: UsageRequestSummary[] }>(
     `/api/v1/observability/requests?${params(filters, { limit })}`,
   ).then((value) => value.items),
+  requestPage: (filters: UsageFilters, cursor?: string) => request<UsageRequestPage>(
+    `/api/v1/observability/requests?${params(filters, { limit: 200, ...(cursor ? { cursor } : {}) })}`,
+  ),
   requestDetail: (requestId: string) => request<UsageRequestDetail>(
     `/api/v1/observability/requests/${encodeURIComponent(requestId)}`,
   ),
@@ -244,8 +376,8 @@ export const dataSource = {
   createAnomalyRule: (value: AnomalyRuleWrite) => writeJson<AnomalyRule>("/api/v1/anomaly-rules", value),
   updateAnomalyRule: (id: string, value: AnomalyRuleWrite) => writeJson<AnomalyRule>(`/api/v1/anomaly-rules/${encodeURIComponent(id)}`, value, "PUT"),
   deleteAnomalyRule: (id: string) => request<void>(`/api/v1/anomaly-rules/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  budgets: (period: string) => request<TokenBudgetResponse>(
-    `/api/v1/budgets?period=${encodeURIComponent(period)}`,
+  budgets: (period: string, includeUsers = false) => request<TokenBudgetResponse>(
+    `/api/v1/budgets?period=${encodeURIComponent(period)}${includeUsers ? "&include_users=true" : ""}`,
   ).then((response) => {
     if (!Number.isInteger(response.risk_count) || !Array.isArray(response.risk_items)) {
       throw new ApiError(
@@ -325,8 +457,50 @@ export const dataSource = {
   createOptimization: (value: {
     workflow: string; label: string; notes: string; occurred_at: string; comparison_window_days: number
   }) => writeJson<OptimizationEvent>("/api/v1/observability/optimization-events", value),
-  registry: () => request<ModelRegistry>("/api/v1/model-management").then(normalizeRegistry),
+  registry: async (): Promise<ModelRegistry> => {
+    const registry = normalizeRegistry(await request<ModelRegistry>("/api/v1/model-management"))
+    if (registry.apim_target_topology_available && !registry.apim_target_topology) {
+      registry.apim_target_topology = await dataSource.apimTargetTopologies()
+    }
+    return registry
+  },
+  apimOnboardingOperations: () => request<ApimOnboardingOperations>(
+    "/api/v1/model-management/apim-onboarding",
+  ),
+  previewApimOnboarding: (value: ApimOnboardingRequest) => writeJson<ApimOnboardingPlan>(
+    "/api/v1/model-management/apim-onboarding/preview", value,
+  ),
+  startApimOnboarding: (value: { request: ApimOnboardingRequest; confirmation_sha256: string }) =>
+    writeJson<GatewayReleaseOperationAccepted>("/api/v1/model-management/apim-onboarding", value),
+  retryApimOnboarding: (id: string) => request<GatewayReleaseOperationAccepted>(
+    `/api/v1/model-management/apim-onboarding/${encodeURIComponent(id)}/retry`, { method: "POST" },
+  ),
+
+
+
+
+
+
+
+
+
+
+
+
+
   saveGateway: (value: Record<string, unknown>, id?: string) => saveRegistry("/api/v1/model-management/gateways", value, id),
+  renameGateway: (id: string, name: string) => request<ModelRegistry | undefined>(
+    `/api/v1/model-management/gateways/${encodeURIComponent(id)}/name`,
+    { method: "PATCH", headers: { "content-type": "application/json", Prefer: "return=minimal" }, body: JSON.stringify({ name }) },
+  ).then(registry => registry ? normalizeRegistry(registry) : undefined),
+  checkBudgetDelegation: (gatewayId: string) => writeJson<BudgetDelegationReadiness>(
+    `/api/v1/model-management/gateways/${encodeURIComponent(gatewayId)}/budget-readiness`,
+    {},
+  ),
+  verifyBudgetExecution: (gatewayId: string, applicationId: string, modelId: string) => writeJson<BudgetExecutionVerification>(
+    `/api/v1/model-management/gateways/${encodeURIComponent(gatewayId)}/budget-execution-verification`,
+    {application_id: applicationId, model_id: modelId},
+  ),
   deleteGateway: (id: string) => request<ModelRegistry>(
     `/api/v1/model-management/gateways/${encodeURIComponent(id)}`,
     { method: "DELETE" },
@@ -355,6 +529,16 @@ export const dataSource = {
   ),
   priceCatalogOptions: (modelKey: string) => request<PriceCatalogOptionsResponse>(
     `/api/v1/model-management/price-catalog/options?model=${encodeURIComponent(modelKey)}`,
+  ),
+  changeModelAvailability: (id: string, value: ModelAvailabilityCommand) => writeJson<ModelAvailabilityAccepted>(
+    `/api/v1/model-management/models/${encodeURIComponent(id)}/availability`, value, "PUT",
+  ),
+  modelAvailability: () => request<ModelAvailabilityList>(
+    "/api/v1/model-management/model-availability", { cache: "no-store" },
+  ),
+  retryModelAvailability: (operationId: string, revision: number) => writeJson<ModelAvailabilityAccepted>(
+    `/api/v1/model-management/model-availability/operations/${encodeURIComponent(operationId)}/retry`,
+    { expected_revision: revision },
   ),
   // Omitting the ids syncs everything that follows a list price. Passing them is how the
   // price table's row selection turns into "sync just these".
@@ -386,11 +570,97 @@ export const dataSource = {
     { method: "DELETE" },
   ).then(normalizeGatewayPublicationAccepted),
   publishModel: (value: GatewayPublicationCreate) => requireOpenAICompatibleApi(
-    writeJson<GatewayPublicationAccepted>("/api/v1/model-management/publications", value),
+    writeJson<GatewayPublicationAccepted>(
+      "/api/v1/model-management/publications",
+      value,
+    ),
   ).then(normalizeGatewayPublicationAccepted),
+  archiveFailedPublication: (id: string) => request<void>(
+    `/api/v1/model-management/publications/${encodeURIComponent(id)}/archive`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  ),
+  publishMultiTargetModel: (value: MultiTargetPublicationCreate) =>
+    writeJson<MultiTargetPublicationAccepted>(
+      "/api/v1/model-management/rollouts",
+      value,
+    ),
+  multiTargetRollouts: () => request<MultiTargetRolloutList>(
+    "/api/v1/model-management/rollouts?limit=50",
+  ),
+  multiTargetRollout: (id: string) => request<MultiTargetRollout>(
+    `/api/v1/model-management/rollouts/${encodeURIComponent(id)}`,
+  ),
+  apimTargetTopologies: () => request<ApimTargetTopologyList>(
+    "/api/v1/model-management/apim-targets",
+  ).then(normalizeApimTargetTopologies),
+  addApimTarget: (value: import("./types").ApimTargetWrite) =>
+    writeJson<import("./types").ApimTargetTopology>(
+      "/api/v1/model-management/apim-targets",
+      value,
+    ),
+  previewApimTargetRemoval: (gatewayProfileId: string) =>
+    request<import("./types").ApimTargetRemovalPreview>(
+      `/api/v1/model-management/apim-targets/${encodeURIComponent(gatewayProfileId)}/removal-preview`,
+    ),
+  removeApimTarget: (gatewayProfileId: string) =>
+    request<import("./types").ApimTargetRemovalPreview>(
+      `/api/v1/model-management/apim-targets/${encodeURIComponent(gatewayProfileId)}`,
+      { method: "DELETE" },
+    ),
+  addSelfHostedGateway: (
+    gatewayProfileId: string,
+    value: import("./types").SelfHostedGatewayWrite,
+  ) => writeJson<import("./types").ApimTargetTopology["deployments"][number]>(
+    `/api/v1/model-management/apim-targets/${encodeURIComponent(gatewayProfileId)}/self-hosted-gateways`,
+    value,
+  ),
+  selfHostedGatewayProvisions: () => request<import("./types").SelfHostedGatewayProvisionOperations>(
+    "/api/v1/model-management/self-hosted-gateway-provisions",
+  ),
+  createSelfHostedGateway: (targetId: string, value: import("./types").SelfHostedGatewayCreate, requestId: string) => request<GatewayReleaseOperationAccepted>(
+    `/api/v1/model-management/apim-targets/${encodeURIComponent(targetId)}/self-hosted-gateway-provisions`,
+    { method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": requestId }, body: JSON.stringify(value) },
+  ),
+  retrySelfHostedGatewayProvision: (id: string) => request<GatewayReleaseOperationAccepted>(
+    `/api/v1/model-management/self-hosted-gateway-provisions/${encodeURIComponent(id)}/retry`, { method: "POST" },
+  ),
+  renameSelfHostedGateway: (deploymentId: string, displayName: string) => request<void>(
+    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(deploymentId)}/name`,
+    { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ display_name: displayName }) },
+  ),
+  validateSelfHostedGateway: (deploymentId: string) =>
+    writeJson<import("./types").ApimTargetTopology["deployments"][number]>(
+      `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(deploymentId)}/validations`,
+      {},
+    ),
+  changeSelfHostedGatewayAssociation: (
+    deploymentId: string,
+    value: import("./types").SelfHostedGatewayAssociationChange,
+  ) => writeJson<import("./types").ApimTargetTopology["deployments"][number]>(
+    `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(deploymentId)}/apim-association`,
+    value,
+    "PUT",
+  ),
+  previewSelfHostedGatewayRemoval: (deploymentId: string) =>
+    request<import("./types").SelfHostedGatewayRemovalPreview>(
+      `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(deploymentId)}/removal-preview`,
+    ),
+  removeSelfHostedGateway: (deploymentId: string) =>
+    request<import("./types").SelfHostedGatewayRemovalPreview>(
+      `/api/v1/model-management/self-hosted-gateways/${encodeURIComponent(deploymentId)}`,
+      { method: "DELETE" },
+    ),
+  requestApimTargetInventorySync: (gatewayProfileId: string) =>
+    request<GatewayReleaseOperationAccepted>(
+      `/api/v1/model-management/apim-targets/${encodeURIComponent(gatewayProfileId)}/inventory-syncs`,
+      { method: "POST" },
+    ),
   gatewayPublication: (id: string) => request<GatewayPublication>(
     `/api/v1/model-management/publications/${encodeURIComponent(id)}`,
   ).then(normalizeGatewayPublication),
+  gatewayProgramUpgradePreview: (gatewayProfileId: string) => request<GatewayProgramUpgradePreview>(
+    `/api/v1/model-management/gateways/${encodeURIComponent(gatewayProfileId)}/program-upgrades/preview`,
+  ),
   gatewayPublications: () => request<GatewayPublicationList>(
     "/api/v1/model-management/publications?limit=20",
   ).then((value) => ({
@@ -462,6 +732,11 @@ export const dataSource = {
     value,
     "PUT",
   ),
+  updateGatewayApplicationOrganization: (id: string, organizationId: string | null, departmentId?: string | null, personId?: string | null) =>
+    writeJson<{ organization_id: string | null; organization_name: string | null; department_id?: string | null; department_name?: string | null; person_id?: string | null; person_name?: string | null; projected: boolean }>(
+      `/api/v1/application-access/applications/${encodeURIComponent(id)}/organization`,
+      { organization_id: organizationId, ...(departmentId !== undefined ? { department_id: departmentId } : {}), ...(personId !== undefined ? { person_id: personId } : {}) }, "PUT",
+    ),
   updateGatewayApplicationBudget: (
     id: string,
     value: GatewayApplicationBudgetUpdate,
@@ -511,12 +786,9 @@ export const dataSource = {
       + `/keys/${keyKind}/rotate`,
     { confirmation },
   ),
-  retryGatewayPublication: (id: string, credential?: string, authorizeImageProbes = false, kind: "api_key" | "oauth_m2m" = "api_key") => writeJson<GatewayPublication>(
+  retryGatewayPublication: (id: string, credential?: string, kind: "api_key" | "oauth_m2m" = "api_key") => writeJson<GatewayPublication>(
     `/api/v1/model-management/publications/${encodeURIComponent(id)}/retry`,
-    {
-      ...(credential ? kind === "oauth_m2m" ? { oauth_client_secret: credential } : { api_key: credential } : {}),
-      ...(authorizeImageProbes === true ? { authorize_image_probes: true } : {}),
-    },
+    credential ? kind === "oauth_m2m" ? { oauth_client_secret: credential } : { api_key: credential } : {},
   ).then(normalizeGatewayPublication),
   resumeGatewayPublicationAuthorization: (id: string) => writeJson<GatewayPublication>(
     `/api/v1/model-management/publications/${encodeURIComponent(id)}/authorization/resume`,
@@ -527,11 +799,17 @@ export const dataSource = {
       `/api/v1/model-management/gateways/${encodeURIComponent(gatewayId)}/credentials/rotate`,
       { model_key: modelKey, ...(kind === "oauth_m2m" ? { oauth_client_secret: credential } : { api_key: credential }) },
     ).then(normalizeGatewayPublication),
-  checkRuntime: (id: string) => request<RuntimeHealth>(
-    `/api/v1/model-management/runtimes/${id}/check`, { method: "POST" },
+  runtimeCheckPlan: (id: string) => request<RuntimeCheckPlan>(
+    `/api/v1/model-management/runtimes/${encodeURIComponent(id)}/check`,
+  ),
+  checkRuntime: (id: string, selection: RuntimeCheckSelection) => writeJson<RuntimeHealth>(
+    `/api/v1/model-management/runtimes/${encodeURIComponent(id)}/check`, selection,
   ),
   invokeModel: (value: Record<string, unknown>) => writeJson<ModelInvocationResponse>(
     "/api/v1/model-gateway/invoke", value,
+  ),
+  invokeDecision: (value: DecisionInvocationRequest) => writeJson<DecisionInvocationResponse>(
+    "/api/v1/model-gateway/decision", value,
   ),
   generateImage: (value: ImageInvocationRequest) => writeJson<ImageInvocationResponse>(
     "/api/v1/model-gateway/images/generations", value,

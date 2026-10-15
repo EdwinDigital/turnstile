@@ -53,8 +53,9 @@ async function postIdentity(path: string, body: unknown): Promise<AuthUser> {
     body: JSON.stringify(body),
   })
   if (!response.ok) {
-    const detail = (await response.json().catch(() => null)) as { detail?: string } | null
-    throw new Error(detail?.detail || "登录失败，请重试。")
+    const detail = (await response.json().catch(() => null)) as { detail?: unknown } | null
+    throw new ApiError(response.status, typeof detail?.detail === "string"
+      ? detail.detail : "登录失败，请重试。")
   }
   return (await response.json()) as AuthUser
 }

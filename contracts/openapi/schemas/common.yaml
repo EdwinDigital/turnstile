@@ -10,6 +10,7 @@ schemas:
     - microsoft
     - microsoft_foundry
     - openai
+    title: BrandKey
   BudgetScopeType:
     type: string
     enum:
@@ -17,11 +18,6 @@ schemas:
     - department
     - user
   AssistantTurn:
-    type: object
-    additionalProperties: false
-    required:
-    - role
-    - content
     properties:
       role:
         type: string
@@ -30,23 +26,25 @@ schemas:
         - assistant
       content:
         type: string
-        minLength: 1
         maxLength: 20000
-  AssistantAskRequest:
-    type: object
+        minLength: 1
     additionalProperties: false
+    type: object
     required:
-    - question
+    - role
+    - content
+    title: AssistantTurn
+  AssistantAskRequest:
     properties:
       question:
         type: string
-        minLength: 1
         maxLength: 4000
+        minLength: 1
       history:
-        type: array
-        maxItems: 20
         items:
           $ref: ../../openapi.yaml#/components/schemas/AssistantTurn
+        type: array
+        maxItems: 20
         description: 'Prior text turns only. Charts are deliberately not replayed through the context
 
           window, so a long conversation does not grow unboundedly.
@@ -56,33 +54,33 @@ schemas:
         type:
         - string
         - 'null'
+        maxLength: 64
+        minLength: 1
       timezone:
         type: string
         maxLength: 64
+        minLength: 1
         default: UTC
       locale:
         type: string
         maxLength: 16
+        minLength: 2
         default: en
-  AssistantStep:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - sequence
-    - tool
-    - arguments
-    - status
-    - summary
-    description: One tool call, surfaced so an answer can be audited.
+    - question
+    title: AssistantAskRequest
+  AssistantStep:
     properties:
       sequence:
         type: integer
-        minimum: 1
+        minimum: 1.0
       tool:
         type: string
       arguments:
-        type: object
         additionalProperties: true
+        type: object
       status:
         type: string
         enum:
@@ -93,11 +91,48 @@ schemas:
         maxLength: 500
       row_count:
         type: integer
-        minimum: 0
+        minimum: 0.0
         default: 0
-  AssistantReply:
-    type: object
     additionalProperties: false
+    type: object
+    required:
+    - sequence
+    - tool
+    - arguments
+    - status
+    - summary
+    title: AssistantStep
+    description: One tool call, surfaced so an answer can be audited.
+  AssistantReply:
+    properties:
+      conversation_id:
+        type: string
+      message:
+        type: string
+      charts:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ChartSpec
+        type: array
+      steps:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/AssistantStep
+        type: array
+      latency_ms:
+        type: integer
+        minimum: 0.0
+      model:
+        type: string
+      total_tokens:
+        type: integer
+        minimum: 0.0
+        default: 0
+        description: 'The assistant''s own spend. It calls the same gateway as every other caller and
+
+          is attributed in the dashboard it analyses.
+
+          '
+    additionalProperties: false
+    type: object
     required:
     - conversation_id
     - message
@@ -105,54 +140,38 @@ schemas:
     - steps
     - latency_ms
     - model
-    properties:
-      conversation_id:
-        type: string
-      message:
-        type: string
-      charts:
-        type: array
-        items:
-          $ref: ../../openapi.yaml#/components/schemas/ChartSpec
-      steps:
-        type: array
-        items:
-          $ref: ../../openapi.yaml#/components/schemas/AssistantStep
-      latency_ms:
-        type: integer
-        minimum: 0
-      model:
-        type: string
-      total_tokens:
-        type: integer
-        minimum: 0
-        default: 0
-        description: 'The assistant''s own spend. It calls the same gateway as every other caller and
-
-          is attributed in the dashboard it analyses.
-
-          '
+    title: AssistantReply
   ChartSeries:
-    type: object
-    additionalProperties: false
-    required:
-    - key
-    - label
     properties:
       key:
         type: string
-        minLength: 1
         maxLength: 64
+        minLength: 1
       label:
         type: string
-        minLength: 1
         maxLength: 120
-  ChartQuery:
-    type: object
+        minLength: 1
     additionalProperties: false
+    type: object
+    required:
+    - key
+    - label
+    title: ChartSeries
+  ChartQuery:
+    properties:
+      tool:
+        type: string
+        maxLength: 64
+        minLength: 1
+      arguments:
+        additionalProperties: true
+        type: object
+    additionalProperties: false
+    type: object
     required:
     - tool
     - arguments
+    title: ChartQuery
     description: 'Everything needed to reproduce a chart, and nothing else. `arguments` has already
 
       been validated against the tool''s own argument model, so replaying it cannot widen
@@ -160,35 +179,12 @@ schemas:
       what the original question was allowed to read. No SQL is ever persisted.
 
       '
-    properties:
-      tool:
-        type: string
-        minLength: 1
-        maxLength: 64
-      arguments:
-        type: object
-        additionalProperties: true
   ChartSpec:
-    type: object
-    additionalProperties: false
-    required:
-    - id
-    - kind
-    - title
-    - time_range_label
-    - basis
-    - unit
-    - category_key
-    - category_label
-    - series
-    - rows
-    - generated_at
-    - query
     properties:
       id:
         type: string
-        minLength: 1
         maxLength: 64
+        minLength: 1
       kind:
         type: string
         enum:
@@ -198,39 +194,39 @@ schemas:
         - kpi
       title:
         type: string
-        minLength: 1
         maxLength: 200
+        minLength: 1
       time_range_label:
         type: string
-        minLength: 1
         maxLength: 120
+        minLength: 1
       basis:
         type: string
-        minLength: 1
         maxLength: 400
+        minLength: 1
       unit:
         type: string
         maxLength: 60
       category_key:
         type: string
-        minLength: 1
         maxLength: 64
+        minLength: 1
       category_label:
         type: string
-        minLength: 1
         maxLength: 120
+        minLength: 1
       series:
-        type: array
-        minItems: 1
-        maxItems: 12
         items:
           $ref: ../../openapi.yaml#/components/schemas/ChartSeries
+        type: array
+        maxItems: 12
+        minItems: 1
       rows:
+        items:
+          additionalProperties: true
+          type: object
         type: array
         maxItems: 500
-        items:
-          type: object
-          additionalProperties: true
       generated_at:
         type: string
         format: date-time
@@ -254,16 +250,23 @@ schemas:
         description: The last calendar day covered, inclusive.
       query:
         $ref: ../../openapi.yaml#/components/schemas/ChartQuery
-  ConversationSummary:
-    type: object
     additionalProperties: false
+    type: object
     required:
     - id
+    - kind
     - title
-    - owner_id
-    - turn_count
-    - created_at
-    - updated_at
+    - time_range_label
+    - basis
+    - unit
+    - category_key
+    - category_label
+    - series
+    - rows
+    - generated_at
+    - query
+    title: ChartSpec
+  ConversationSummary:
     properties:
       id:
         type: string
@@ -289,25 +292,34 @@ schemas:
         type: string
       turn_count:
         type: integer
-        minimum: 0
+        minimum: 0.0
       created_at:
         type: string
         format: date-time
       updated_at:
         type: string
         format: date-time
-  ConversationExchange:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - position
-    - question
-    - reply
+    - id
+    - title
+    - owner_id
+    - turn_count
     - created_at
+    - updated_at
+    title: ConversationSummary
+    description: 'A row in the history dropdown.
+
+
+      Carries no turns: the dropdown lists conversations and would otherwise download every
+
+      transcript, including their charts, to render a list of titles.'
+  ConversationExchange:
     properties:
       position:
         type: integer
-        minimum: 0
+        minimum: 0.0
       question:
         type: string
       reply:
@@ -315,7 +327,62 @@ schemas:
       created_at:
         type: string
         format: date-time
+    additionalProperties: false
+    type: object
+    required:
+    - position
+    - question
+    - reply
+    - created_at
+    title: ConversationExchange
+    description: One question and the reply it produced, as it was shown at the time.
   Conversation:
+    properties:
+      id:
+        type: string
+        format: uuid
+        title: Id
+      title:
+        type: string
+        title: Title
+      title_source:
+        type: string
+        enum:
+        - question
+        - model
+        - user
+        title: Title Source
+        default: question
+      owner_id:
+        type: string
+        title: Owner Id
+      turn_count:
+        type: integer
+        minimum: 0.0
+        title: Turn Count
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
+      updated_at:
+        type: string
+        format: date-time
+        title: Updated At
+      exchanges:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ConversationExchange
+        type: array
+        title: Exchanges
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - title
+    - owner_id
+    - turn_count
+    - created_at
+    - updated_at
+    title: Conversation
     allOf:
     - $ref: ../../openapi.yaml#/components/schemas/ConversationSummary
     - type: object
@@ -327,39 +394,48 @@ schemas:
           items:
             $ref: ../../openapi.yaml#/components/schemas/ConversationExchange
   ConversationList:
-    type: object
-    additionalProperties: false
-    required:
-    - items
     properties:
       items:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/ConversationSummary
-  ConversationRename:
-    type: object
+        type: array
     additionalProperties: false
+    type: object
     required:
-    - title
+    - items
+    title: ConversationList
+  ConversationRename:
     properties:
       title:
         type: string
-        minLength: 1
         maxLength: 200
-  ConversationTitleRequest:
-    type: object
+        minLength: 1
     additionalProperties: false
+    type: object
+    required:
+    - title
+    title: ConversationRename
+  ConversationTitleRequest:
     properties:
       locale:
         type: string
-        minLength: 2
         maxLength: 16
+        minLength: 2
         default: en
         description: 'The language to write the title in. This is the reader''s current UI locale,
 
           not the one the conversation was held in, because the title is read now.
 
           '
+    additionalProperties: false
+    type: object
+    title: ConversationTitleRequest
+    description: 'Ask the model to name a conversation.
+
+
+      The locale is the reader''s current one rather than the one the conversation was held
+
+      in, because the title is read now, in the sidebar they are looking at now.'
   Error:
     type: object
     additionalProperties: false
@@ -374,3 +450,3504 @@ schemas:
         type: string
       request_id:
         type: string
+  AuthStrategy:
+    type: string
+    enum:
+    - none
+    - managed_identity
+    - named_value_bearer
+    - named_value_api_key
+    - oauth_client_credentials
+    title: AuthStrategy
+  AuthType:
+    type: string
+    enum:
+    - none
+    - api_key
+    - bearer
+    - azure_ad
+    title: AuthType
+  BudgetPriceProjection:
+    properties:
+      version:
+        type: integer
+        const: 1
+        title: Version
+        default: 1
+      model_id:
+        type: string
+        format: uuid
+        title: Model Id
+      price_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Price Sha256
+      price:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ModelPrice
+        - type: 'null'
+      rate_schedules:
+        items:
+          additionalProperties:
+            anyOf:
+            - type: integer
+            - type: 'null'
+          type: object
+        type: array
+        title: Rate Schedules
+      updated_at:
+        type: string
+        format: date-time
+        title: Updated At
+    additionalProperties: false
+    type: object
+    required:
+    - model_id
+    - price_sha256
+    - price
+    - updated_at
+    title: BudgetPriceProjection
+    description: Current accepted model price projected separately from route publications.
+  BudgetReservationResolution:
+    properties:
+      version:
+        type: integer
+        const: 1
+        title: Version
+        default: 1
+      id:
+        type: string
+        format: uuid
+        title: Id
+      receipt:
+        $ref: ../../openapi.yaml#/components/schemas/LedgerAdmissionReceipt-Output
+      decision:
+        type: string
+        const: release_unverified
+        title: Decision
+        default: release_unverified
+      actor:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Actor
+      reason:
+        type: string
+        enum:
+        - gateway_validation_failure
+        - provider_result_unavailable
+        - evidence_irrecoverable
+        title: Reason
+      evidence_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Evidence Sha256
+      approved_at:
+        type: string
+        format: date-time
+        title: Approved At
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - receipt
+    - actor
+    - reason
+    - evidence_sha256
+    - approved_at
+    title: BudgetReservationResolution
+  BudgetReservationResolutionWrite:
+    properties:
+      id:
+        type: string
+        format: uuid
+        title: Id
+      receipt:
+        $ref: ../../openapi.yaml#/components/schemas/LedgerAdmissionReceipt-Input
+      reason:
+        type: string
+        enum:
+        - gateway_validation_failure
+        - provider_result_unavailable
+        - evidence_irrecoverable
+        title: Reason
+      evidence_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+        title: Evidence Sha256
+      accepts_late_usage:
+        type: boolean
+        const: true
+        title: Accepts Late Usage
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - receipt
+    - reason
+    - evidence_sha256
+    - accepts_late_usage
+    title: BudgetReservationResolutionWrite
+  ChatMessage:
+    properties:
+      role:
+        type: string
+        enum:
+        - system
+        - user
+        - assistant
+        - tool
+        title: Role
+      content:
+        anyOf:
+        - type: string
+          maxLength: 200000
+        - type: 'null'
+        title: Content
+      tool_calls:
+        anyOf:
+        - items:
+            $ref: ../../openapi.yaml#/components/schemas/ToolCall
+          type: array
+          maxItems: 20
+        - type: 'null'
+        title: Tool Calls
+      tool_call_id:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+        title: Tool Call Id
+    additionalProperties: false
+    type: object
+    required:
+    - role
+    title: ChatMessage
+    description: 'One turn in an OpenAI-shaped conversation.
+
+
+      `content` is optional because an assistant turn that only calls tools carries no
+
+      text, and a `tool` turn carries the result of exactly one call. The validator below
+
+      is what keeps that from degrading into "any field may be missing".'
+  ChoiceQuestion:
+    properties:
+      type:
+        type: string
+        const: choice
+        title: Type
+      instructions:
+        type: string
+        minLength: 1
+        title: Instructions
+      criteria:
+        additionalProperties:
+          type: string
+          minLength: 1
+        type: object
+        minProperties: 2
+        title: Criteria
+    additionalProperties: false
+    type: object
+    required:
+    - type
+    - instructions
+    - criteria
+    title: ChoiceQuestion
+  ConnectionAuthMode:
+    type: string
+    enum:
+    - managed_identity
+    - api_key
+    - oauth_m2m
+    title: ConnectionAuthMode
+  DecisionInvocationRequest:
+    properties:
+      state:
+        $ref: ../../openapi.yaml#/components/schemas/JsonValue
+      questions:
+        additionalProperties:
+          oneOf:
+          - $ref: ../../openapi.yaml#/components/schemas/NoulQuestion
+          - $ref: ../../openapi.yaml#/components/schemas/ChoiceQuestion
+          - $ref: ../../openapi.yaml#/components/schemas/ScoreQuestion
+          discriminator:
+            propertyName: type
+            mapping:
+                choice: ../../openapi.yaml#/components/schemas/ChoiceQuestion
+                noul: ../../openapi.yaml#/components/schemas/NoulQuestion
+                score: ../../openapi.yaml#/components/schemas/ScoreQuestion
+        type: object
+        minProperties: 1
+        title: Questions
+      metadata:
+        $ref: ../../openapi.yaml#/components/schemas/InvocationMetadata
+      model_id:
+        type: string
+        format: uuid
+        title: Model Id
+      runtime_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Runtime Id
+      gateway_profile_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Profile Id
+      gateway_deployment_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Deployment Id
+    additionalProperties: false
+    type: object
+    required:
+    - state
+    - questions
+    - metadata
+    - model_id
+    title: DecisionInvocationRequest
+  DecisionInvocationResponse:
+    properties:
+      request_id:
+        type: string
+        title: Request Id
+      correlation_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Correlation Id
+      upstream_request_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Upstream Request Id
+      answers:
+        additionalProperties:
+          $ref: ../../openapi.yaml#/components/schemas/JsonValue
+        type: object
+        title: Answers
+      provider:
+        type: string
+        title: Provider
+      runtime:
+        type: string
+        title: Runtime
+      model:
+        type: string
+        title: Model
+      gateway:
+        type: string
+        title: Gateway
+      gateway_profile_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Profile Id
+      gateway_deployment_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Deployment Id
+      native_gateway_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Native Gateway Id
+      latency_ms:
+        type: integer
+        minimum: 0.0
+        title: Latency Ms
+      usage:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/InvocationUsage
+        - type: 'null'
+      estimated_cost:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Estimated Cost
+    additionalProperties: false
+    type: object
+    required:
+    - request_id
+    - answers
+    - provider
+    - runtime
+    - model
+    - gateway
+    - latency_ms
+    - usage
+    title: DecisionInvocationResponse
+  DepartmentEnforcementWrite:
+    properties:
+      mode:
+        type: string
+        enum:
+        - block
+        - audit
+        title: Mode
+    additionalProperties: false
+    type: object
+    required:
+    - mode
+    title: DepartmentEnforcementWrite
+  DistributionBreakdown:
+    properties:
+      id:
+        type: string
+        title: Id
+      name:
+        type: string
+        title: Name
+      total_tokens:
+        type: integer
+        minimum: 0.0
+        title: Total Tokens
+      total_requests:
+        type: integer
+        minimum: 0.0
+        title: Total Requests
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - name
+    - total_tokens
+    - total_requests
+    title: DistributionBreakdown
+    description: 'One slice of a ranking row, used to stack a second dimension inside the first.
+
+
+      Deliberately narrower than `DistributionItem`: a stacked bar needs volume, not tail
+
+      latency or a failure split, and computing percentiles for every parent-child pair would
+
+      cost far more than the chart can show.'
+  DistributionItem:
+    properties:
+      total_tokens:
+        type: integer
+        minimum: 0.0
+        title: Total Tokens
+      cache_read_tokens:
+        type: integer
+        minimum: 0.0
+        title: Cache Read Tokens
+        default: 0
+      total_requests:
+        type: integer
+        minimum: 0.0
+        title: Total Requests
+      estimated_cost:
+        type: number
+        minimum: 0.0
+        title: Estimated Cost
+      average_latency_ms:
+        type: number
+        minimum: 0.0
+        title: Average Latency Ms
+      error_rate:
+        type: number
+        maximum: 100.0
+        minimum: 0.0
+        title: Error Rate
+      p50_latency_ms:
+        type: number
+        minimum: 0.0
+        title: P50 Latency Ms
+        default: 0.0
+      p95_latency_ms:
+        type: number
+        minimum: 0.0
+        title: P95 Latency Ms
+        default: 0.0
+      p99_latency_ms:
+        type: number
+        minimum: 0.0
+        title: P99 Latency Ms
+        default: 0.0
+      success_requests:
+        type: integer
+        minimum: 0.0
+        title: Success Requests
+        default: 0
+      client_error_requests:
+        type: integer
+        minimum: 0.0
+        title: Client Error Requests
+        default: 0
+      server_error_requests:
+        type: integer
+        minimum: 0.0
+        title: Server Error Requests
+        default: 0
+      latency_under_1s:
+        type: integer
+        minimum: 0.0
+        title: Latency Under 1S
+        default: 0
+      latency_1_to_2s:
+        type: integer
+        minimum: 0.0
+        title: Latency 1 To 2S
+        default: 0
+      latency_2_to_5s:
+        type: integer
+        minimum: 0.0
+        title: Latency 2 To 5S
+        default: 0
+      latency_over_5s:
+        type: integer
+        minimum: 0.0
+        title: Latency Over 5S
+        default: 0
+      id:
+        type: string
+        title: Id
+      name:
+        type: string
+        title: Name
+      share_percent:
+        type: number
+        maximum: 100.0
+        minimum: 0.0
+        title: Share Percent
+      breakdown:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/DistributionBreakdown
+        type: array
+        title: Breakdown
+    additionalProperties: false
+    type: object
+    required:
+    - total_tokens
+    - total_requests
+    - estimated_cost
+    - average_latency_ms
+    - error_rate
+    - id
+    - name
+    - share_percent
+    title: DistributionItem
+    description: 'One ranking row. Inherits the window metrics so a dimension carries the same tail
+
+      latency and failure split as the window total, and so adding a metric is one edit
+
+      rather than two that can drift apart. The frontend type has always been
+
+      `ExecutiveTotals & { id, name, share_percent }`; this makes the backend agree.'
+  DistributionResponse:
+    properties:
+      from:
+        type: string
+        format: date-time
+        title: From
+      to:
+        type: string
+        format: date-time
+        title: To
+      dimension:
+        type: string
+        title: Dimension
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/DistributionItem
+        type: array
+        title: Items
+    additionalProperties: false
+    type: object
+    required:
+    - from
+    - to
+    - dimension
+    - items
+    title: DistributionResponse
+  EnterpriseEntity:
+    properties:
+      id:
+        type: string
+        title: Id
+      name:
+        type: string
+        title: Name
+      parent_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Parent Id
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - name
+    title: EnterpriseEntity
+  EnterpriseEntityCatalog:
+    properties:
+      organizations:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/EnterpriseEntity
+        type: array
+        title: Organizations
+      departments:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/EnterpriseEntity
+        type: array
+        title: Departments
+      projects:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/EnterpriseEntity
+        type: array
+        title: Projects
+      agents:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/EnterpriseEntity
+        type: array
+        title: Agents
+      users:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/EnterpriseEntity
+        type: array
+        title: Users
+      invocation_testers:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/EnterpriseEntity
+        type: array
+        title: Invocation Testers
+    additionalProperties: false
+    type: object
+    required:
+    - organizations
+    - departments
+    - projects
+    - agents
+    - users
+    title: EnterpriseEntityCatalog
+  ExecutiveChanges:
+    properties:
+      total_tokens:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Total Tokens
+      cache_read_tokens:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Cache Read Tokens
+      total_requests:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Total Requests
+      estimated_cost:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Estimated Cost
+      average_latency_ms:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Average Latency Ms
+      error_rate:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Error Rate
+      p50_latency_ms:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: P50 Latency Ms
+      p95_latency_ms:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: P95 Latency Ms
+      p99_latency_ms:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: P99 Latency Ms
+      success_requests:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Success Requests
+      client_error_requests:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Client Error Requests
+      server_error_requests:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Server Error Requests
+      latency_under_1s:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Latency Under 1S
+      latency_1_to_2s:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Latency 1 To 2S
+      latency_2_to_5s:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Latency 2 To 5S
+      latency_over_5s:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Latency Over 5S
+    additionalProperties: false
+    type: object
+    required:
+    - total_tokens
+    - total_requests
+    - estimated_cost
+    - average_latency_ms
+    - error_rate
+    title: ExecutiveChanges
+  ExecutiveOverviewResponse:
+    properties:
+      from:
+        type: string
+        format: date-time
+        title: From
+      to:
+        type: string
+        format: date-time
+        title: To
+      previous_from:
+        type: string
+        format: date-time
+        title: Previous From
+      generated_at:
+        type: string
+        format: date-time
+        title: Generated At
+      totals:
+        $ref: ../../openapi.yaml#/components/schemas/ExecutiveTotals
+      changes_percent:
+        $ref: ../../openapi.yaml#/components/schemas/ExecutiveChanges
+    additionalProperties: false
+    type: object
+    required:
+    - from
+    - to
+    - previous_from
+    - generated_at
+    - totals
+    - changes_percent
+    title: ExecutiveOverviewResponse
+  ExecutiveTotals:
+    properties:
+      total_tokens:
+        type: integer
+        minimum: 0.0
+        title: Total Tokens
+      cache_read_tokens:
+        type: integer
+        minimum: 0.0
+        title: Cache Read Tokens
+        default: 0
+      total_requests:
+        type: integer
+        minimum: 0.0
+        title: Total Requests
+      estimated_cost:
+        type: number
+        minimum: 0.0
+        title: Estimated Cost
+      average_latency_ms:
+        type: number
+        minimum: 0.0
+        title: Average Latency Ms
+      error_rate:
+        type: number
+        maximum: 100.0
+        minimum: 0.0
+        title: Error Rate
+      p50_latency_ms:
+        type: number
+        minimum: 0.0
+        title: P50 Latency Ms
+        default: 0.0
+      p95_latency_ms:
+        type: number
+        minimum: 0.0
+        title: P95 Latency Ms
+        default: 0.0
+      p99_latency_ms:
+        type: number
+        minimum: 0.0
+        title: P99 Latency Ms
+        default: 0.0
+      success_requests:
+        type: integer
+        minimum: 0.0
+        title: Success Requests
+        default: 0
+      client_error_requests:
+        type: integer
+        minimum: 0.0
+        title: Client Error Requests
+        default: 0
+      server_error_requests:
+        type: integer
+        minimum: 0.0
+        title: Server Error Requests
+        default: 0
+      latency_under_1s:
+        type: integer
+        minimum: 0.0
+        title: Latency Under 1S
+        default: 0
+      latency_1_to_2s:
+        type: integer
+        minimum: 0.0
+        title: Latency 1 To 2S
+        default: 0
+      latency_2_to_5s:
+        type: integer
+        minimum: 0.0
+        title: Latency 2 To 5S
+        default: 0
+      latency_over_5s:
+        type: integer
+        minimum: 0.0
+        title: Latency Over 5S
+        default: 0
+    additionalProperties: false
+    type: object
+    required:
+    - total_tokens
+    - total_requests
+    - estimated_cost
+    - average_latency_ms
+    - error_rate
+    title: ExecutiveTotals
+  GatewayApplicationOrganization:
+    properties:
+      organization_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Organization Id
+      organization_name:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Organization Name
+      department_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Department Id
+      department_name:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Department Name
+      person_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Person Id
+      person_name:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Person Name
+      projected:
+        type: boolean
+        title: Projected
+        default: false
+    additionalProperties: false
+    type: object
+    required:
+    - organization_id
+    - organization_name
+    title: GatewayApplicationOrganization
+  GatewayApplicationOrganizationUpdate:
+    properties:
+      organization_id:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+        title: Organization Id
+      department_id:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+        title: Department Id
+      person_id:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+        title: Person Id
+    additionalProperties: false
+    type: object
+    title: GatewayApplicationOrganizationUpdate
+  GatewayApplicationProvisioningDefaults:
+    properties:
+      monthly_token_limit:
+        type: integer
+        exclusiveMinimum: 0.0
+        title: Monthly Token Limit
+      tokens_per_minute:
+        type: integer
+        maximum: 2147483647.0
+        exclusiveMinimum: 0.0
+        title: Tokens Per Minute
+    additionalProperties: false
+    type: object
+    required:
+    - monthly_token_limit
+    - tokens_per_minute
+    title: GatewayApplicationProvisioningDefaults
+  GatewayKind:
+    type: string
+    enum:
+    - apim
+    - litellm
+    - direct
+    title: GatewayKind
+  GatewayProfile:
+    properties:
+      name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Name
+      implementation:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayKind
+      base_url:
+        anyOf:
+        - type: string
+          maxLength: 2000
+        - type: 'null'
+        title: Base Url
+      auth_type:
+        $ref: ../../openapi.yaml#/components/schemas/AuthType
+        default: none
+      credential:
+        type: 'null'
+        title: Credential
+      enabled:
+        type: boolean
+        title: Enabled
+        default: true
+      is_default:
+        type: boolean
+        title: Is Default
+        default: false
+      config:
+        additionalProperties: true
+        type: object
+        title: Config
+      id:
+        type: string
+        format: uuid
+        title: Id
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
+      updated_at:
+        type: string
+        format: date-time
+        title: Updated At
+      credential_configured:
+        type: boolean
+        title: Credential Configured
+      credential_hint:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Credential Hint
+    additionalProperties: false
+    type: object
+    required:
+    - name
+    - implementation
+    - id
+    - created_at
+    - updated_at
+    - credential_configured
+    - credential_hint
+    title: GatewayProfile
+  GatewayProfileWrite:
+    properties:
+      name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Name
+      implementation:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayKind
+      base_url:
+        anyOf:
+        - type: string
+          maxLength: 2000
+        - type: 'null'
+        title: Base Url
+      auth_type:
+        $ref: ../../openapi.yaml#/components/schemas/AuthType
+        default: none
+      credential:
+        anyOf:
+        - type: string
+          format: password
+          writeOnly: true
+        - type: 'null'
+        title: Credential
+      enabled:
+        type: boolean
+        title: Enabled
+        default: true
+      is_default:
+        type: boolean
+        title: Is Default
+        default: false
+      config:
+        additionalProperties: true
+        type: object
+        title: Config
+    additionalProperties: false
+    type: object
+    required:
+    - name
+    - implementation
+    title: GatewayProfileWrite
+  GatewayPublicationList:
+    properties:
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationView
+        type: array
+        title: Items
+    additionalProperties: false
+    type: object
+    required:
+    - items
+    title: GatewayPublicationList
+  GatewayPublicationRequestAccepted:
+    properties:
+      publication:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationView
+      status_url:
+        type: string
+        title: Status Url
+    additionalProperties: false
+    type: object
+    required:
+    - publication
+    - status_url
+    title: GatewayPublicationRequestAccepted
+  GatewayPublicationView:
+    properties:
+      retry_can_authorize_image_probes:
+        type: boolean
+        default: false
+        title: Retry Can Authorize Image Probes
+      id:
+        type: string
+        format: uuid
+        title: Id
+      gateway_profile_id:
+        type: string
+        format: uuid
+        title: Gateway Profile Id
+      target_deployments:
+        anyOf:
+        - items:
+            $ref: ../../openapi.yaml#/components/schemas/GatewayServingDeployment
+          type: array
+        - type: 'null'
+        title: Target Deployments
+      generation:
+        type: integer
+        title: Generation
+      publication_kind:
+        $ref: ../../openapi.yaml#/components/schemas/PublicationKind
+      model_key:
+        type: string
+        title: Model Key
+      display_name:
+        type: string
+        title: Display Name
+      status:
+        $ref: ../../openapi.yaml#/components/schemas/PublicationStatus
+      configuration_only:
+        type: boolean
+        title: Configuration Only
+        default: false
+      error_code:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Error Code
+      error_message:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Error Message
+      failure:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayPublicationFailure
+        - type: 'null'
+      authorization:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/GatewayAuthorizationRequirement
+        - $ref: ../../openapi.yaml#/components/schemas/DatabricksAuthorizationRequirement
+        - $ref: ../../openapi.yaml#/components/schemas/DatabricksOAuthAuthorizationRequirement
+        - type: 'null'
+        title: Authorization
+      retry_requires_credential:
+        type: boolean
+        title: Retry Requires Credential
+        default: false
+      credential_kind:
+        anyOf:
+        - type: string
+          enum:
+          - api_key
+          - oauth_m2m
+        - type: 'null'
+        title: Credential Kind
+      attempt_count:
+        type: integer
+        title: Attempt Count
+      created_by:
+        type: string
+        title: Created By
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
+      started_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Started At
+      completed_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Completed At
+      updated_at:
+        type: string
+        format: date-time
+        title: Updated At
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - gateway_profile_id
+    - generation
+    - publication_kind
+    - model_key
+    - display_name
+    - status
+    - error_code
+    - error_message
+    - attempt_count
+    - created_by
+    - created_at
+    - started_at
+    - completed_at
+    - updated_at
+    title: GatewayPublicationView
+  GatewayReleaseOperationKind:
+    type: string
+    enum:
+    - rollback
+    - integrity_check
+    - gc_plan
+    - application_sync
+    - application_provision
+    - target_inventory_sync
+    - apim_onboarding
+    - self_hosted_gateway_provision
+    title: GatewayReleaseOperationKind
+  GatewayReleaseOperationStatus:
+    type: string
+    enum:
+    - queued
+    - validating_dependencies
+    - preflight_probing
+    - promoting
+    - verifying_readback
+    - post_promotion_probing
+    - restoring
+    - succeeded
+    - failed
+    - restored
+    title: GatewayReleaseOperationStatus
+  GatewayReleaseRole:
+    type: string
+    enum:
+    - current
+    - immediate_rollback
+    - pinned
+    - superseded
+    - failed
+    - expired
+    - in_progress
+    - rolled_back
+    title: GatewayReleaseRole
+  GatewayServingDeployment:
+    properties:
+      deployment_id:
+        type: string
+        format: uuid
+        title: Deployment Id
+      native_gateway_id:
+        type: string
+        maxLength: 80
+        minLength: 1
+        title: Native Gateway Id
+      kind:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayDeploymentKind
+      endpoint_url:
+        type: string
+        maxLength: 2083
+        minLength: 1
+        format: uri
+        title: Endpoint Url
+      release_gate:
+        $ref: ../../openapi.yaml#/components/schemas/GatewayReleaseGate
+    additionalProperties: false
+    type: object
+    required:
+    - deployment_id
+    - native_gateway_id
+    - kind
+    - endpoint_url
+    - release_gate
+    title: GatewayServingDeployment
+  HTTPValidationError:
+    properties:
+      detail:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ValidationError
+        type: array
+        title: Detail
+    type: object
+    title: HTTPValidationError
+  HealthStatus:
+    type: string
+    enum:
+    - unknown
+    - available
+    - unavailable
+    title: HealthStatus
+  InvocationMetadata:
+    properties:
+      organization_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Organization Id
+      organization:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Organization
+      department_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Department Id
+      department:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Department
+      project_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Project Id
+      project:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Project
+      agent_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Agent Id
+      agent:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Agent
+      user_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: User Id
+      user:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: User
+      workflow:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Workflow
+      model_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Model Id
+      model:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Model
+      runtime:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Runtime
+      request_source:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Request Source
+      usage_domain:
+        type: string
+        enum:
+        - apim
+        - github_copilot
+        title: Usage Domain
+        default: apim
+      run_id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Run Id
+      turn_index:
+        type: integer
+        minimum: 1.0
+        title: Turn Index
+        default: 1
+    additionalProperties: false
+    type: object
+    required:
+    - organization_id
+    - organization
+    - department_id
+    - department
+    - project_id
+    - project
+    - agent_id
+    - agent
+    - user_id
+    - user
+    - workflow
+    - model_id
+    - model
+    - runtime
+    - request_source
+    - run_id
+    title: InvocationMetadata
+  InvocationUsage:
+    properties:
+      input_tokens:
+        type: integer
+        minimum: 0.0
+        title: Input Tokens
+      cached_tokens:
+        type: integer
+        minimum: 0.0
+        title: Cached Tokens
+      cache_write_tokens:
+        type: integer
+        minimum: 0.0
+        title: Cache Write Tokens
+        default: 0
+      output_tokens:
+        type: integer
+        minimum: 0.0
+        title: Output Tokens
+      estimated:
+        type: boolean
+        title: Estimated
+    additionalProperties: false
+    type: object
+    required:
+    - input_tokens
+    - cached_tokens
+    - output_tokens
+    - estimated
+    title: InvocationUsage
+  JsonValue: {}
+  LedgerAdmissionReceipt-Input:
+    properties:
+      identity:
+        $ref: ../../openapi.yaml#/components/schemas/LedgerAttemptIdentity
+      epoch:
+        type: string
+        format: uuid
+        title: Epoch
+      reserved_tokens:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 1.0
+        title: Reserved Tokens
+      budget_mode:
+        type: string
+        enum:
+        - tokens
+        - usd
+        title: Budget Mode
+        default: tokens
+      reserved_usd:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*(?:\d{0,16}|(?=[\d.]{1,31}0*$)\d{0,16}\.\d{0,14}0*$)
+        - type: 'null'
+        title: Reserved Usd
+      price_snapshot:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/BudgetPriceProjection
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - identity
+    - epoch
+    - reserved_tokens
+    title: LedgerAdmissionReceipt
+  LedgerAdmissionReceipt-Output:
+    properties:
+      identity:
+        $ref: ../../openapi.yaml#/components/schemas/LedgerAttemptIdentity
+      epoch:
+        type: string
+        format: uuid
+        title: Epoch
+      reserved_tokens:
+        type: integer
+        maximum: 9.223372036854776e+18
+        minimum: 1.0
+        title: Reserved Tokens
+      budget_mode:
+        type: string
+        enum:
+        - tokens
+        - usd
+        title: Budget Mode
+        default: tokens
+      reserved_usd:
+        anyOf:
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*(?:\d{0,16}|(?=[\d.]{1,31}0*$)\d{0,16}\.\d{0,14}0*$)
+        - type: 'null'
+        title: Reserved Usd
+      price_snapshot:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/BudgetPriceProjection
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - identity
+    - epoch
+    - reserved_tokens
+    title: LedgerAdmissionReceipt
+  ManagedModel:
+    properties:
+      provider_id:
+        type: string
+        format: uuid
+        title: Provider Id
+      runtime_id:
+        type: string
+        format: uuid
+        title: Runtime Id
+      model_key:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Model Key
+      display_name:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Display Name
+      family_key:
+        $ref: ../../openapi.yaml#/components/schemas/ModelFamilyKey
+        default: generic
+      upstream_model_id:
+        anyOf:
+        - type: string
+          maxLength: 500
+          minLength: 1
+        - type: 'null'
+        title: Upstream Model Id
+      assignment_required:
+        type: boolean
+        title: Assignment Required
+        default: false
+      enabled:
+        type: boolean
+        title: Enabled
+        default: true
+      is_default:
+        type: boolean
+        title: Is Default
+        default: false
+      capabilities:
+        items:
+          type: string
+          enum:
+          - chat
+          - tools
+          - vision
+          - reasoning
+          - streaming
+          - embeddings
+          - image_generation
+          - decision
+        type: array
+        title: Capabilities
+      context_window:
+        anyOf:
+        - type: integer
+          minimum: 1.0
+        - type: 'null'
+        title: Context Window
+      input_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Input Cost Per Million
+      output_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Output Cost Per Million
+      cached_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Cached Cost Per Million
+      cache_write_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Cache Write Cost Per Million
+      allowed_roles:
+        items:
+          type: string
+        type: array
+        title: Allowed Roles
+      price_source:
+        $ref: ../../openapi.yaml#/components/schemas/PriceSource
+        default: manual
+      price_reference:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+        title: Price Reference
+      context_price_references:
+        items:
+          type: string
+        type: array
+        maxItems: 32
+        title: Context Price References
+      context_price_refresh:
+        type: boolean
+        title: Context Price Refresh
+        default: false
+      context_price_rule:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ContextPriceRule
+        - type: 'null'
+      price_discount_percent:
+        anyOf:
+        - type: number
+          maximum: 100.0
+          exclusiveMinimum: 0.0
+        - type: 'null'
+        title: Price Discount Percent
+      id:
+        type: string
+        format: uuid
+        title: Id
+      provider_name:
+        type: string
+        title: Provider Name
+      runtime_name:
+        type: string
+        title: Runtime Name
+      publication_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Publication Id
+      image_profile:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ImageGenerationProfile
+        - type: 'null'
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
+      updated_at:
+        type: string
+        format: date-time
+        title: Updated At
+      list_input_cost_per_million:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: List Input Cost Per Million
+      list_output_cost_per_million:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: List Output Cost Per Million
+      list_cached_cost_per_million:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: List Cached Cost Per Million
+      list_cache_write_cost_per_million:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: List Cache Write Cost Per Million
+      price_synced_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Price Synced At
+      price_sync_status:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/PriceSyncStatus
+        - type: 'null'
+      price_sync_message:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Price Sync Message
+      pending_list_price:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/PendingListPrice
+        - type: 'null'
+      context_price_tiers:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/StoredContextPriceTier
+        type: array
+        maxItems: 32
+        title: Context Price Tiers
+      pending_context_price_tiers:
+        anyOf:
+        - items:
+            $ref: ../../openapi.yaml#/components/schemas/StoredContextPriceTier
+          type: array
+        - type: 'null'
+        title: Pending Context Price Tiers
+      effective_discount_percent:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Effective Discount Percent
+    additionalProperties: false
+    type: object
+    required:
+    - provider_id
+    - runtime_id
+    - model_key
+    - display_name
+    - id
+    - provider_name
+    - runtime_name
+    - created_at
+    - updated_at
+    title: ManagedModel
+  ManagedModelWrite:
+    properties:
+      provider_id:
+        type: string
+        format: uuid
+        title: Provider Id
+      runtime_id:
+        type: string
+        format: uuid
+        title: Runtime Id
+      model_key:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Model Key
+      display_name:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Display Name
+      family_key:
+        $ref: ../../openapi.yaml#/components/schemas/ModelFamilyKey
+        default: generic
+      upstream_model_id:
+        anyOf:
+        - type: string
+          maxLength: 500
+          minLength: 1
+        - type: 'null'
+        title: Upstream Model Id
+      assignment_required:
+        type: boolean
+        title: Assignment Required
+        default: false
+      enabled:
+        type: boolean
+        title: Enabled
+        default: true
+      is_default:
+        type: boolean
+        title: Is Default
+        default: false
+      capabilities:
+        items:
+          type: string
+          enum:
+          - chat
+          - tools
+          - vision
+          - reasoning
+          - streaming
+          - embeddings
+          - image_generation
+          - decision
+        type: array
+        title: Capabilities
+      context_window:
+        anyOf:
+        - type: integer
+          minimum: 1.0
+        - type: 'null'
+        title: Context Window
+      input_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Input Cost Per Million
+      output_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Output Cost Per Million
+      cached_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Cached Cost Per Million
+      cache_write_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Cache Write Cost Per Million
+      allowed_roles:
+        items:
+          type: string
+        type: array
+        title: Allowed Roles
+      price_source:
+        $ref: ../../openapi.yaml#/components/schemas/PriceSource
+        default: manual
+      price_reference:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+        title: Price Reference
+      context_price_references:
+        items:
+          type: string
+        type: array
+        maxItems: 32
+        title: Context Price References
+      context_price_refresh:
+        type: boolean
+        title: Context Price Refresh
+        default: false
+      context_price_rule:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ContextPriceRule
+        - type: 'null'
+      price_discount_percent:
+        anyOf:
+        - type: number
+          maximum: 100.0
+          exclusiveMinimum: 0.0
+        - type: 'null'
+        title: Price Discount Percent
+    additionalProperties: false
+    type: object
+    required:
+    - provider_id
+    - runtime_id
+    - model_key
+    - display_name
+    title: ManagedModelWrite
+  ModelCreateTarget:
+    properties:
+      operation:
+        type: string
+        enum:
+        - chat
+        - image_generation
+        - decision
+        title: Operation
+        default: chat
+      image_configuration:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ImageGenerationLimits
+        - type: 'null'
+      deployment_name:
+        anyOf:
+        - type: string
+          maxLength: 500
+          minLength: 1
+        - type: 'null'
+        title: Deployment Name
+      model_key:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+          pattern: ^[a-zA-Z0-9._:-]+$
+        - type: 'null'
+        title: Model Key
+      display_name:
+        anyOf:
+        - type: string
+          maxLength: 255
+          minLength: 1
+        - type: 'null'
+        title: Display Name
+      upstream_model_id:
+        anyOf:
+        - type: string
+          maxLength: 500
+          minLength: 1
+        - type: 'null'
+        title: Upstream Model Id
+      context_window:
+        anyOf:
+        - type: integer
+          minimum: 1.0
+        - type: 'null'
+        title: Context Window
+      input_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Input Cost Per Million
+      output_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Output Cost Per Million
+      cached_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Cached Cost Per Million
+      cache_write_cost_per_million:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Cache Write Cost Per Million
+      price_source:
+        $ref: ../../openapi.yaml#/components/schemas/PriceSource
+        default: manual
+      price_reference:
+        anyOf:
+        - type: string
+          maxLength: 1000
+        - type: 'null'
+        title: Price Reference
+      price_discount_percent:
+        anyOf:
+        - type: number
+          maximum: 100.0
+          exclusiveMinimum: 0.0
+        - type: 'null'
+        title: Price Discount Percent
+      context_price_references:
+        items:
+          type: string
+        type: array
+        maxItems: 32
+        title: Context Price References
+      context_price_rule:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ContextPriceRule
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    title: ModelCreateTarget
+  ModelFamilyKey:
+    type: string
+    enum:
+    - generic
+    - claude
+    - copilot
+    - openai
+    title: ModelFamilyKey
+  ModelInvocationRequest:
+    properties:
+      metadata:
+        $ref: ../../openapi.yaml#/components/schemas/InvocationMetadata
+      runtime_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Runtime Id
+      model_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Model Id
+      gateway_profile_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Profile Id
+      gateway_deployment_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Deployment Id
+      messages:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ChatMessage
+        type: array
+        maxItems: 100
+        minItems: 1
+        title: Messages
+      tools:
+        anyOf:
+        - items:
+            $ref: ../../openapi.yaml#/components/schemas/ToolDefinition
+          type: array
+          maxItems: 32
+        - type: 'null'
+        title: Tools
+      temperature:
+        anyOf:
+        - type: number
+          maximum: 2.0
+          minimum: 0.0
+        - type: 'null'
+        title: Temperature
+      max_output_tokens:
+        anyOf:
+        - type: integer
+          maximum: 1000000.0
+          minimum: 1.0
+        - type: 'null'
+        title: Max Output Tokens
+      response_format:
+        anyOf:
+        - type: string
+          const: json_object
+        - type: 'null'
+        title: Response Format
+      stream:
+        type: boolean
+        title: Stream
+        default: false
+    additionalProperties: false
+    type: object
+    required:
+    - metadata
+    - messages
+    title: ModelInvocationRequest
+  ModelInvocationResponse:
+    properties:
+      request_id:
+        type: string
+        title: Request Id
+      correlation_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Correlation Id
+      upstream_request_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Upstream Request Id
+      content:
+        type: string
+        title: Content
+      tool_calls:
+        anyOf:
+        - items:
+            $ref: ../../openapi.yaml#/components/schemas/ToolCall
+          type: array
+        - type: 'null'
+        title: Tool Calls
+      provider:
+        type: string
+        title: Provider
+      runtime:
+        type: string
+        title: Runtime
+      model:
+        type: string
+        title: Model
+      gateway:
+        type: string
+        title: Gateway
+      gateway_profile_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Profile Id
+      gateway_deployment_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Deployment Id
+      native_gateway_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Native Gateway Id
+      latency_ms:
+        type: integer
+        minimum: 0.0
+        title: Latency Ms
+      usage:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/InvocationUsage
+        - type: 'null'
+      estimated_cost:
+        anyOf:
+        - type: number
+          minimum: 0.0
+        - type: 'null'
+        title: Estimated Cost
+      selected_model_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Selected Model Id
+      selected_model_name:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Selected Model Name
+    additionalProperties: false
+    type: object
+    required:
+    - request_id
+    - content
+    - provider
+    - runtime
+    - model
+    - gateway
+    - latency_ms
+    - usage
+    title: ModelInvocationResponse
+  ModelPrice:
+    properties:
+      input_price_per_million:
+        type: number
+        minimum: 0.0
+        title: Input Price Per Million
+      cached_price_per_million:
+        type: number
+        minimum: 0.0
+        title: Cached Price Per Million
+      cache_write_price_per_million:
+        type: number
+        minimum: 0.0
+        title: Cache Write Price Per Million
+      output_price_per_million:
+        type: number
+        minimum: 0.0
+        title: Output Price Per Million
+      context_tiers:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ModelPriceTier
+        type: array
+        maxItems: 32
+        title: Context Tiers
+      selected_tier:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Selected Tier
+    additionalProperties: false
+    type: object
+    required:
+    - input_price_per_million
+    - cached_price_per_million
+    - cache_write_price_per_million
+    - output_price_per_million
+    title: ModelPrice
+    description: Registry unit prices in USD per million tokens.
+  ModelPriceTier:
+    properties:
+      key:
+        type: string
+        minLength: 1
+        title: Key
+      min_input_tokens:
+        type: integer
+        minimum: 0.0
+        title: Min Input Tokens
+      max_input_tokens:
+        anyOf:
+        - type: integer
+          minimum: 0.0
+        - type: 'null'
+        title: Max Input Tokens
+      input_price_per_million:
+        type: number
+        minimum: 0.0
+        title: Input Price Per Million
+      cached_price_per_million:
+        type: number
+        minimum: 0.0
+        title: Cached Price Per Million
+      cache_write_price_per_million:
+        type: number
+        minimum: 0.0
+        title: Cache Write Price Per Million
+      output_price_per_million:
+        type: number
+        minimum: 0.0
+        title: Output Price Per Million
+      input_range_source:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/PriceCatalogRuleSource
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - key
+    - min_input_tokens
+    - input_price_per_million
+    - cached_price_per_million
+    - cache_write_price_per_million
+    - output_price_per_million
+    title: ModelPriceTier
+  ModelVendorKey:
+    type: string
+    enum:
+    - generic
+    - kimi
+    - deepseek
+    - openai
+    - anthropic
+    title: ModelVendorKey
+  NoulQuestion:
+    properties:
+      type:
+        type: string
+        const: noul
+        title: Type
+      instructions:
+        type: string
+        minLength: 1
+        title: Instructions
+      criteria:
+        anyOf:
+        - additionalProperties:
+            type: string
+          propertyNames:
+            enum:
+            - 'true'
+            - 'false'
+          type: object
+        - type: 'null'
+        title: Criteria
+    additionalProperties: false
+    type: object
+    required:
+    - type
+    - instructions
+    title: NoulQuestion
+  PendingListPrice:
+    properties:
+      input:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Input
+      output:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Output
+      cached:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Cached
+      cache_write:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Cache Write
+    additionalProperties: false
+    type: object
+    title: PendingListPrice
+    description: A published price waiting for a person, in the same four buckets as the accepted one.
+  PriceCatalogContextTier:
+    properties:
+      group_key:
+        type: string
+        minLength: 1
+        title: Group Key
+      model_label:
+        type: string
+        minLength: 1
+        title: Model Label
+      service_tier:
+        type: string
+        title: Service Tier
+        default: ''
+      key:
+        type: string
+        minLength: 1
+        title: Key
+      label:
+        type: string
+        minLength: 1
+        title: Label
+      order:
+        type: integer
+        minimum: 0.0
+        title: Order
+      input_range:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/PriceCatalogInputRange
+        - type: 'null'
+      input_range_source:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/PriceCatalogRuleSource
+        - type: 'null'
+    additionalProperties: false
+    type: object
+    required:
+    - group_key
+    - model_label
+    - key
+    - label
+    - order
+    title: PriceCatalogContextTier
+  PriceCatalogInputRange:
+    properties:
+      min_input_tokens:
+        type: integer
+        minimum: 0.0
+        title: Min Input Tokens
+      max_input_tokens:
+        anyOf:
+        - type: integer
+          minimum: 0.0
+        - type: 'null'
+        title: Max Input Tokens
+    additionalProperties: false
+    type: object
+    required:
+    - min_input_tokens
+    title: PriceCatalogInputRange
+  PriceCatalogModel:
+    properties:
+      key:
+        type: string
+        title: Key
+      label:
+        type: string
+        title: Label
+      product:
+        type: string
+        title: Product
+      source:
+        $ref: ../../openapi.yaml#/components/schemas/PriceSource
+      context_tier:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/PriceCatalogContextTier
+        - type: 'null'
+      text_to_image:
+        type: boolean
+        title: Text To Image
+        default: false
+    additionalProperties: false
+    type: object
+    required:
+    - key
+    - label
+    - product
+    - source
+    title: PriceCatalogModel
+    description: One priceable model in a vendor's published list, named the way that vendor names it.
+  PriceCatalogModelsResponse:
+    properties:
+      models:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/PriceCatalogModel
+        type: array
+        title: Models
+      unavailable:
+        items:
+          type: string
+        type: array
+        title: Unavailable
+    additionalProperties: false
+    type: object
+    required:
+    - models
+    title: PriceCatalogModelsResponse
+  PriceCatalogOption:
+    properties:
+      reference:
+        type: string
+        title: Reference
+      deployment:
+        type: string
+        title: Deployment
+      regions:
+        items:
+          type: string
+        type: array
+        title: Regions
+      references_by_region:
+        additionalProperties:
+          type: string
+        type: object
+        title: References By Region
+      region_required:
+        type: boolean
+        title: Region Required
+        default: false
+      input_per_million:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Input Per Million
+      output_per_million:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Output Per Million
+      cached_per_million:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Cached Per Million
+      cache_write_per_million:
+        anyOf:
+        - type: number
+        - type: 'null'
+        title: Cache Write Per Million
+    additionalProperties: false
+    type: object
+    required:
+    - reference
+    - deployment
+    title: PriceCatalogOption
+    description: 'How one model is priced under one deployment shape.
+
+
+      `regions` lists every region charging exactly these rates. `region_required` is false when
+
+      the shape charges one figure everywhere -- Global always does -- because asking for a region
+
+      that cannot change the answer is asking someone to guess at nothing.'
+  PriceCatalogOptionsResponse:
+    properties:
+      model_entry:
+        $ref: ../../openapi.yaml#/components/schemas/PriceCatalogModel
+      options:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/PriceCatalogOption
+        type: array
+        title: Options
+      complete:
+        type: boolean
+        title: Complete
+        default: true
+      unreadable:
+        items:
+          type: string
+        type: array
+        title: Unreadable
+      other_meters:
+        items:
+          type: string
+        type: array
+        title: Other Meters
+      note:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Note
+    additionalProperties: false
+    type: object
+    required:
+    - model_entry
+    title: PriceCatalogOptionsResponse
+  PriceCatalogRuleSource:
+    properties:
+      rule_id:
+        type: string
+        minLength: 1
+        title: Rule Id
+      url:
+        anyOf:
+        - type: string
+          pattern: ^https://
+        - type: 'null'
+        title: Url
+      revision:
+        type: string
+        minLength: 1
+        title: Revision
+      verified_on:
+        anyOf:
+        - type: string
+          pattern: ^\d{4}-\d{2}-\d{2}$
+        - type: 'null'
+        title: Verified On
+      origin:
+        type: string
+        enum:
+        - official
+        - reference
+        - custom
+        title: Origin
+        default: official
+      configured_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Configured At
+      note:
+        anyOf:
+        - type: string
+          maxLength: 500
+        - type: 'null'
+        title: Note
+    additionalProperties: false
+    type: object
+    required:
+    - rule_id
+    - revision
+    title: PriceCatalogRuleSource
+  PriceSource:
+    type: string
+    enum:
+    - manual
+    - azure_retail
+    - anthropic
+    title: PriceSource
+    description: 'Where a model''s charged rates come from.
+
+
+      `MANUAL` is what every model did before this existed: a person typed four numbers and they
+
+      stay until that person changes them. The other two derive the rates as list price times
+
+      discount and keep them current, which only works because the discount is stored separately
+
+      -- a published list price is a fact, the discount is a contract term.'
+  PriceSyncDetail:
+    properties:
+      model_id:
+        type: string
+        format: uuid
+        title: Model Id
+      model_key:
+        type: string
+        title: Model Key
+      status:
+        $ref: ../../openapi.yaml#/components/schemas/PriceSyncStatus
+      message:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Message
+    additionalProperties: false
+    type: object
+    required:
+    - model_id
+    - model_key
+    - status
+    title: PriceSyncDetail
+  PriceSyncRequest:
+    properties:
+      model_ids:
+        anyOf:
+        - items:
+            type: string
+            format: uuid
+          type: array
+        - type: 'null'
+        title: Model Ids
+    additionalProperties: false
+    type: object
+    title: PriceSyncRequest
+    description: Which models to sync. Omitting the list syncs everything that follows a list price.
+  PriceSyncResponse:
+    properties:
+      considered:
+        type: integer
+        title: Considered
+      updated:
+        type: integer
+        title: Updated
+      unmapped:
+        type: integer
+        title: Unmapped
+      review_needed:
+        type: integer
+        title: Review Needed
+      stale:
+        type: integer
+        title: Stale
+      superseded:
+        type: integer
+        title: Superseded
+        default: 0
+      details:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/PriceSyncDetail
+        type: array
+        title: Details
+      registry:
+        $ref: ../../openapi.yaml#/components/schemas/RegistryResponse
+    additionalProperties: false
+    type: object
+    required:
+    - considered
+    - updated
+    - unmapped
+    - review_needed
+    - stale
+    - details
+    - registry
+    title: PriceSyncResponse
+    description: 'What a sync run did, reported per outcome rather than as a single count.
+
+
+      `updated` counts rows whose charged rates changed. The rest is why the others did not, which
+
+      is the part worth reading: a sync that silently prices nothing looks identical to one that
+
+      prices everything unless the skips are named. The refreshed registry rides along so the
+
+      dashboard can show the new rates without a second round trip.'
+  PriceSyncStatus:
+    type: string
+    enum:
+    - ok
+    - unmapped
+    - stale
+    - review_needed
+    - superseded
+    title: PriceSyncStatus
+  Profile:
+    properties:
+      id:
+        type: string
+        title: Id
+      email:
+        type: string
+        title: Email
+      name:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Name
+      role:
+        type: string
+        enum:
+        - owner
+        - member
+        title: Role
+      method:
+        type: string
+        enum:
+        - password
+        - entra
+        title: Method
+      session_expires_at:
+        type: string
+        format: date-time
+        title: Session Expires At
+    type: object
+    required:
+    - id
+    - email
+    - name
+    - role
+    - method
+    - session_expires_at
+    title: Profile
+  Provider:
+    properties:
+      name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Name
+      provider_kind:
+        $ref: ../../openapi.yaml#/components/schemas/ProviderKind
+      endpoint_url:
+        anyOf:
+        - type: string
+          maxLength: 2000
+        - type: 'null'
+        title: Endpoint Url
+      auth_type:
+        $ref: ../../openapi.yaml#/components/schemas/AuthType
+        default: none
+      credential:
+        type: 'null'
+        title: Credential
+      enabled:
+        type: boolean
+        title: Enabled
+        default: true
+      brand_key:
+        $ref: ../../openapi.yaml#/components/schemas/BrandKey
+        default: generic
+      config:
+        additionalProperties: true
+        type: object
+        title: Config
+      id:
+        type: string
+        format: uuid
+        title: Id
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
+      updated_at:
+        type: string
+        format: date-time
+        title: Updated At
+      credential_configured:
+        type: boolean
+        title: Credential Configured
+      credential_hint:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Credential Hint
+    additionalProperties: false
+    type: object
+    required:
+    - name
+    - provider_kind
+    - id
+    - created_at
+    - updated_at
+    - credential_configured
+    - credential_hint
+    title: Provider
+  ProviderKind:
+    type: string
+    enum:
+    - github
+    - anthropic
+    - microsoft_foundry
+    - openai_compatible
+    title: ProviderKind
+  ProviderTarget:
+    properties:
+      existing_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Existing Id
+      template:
+        anyOf:
+        - type: string
+          enum:
+          - amazon_bedrock
+          - microsoft_foundry
+          - openai_compatible
+          - azure_databricks
+        - type: 'null'
+        title: Template
+    additionalProperties: false
+    type: object
+    title: ProviderTarget
+  ProviderWrite:
+    properties:
+      name:
+        type: string
+        maxLength: 120
+        minLength: 1
+        title: Name
+      provider_kind:
+        $ref: ../../openapi.yaml#/components/schemas/ProviderKind
+      endpoint_url:
+        anyOf:
+        - type: string
+          maxLength: 2000
+        - type: 'null'
+        title: Endpoint Url
+      auth_type:
+        $ref: ../../openapi.yaml#/components/schemas/AuthType
+        default: none
+      credential:
+        anyOf:
+        - type: string
+          format: password
+          writeOnly: true
+        - type: 'null'
+        title: Credential
+      enabled:
+        type: boolean
+        title: Enabled
+        default: true
+      brand_key:
+        $ref: ../../openapi.yaml#/components/schemas/BrandKey
+        default: generic
+      config:
+        additionalProperties: true
+        type: object
+        title: Config
+    additionalProperties: false
+    type: object
+    required:
+    - name
+    - provider_kind
+    title: ProviderWrite
+  PublicationKind:
+    type: string
+    enum:
+    - model_add
+    - model_remove
+    - credential_rotation
+    - route_reconcile
+    title: PublicationKind
+  PublicationStatus:
+    type: string
+    enum:
+    - queued
+    - validating
+    - provisioning
+    - building_revision
+    - verifying
+    - awaiting_authorization
+    - promoting
+    - active
+    - failed
+    - superseded
+    - rolling_back
+    - rolled_back
+    title: PublicationStatus
+  RegistryResponse:
+    properties:
+      gateway_name_edit_supported:
+        type: boolean
+        title: Gateway Name Edit Supported
+        default: true
+      runtime_diagnostics_supported:
+        type: boolean
+        title: Runtime Diagnostics Supported
+        default: false
+      failed_publication_archive_supported:
+        type: boolean
+        title: Failed Publication Archive Supported
+        default: false
+      providers:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/Provider
+        type: array
+        title: Providers
+      gateways:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/GatewayProfile
+        type: array
+        title: Gateways
+      runtimes:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/Runtime
+        type: array
+        title: Runtimes
+      models:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/ManagedModel
+        type: array
+        title: Models
+      backend_pool_session_affinity_supported:
+        type: boolean
+        title: Backend Pool Session Affinity Supported
+        default: false
+      databricks_connections_supported:
+        type: boolean
+        title: Databricks Connections Supported
+        default: false
+      databricks_oauth_supported:
+        type: boolean
+        title: Databricks Oauth Supported
+        default: false
+      decision_supported:
+        type: boolean
+        title: Decision Supported
+        default: false
+      image_generation_supported:
+        type: boolean
+        title: Image Generation Supported
+        default: false
+      image_configuration_defaults:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ImageGenerationLimits
+        - type: 'null'
+      image_configuration_schema_version:
+        type: integer
+        const: 4
+        title: Image Configuration Schema Version
+        default: 4
+      apim_target_topology_available:
+        type: boolean
+        title: Apim Target Topology Available
+        default: false
+      apim_target_topology:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ApimTargetTopologyList
+        - type: 'null'
+      explicit_gateway_selection_supported:
+        type: boolean
+        title: Explicit Gateway Selection Supported
+        default: false
+      self_hosted_gateway_enabled:
+        type: boolean
+        title: Self Hosted Gateway Enabled
+        default: false
+      multi_apim_target_rollout_enabled:
+        type: boolean
+        title: Multi Apim Target Rollout Enabled
+        default: false
+      context_pricing_supported:
+        type: boolean
+        title: Context Pricing Supported
+        default: false
+      context_price_rules_supported:
+        type: boolean
+        title: Context Price Rules Supported
+        default: false
+    additionalProperties: false
+    type: object
+    required:
+    - providers
+    - gateways
+    - runtimes
+    - models
+    title: RegistryResponse
+  Runtime:
+    properties:
+      provider_id:
+        type: string
+        format: uuid
+        title: Provider Id
+      gateway_profile_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Profile Id
+      name:
+        type: string
+        maxLength: 160
+        minLength: 1
+        title: Name
+      runtime_kind:
+        $ref: ../../openapi.yaml#/components/schemas/RuntimeKind
+      enabled:
+        type: boolean
+        title: Enabled
+        default: true
+      is_default:
+        type: boolean
+        title: Is Default
+        default: false
+      brand_key:
+        $ref: ../../openapi.yaml#/components/schemas/BrandKey
+        default: generic
+      config:
+        additionalProperties: true
+        type: object
+        title: Config
+      allowed_roles:
+        items:
+          type: string
+        type: array
+        title: Allowed Roles
+      price_discount_percent:
+        anyOf:
+        - type: number
+          maximum: 100.0
+          exclusiveMinimum: 0.0
+        - type: 'null'
+        title: Price Discount Percent
+      id:
+        type: string
+        format: uuid
+        title: Id
+      provider_name:
+        type: string
+        title: Provider Name
+      gateway_name:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Gateway Name
+      health_status:
+        $ref: ../../openapi.yaml#/components/schemas/HealthStatus
+      health_message:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Health Message
+      last_checked_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Last Checked At
+      diagnostic:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/RuntimeHealth
+        - type: 'null'
+      created_at:
+        type: string
+        format: date-time
+        title: Created At
+      updated_at:
+        type: string
+        format: date-time
+        title: Updated At
+    additionalProperties: false
+    type: object
+    required:
+    - provider_id
+    - name
+    - runtime_kind
+    - id
+    - provider_name
+    - gateway_name
+    - health_status
+    - health_message
+    - last_checked_at
+    - created_at
+    - updated_at
+    title: Runtime
+  RuntimeKind:
+    type: string
+    enum:
+    - copilot_cli
+    - foundry
+    - openai_compatible
+    title: RuntimeKind
+  RuntimeTarget:
+    properties:
+      existing_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Existing Id
+      bedrock_runtime_url:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        title: Bedrock Runtime Url
+      foundry_project_endpoint:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        title: Foundry Project Endpoint
+      foundry_inference_endpoint:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        title: Foundry Inference Endpoint
+      openai_base_url:
+        anyOf:
+        - type: string
+          maxLength: 2083
+          minLength: 1
+          format: uri
+        - type: 'null'
+        title: Openai Base Url
+      model_vendor:
+        anyOf:
+        - $ref: ../../openapi.yaml#/components/schemas/ModelVendorKey
+        - type: 'null'
+      api_key:
+        anyOf:
+        - type: string
+          maxLength: 4096
+          minLength: 1
+          format: password
+          writeOnly: true
+        - type: 'null'
+        title: Api Key
+      oauth_client_secret:
+        anyOf:
+        - type: string
+          maxLength: 4096
+          minLength: 1
+          format: password
+          writeOnly: true
+        - type: 'null'
+        title: Oauth Client Secret
+    additionalProperties: false
+    type: object
+    title: RuntimeTarget
+  RuntimeWrite:
+    properties:
+      provider_id:
+        type: string
+        format: uuid
+        title: Provider Id
+      gateway_profile_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Gateway Profile Id
+      name:
+        type: string
+        maxLength: 160
+        minLength: 1
+        title: Name
+      runtime_kind:
+        $ref: ../../openapi.yaml#/components/schemas/RuntimeKind
+      enabled:
+        type: boolean
+        title: Enabled
+        default: true
+      is_default:
+        type: boolean
+        title: Is Default
+        default: false
+      brand_key:
+        $ref: ../../openapi.yaml#/components/schemas/BrandKey
+        default: generic
+      config:
+        additionalProperties: true
+        type: object
+        title: Config
+      allowed_roles:
+        items:
+          type: string
+        type: array
+        title: Allowed Roles
+      price_discount_percent:
+        anyOf:
+        - type: number
+          maximum: 100.0
+          exclusiveMinimum: 0.0
+        - type: 'null'
+        title: Price Discount Percent
+    additionalProperties: false
+    type: object
+    required:
+    - provider_id
+    - name
+    - runtime_kind
+    title: RuntimeWrite
+  ScoreQuestion:
+    properties:
+      type:
+        type: string
+        const: score
+        title: Type
+      instructions:
+        type: string
+        minLength: 1
+        title: Instructions
+      criteria:
+        items:
+          type: string
+          minLength: 1
+        type: array
+        minItems: 2
+        title: Criteria
+    additionalProperties: false
+    type: object
+    required:
+    - type
+    - instructions
+    - criteria
+    title: ScoreQuestion
+  ToolCall:
+    properties:
+      id:
+        type: string
+        maxLength: 255
+        minLength: 1
+        title: Id
+      type:
+        type: string
+        const: function
+        title: Type
+        default: function
+      function:
+        $ref: ../../openapi.yaml#/components/schemas/ToolFunctionCall
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - function
+    title: ToolCall
+  ToolDefinition:
+    properties:
+      type:
+        type: string
+        const: function
+        title: Type
+        default: function
+      function:
+        $ref: ../../openapi.yaml#/components/schemas/ToolFunctionDefinition
+    additionalProperties: false
+    type: object
+    required:
+    - function
+    title: ToolDefinition
+  ToolFunctionCall:
+    properties:
+      name:
+        type: string
+        maxLength: 64
+        minLength: 1
+        title: Name
+      arguments:
+        type: string
+        maxLength: 100000
+        title: Arguments
+        default: '{}'
+    additionalProperties: false
+    type: object
+    required:
+    - name
+    title: ToolFunctionCall
+  ToolFunctionDefinition:
+    properties:
+      name:
+        type: string
+        maxLength: 64
+        minLength: 1
+        title: Name
+      description:
+        type: string
+        maxLength: 4000
+        minLength: 1
+        title: Description
+      parameters:
+        additionalProperties: true
+        type: object
+        title: Parameters
+    additionalProperties: false
+    type: object
+    required:
+    - name
+    - description
+    - parameters
+    title: ToolFunctionDefinition
+  TrafficExecutionItem:
+    properties:
+      sequence:
+        type: integer
+        minimum: 1.0
+        title: Sequence
+      model_id:
+        type: string
+        format: uuid
+        title: Model Id
+      request_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Request Id
+      correlation_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Correlation Id
+      status_code:
+        type: integer
+        maximum: 599.0
+        minimum: 100.0
+        title: Status Code
+      estimated_cost:
+        type: number
+        minimum: 0.0
+        title: Estimated Cost
+      error_message:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Error Message
+    additionalProperties: false
+    type: object
+    required:
+    - sequence
+    - model_id
+    - status_code
+    - estimated_cost
+    title: TrafficExecutionItem
+  TrafficGenerationPlan:
+    properties:
+      dry_run:
+        type: boolean
+        title: Dry Run
+      request_count:
+        type: integer
+        minimum: 0.0
+        title: Request Count
+      budget_usd:
+        type: number
+        exclusiveMinimum: 0.0
+        title: Budget Usd
+      conservative_cost_ceiling:
+        type: number
+        minimum: 0.0
+        title: Conservative Cost Ceiling
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/TrafficPlanItem
+        type: array
+        title: Items
+    additionalProperties: false
+    type: object
+    required:
+    - dry_run
+    - request_count
+    - budget_usd
+    - conservative_cost_ceiling
+    - items
+    title: TrafficGenerationPlan
+  TrafficGenerationRequest:
+    properties:
+      model_ids:
+        items:
+          type: string
+          format: uuid
+        type: array
+        maxItems: 20
+        title: Model Ids
+      requests_per_model:
+        type: integer
+        maximum: 100.0
+        minimum: 1.0
+        title: Requests Per Model
+        default: 4
+      max_output_tokens:
+        type: integer
+        maximum: 512.0
+        minimum: 1.0
+        title: Max Output Tokens
+        default: 48
+      budget_usd:
+        type: number
+        maximum: 20.0
+        exclusiveMinimum: 0.0
+        title: Budget Usd
+        default: 5.0
+      dry_run:
+        type: boolean
+        title: Dry Run
+        default: true
+    additionalProperties: false
+    type: object
+    title: TrafficGenerationRequest
+  TrafficGenerationResult:
+    properties:
+      planned_requests:
+        type: integer
+        minimum: 0.0
+        title: Planned Requests
+      completed_requests:
+        type: integer
+        minimum: 0.0
+        title: Completed Requests
+      successful_requests:
+        type: integer
+        minimum: 0.0
+        title: Successful Requests
+      failed_requests:
+        type: integer
+        minimum: 0.0
+        title: Failed Requests
+      total_estimated_cost:
+        type: number
+        minimum: 0.0
+        title: Total Estimated Cost
+      stopped_reason:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Stopped Reason
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/TrafficExecutionItem
+        type: array
+        title: Items
+    additionalProperties: false
+    type: object
+    required:
+    - planned_requests
+    - completed_requests
+    - successful_requests
+    - failed_requests
+    - total_estimated_cost
+    - items
+    title: TrafficGenerationResult
+  TrafficPlanItem:
+    properties:
+      sequence:
+        type: integer
+        minimum: 1.0
+        title: Sequence
+      model_id:
+        type: string
+        format: uuid
+        title: Model Id
+      model_name:
+        type: string
+        title: Model Name
+      organization_id:
+        type: string
+        title: Organization Id
+      organization_name:
+        type: string
+        title: Organization Name
+      department_id:
+        type: string
+        title: Department Id
+      department_name:
+        type: string
+        title: Department Name
+      project_id:
+        type: string
+        title: Project Id
+      project_name:
+        type: string
+        title: Project Name
+      agent_id:
+        type: string
+        title: Agent Id
+      agent_name:
+        type: string
+        title: Agent Name
+      user_id:
+        type: string
+        title: User Id
+      user_name:
+        type: string
+        title: User Name
+      workflow:
+        type: string
+        title: Workflow
+      prompt:
+        type: string
+        title: Prompt
+      max_output_tokens:
+        type: integer
+        minimum: 1.0
+        title: Max Output Tokens
+      conservative_cost_ceiling:
+        type: number
+        minimum: 0.0
+        title: Conservative Cost Ceiling
+    additionalProperties: false
+    type: object
+    required:
+    - sequence
+    - model_id
+    - model_name
+    - organization_id
+    - organization_name
+    - department_id
+    - department_name
+    - project_id
+    - project_name
+    - agent_id
+    - agent_name
+    - user_id
+    - user_name
+    - workflow
+    - prompt
+    - max_output_tokens
+    - conservative_cost_ceiling
+    title: TrafficPlanItem
+  UsageAnomaly:
+    properties:
+      id:
+        type: string
+        title: Id
+      detected_at:
+        type: string
+        format: date-time
+        title: Detected At
+      rule_id:
+        type: string
+        title: Rule Id
+      severity:
+        type: string
+        title: Severity
+      title:
+        type: string
+        title: Title
+      description:
+        type: string
+        title: Description
+      dimension:
+        type: string
+        title: Dimension
+      dimension_id:
+        type: string
+        title: Dimension Id
+      dimension_name:
+        type: string
+        title: Dimension Name
+      request_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Request Id
+      actual_value:
+        type: number
+        title: Actual Value
+      threshold_value:
+        type: number
+        title: Threshold Value
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - detected_at
+    - rule_id
+    - severity
+    - title
+    - description
+    - dimension
+    - dimension_id
+    - dimension_name
+    - actual_value
+    - threshold_value
+    title: UsageAnomaly
+  UsageAnomalyListResponse:
+    properties:
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/UsageAnomaly
+        type: array
+        title: Items
+    additionalProperties: false
+    type: object
+    required:
+    - items
+    title: UsageAnomalyListResponse
+  ValidationError:
+    properties:
+      loc:
+        items:
+          anyOf:
+          - type: string
+          - type: integer
+        type: array
+        title: Location
+      msg:
+        type: string
+        title: Message
+      type:
+        type: string
+        title: Error Type
+      input:
+        title: Input
+      ctx:
+        type: object
+        title: Context
+    type: object
+    required:
+    - loc
+    - msg
+    - type
+    title: ValidationError

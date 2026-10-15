@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any, Literal, Self
 from uuid import UUID
@@ -21,6 +22,7 @@ class BillableRequestPlan(StrictModel):
     authorization_id: UUID | None = None
     attempt_limit: int = Field(default=1, ge=1, le=32)
     reuse_requires: dict[str, Any] = Field(default_factory=dict)
+    admission_authority: Literal["postgresql", "apim_execution"] = "postgresql"
 
     @field_validator("period_start")
     @classmethod
@@ -68,3 +70,21 @@ class BillableBudgetExceeded(ValueError):
 
 class BillableOutcomeUncertain(ValueError):
     pass
+
+
+def recover_billable_attempt(
+    plan: BillableRequestPlan, attempts: Sequence[BillableRequestAttempt],
+) -> BillableRequestAttempt:
+    matches = [attempt for attempt in attempts if (
+        attempt.operation_key == plan.operation_key and attempt.plan_sha256 == plan.plan_sha256
+        and attempt.scope_type == plan.scope_type and attempt.scope_id == plan.scope_id
+        and attempt.model_id == plan.model_id and attempt.model_key == plan.model_key
+        and attempt.authorization_id == plan.authorization_id
+        and attempt.state == "exact" and attempt.actual_tokens is not None
+        and attempt.evidence.get("admission_authority", "postgresql") == plan.admission_authority
+        and all(name in attempt.evidence and attempt.evidence[name] == value
+                for name, value in plan.reuse_requires.items())
+    )]
+    if len(attempts) > 32 or len(matches) != 1:
+        raise BillableOutcomeUncertain("Original validated billable evidence is unavailable")
+    return matches[0]

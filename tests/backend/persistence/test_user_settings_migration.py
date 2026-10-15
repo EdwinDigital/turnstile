@@ -17,6 +17,7 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
+from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 
 from backend import migrate as migration_runner
@@ -26,7 +27,6 @@ from tests.platform.api.api_support import _usage_record
 from tests.support.paths import REPOSITORY_ROOT
 from turnstile_core.config import Settings
 from turnstile_core.persistence.auth_store import AuthStore
-from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
 
 TARGET = "011_user_settings_profile.up.sql"
 VERSION = TARGET.removesuffix(".up.sql")
@@ -136,11 +136,22 @@ def seed_history(info: str) -> None:
                VALUES ('2026-10-01', 'organization', 'org-contoso-global',
                        100000, 'migration-test')"""
         )
-    repository = PostgreSqlOpsDbProxy(info)
-    try:
-        repository.write_token_usage(_usage_record("preserved-usage", "Migration test", 2345))
-    finally:
-        repository.close()
+    record = _usage_record("preserved-usage", "Migration test", 2345).model_dump()
+    record["user_ref"] = record.pop("user")
+    with psycopg.connect(info) as connection:
+        columns = {row[0] for row in connection.execute(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='token_usage'""",
+        ).fetchall()}
+        fields = [name for name in record if name in columns]
+        connection.execute(
+            sql.SQL("INSERT INTO token_usage ({}) VALUES ({})").format(
+                sql.SQL(", ").join(map(sql.Identifier, fields)),
+                sql.SQL(", ").join(sql.Placeholder() for _ in fields),
+            ),
+            [Jsonb(record[name]) if isinstance(record[name], (dict, list)) else record[name]
+             for name in fields],
+        )
 
 
 def test_existing_installation_upgrade_preserves_history_and_skips_rerun(

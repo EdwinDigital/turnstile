@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
+import { createContext, type Context, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import {
   PublicClientApplication,
@@ -34,12 +34,14 @@ type AuthContextValue = {
   loginNotice: string | null
 }
 
-const AuthContext = createContext<AuthContextValue | null>(null)
+const AuthContext: Context<AuthContextValue | null> =
+  import.meta.hot?.data.authContext ?? createContext<AuthContextValue | null>(null)
+if (import.meta.hot) import.meta.hot.data.authContext = AuthContext
 
 /** The client id is a public identifier -- it travels in every authorize URL.
  *
- *  There is no tenant id here on purpose. The authority is `/organizations`, copied from
- *  GBBAIP's authConfig.js, which admits any work or school account from any tenant. Pinning
+ *  There is no tenant id here on purpose. The authority is `/organizations`,
+ *  which admits any work or school account from any tenant. Pinning
  *  it to the tenant that owns the app registration is what produced "Selected user account
  *  does not exist in tenant 'Default Directory'": the registration and the people signing
  *  in live in different tenants, which is the normal case here rather than a mistake.
@@ -50,10 +52,7 @@ const AuthContext = createContext<AuthContextValue | null>(null)
  *  check is the actual authorization gate, which is why it is an exact domain comparison
  *  and not a substring.
  *
- *  This is Turnstile's own registration. It replaced a borrowed one whose display name was
- *  another product's, which every consent screen showed -- the name on that screen belongs
- *  to the registration, not to the frontend using it, so the only fix was a registration of
- *  our own. Keep it in step with `entra_client_id` on the backend: that is what `aud` is
+ *  Keep it in step with `entra_client_id` on the backend: that is what `aud` is
  *  checked against, and a mismatch fails every Microsoft sign-in. */
 const ENTRA_CLIENT_ID = import.meta.env.VITE_ENTRA_CLIENT_ID?.trim() ?? ""
 
@@ -66,7 +65,7 @@ const msalConfig: Configuration = {
     // registration, but the code does not need to know which one it is running as.
     redirectUri: window.location.origin,
     // Stay on the redirect URI once the response is processed instead of navigating back
-    // to wherever sign-in was started. GBBAIP sets this too. The default `true` costs a
+    // to wherever sign-in was started. The default `true` costs a
     // second navigation and, with this app's query-string routing, would restore a page
     // the person cannot see yet -- the session is established milliseconds later.
     navigateToLoginRequestUrl: false,
@@ -142,7 +141,7 @@ function resolveIdentity(): Promise<AuthUser | null> {
  *  to just fails, and the avatar would quietly never appear with nothing to explain it. */
 const GRAPH_SCOPES = ["User.Read"]
 
-/** Same size GBBAIP asks for. Graph resizes server-side, so this is a fraction of the
+/** Graph resizes server-side, so this is a fraction of the
  *  full-resolution photo -- typically a few KB against a few hundred. */
 const GRAPH_PHOTO_URL = "https://graph.microsoft.com/v1.0/me/photos/96x96/$value"
 
@@ -393,7 +392,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(message)
     }
     await initialiseMsal()
-    // A full-page redirect, matching GBBAIP. Not `loginPopup`: a popup is blocked by
+    // A full-page redirect rather than `loginPopup`: a popup is blocked by
     // default in Safari and by common enterprise policy, and it fails in a way the person
     // cannot act on -- nothing appears and there is no error to read. The redirect costs a
     // page load and always works.

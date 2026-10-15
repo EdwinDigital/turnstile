@@ -86,13 +86,43 @@ def test_documentation_contains_no_original_environment_identifiers() -> None:
     assert not violations
 
 
+def test_product_upgrade_docs_preserve_history_and_require_real_database_evidence() -> None:
+    testing = (REPOSITORY_ROOT / "docs/testing.md").read_text()
+    for version in (
+        "017_budget_terminal_observation", "018_budget_reservation_resolution",
+        "019_runtime_display_name", "020_failed_publication_spec", "022_subscription_tags",
+    ):
+        assert version in testing
+    assert "existing usage, financial/audit history" in testing
+    assert "SQL source checks do not prove applied migrations" in testing
+    assert "Do not initialize a shared database" in testing
+
+
 def test_image_upgrade_documents_independent_defaults_and_validation_limits() -> None:
     configuration = (REPOSITORY_ROOT / "docs/configuration.md").read_text()
     architecture = (REPOSITORY_ROOT / "docs/architecture.md").read_text()
     testing = (REPOSITORY_ROOT / "docs/testing.md").read_text()
-    assert "`IMAGE_GENERATION_ENABLED` defaults to `false`" in configuration
+    assert (
+        "`IMAGE_GENERATION_ENABLED` defaults to false"
+        in configuration
+    )
     assert "effective_at = NULL" in configuration
     assert configuration.count("## Runtime attribution") == 1
     assert architecture.count("## Ledger finalization") == 1
     assert "SQL source checks cannot prove" in testing
     assert "separately authorized real targets" in testing
+
+
+def test_model_availability_documents_installation_and_evidence_boundaries() -> None:
+    configuration = (REPOSITORY_ROOT / "docs/configuration.md").read_text()
+    deployment = " ".join((REPOSITORY_ROOT / "docs/deployment.md").read_text().split())
+    testing = (REPOSITORY_ROOT / "docs/testing.md").read_text()
+    assert "202` response" in configuration and "not effective" in configuration
+    assert "Ordinary model updates cannot change `enabled`" in configuration
+    assert "every retained Revision" in deployment
+    assert "Publisher remains unable" in deployment
+    assert "do not" in deployment and "grant those rights to the ordinary Publisher" in deployment
+    assert "does not provide a generic controller" in deployment
+    assert "enrolled_nodes_only_guarded_bootstrap" in deployment
+    assert "016_model_availability" in testing
+    assert "do not prove PostgreSQL transaction isolation" in testing

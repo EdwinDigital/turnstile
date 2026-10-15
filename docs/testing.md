@@ -43,6 +43,28 @@ git diff --check
 
 ## Database validation
 
+The merged fork preserves migration identities from both histories. The runner uses the full
+filename, not just the numeric prefix: `009_assistant_api_format` and
+`009_context_tier_pricing` are separate migrations. Never rename or edit either applied file.
+Validate both a fresh database and an upgrade from the fork's existing 001-018 ledger.
+Keep existing usage, financial/audit history, directory memberships and menu assignments.
+SQL source checks do not prove applied migrations. Do not initialize a shared database.
+
+Upstream additions retained in this fork are `009_context_tier_pricing`,
+`010_budget_execution_protocol`, `011_gateway_targets`, `012_apim_onboarding`,
+`013_multi_target_rollout`, `014_self_hosted_gateway_provisioning`,
+`015_platform_invocation_trace`, `016_model_availability`,
+`017_budget_terminal_observation`, `018_budget_reservation_resolution`,
+`019_runtime_display_name`, `020_failed_publication_spec`, `021_usd_budget_reservations`,
+`022_subscription_tags`, `023_usd_reservation_resolution`, `024_gateway_usage_attribution`,
+`025_usage_cost_component_prices`, `026_invocation_trace_service_identity`,
+`027_product_schema_alignment` and `028_product_index_alignment`.
+Budget execution and settlement remain independently gated. Unknown usage is not refundable
+merely because time has elapsed or a request failed. Verify atomic reservations, immutable
+prices, settlement idempotency and late formal evidence on an isolated PostgreSQL target.
+Model availability tests and recording adapters do not prove PostgreSQL transaction isolation
+or real APIM propagation. These require separately authorized validation, not a Git merge.
+
 For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_assistant_api_format`, `010_models_dev_pricing`, and `011_user_settings_profile`), then run the command again and verify that no migration is reapplied.
 
 Migration `012_organization_directory` adds empty organizational-directory and synchronization
@@ -157,6 +179,33 @@ In a separately authorized PostgreSQL/Table/Log Analytics environment, verify ex
 
 For API and browser checks, distinguish a missing snapshot from zero pending usage. Verify that available Tokens subtract both pending reservations and finalized upper bounds. Recovery records have no model pricing or cache classification; they must not invent prices, latency or per-user cache measurements. Unit tests and SQL source checks do not establish live data-plane or migration correctness.
 
+### Budget execution validation
+
+Migration `010_budget_execution_protocol` adds default-off execution scopes, immutable admission
+and evidence records, and a durable settlement outbox. It does not activate a rollout or rewrite
+historical usage. Apply it only to the separately authorized database after preserving the existing
+migration checksums and data readback. Runtime activation requires a verified legacy-admission fence,
+drained in-flight work, equal opening balances, compatible readers, and an explicit epoch.
+
+```bash
+uv run --frozen --no-sync pytest -q tests/backend/telemetry/test_atomic_ledger.py \
+	tests/platform/infrastructure/test_budget_execution_policy.py
+```
+
+The policy suite requires an installed
+.NET 8 SDK and executes the generated expressions as C# 7.3 with the SDK's Newtonsoft.Json assembly;
+it does not substitute a Python parser or mock results for C# execution. Cover tool schemas and
+arguments, text containing JSON, protocol-specific mixed/remote content, incomplete structures,
+strict versus estimate contracts, native-count guarantees, error ownership, CAS conflicts and
+completion idempotence. Local HTTP doubles and SQL structure checks are not real database acceptance.
+
+For a separately approved deployed run, preserve parent-policy ETags and component hashes, prove
+all affected parents match the candidate, and verify exact request-to-receipt-to-settlement identity.
+Use the actual subscription header and model setting in a supported normal Claude Code session;
+do not treat bare-mode diagnostics or private-environment results as public acceptance. Unknown
+request outcomes cannot authorize a replay. Record unresolved transport errors without attributing
+their cause to the platform without evidence.
+
 ## Browser validation
 
 ### Assistant API protocols
@@ -206,7 +255,12 @@ and promotion, resume without duplication, rerun after success, and verify expli
 before introducing later model publications. Never make the current revision writable through
 a fabricated success response or relax the shared Publisher role to pass these checks.
 
-Image generation is off by default. The version-2 budget evidence cutoff is independently disabled (`budget_evidence_policy.effective_at IS NULL`). Applying migrations does not enable either feature or reassess historical requests. Enabling a future cutoff requires separate operational authorization; it cannot be cleared or moved after being set.
+This fork preserves `IMAGE_GENERATION_ENABLED=false` by default. Test the disabled capability
+and rejection paths separately, then use an explicitly enabled local fixture for image protocols.
+The version-2 budget evidence cutoff remains independently disabled
+(`budget_evidence_policy.effective_at IS NULL`). Applying migrations does not enable that cutoff
+or reassess historical requests. Enabling a future cutoff requires separate operational
+authorization; it cannot be cleared or moved after being set.
 
 Focused local checks include `tests/backend/model_platform/test_image_*.py`, `tests/backend/telemetry/test_billable_requests.py`, `tests/backend/telemetry/test_ledger.py`, and `tests/platform/frontend/test_image_generation.py`. These use unit fixtures and mocked transports, not live images or database evidence.
 
@@ -227,6 +281,13 @@ For images, verify model-operation selection, required text-input/cached-text/im
 Unit tests may use in-memory repositories. Integration and E2E results must identify the real deployed environment and resource boundary used for validation.
 
 ## Feature acceptance matrix
+
+Multi-target local coverage must include bounded distinct targets, stable parent identity,
+all-or-none child queueing, truthful partial status, canonical manual and tiered catalog prices,
+all price-identity drift fields, and route removal preserving shared access until the final target.
+Validate the same logic with concurrent PostgreSQL transactions and independent real APIM
+publications before operational acceptance. No local double proves distributed promotion,
+pricing under production load or per-target upstream invoice equivalence.
 
 Passing a helper test or finding a source string does not establish complete feature delivery.
 The image Node suites execute the production registry normalization, publication component and

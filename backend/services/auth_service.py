@@ -13,12 +13,11 @@ replay a live session, and lookup is still a primary-key hit because the hash is
 deterministic. A plain SHA-256 is right here and would be wrong for the password column --
 the input is already full-entropy random, so there is nothing to brute-force.
 
-**Microsoft tokens are verified against the published JWKS, not merely decoded.** The
-reference implementation this was modelled on (`gbbai-dev-backend/core/authentication.py`)
-calls `jwt.decode(..., options={"verify_signature": False})` and then trusts the email
-claim. That accepts any token a caller cares to type: the payload is base64, not a secret.
-Verification here is the whole point of the endpoint, so it is not optional and there is no
-fallback path that skips it.
+**Microsoft tokens are verified against the published JWKS, not merely decoded.** A naive
+implementation that calls `jwt.decode(..., options={"verify_signature": False})` and then
+trusts the email claim accepts any token a caller cares to type: the payload is base64, not
+a secret. Verification here is the whole point of the endpoint, so it is not optional and
+there is no fallback path that skips it.
 """
 
 from __future__ import annotations
@@ -124,7 +123,7 @@ class EntraIdentity:
 class EntraTokenVerifier:
     """Validates an ID token from any Microsoft work or school tenant.
 
-    The frontend authenticates against `/organizations`, matching GBBAIP, because the app
+    The frontend authenticates against `/organizations` because the app
     registration and the people signing in live in different tenants. Tokens therefore
     arrive issued by the *user's* tenant, not by the one that owns the registration -- so
     the issuer and `tid` cannot be pinned to a constant, and the earlier version of this

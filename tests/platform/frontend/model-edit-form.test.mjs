@@ -1,3 +1,4 @@
+// Isolated draft/payload unit tests. No browser, API, registry writes or database.
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { createRequire } from "node:module"
@@ -14,9 +15,7 @@ import {
   modelEditPayload,
   modelEditRoleOptions,
   resolveDiscount,
-  setModelEditDefault,
-  setModelEditEnabled,
-  toggleModelRole,
+  toggleModelSelection,
   validateModelEdit,
 } from "../../../frontend/src/components/model-management/model-edit-form.ts"
 import * as modelEditForm from "../../../frontend/src/components/model-management/model-edit-form.ts"
@@ -24,17 +23,15 @@ import * as modelVendor from "../../../frontend/src/components/model-management/
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
-const entry = fileURLToPath(new URL("../../../frontend/src/components/model-management/model-edit-dialog.tsx", import.meta.url))
-const bundle = await rolldown({ input: entry, external: path => path !== entry, transform: { jsx: { runtime: "automatic" } }, treeshake: false })
-let component
-try { component = (await bundle.generate({ format: "cjs" })).output[0].code }
-finally { await bundle.close() }
-
-const priceEntry = fileURLToPath(new URL("../../../frontend/src/components/model-management/model-price-source.tsx", import.meta.url))
-const priceBundle = await rolldown({ input: priceEntry, external: path => path !== priceEntry, transform: { jsx: { runtime: "automatic" } }, treeshake: false })
-let priceComponent
-try { priceComponent = (await priceBundle.generate({ format: "cjs" })).output[0].code }
-finally { await priceBundle.close() }
+async function compile(relative) {
+  const entry = fileURLToPath(new URL(relative, import.meta.url))
+  const bundle = await rolldown({ input: entry, external: path => path !== entry,
+    transform: { jsx: { runtime: "automatic" } }, treeshake: false })
+  try { return (await bundle.generate({ format: "cjs" })).output[0].code }
+  finally { await bundle.close() }
+}
+const component = await compile("../../../frontend/src/components/model-management/model-edit-dialog.tsx")
+const priceComponent = await compile("../../../frontend/src/components/model-management/model-price-source.tsx")
 
 function editorHarness(model, providerKind = "microsoft_foundry") {
   const slots = []
@@ -47,7 +44,9 @@ function editorHarness(model, providerKind = "microsoft_foundry") {
     } },
     "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
     "./model-edit-form": modelEditForm,
-    "./openai-compatible": modelVendor,
+    "./model-vendor-select": { ...modelVendor, ModelVendorLogo: "ModelVendorLogo" },
+    "./model-availability": { useModelAvailabilityCommand: () => ({ submitting: false }),
+      ModelAvailabilityStatus: "ModelAvailabilityStatus", ModelAvailabilitySwitch: "ModelAvailabilitySwitch" },
     "../brand-logos": { GatewayBrandLogo: "GatewayBrandLogo", ProviderBrandLogo: "ProviderBrandLogo", gatewayBrandFromIdentity: value => value, providerBrandFromMetadata: value => value },
   }
   const exports = {}
@@ -67,151 +66,145 @@ function editorHarness(model, providerKind = "microsoft_foundry") {
   return { props, saved, nodes, find: predicate => nodes(render()).find(predicate), all: () => nodes(render()) }
 }
 
-function savedModel(overrides = {}) {
-  return {
-    id: "model-id",
-    provider_id: "provider-id",
-    runtime_id: "runtime-id",
-    model_key: "published-model",
-    upstream_model_id: "upstream-deployment",
-    family_key: "generic",
-    assignment_required: true,
-    capabilities: ["chat", "streaming"],
-    display_name: "Existing model",
-    context_window: 128000,
-    input_cost_per_million: 2,
-    output_cost_per_million: 8,
-    cached_cost_per_million: 0.5,
-    cache_write_cost_per_million: 1,
-    allowed_roles: ["owner", "member", "custom-role"],
-    enabled: true,
-    is_default: false,
-    // Every model carries these once the registry knows about list prices. "manual" is what a
-    // model that was priced by hand reports, which is every model that existed before.
-    price_source: "manual",
-    price_reference: null,
-    price_discount_percent: null,
-    ...overrides,
-  }
-}
+const savedModel = overrides => model(overrides)
 
-test("unchanged model metadata round-trips without a pending change", () => {
-  const model = savedModel()
-  const draft = createModelEditDraft(model)
-  const payload = modelEditPayload(model, draft)
-  assert.equal(modelEditHasChanges(draft, createModelEditDraft(model)), false)
-  for (const [key, value] of Object.entries(payload)) assert.deepEqual(value, model[key], key)
-  assert.equal("id" in payload, false)
-  assert.equal("gateway_profile_id" in payload, false)
+const model = (overrides = {}) => ({
+  id: "model-a",
+  provider_id: "provider-a",
+  runtime_id: "connection-a",
+  model_key: "published-alias",
+  upstream_model_id: "existing-deployment",
+  family_key: "generic",
+  assignment_required: true,
+  display_name: "Existing model",
+  capabilities: ["chat", "streaming"],
+  context_window: 1048576,
+  input_cost_per_million: 3,
+  output_cost_per_million: 15,
+  cached_cost_per_million: 0.3,
+  cache_write_cost_per_million: 3,
+  price_source: "manual",
+  price_reference: null,
+  price_discount_percent: null,
+  allowed_roles: ["owner", "admin", "member"],
+  enabled: true,
+  is_default: false,
+  ...overrides,
 })
 
-test("draft fields cannot replace saved routing identity or capabilities", () => {
-  const model = savedModel()
-  const draft = {
-    ...createModelEditDraft(model),
-    displayName: " Renamed model ",
-    inputPrice: "3.123456789",
-    provider_id: "other-provider",
-    runtime_id: "other-runtime",
-    model_key: "other-alias",
-    upstream_model_id: "other-deployment",
-    family_key: "other-family",
-    assignment_required: false,
-    capabilities: ["vision"],
-  }
-  const payload = modelEditPayload(model, draft)
+test("unchanged metadata round-trips while routing identity comes from the saved model", () => {
+  const source = model()
+  const result = modelEditPayload(source, createModelEditDraft(source))
+  for (const key of Object.keys(result)) assert.deepEqual(result[key], source[key], key)
+  assert.equal("id" in result, false)
+  assert.equal("gateway_profile_id" in result, false)
+})
+
+test("editing display and price fields cannot override routing identity or capabilities", () => {
+  const source = model()
+  const draft = { ...createModelEditDraft(source), displayName: " Renamed ",
+    capabilities: ["chat", "tools"], inputPrice: "4.123456789",
+    provider_id: "different", runtime_id: "different", model_key: "different",
+    upstream_model_id: "different", assignment_required: false, family_key: "openai" }
+  const result = modelEditPayload(source, draft)
   for (const key of ["provider_id", "runtime_id", "model_key", "upstream_model_id",
-    "family_key", "assignment_required", "capabilities"]) {
-    assert.deepEqual(payload[key], model[key], key)
-  }
-  assert.equal(payload.display_name, "Renamed model")
-  assert.equal(payload.input_cost_per_million, 3.123456789)
-  assert.notEqual(payload.capabilities, model.capabilities)
+    "family_key", "assignment_required"]) assert.equal(result[key], source[key])
+  assert.equal(result.display_name, "Renamed")
+  assert.equal(result.input_cost_per_million, 4.123456789)
+  assert.deepEqual(result.capabilities, source.capabilities)
 })
 
-test("nulls and explicit zero prices retain distinct meanings", () => {
-  const model = savedModel({
-    upstream_model_id: null,
-    context_window: null,
-    input_cost_per_million: null,
-    output_cost_per_million: 0,
-    cached_cost_per_million: null,
-    cache_write_cost_per_million: 0,
-  })
-  const draft = createModelEditDraft(model)
+test("null upstream identity is preserved without substituting the public alias", () => {
+  const source = model({ upstream_model_id: null })
+  assert.equal(modelEditPayload(source, createModelEditDraft(source)).upstream_model_id, null)
+})
+
+test("blank nullable fields remain null and zero prices remain explicitly free", () => {
+  const source = model({ context_window: null, input_cost_per_million: null,
+    output_cost_per_million: 0, cached_cost_per_million: null, cache_write_cost_per_million: 0 })
+  const draft = createModelEditDraft(source)
   assert.equal(draft.contextWindow, "")
   assert.equal(draft.inputPrice, "")
   assert.equal(draft.outputPrice, "0")
-  const payload = modelEditPayload(model, draft)
-  for (const [key, value] of Object.entries(payload)) assert.deepEqual(value, model[key], key)
+  const result = modelEditPayload(source, draft)
+  assert.equal(result.context_window, null)
+  assert.equal(result.input_cost_per_million, null)
+  assert.equal(result.output_cost_per_million, 0)
+  assert.equal(result.cached_cost_per_million, null)
+  assert.equal(result.cache_write_cost_per_million, 0)
 })
 
-test("cleared cache rates request backend fallback without inventing prices", () => {
-  const model = savedModel()
-  const payload = modelEditPayload(model, {
-    ...createModelEditDraft(model), cacheReadPrice: "", cacheWritePrice: " ",
-  })
-  assert.equal(payload.cached_cost_per_million, null)
-  assert.equal(payload.cache_write_cost_per_million, null)
-  assert.equal(payload.input_cost_per_million, model.input_cost_per_million)
+test("clearing cache rates requests backend fallback, not a client-side fabricated rate", () => {
+  const source = model()
+  const result = modelEditPayload(source, { ...createModelEditDraft(source),
+    cacheReadPrice: "", cacheWritePrice: " " })
+  assert.equal(result.cached_cost_per_million, null)
+  assert.equal(result.cache_write_cost_per_million, null)
+  assert.equal(result.input_cost_per_million, 3)
 })
 
-test("role options preserve custom roles without granting them implicitly", () => {
-  const model = savedModel({ allowed_roles: ["admin", "custom-role"] })
-  const draft = createModelEditDraft(model)
-  assert.deepEqual(modelEditRoleOptions(model), ["owner", "member", "admin", "custom-role"])
-  assert.deepEqual(modelEditPayload(model, draft).allowed_roles, model.allowed_roles)
-  assert.notEqual(draft.allowedRoles, model.allowed_roles)
-  const roles = toggleModelRole(draft.allowedRoles, "owner", true)
-  assert.deepEqual(toggleModelRole(roles, "owner", true), roles)
-  assert.deepEqual(toggleModelRole(roles, "owner", false), model.allowed_roles)
-  assert.deepEqual(modelEditPayload(model, { ...draft, allowedRoles: [] }).allowed_roles, [])
-})
-
-test("restored roles are unchanged regardless of checkbox order", () => {
-  const initial = createModelEditDraft(savedModel())
-  assert.equal(modelEditHasChanges(initial, {
-    ...initial, allowedRoles: [...initial.allowedRoles].reverse(),
-  }), false)
-  assert.equal(modelEditHasChanges(initial, { ...initial, allowedRoles: [] }), true)
-})
-
-test("invalid names cannot produce a save payload", () => {
-  const model = savedModel()
-  for (const displayName of ["", "   ", "x".repeat(256)]) {
-    const draft = { ...createModelEditDraft(model), displayName }
-    assert.equal(validateModelEdit(draft), "display_name")
-    assert.throws(() => modelEditPayload(model, draft), /display_name/)
+test("capabilities are excluded from the draft and preserved from the registered model", () => {
+  for (const capabilities of [["chat", "streaming"], ["tools", "vision", "reasoning"], []]) {
+    const source = model({ capabilities })
+    const draft = createModelEditDraft(source)
+    assert.equal("capabilities" in draft, false)
+    const payload = modelEditPayload(source, { ...draft, capabilities: ["invented-capability"] })
+    assert.deepEqual(payload.capabilities, capabilities)
+    assert.notEqual(payload.capabilities, source.capabilities)
   }
 })
 
-test("context windows require positive safe integers and prices finite non-negative values", () => {
-  const draft = createModelEditDraft(savedModel())
-  for (const contextWindow of ["0", "-1", "1.5", "Infinity", "invalid", "9007199254740992"]) {
+test("legacy and custom roles round-trip without silently adding or dropping permissions", () => {
+  const source = model({ allowed_roles: ["owner", "admin", "service", "custom-role"] })
+  const draft = createModelEditDraft(source)
+  assert.deepEqual(modelEditRoleOptions(source), ["owner", "member", "admin", "service", "custom-role"])
+  assert.deepEqual(modelEditPayload(source, draft).allowed_roles, source.allowed_roles)
+  assert.deepEqual(modelEditRoleOptions(model({ allowed_roles: ["member"] })), ["owner", "member"])
+  assert.deepEqual(modelEditPayload(source, { ...draft, allowedRoles: [] }).allowed_roles, [])
+  const selected = toggleModelSelection(draft.allowedRoles, "member", true)
+  assert.deepEqual(toggleModelSelection(selected, "member", true), selected)
+  assert.deepEqual(toggleModelSelection(selected, "member", false), source.allowed_roles)
+})
+
+test("restoring the same checkbox choices does not leave a spurious pending change", () => {
+  const initial = createModelEditDraft(model())
+  assert.equal(modelEditHasChanges(initial, { ...initial,
+    allowedRoles: [...initial.allowedRoles].reverse(),
+  }), false)
+  assert.equal(modelEditHasChanges(initial, { ...initial, allowedRoles: ["owner"] }), true)
+})
+
+test("invalid display names are rejected before a save payload can be constructed", () => {
+  const source = model()
+  for (const displayName of ["", "   ", "x".repeat(256)]) {
+    const draft = { ...createModelEditDraft(source), displayName }
+    assert.equal(validateModelEdit(draft), "display_name")
+    assert.throws(() => modelEditPayload(source, draft), /display_name/)
+  }
+})
+
+test("context limits require safe positive integers and rates finite non-negative values", () => {
+  const draft = createModelEditDraft(model())
+  for (const contextWindow of ["0", "-1", "1.5", "Infinity", "not-a-number", "9007199254740992"]) {
     assert.equal(validateModelEdit({ ...draft, contextWindow }), "context_window")
   }
-  for (const price of ["-1", "Infinity", "NaN", "1e999"]) {
-    for (const field of ["inputPrice", "outputPrice", "cacheReadPrice", "cacheWritePrice"]) {
-      assert.equal(validateModelEdit({ ...draft, [field]: price }), "prices")
+  for (const value of ["-1", "Infinity", "NaN", "1e999"]) {
+    for (const key of ["inputPrice", "outputPrice", "cacheReadPrice", "cacheWritePrice"]) {
+      assert.equal(validateModelEdit({ ...draft, [key]: value }), "prices")
     }
   }
   assert.equal(validateModelEdit({ ...draft, contextWindow: "1", inputPrice: "0" }), null)
 })
 
-test("default and enabled controls cannot produce a disabled default", () => {
-  const model = savedModel()
-  const initial = createModelEditDraft(model)
-  const disabled = setModelEditEnabled(initial, false)
-  const promoted = setModelEditDefault(disabled, true)
-  assert.equal(promoted.enabled, true)
-  assert.equal(promoted.isDefault, true)
-  assert.equal(setModelEditEnabled(promoted, false).isDefault, false)
-  assert.equal(setModelEditDefault(promoted, false).enabled, true)
-  const invalid = { ...initial, enabled: false, isDefault: true }
-  assert.equal(validateModelEdit(invalid), "default_disabled")
-  assert.throws(() => modelEditPayload(model, invalid), /default_disabled/)
-  assert.equal(initial.enabled, true)
-  assert.equal(initial.isDefault, false)
+test("availability never enters a metadata draft or payload and defaults survive disablement", () => {
+  const source = model({ enabled: false, is_default: true })
+  const draft = createModelEditDraft(source)
+  assert.equal("enabled" in draft, false)
+  assert.equal(validateModelEdit(draft), null)
+  const payload = modelEditPayload(source, { ...draft, enabled: true })
+  assert.equal("enabled" in payload, false)
+  assert.equal(payload.is_default, true)
+  assert.equal(modelEditHasChanges(draft, createModelEditDraft({ ...source, enabled: true })), false)
 })
 
 test("model editor restores identity, help and units without changing saved routing", () => {
@@ -283,7 +276,9 @@ test("model editor density and responsive rules retain the source composition", 
 
 for (const [locale, exportName] of [["en", "ENGLISH_CORE_PHRASES"], ["ja", "JAPANESE_CORE_PHRASES"], ["ko", "KOREAN_CORE_PHRASES"]]) {
   test(`model editor source help and validation are localized in ${locale}`, async () => {
-    const phrases = (await import(new URL(`../../../frontend/src/locales/${locale}/phrases-core.ts`, import.meta.url)))[exportName]
+    const core = (await import(new URL(`../../../frontend/src/locales/${locale}/phrases-core.ts`, import.meta.url)))[exportName]
+    const image = await import(new URL(`../../../frontend/src/locales/${locale}/phrases-image-generation.ts`, import.meta.url))
+    const phrases = { ...core, ...Object.values(image)[0] }
     for (const phrase of ["更新模型名称、价格和访问配置。连接与模型标识保持不变。", "显示名称须为 1–255 个字符。", "上下文窗口须为正整数，或留空。", "单价须为非负有限数字，或留空。", "连接和模型标识决定已发布路由，仅供查看；更换连接请走模型接入与发布流程。", "设为整个模型目录的默认模型，并将其连接设为默认；不改变网关路由优先级。", "图片模型不能设为聊天默认", "角色限制不替代人员模型分配，仍需满足连接和人员的访问策略。", "当前应用登录角色为 Owner 和 Member；其他已有角色值按兼容配置保留。"]) {
       assert.ok(phrases[phrase], phrase)
       assert.notEqual(phrases[phrase], phrase)
@@ -429,12 +424,12 @@ for (const complete of [false, undefined]) {
 
     await harness.find(node => node.type?.name === "ModelStep").props.onChoose(response.model_entry)
 
-    assert.deepEqual(harness.draft, before)
+    assert.deepEqual(JSON.parse(JSON.stringify(harness.draft)), JSON.parse(JSON.stringify(before)))
     assert.equal(validateModelEdit(harness.draft), "price_reference")
     assert.throws(() => harness.payload(), /price_reference/)
     assert.equal(harness.find(node => node.props?.name === "price-deployment").props.disabled, true)
     harness.find(node => node.type?.name === "DeploymentStep").props.onChoose(response.options[0])
-    assert.deepEqual(harness.draft, before)
+    assert.deepEqual(JSON.parse(JSON.stringify(harness.draft)), JSON.parse(JSON.stringify(before)))
   })
 }
 
@@ -475,9 +470,9 @@ test("the selected region survives saving, discount changes, and reopening", asy
   ] })
   const harness = priceSourceHarness(response)
   await harness.find(node => node.type?.name === "ModelStep").props.onChoose(response.model_entry)
-  const westus = harness.find(node => node.type === "option" && node.props.children === "westus")
+  const westus = harness.find(node => node.type === "SelectItem" && node.props.value === references.westus)
   assert.equal(westus.props.value, references.westus)
-  harness.find(node => node.type === "select").props.onChange({ target: { value: westus.props.value } })
+  harness.find(node => node.type === "Select" && node.props.name === "price-region").props.onValueChange(westus.props.value)
   assert.equal(harness.payload().price_reference, references.westus)
 
   harness.find(node => node.props?.id === "model-discount").props.onChange({ target: { value: "80" } })
@@ -488,7 +483,7 @@ test("the selected region survives saving, discount changes, and reopening", asy
   const reopened = priceSourceHarness(response, savedModel(harness.payload()))
   reopened.all()
   await reopened.flush()
-  assert.equal(reopened.find(node => node.type === "select").props.value, references.westus)
+  assert.equal(reopened.find(node => node.type === "Select" && node.props.name === "price-region").props.value, references.westus)
 })
 
 test("image pricing preserves its configured source and exposes the public controls", () => {
@@ -524,16 +519,19 @@ test("Azure search passes its source and rejects cross-source results and select
 test("switching official sources clears loaded details and late searches", async () => {
   let finish
   const harness = priceSourceHarness(catalogResponse(), savedModel(), {
-    priceCatalogModels: () => new Promise(resolve => { finish = resolve }),
+    priceCatalogModels: (_query, source) => source === "azure_retail"
+      ? new Promise(resolve => { finish = resolve })
+      : Promise.resolve({ models: [], unavailable: [] }),
   })
   const pending = harness.find(node => node.type?.name === "ModelStep").props.onSearch()
-  harness.find(node => node.type === "input" && node.props.value === "anthropic").props.onChange()
+  harness.find(node => node.type === "button" && node.props["aria-label"] === "Anthropic 列表价").props.onClick()
   harness.all()
   finish({ models: [catalogResponse().model_entry], unavailable: [] })
   await pending
+  await harness.flush()
   assert.equal(harness.draft.priceSource, "anthropic")
   const step = harness.find(node => node.type?.name === "ModelStep")
-  assert.equal(step.props.matches, null)
+  assert.deepEqual(JSON.parse(JSON.stringify(step.props.matches ?? [])), [])
   assert.equal(step.props.chosen, null)
   assert.equal(step.props.searching, false)
 })
@@ -545,7 +543,7 @@ test("late options cannot switch a manual draft back to Azure or overwrite price
     priceCatalogOptions: () => new Promise(resolve => { finish = resolve }),
   })
   const pending = harness.find(node => node.type?.name === "ModelStep").props.onChoose(response.model_entry)
-  harness.find(node => node.type === "input" && node.props.value === "manual").props.onChange()
+  harness.find(node => node.type === "button" && node.props["aria-label"] === "手工填写").props.onClick()
   harness.all()
   const before = { ...harness.draft }
   finish(response)
@@ -560,5 +558,5 @@ test("selected source rejects options carrying a different source", async () => 
   })
   const before = { ...harness.draft }
   await harness.find(node => node.type?.name === "ModelStep").props.onChoose(response.model_entry)
-  assert.deepEqual(harness.draft, before)
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.draft)), JSON.parse(JSON.stringify(before)))
 })

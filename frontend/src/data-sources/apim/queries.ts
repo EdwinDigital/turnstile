@@ -1,11 +1,16 @@
-import { queryOptions, type QueryClient } from "@tanstack/react-query"
+import { infiniteQueryOptions, queryOptions, type QueryClient } from "@tanstack/react-query"
 
 import { cachePolicies } from "../../api/cache-policies"
+import { availabilityRefetchInterval } from "../../lib/model-availability"
 import { resolveTimezone } from "../../lib/timezone"
 import { usageFacetWindow, usageSelection } from "../../lib/usage-filter-scope"
 import { dataSource, usageWindow } from "./api"
 import type {
   DistributionDimension,
+  GatewayApplicationBudget,
+  GatewayApplicationDetail,
+  GatewayApplicationList,
+  ModelRegistry,
   PeopleBudgetFilter,
   TrendDimension,
   UsageFilters,
@@ -15,6 +20,7 @@ import type {
 const DAY_MS = 24 * 60 * 60 * 1000
 
 type UsageScope = {
+  window?: { from: string; to: string }
   days: number
   organizationId: string[] | null
   departmentId: string[] | null
@@ -27,7 +33,7 @@ type UsageScope = {
   directoryStatus: UsageDirectoryStatus[] | null
 }
 
-function scopeFromFilters(filters: UsageFilters): UsageScope {
+function scopeFromFilters(filters: UsageFilters, windowMode: "rolling" | "fixed" = "rolling"): UsageScope {
   const duration = Date.parse(filters.to) - Date.parse(filters.from)
   const selection = (value: string | string[] | undefined) => {
     const normalized = usageSelection(value)
@@ -35,6 +41,7 @@ function scopeFromFilters(filters: UsageFilters): UsageScope {
   }
   return {
     days: Math.max(1, Math.round(duration / DAY_MS)),
+    ...(windowMode === "fixed" ? { window: { from: filters.from, to: filters.to } } : {}),
     organizationId: selection(filters.organization_id),
     departmentId: selection(filters.department_id),
     projectId: selection(filters.project_id),
@@ -52,7 +59,7 @@ function scopeFromFilters(filters: UsageFilters): UsageScope {
 
 function filtersFromScope(scope: UsageScope): UsageFilters {
   return {
-    ...usageWindow(scope.days),
+    ...(scope.window ?? usageWindow(scope.days)),
     organization_id: scope.organizationId ?? undefined,
     department_id: scope.departmentId ?? undefined,
     project_id: scope.projectId ?? undefined,
@@ -65,7 +72,8 @@ function filtersFromScope(scope: UsageScope): UsageFilters {
   }
 }
 
-export function withWindowDays(filters: UsageFilters, days: number): UsageFilters {
+export function withWindowDays(filters: UsageFilters, days: number, windowMode: "rolling" | "fixed" = "rolling"): UsageFilters {
+  if (windowMode === "fixed") return { ...filters, from: new Date(Date.parse(filters.to) - days * DAY_MS).toISOString() }
   const scope = scopeFromFilters(filters)
   return filtersFromScope({ ...scope, days })
 }
@@ -86,9 +94,15 @@ export const finopsKeys = {
   entities: ["reference", "enterprise-entities"] as const,
   queryEntities: (filters: UsageFilters) => ["reference", "enterprise-query-entities", scopeFromFilters(usageFacetWindow(filters))] as const,
   registry: ["reference", "model-registry"] as const,
+  modelAvailability: ["model-platform", "model-availability"] as const,
+
+
+
+
   modelBackendPool: (id: string) => ["model-platform", "model-backend-pool", id] as const,
   gatewayPublications: ["control-plane", "gateway-publications"] as const,
   gatewayPublication: (id: string) => ["control-plane", "gateway-publication", id] as const,
+  gatewayProgramUpgradePreview: (id: string) => ["control-plane", "gateway-program-upgrade-preview", id] as const,
   gatewayReleases: ["control-plane", "gateway-releases"] as const,
   gatewayRelease: (id: string) => ["control-plane", "gateway-release", id] as const,
   gatewayReleaseDiff: (id: string, againstId: string | null) => ["control-plane", "gateway-release-diff", id, againstId] as const,
@@ -107,6 +121,7 @@ export const finopsKeys = {
   distribution: (scope: UsageScope, dimension: DistributionDimension, splitBy?: DistributionDimension) =>
     ["finops", "distribution", dimension, splitBy ?? null, scope] as const,
   requests: (scope: UsageScope) => ["finops", "requests", scope] as const,
+  requestPages: (scope: UsageScope) => ["finops", "requests", scope, "pages"] as const,
   // The server buckets by timezone, so the zone is part of the response identity rather than a
   // display option that could be reapplied to a cached UTC result.
   usageActivity: (scope: UsageScope, interval: "hour" | "day" | "week", timezone: string) =>
@@ -126,6 +141,76 @@ export const finopsKeys = {
   ) => ["finops", "budgets", "people", period, departmentId, query, status, offset, limit] as const,
 }
 
+function registryQuery() {
+  return queryOptions({
+    queryKey: finopsKeys.registry,
+    queryFn: dataSource.registry,
+    ...cachePolicies.aggregate,
+  })
+}
+
+export async function storeRegistry(
+  queryClient: QueryClient,
+  update: ModelRegistry | ((current: ModelRegistry | undefined) => ModelRegistry | undefined),
+) {
+  await queryClient.cancelQueries({ queryKey: finopsKeys.registry })
+  let legacyTopology = false
+  queryClient.setQueryData<ModelRegistry>(finopsKeys.registry, current => {
+    const registry = typeof update === "function" ? update(current) : update
+    if (!registry) return undefined
+    legacyTopology = registry.apim_target_topology_available === true
+      && registry.apim_target_topology == null
+    return legacyTopology && current?.apim_target_topology
+      ? { ...registry, apim_target_topology: current.apim_target_topology }
+      : registry
+  })
+  if (legacyTopology) void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
+}
+
+export async function storeGatewayName(queryClient: QueryClient, id: string, name: string) {
+  await storeRegistry(queryClient, current => current ? {
+    ...current,
+    gateways: current.gateways.map(gateway => gateway.id === id ? { ...gateway, name: name.trim() } : gateway),
+    runtimes: current.runtimes.map(runtime => runtime.gateway_profile_id === id
+      ? { ...runtime, gateway_name: name.trim() } : runtime),
+  } : undefined)
+  void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
+}
+
+export async function storeGatewayDeploymentName(queryClient: QueryClient, id: string, name: string) {
+  await storeRegistry(queryClient, current => current?.apim_target_topology ? {
+    ...current,
+    apim_target_topology: {
+      ...current.apim_target_topology,
+      items: current.apim_target_topology.items.map(target => ({
+        ...target,
+        deployments: target.deployments.map(entry => entry.deployment.id === id
+          ? { ...entry, deployment: { ...entry.deployment, display_name: name.trim() } } : entry),
+      })),
+    },
+  } : current)
+  void queryClient.invalidateQueries({ queryKey: finopsKeys.registry })
+}
+
+export function applicationBudgetPending(budget: GatewayApplicationBudget | null | undefined) {
+  return budget?.policy_pending === true || budget?.tpm_sync_status === "pending"
+}
+
+export async function storeGatewayApplicationBudget(queryClient: QueryClient, application: GatewayApplicationDetail) {
+  const queryKey = finopsKeys.gatewayApplication(application.id)
+  await Promise.all([
+    queryClient.cancelQueries({ queryKey, exact: true }),
+    queryClient.cancelQueries({ queryKey: finopsKeys.gatewayApplications, exact: true }),
+  ])
+  queryClient.setQueryData(queryKey, application)
+  queryClient.setQueryData<GatewayApplicationList>(finopsKeys.gatewayApplications, current => current ? {
+    ...current,
+    items: current.items.map(item => item.id === application.id ? { ...item, budget: application.budget } : item),
+  } : current)
+  void queryClient.invalidateQueries({ queryKey: finopsKeys.gatewayApplications, exact: true })
+  void queryClient.invalidateQueries({ queryKey, exact: true })
+}
+
 export const finopsQueries = {
   entities: () => queryOptions({
     queryKey: finopsKeys.entities,
@@ -137,11 +222,11 @@ export const finopsQueries = {
     queryFn: () => dataSource.queryEntities(usageFacetWindow(filters)),
     ...cachePolicies.reference,
   }),
-  registry: () => queryOptions({
-    queryKey: finopsKeys.registry,
-    queryFn: dataSource.registry,
-    ...cachePolicies.aggregate,
-  }),
+  registry: registryQuery,
+
+
+
+
   modelBackendPool: (id: string | null) => queryOptions({
     queryKey: finopsKeys.modelBackendPool(id ?? ""),
     queryFn: () => dataSource.modelBackendPool(id!),
@@ -159,6 +244,27 @@ export const finopsQueries = {
         ? 2_000
         : false
     },
+  }),
+  gatewayProgramUpgradePreview: (id: string | null) => queryOptions({
+    queryKey: finopsKeys.gatewayProgramUpgradePreview(id ?? ""),
+    queryFn: () => dataSource.gatewayProgramUpgradePreview(id!),
+    enabled: Boolean(id),
+    retry: false,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+  }),
+  apimTargetTopologies: () => queryOptions({
+    ...registryQuery(),
+    select: (registry: ModelRegistry) => registry.apim_target_topology ?? null,
+  }),
+  modelAvailability: () => queryOptions({
+    queryKey: finopsKeys.modelAvailability,
+    queryFn: dataSource.modelAvailability,
+    retry: false,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+    refetchInterval: query => availabilityRefetchInterval(query.state.data?.items, query.state.error),
   }),
     gatewayPublications: () => queryOptions({
       queryKey: finopsKeys.gatewayPublications,
@@ -220,12 +326,24 @@ export const finopsQueries = {
     queryKey: finopsKeys.gatewayApplications,
     queryFn: dataSource.gatewayApplications,
     ...cachePolicies.aggregate,
+    refetchIntervalInBackground: true,
+    refetchInterval: query => query.state.data?.items.some(item => applicationBudgetPending(item.budget))
+      ? 10_000 : false,
   }),
   gatewayApplication: (id: string | null) => queryOptions({
     queryKey: finopsKeys.gatewayApplication(id ?? ""),
     queryFn: () => dataSource.gatewayApplication(id!),
     enabled: Boolean(id),
     ...cachePolicies.aggregate,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    refetchIntervalInBackground: true,
+    refetchInterval: (query) => {
+      const budget = query.state.data?.budget
+      return budget && (applicationBudgetPending(budget)
+        || query.state.status === "error") ? 10_000 : false
+    },
   }),
   gatewayApplicationUsageActivity: (
     id: string,
@@ -245,27 +363,37 @@ export const finopsQueries = {
       ...cachePolicies.aggregate,
     })
   },
-  executiveOverview: (filters: UsageFilters) => {
-    const scope = scopeFromFilters(filters)
+  executiveOverview: (filters: UsageFilters, windowMode: "rolling" | "fixed" = "rolling") => {
+    const scope = scopeFromFilters(filters, windowMode)
     return queryOptions({
       queryKey: finopsKeys.executiveOverview(scope),
       queryFn: () => dataSource.executiveOverview(filtersFromScope(scope)),
       ...cachePolicies.aggregate,
     })
   },
-  distribution: (filters: UsageFilters, dimension: DistributionDimension, splitBy?: DistributionDimension) => {
-    const scope = scopeFromFilters(filters)
+  distribution: (filters: UsageFilters, dimension: DistributionDimension, splitBy?: DistributionDimension, windowMode: "rolling" | "fixed" = "rolling") => {
+    const scope = scopeFromFilters(filters, windowMode)
     return queryOptions({
       queryKey: finopsKeys.distribution(scope, dimension, splitBy),
       queryFn: () => dataSource.distribution(filtersFromScope(scope), dimension, 30, splitBy),
       ...cachePolicies.aggregate,
     })
   },
-  requests: (filters: UsageFilters) => {
-    const scope = scopeFromFilters(filters)
+  requests: (filters: UsageFilters, windowMode: "rolling" | "fixed" = "rolling", limit = 200) => {
+    const scope = scopeFromFilters(filters, windowMode)
     return queryOptions({
-      queryKey: finopsKeys.requests(scope),
-      queryFn: () => dataSource.requests(filtersFromScope(scope), 200),
+      queryKey: limit === 200 ? finopsKeys.requests(scope) : [...finopsKeys.requests(scope), { limit }],
+      queryFn: () => dataSource.requests(filtersFromScope(scope), limit),
+      ...cachePolicies.requestList,
+    })
+  },
+  requestPages: (filters: UsageFilters, windowMode: "rolling" | "fixed" = "rolling") => {
+    const scope = scopeFromFilters(filters, windowMode)
+    return infiniteQueryOptions({
+      queryKey: finopsKeys.requestPages(scope),
+      queryFn: ({ pageParam }) => dataSource.requestPage(filtersFromScope(scope), pageParam ?? undefined),
+      initialPageParam: null as string | null,
+      getNextPageParam: (lastPage) => lastPage.page.next_cursor,
       ...cachePolicies.requestList,
     })
   },
@@ -289,8 +417,9 @@ export const finopsQueries = {
     filters: UsageFilters,
     interval: "hour" | "day" | "week",
     timezone: string,
+    windowMode: "rolling" | "fixed" = "rolling",
   ) => {
-    const scope = scopeFromFilters(filters)
+    const scope = scopeFromFilters(filters, windowMode)
     return queryOptions({
       queryKey: finopsKeys.usageActivity(scope, interval, timezone),
       queryFn: () => dataSource.trendPoints(filtersFromScope(scope), "none", interval, timezone),
@@ -368,7 +497,6 @@ export function prefetchPage(
 ) {
   void queryClient.prefetchQuery(finopsQueries.entities())
   void queryClient.prefetchQuery(finopsQueries.registry())
-
 
   if (page === "applications") {
     void queryClient.prefetchQuery(finopsQueries.gatewayApplications())

@@ -35,6 +35,23 @@ PARAMETERS = json.loads(
 )["parameters"]
 
 
+def test_self_hosted_access_is_opt_in_and_separates_creation_from_tokens() -> None:
+    wrapper = (ROOT / "infra/self-hosted-gateway-access.bicep").read_text()
+    access = (ROOT / "infra/modules/self-hosted-gateway-rbac.bicep").read_text()
+    assert "targetScope = 'subscription'" in wrapper
+    assert "scope: apimResourceGroup" in wrapper
+    assert "self-hosted-gateway-rbac" not in MAIN
+    assert access.count("scope: apim\n") == 2
+    for action in ("gateways/write", "gateways/apis/write", "gateways/generateToken/action"):
+        assert f"Microsoft.ApiManagement/service/{action}" in access
+        assert f"Microsoft.ApiManagement/service/{action}" not in CONTROL_PLANE_APIM_RBAC
+    provisioner, bootstrap = access.split("resource bootstrapRole", 1)
+    assert "generateToken" not in provisioner
+    assert "Microsoft.Authorization/permissions/read" in bootstrap
+    assert "gateways/write" not in bootstrap and "gateways/apis/write" not in bootstrap
+    assert all(value not in access for value in ("listSecrets", "listKeys", "/delete", "'*'"))
+
+
 def test_main_creates_the_platform_resource_group_and_apim() -> None:
     assert "targetScope = 'subscription'" in MAIN
     assert "resource platformResourceGroup" in MAIN
@@ -290,6 +307,41 @@ def test_telemetry_host_storage_is_fully_reachable_over_private_links() -> None:
     assert "resource functionStorageTableContributor" in DATA_PLANE
 
 
+def test_control_plane_host_storage_uses_private_links_for_new_and_existing_installs() -> None:
+    storage = CONTROL_PLANE.split("resource storage ", 1)[1].split(
+        "module storagePrivateNetwork", 1
+    )[0]
+    assert "publicNetworkAccess: 'Disabled'" in storage
+    assert "allowSharedKeyAccess: false" in storage
+    assert "defaultAction: 'Deny'" in storage
+    assert "bypass: 'None'" in storage
+    assert "SecurityControl" not in storage
+    assert "module storagePrivateNetwork 'storage-private-endpoints.bicep'" in CONTROL_PLANE
+    assert "storageAccountName: storage.name" in CONTROL_PLANE
+    function_app = CONTROL_PLANE.split("resource functionApp ", 1)[1].split(
+        "resource functionVnetIntegration", 1
+    )[0]
+    assert "dependsOn: [\n    storagePrivateNetwork\n  ]" in function_app
+    network = (ROOT / "infra/modules/storage-private-endpoints.bicep").read_text()
+    upgrade = (ROOT / "infra/control-plane-storage-network-upgrade.bicep").read_text()
+    for service in ("blob", "queue", "table"):
+        assert f"'{service}'" in network
+    assert "privateLinkServiceId: storage.id" in network
+    assert "privateDnsZoneId: privateDnsZones[index].id" in network
+    assert "name: 'privatelink.${service}.${environment().suffixes.storage}'" in network
+    assert "parent: privateEndpoints[index]" in network
+    assert "name: 'pe-${storageAccountName}-${service}'" in network
+    assert "storageAccounts@2023-05-01' existing" in network
+    assert "virtualNetworks@2024-05-01' existing" in network
+    assert "subnets@2024-05-01' existing" in network
+    assert "privateDnsZones@2024-06-01' existing" in network
+    assert "targetScope = 'subscription'" in upgrade
+    assert "'modules/storage-private-endpoints.bicep'" in upgrade
+    assert "scope: resourceGroup(resourceGroupName)" in upgrade
+    for forbidden in ("Microsoft.Web/sites", "Microsoft.Authorization", "listKeys("):
+        assert forbidden not in network + upgrade
+
+
 def test_api_and_apim_share_the_same_gateway_path() -> None:
     assert "param gatewayApiRelativePath string = 'turnstile/llm'" in MAIN
     assert (
@@ -340,6 +392,10 @@ def test_data_plane_creates_an_entra_only_budget_ledger() -> None:
     assert "publicNetworkAccess: 'Enabled'" in DATA_PLANE
     assert "bypass: 'AzureServices'" in DATA_PLANE
     assert "name: ledgerTableName" in DATA_PLANE
+    assert (
+        "var ledgerTableEndpoint = 'https://${ledgerStorage.name}.table."
+        "${environment().suffixes.storage}'" in DATA_PLANE
+    )
     assert "output ledgerTableEndpoint string = ledgerTableEndpoint" in DATA_PLANE
 
 
@@ -501,6 +557,18 @@ def test_application_creation_is_gated_and_uses_the_exact_platform_ledger() -> N
     assert "union(currentApiSettings" in release
     assert "union(currentControlPlaneSettings" in release
     assert release.count("GATEWAY_RELEASE_WORKER_ENABLED: string(releaseWorkerEnabled)") == 2
+    assert release.count("APIM_USAGE_OBSERVER_URL: usageObserverUrl") == 2
+    assert release.count("APIM_USAGE_OBSERVER_KEY_NAMED_VALUE: usageObserverKeyNamedValue") == 2
+    assert "resource applicationProduct " in APIM_INTEGRATION
+    assert "name: 'turnstile-ai-consumers'" in APIM_INTEGRATION
+    for parameter, setting in (
+        ("apimTargetRegistryEnabled", "APIM_TARGET_REGISTRY_ENABLED"),
+        ("selfHostedGatewayEnabled", "SELF_HOSTED_GATEWAY_ENABLED"),
+        ("selfHostedGatewayProvisioningEnabled", "SELF_HOSTED_GATEWAY_PROVISIONING_ENABLED"),
+        ("multiApimTargetRolloutEnabled", "MULTI_APIM_TARGET_ROLLOUT_ENABLED"),
+    ):
+        assert f"param {parameter} bool = true" in release
+        assert release.count(f"{setting}: string({parameter})") == 2
     role = CONTROL_PLANE.split("resource applicationLedgerContributor", 1)[1].split(
         "resource functionDatabaseSecretReader", 1
     )[0]
@@ -517,10 +585,12 @@ def test_application_creation_is_gated_and_uses_the_exact_platform_ledger() -> N
         ):
             assert f"name: '{setting}'" in template
     for action in (
+        "Microsoft.Authorization/permissions/read",
         "Microsoft.ApiManagement/service/subscriptions/read",
         "Microsoft.ApiManagement/service/subscriptions/write",
         "Microsoft.ApiManagement/service/products/apis/read",
         "Microsoft.ApiManagement/service/apis/policies/read",
+        "Microsoft.ApiManagement/service/gateways/read",
     ):
         assert action in CONTROL_PLANE_APIM_RBAC
     assert "listSecrets" not in CONTROL_PLANE_APIM_RBAC
@@ -540,6 +610,30 @@ def test_control_plane_uses_its_own_flex_plan_and_the_platform_vnet() -> None:
     assert "vnet-finops" not in CONTROL_PLANE
 
 
+def test_foundry_managed_identity_access_matches_account_role_contract() -> None:
+    from turnstile_core.domain.runtime_models import FOUNDRY_INFERENCE_ROLE_ID
+
+    role = (ROOT / "infra/modules/foundry-managed-identity-rbac.bicep").read_text()
+    entry = (ROOT / "infra/foundry-managed-identity-access.bicep").read_text()
+    assert FOUNDRY_INFERENCE_ROLE_ID in role
+    assert "accounts@2025-06-01' existing" in role
+    assert "scope: account" in role
+    assert "name: guid(account.id, apimPrincipalId, inferenceRoleId)" in role
+    assert "principalId: apimPrincipalId" in role
+    assert "principalType: 'ServicePrincipal'" in role
+    assert "roleDefinitionId: inferenceRoleId" in role
+    assert "includes account key access" in role
+    assert "targetScope = 'subscription'" in entry
+    assert "'modules/foundry-managed-identity-rbac.bicep'" in entry
+    assert "publicNetworkAccess" not in role + entry
+    assert "foundry-managed-identity" not in MAIN
+    documentation = (ROOT / "docs/deployment.md").read_text()
+    assert "foundry-managed-identity-access.bicep" in documentation
+    assert FOUNDRY_INFERENCE_ROLE_ID in documentation
+    assert "Cognitive Services OpenAI User" in documentation
+    assert "does not read or output keys" in documentation
+
+
 def test_application_key_management_role_is_least_privilege() -> None:
     actions = {
         line.strip().strip("'")
@@ -555,6 +649,32 @@ def test_application_key_management_role_is_least_privilege() -> None:
         "Microsoft.ApiManagement/service/subscriptions/regenerateSecondaryKey/action",
     }
     assert "scope: apim" in APPLICATION_KEY_MANAGEMENT_RBAC
+
+
+def test_apim_inventory_role_is_read_only_and_resource_scoped() -> None:
+    inventory_role = APPLICATION_KEY_MANAGEMENT_RBAC.split("resource inventoryReaderRole ", 1)[1]
+    actions = {
+        line.strip().strip("'")
+        for line in inventory_role.split("actions: [", 1)[1].split("]", 1)[0].splitlines()
+        if line.strip().startswith("'")
+    }
+    assert actions == {
+        "Microsoft.Authorization/permissions/read",
+        "Microsoft.ApiManagement/service/read",
+        "Microsoft.ApiManagement/service/apis/read",
+        "Microsoft.ApiManagement/service/apis/operations/read",
+        "Microsoft.ApiManagement/service/apis/policies/read",
+        "Microsoft.ApiManagement/service/apis/operations/policies/read",
+        "Microsoft.ApiManagement/service/gateways/read",
+        "Microsoft.ApiManagement/service/gateways/apis/read",
+        "Microsoft.ApiManagement/service/gateways/hostnameConfigurations/read",
+        "Microsoft.ApiManagement/service/gateways/certificateAuthorities/read",
+    }
+    assignment = inventory_role.split("resource apiInventoryReaders ", 1)[1]
+    assert "scope: apim" in assignment
+    assert "principalId: apiPrincipalId" in assignment
+    assert "roleDefinitionId: inventoryReaderRole.id" in assignment
+    assert "dataActions: []" in inventory_role
 
 
 def test_control_plane_role_has_no_subscription_or_resource_group_scope() -> None:
@@ -591,3 +711,22 @@ def test_example_parameters_are_non_secret_and_environment_neutral() -> None:
     serialized = json.dumps(PARAMETERS)
     for forbidden in ("xle-", "sebpvmm", "2b04b108", "azurewebsites.net"):
         assert forbidden not in serialized
+
+
+def test_platform_identities_can_delegate_scoped_apim_dependency_roles() -> None:
+    expected_roles = (
+        ("usageEventHub", "2b629674-e913-4c01-ae53-ef4638d8f975"),
+        ("ledgerTable", "0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3"),
+        ("routeTable", "76199698-9eea-4c19-bc75-cec21354c6b6"),
+        ("credentialVault", "4633458b-17de-408a-b874-0445c86b69e6"),
+    )
+    for template in (DATA_PLANE, CONTROL_PLANE):
+        assert "f58310d9-a9f6-439a-9e8d-f62e7b41a168" in template
+        assert "312a565d-c81f-4fd8-895a-4e21e48d571c" in template
+        assert "conditionVersion: '2.0'" in template
+        for scope_name, role_id in expected_roles:
+            assert f"scope: {scope_name}" in template
+            assert f"GuidEquals {{{role_id}}}" in template
+    assert "312a565d-c81f-4fd8-895a-4e21e48d571c" in MAIN
+    assert "eventHubNamespaceName: dataPlane.outputs.eventHubNamespaceName" in MAIN
+    assert "eventHubName: dataPlane.outputs.eventHubName" in MAIN

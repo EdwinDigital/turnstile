@@ -184,16 +184,19 @@ def test_request_trace_prioritizes_correlation_and_keeps_copilot_private() -> No
         app.dependency_overrides.pop(get_repository, None)
 
 
-def test_postgres_request_detail_prefers_attempt_correlation() -> None:
+def test_postgres_request_detail_prefers_trace_then_attempt_correlation() -> None:
     source = (
         Path(__file__).resolve().parents[3] / "turnstile_core/persistence/repository.py"
     ).read_text(encoding="utf-8")
 
-    assert "WHERE (usage.correlation_id = %s OR usage.request_id = %s)" in source
+    assert "FROM invocation_request_trace usage" in source
+    assert "WHERE (usage.correlation_id = %s OR usage.request_id = %s" in source
+    assert "OR usage.trace_id = %s OR usage.id = %s)" in source
     assert "AND usage.usage_domain = 'apim'" in source
-    assert "ORDER BY CASE WHEN usage.correlation_id = %s THEN 0 ELSE 1 END" in source
+    assert "ORDER BY CASE WHEN usage.trace_id = %s THEN 0" in source
+    assert "WHEN usage.correlation_id = %s THEN 1 ELSE 2 END" in source
     assert "usage.ts DESC, usage.id DESC" in source
-    assert "(request_id, request_id, request_id)" in source
+    assert "(request_id, request_id, request_id, request_id, request_id, request_id)" in source
 
 
 def test_apim_observability_excludes_copilot_cli_usage() -> None:

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "controller_kind": "azure_vm_guarded",
+  "configuration_schema_version": 1,
+  "runtime_sha256": [
+    "a0d95a3b1cde8df044ec3256c5b1d7a629f6fec1d5ca7fac4675a869c585850a"
+  ]
+}

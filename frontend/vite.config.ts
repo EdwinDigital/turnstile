@@ -1,4 +1,4 @@
-import { defineConfig, loadEnv } from "vite"
+import { defineConfig, loadEnv, type ProxyOptions } from "vite"
 import react from "@vitejs/plugin-react"
 
 // The dev server never talks to a model provider directly. It proxies every API
@@ -10,6 +10,21 @@ const DEFAULT_API_TARGET = "http://127.0.0.1:8000"
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, ".", "")
   const apiTarget = env.API_PROXY_TARGET || DEFAULT_API_TARGET
+  const apiOrigin = new URL(apiTarget).origin
+  const apiProxy: ProxyOptions = {
+    target: apiTarget,
+    changeOrigin: true,
+    cookieDomainRewrite: "",
+    bypass(request) {
+      if (["GET", "HEAD", "OPTIONS"].includes(request.method ?? "GET")) return
+      const { origin, host } = request.headers
+      const fetchSite = request.headers["sec-fetch-site"]
+      const protocol = "encrypted" in request.socket && request.socket.encrypted ? "https" : "http"
+      if (!host || origin !== `${protocol}://${host}`) return
+      if (fetchSite && fetchSite !== "same-origin") return
+      request.headers.origin = apiOrigin
+    },
+  }
 
   return {
     plugins: [react()],
@@ -21,7 +36,7 @@ export default defineConfig(({ mode }) => {
         // it the backend's Set-Cookie carries whatever host it saw -- and against a cloud
         // target that is an azurewebsites.net domain the browser will not store for
         // localhost, so sign-in succeeds and every following request is anonymous.
-        "/api": { target: apiTarget, changeOrigin: true, cookieDomainRewrite: "" },
+        "/api": apiProxy,
         "/health": { target: apiTarget, changeOrigin: true, cookieDomainRewrite: "" },
       },
     },

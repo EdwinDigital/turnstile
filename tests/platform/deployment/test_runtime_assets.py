@@ -1,6 +1,14 @@
+import ast
+import gzip
 from pathlib import Path
 
 import pytest
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.applications import Starlette
+from starlette.responses import Response
+from starlette.routing import Mount, Route
+from starlette.testclient import TestClient
 
 from backend.http.static_files import validate_production_web_dist
 from turnstile_core.config import Settings
@@ -24,4 +32,69 @@ def test_production_accepts_frontend_index(tmp_path: Path) -> None:
 def test_non_production_allows_missing_frontend_build(tmp_path: Path) -> None:
     validate_production_web_dist(
         Settings(production=False, web_dist_dir=tmp_path / "missing")
+    )
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "identity"])
+def test_asset_compression_preserves_content_and_does_not_wrap_api(
+    tmp_path: Path, encoding: str,
+) -> None:
+    content = b'export const text = "static application content";\n' * 4096
+    (tmp_path / "index-unit.js").write_bytes(content)
+    application = Starlette(routes=[
+        Route("/api/value", lambda request: Response(content, media_type="application/json")),
+        Mount("/assets", GZipMiddleware(
+            StaticFiles(directory=tmp_path), minimum_size=1024, compresslevel=6,
+        )),
+    ])
+    with TestClient(application) as client:
+        asset = client.get("/assets/index-unit.js", headers={"Accept-Encoding": encoding})
+        assert asset.status_code == 200
+        assert asset.content == content
+        assert asset.headers.get("content-encoding") == ("gzip" if encoding == "gzip" else None)
+        if encoding == "gzip":
+            assert "Accept-Encoding" in asset.headers["vary"]
+            with client.stream(
+                "GET", "/assets/index-unit.js", headers={"Accept-Encoding": encoding},
+            ) as streamed:
+                compressed = b"".join(streamed.iter_raw())
+            assert len(compressed) < len(content)
+            assert gzip.decompress(compressed) == content
+        api = client.get("/api/value", headers={"Accept-Encoding": encoding})
+        assert api.content == content
+        assert "content-encoding" not in api.headers
+        head = client.head("/assets/index-unit.js", headers={"Accept-Encoding": encoding})
+        assert head.status_code == 200
+        assert head.content == b""
+        unchanged = client.get(
+            "/assets/index-unit.js",
+            headers={"Accept-Encoding": encoding, "If-None-Match": asset.headers["etag"]},
+        )
+        assert unchanged.status_code == 304
+        assert unchanged.content == b""
+        assert client.get("/assets/missing.js").status_code == 404
+
+
+def test_api_compression_is_scoped_to_the_static_asset_mount() -> None:
+    source = (Path(__file__).resolve().parents[3] / "backend/api.py").read_text()
+    tree = ast.parse(source)
+    compressed = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "GZipMiddleware"
+    ]
+    assert len(compressed) == 1
+    mounts = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "mount" and compressed[0] in node.args
+    ]
+    assert len(mounts) == 1
+    assert ast.literal_eval(mounts[0].args[0]) == "/assets"
+    assert not any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_middleware"
+        and any(isinstance(argument, ast.Name) and argument.id == "GZipMiddleware"
+                for argument in node.args)
+        for node in ast.walk(tree)
     )

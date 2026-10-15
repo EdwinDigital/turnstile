@@ -23,7 +23,7 @@ from turnstile_core.domain.runtime_models import (
     PriceSource,
     RegistryResponse,
 )
-from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
+from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog, parse_context_tier
 from turnstile_core.pricing.matching import match_model, reference_price_basis
 
 MATCH_SYSTEM_PROMPT = (
@@ -313,6 +313,10 @@ class ModelPricingService:
             return PricePreviewResponse(status="stale", warnings=["价格来源读取失败"])
         if entry is None:
             return PricePreviewResponse(status="unmapped", warnings=["保存的目录引用未找到"])
+        if entry.context_tier is not None or parse_context_tier(entry.label) is not None:
+            raise HTTPException(
+                status_code=409, detail="Select the complete context price schedule, not one tier",
+            )
         if entry.operation != operation:
             return PricePreviewResponse(
                 status="unsupported",

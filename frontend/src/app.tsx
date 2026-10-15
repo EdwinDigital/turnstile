@@ -46,6 +46,7 @@ import {
   UserRoundX,
   UsersRound,
   WalletCards,
+  Workflow,
   X,
   Zap, LogOut,} from "lucide-react";
 import { TurnstileMark } from "./components/turnstile-logo";
@@ -1102,7 +1103,6 @@ export function App() {
     url.searchParams.set("page", next);
     url.searchParams.delete("runtime");
     url.searchParams.delete("tab");
-    url.searchParams.delete("router");
     url.searchParams.delete("application");
     if (next !== "pinned-report") url.searchParams.delete("chart");
     // The open thread belongs to the assistant page alone. Leaving it in the URL would
@@ -1153,7 +1153,7 @@ export function App() {
       page === "apim-native-routes"
         ? "负载均衡"
         : page === "gateway-releases"
-          ? "网关发布"
+          ? "发布管理"
         : page === "applications"
           ? "订阅管理"
         : page === "settings"
@@ -1307,7 +1307,8 @@ export function App() {
             </li>
             {selectedDataSource === "apim" && canAccessMenu(user, "finops-invoke") && <li className="sidebar-menu-item">
               <button
-                className="sidebar-menu-button sidebar-quick-action"
+                className={`sidebar-menu-button sidebar-quick-action ${page === "finops-invoke" ? "active" : ""}`}
+                aria-current={page === "finops-invoke" ? "page" : undefined}
                 type="button"
                 onClick={() => {
                   navigatePage("finops-invoke");
@@ -1345,8 +1346,10 @@ export function App() {
                         <li className="sidebar-menu-item" key={item.label}>
                           <button
                             className={`sidebar-menu-button ${item.page === page ? "active" : ""}`}
+                            aria-current={item.page === page ? "page" : undefined}
                             onMouseEnter={() => prefetchNavigation(item.page)}
                             onFocus={() => prefetchNavigation(item.page)}
+                            data-page={item.page}
                             onClick={() => {
                               navigatePage(item.page);
                               setSidebarOpenMobile(false);

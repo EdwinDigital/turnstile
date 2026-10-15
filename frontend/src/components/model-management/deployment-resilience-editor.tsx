@@ -19,9 +19,8 @@ import type {
   ModelRuntime,
 } from "../../data-sources/apim/types"
 import { useAuth } from "../../providers/auth-provider"
-import { equivalentNativeRouteRuntimes } from "./apim-native-route-eligibility"
-import { FieldHelp } from "./field-help"
-import { poolPublicationPayload } from "./pool-session-affinity"
+import { equivalentNativeRouteRuntimes } from "../model-management/apim-native-route-eligibility"
+import { FieldHelp } from "../model-management/field-help"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -35,6 +34,7 @@ import { Checkbox } from "../ui/checkbox"
 import { Button } from "../ui/button"
 import { ButtonGroup } from "../ui/button-group"
 import { Input } from "../ui/input"
+import { poolPublicationPayload } from "./pool-session-affinity"
 
 const DEFAULT_RATE_LIMIT: GatewayBackendPoolWrite["rate_limit"] = {
   max_attempts_per_request: 2,
@@ -262,7 +262,6 @@ export function DeploymentResilienceEditor({
   const selectedWeights = draft.members.map((member) => member.weight)
   const weightedIsDistinct = mode !== "weighted" || new Set(selectedWeights).size > 1
   const validDraft = validMemberCount && weightedIsDistinct
-    && (!draft.session_affinity || affinitySupported)
   const hasEffectivePool = Boolean(pool.data)
   const hasPendingPool = !hasEffectivePool && validMemberCount
   const visiblePublicationStatus = publicationStatus ?? notice?.status
@@ -322,7 +321,7 @@ export function DeploymentResilienceEditor({
   const canConfigure = canManage && (hasEffectivePool || compatibleRuntimes.length >= 2)
   const changeActions = canConfigure && (dirty || configuring) ? <span className="apim-native-route-change-actions">
     {dirty && !configuring && <span className="apim-native-route-dirty">未保存</span>}
-    <Button className="gateway-action-primary" type="button" size="sm" disabled={busy || !validDraft} onClick={() => save.mutate()}>{configuring ? <LoaderCircle className="spin" size={13} /> : <Send size={13} />}{configuring ? "正在发布" : "发布到 APIM"}</Button>
+    <Button className="router-action-primary" type="button" size="sm" disabled={busy || !validDraft} onClick={() => save.mutate()}>{configuring ? <LoaderCircle className="spin" size={13} /> : <Send size={13} />}{configuring ? "正在发布" : "发布到 APIM"}</Button>
   </span> : null
   const disableAction = canConfigure && pool.data
     ? <Button className="apim-native-route-disable" type="button" variant="destructive" size="sm" disabled={busy} onClick={() => setRemoveOpen(true)}><PowerOff size={13} />停用 Pool</Button>
@@ -332,32 +331,20 @@ export function DeploymentResilienceEditor({
     {changeActions}
     {disableAction}
   </>
-  const editor = <section className="gateway-deployment-resilience">
-    {pool.isLoading || registry.isLoading ? <div className="gateway-resilience-state"><LoaderCircle className="spin" size={14} />加载 APIM 后端池</div> : !primaryRuntime || primaryRuntime.config.control_plane_managed !== true ? <div className="gateway-resilience-state warning"><CircleAlert size={14} />此模型不支持 APIM 后端池</div> : <>
-      <div className="gateway-resilience-toolbar">
+  const editor = <section className="router-deployment-resilience">
+    {pool.isLoading || registry.isLoading ? <div className="router-resilience-state"><LoaderCircle className="spin" size={14} />加载 APIM 后端池</div> : !primaryRuntime || primaryRuntime.config.control_plane_managed !== true ? <div className="router-resilience-state warning"><CircleAlert size={14} />此模型不支持 APIM 后端池</div> : <>
+      <div className="router-resilience-toolbar">
         <span><b>部署模式</b><small>选择同一模型的物理 Deployment 如何接收流量。</small></span>
         {!renderFrame && <i data-active={hasEffectivePool} data-pending={hasPendingPool}>{hasEffectivePool ? "已生效" : hasPendingPool ? "待发布" : "未启用"}</i>}
       </div>
-      <ButtonGroup className="usage-metric-segment gateway-deployment-mode" aria-label="切换 APIM 部署模式">
-        <button type="button" className={validMemberCount && mode === "failover" ? "active" : ""} aria-pressed={validMemberCount && mode === "failover"} onClick={() => changeMode("failover")} disabled={!canManage || busy || !validMemberCount}><span className="gateway-mode-label-full">主备切换</span><span className="gateway-mode-label-short">主备</span></button>
-        <button type="button" className={validMemberCount && mode === "balanced" ? "active" : ""} aria-pressed={validMemberCount && mode === "balanced"} onClick={() => changeMode("balanced")} disabled={!canManage || busy || !validMemberCount}><span className="gateway-mode-label-full">均衡分流</span><span className="gateway-mode-label-short">均衡</span></button>
-        <button type="button" className={validMemberCount && mode === "weighted" ? "active" : ""} aria-pressed={validMemberCount && mode === "weighted"} onClick={() => changeMode("weighted")} disabled={!canManage || busy || !validMemberCount}><span className="gateway-mode-label-full">加权分流</span><span className="gateway-mode-label-short">加权</span></button>
+      <ButtonGroup className="usage-metric-segment router-deployment-mode" aria-label="切换 APIM 部署模式">
+        <button type="button" className={validMemberCount && mode === "failover" ? "active" : ""} aria-pressed={validMemberCount && mode === "failover"} onClick={() => changeMode("failover")} disabled={!canManage || busy || !validMemberCount}><span className="router-mode-label-full">主备切换</span><span className="router-mode-label-short">主备</span></button>
+        <button type="button" className={validMemberCount && mode === "balanced" ? "active" : ""} aria-pressed={validMemberCount && mode === "balanced"} onClick={() => changeMode("balanced")} disabled={!canManage || busy || !validMemberCount}><span className="router-mode-label-full">均衡分流</span><span className="router-mode-label-short">均衡</span></button>
+        <button type="button" className={validMemberCount && mode === "weighted" ? "active" : ""} aria-pressed={validMemberCount && mode === "weighted"} onClick={() => changeMode("weighted")} disabled={!canManage || busy || !validMemberCount}><span className="router-mode-label-full">加权分流</span><span className="router-mode-label-short">加权</span></button>
       </ButtonGroup>
-      <div className="gateway-pool-affinity">
-        <label htmlFor={`pool-affinity-${model.id}`}>
-          <Checkbox id={`pool-affinity-${model.id}`} checked={draft.session_affinity === true}
-            disabled={!canManage || busy || !affinitySupported}
-            onCheckedChange={(checked) => setDraft((current) => ({
-              ...current, session_affinity: checked === true,
-            }))} />
-          <span>会话亲和</span>
-        </label>
-        <FieldHelp>同一会话需保留 APIM 返回的 Cookie；权重、优先级和故障转移规则不变。</FieldHelp>
-        {!affinitySupported && <span className="gateway-pool-affinity-unavailable" role="status">后端尚不支持会话亲和。</span>}
-      </div>
-      {mode === "custom" && <div className="gateway-resilience-state warning"><CircleAlert size={14} />历史自定义配置只读</div>}
-      {mode === "weighted" && !weightedIsDistinct && <div className="gateway-resilience-state warning"><CircleAlert size={14} />请设置至少两个不同权重；相同权重请使用均衡分流。</div>}
-      <div className="gateway-resilience-runtime-list" role="list" aria-label={`${model.display_name} APIM Backend Pool Runtime`}>
+      {mode === "custom" && <div className="router-resilience-state warning"><CircleAlert size={14} />历史自定义配置只读</div>}
+      {mode === "weighted" && !weightedIsDistinct && <div className="router-resilience-state warning"><CircleAlert size={14} />请设置至少两个不同权重；相同权重请使用均衡分流。</div>}
+      <div className="router-resilience-runtime-list" role="list" aria-label={`${model.display_name} APIM Backend Pool Runtime`}>
         {visibleRuntimes.map((runtime) => {
           const selected = selectedIds.has(runtime.id)
           const member = draft.members.find((candidate) => candidate.runtime_id === runtime.id)
@@ -373,30 +360,40 @@ export function DeploymentResilienceEditor({
             : 0
           const authStrategy = String(runtime.config.auth_strategy ?? "none")
           const authLabel = authStrategy === "managed_identity" ? "Managed identity" : authStrategy.includes("api_key") ? "API key" : authStrategy.includes("bearer") ? "Bearer token" : "No auth"
-          return <div className="gateway-resilience-runtime" role="listitem" data-selected={shownSelected} key={runtime.id}>
+          return <div className="router-resilience-runtime" role="listitem" data-selected={shownSelected} key={runtime.id}>
             <label><Checkbox checked={shownSelected} disabled={!canManage || busy || primary || (!selected && draft.members.length >= 30)} onCheckedChange={(checked) => toggleRuntime(runtime.id, checked === true)} /><span><b data-no-localize title={runtime.name}>{runtime.name}</b><small><span data-no-localize>{runtime.gateway_name ?? "APIM Runtime"}</span><i>·</i><span data-no-localize>{authLabel}</span>{!compatible && <><i>·</i><span>不再兼容</span></>}<i>·</i><span>{membershipState}</span></small></span></label>
-            <div className="gateway-resilience-member-meta">
-              <span className="gateway-resilience-member-role" data-primary={primary} data-selected={selected}>{role}</span>
-              {member && <span className="gateway-resilience-member-priority"><small>APIM</small><b>{`P${member.priority + 1}`}</b></span>}
-              {mode === "weighted" && member ? <label className="gateway-resilience-member-weight"><small>权重</small><Input aria-label={`${runtime.name} 权重`} type="number" min="1" max="100" value={member.weight} disabled={!canManage || busy} onChange={(event) => changeWeight(runtime.id, Number(event.target.value))} /><em>{trafficShare}%</em></label> : member ? <span className="gateway-resilience-member-weight-readonly"><small>权重</small><b>{member.weight}</b>{mode !== "failover" && <em>{trafficShare}%</em>}</span> : null}
+            <div className="router-resilience-member-meta">
+              <span className="router-resilience-member-role" data-primary={primary} data-selected={selected}>{role}</span>
+              {member && <span className="router-resilience-member-priority"><small>APIM</small><b>{`P${member.priority + 1}`}</b></span>}
+              {mode === "weighted" && member ? <label className="router-resilience-member-weight"><small>权重</small><Input aria-label={`${runtime.name} 权重`} type="number" min="1" max="100" value={member.weight} disabled={!canManage || busy} onChange={(event) => changeWeight(runtime.id, Number(event.target.value))} /><em>{trafficShare}%</em></label> : member ? <span className="router-resilience-member-weight-readonly"><small>权重</small><b>{member.weight}</b>{mode !== "failover" && <em>{trafficShare}%</em>}</span> : null}
             </div>
           </div>
         })}
       </div>
 
-      <div className="gateway-resilience-policy" data-active={hasEffectivePool} data-pending={hasPendingPool}>
+      <div className="router-resilience-affinity">
+        <div className="router-resilience-affinity-control">
+          <label><Checkbox checked={draft.session_affinity === true} disabled={!canManage || busy || !affinitySupported || !validMemberCount} onCheckedChange={(checked) => setDraft((current) => ({ ...current, session_affinity: checked === true }))} /><span>会话黏着</span></label>
+          <FieldHelp>客户端须按对话保留 APIM Cookie。故障时可切换部署；调整池成员或配置可能重新分配会话。不会锁定 Azure 实际处理 Region。</FieldHelp>
+          <span className="router-resilience-affinity-state">{pool.data?.session_affinity ? "黏着已生效" : draft.session_affinity ? "黏着待发布" : "黏着已关闭"}</span>
+        </div>
+        {!affinitySupported && <div className="router-resilience-state warning"><CircleAlert size={14} />当前后端未发布会话黏着能力。</div>}
+        {draft.session_affinity && <dl><div><dt>绑定范围</dt><dd>Pool 后端端点</dd></div><div><dt>会话传递</dt><dd>Cookie</dd></div><div><dt>故障行为</dt><dd>允许故障切换</dd></div></dl>}
+      </div>
+
+      <div className="router-resilience-policy" data-active={hasEffectivePool} data-pending={hasPendingPool}>
         <div><ShieldCheck size={14} /><span><b>{hasEffectivePool ? "自动故障隔离已启用" : hasPendingPool ? "自动故障隔离待发布" : "自动故障隔离未启用"}</b><small>平台管理的 Circuit Breaker；仅 429 重试当前请求</small></span></div>
         <dl><div><dt>故障信号</dt><dd>429 · 408 · 5xx · Connection · Timeout</dd></div><div><dt>熔断时间</dt><dd>{draft.rate_limit.circuit_breaker.trip_duration_seconds}s</dd></div><div><dt>最大尝试</dt><dd>{draft.rate_limit.max_attempts_per_request}</dd></div><div><dt>重试间隔</dt><dd>{draft.rate_limit.retry_interval_seconds}s</dd></div><div><dt>首次快速重试</dt><dd>{draft.rate_limit.first_fast_retry ? "启用" : "关闭"}</dd></div><div><dt>后端超时</dt><dd>{draft.rate_limit.backend_timeout_seconds}s</dd></div><div><dt>后端 Retry-After</dt><dd>{draft.rate_limit.circuit_breaker.accept_retry_after ? "采用" : "忽略"}</dd></div></dl>
       </div>
 
-      {!canManage && <div className="gateway-resilience-state"><ShieldCheck size={14} />只读</div>}
-      {compatibleRuntimes.length < 2 && <div className="gateway-resilience-state warning"><CircleAlert size={14} />当前只有一个 Runtime，APIM 后端池未启用</div>}
-      {compatibleRuntimes.length >= 2 && draft.members.length < 2 && <div className="gateway-resilience-state warning"><CircleAlert size={14} />请选择至少 1 个备用 Runtime</div>}
-      {visiblePublicationStatus && visiblePublicationMessage && <div className="gateway-resilience-state" data-status={visiblePublicationStatus}>{publishing ? <LoaderCircle className="spin" size={14} /> : publicationHasError || visiblePublicationStatus === "awaiting_authorization" ? <CircleAlert size={14} /> : <CheckCircle2 size={14} />}<span>{visiblePublicationMessage}</span></div>}
-      {error && <div className="gateway-resilience-state error"><CircleAlert size={14} /><span data-no-localize>{String(error)}</span></div>}
+      {!canManage && <div className="router-resilience-state"><ShieldCheck size={14} />只读</div>}
+      {compatibleRuntimes.length < 2 && <div className="router-resilience-state warning"><CircleAlert size={14} />当前只有一个 Runtime，APIM 后端池未启用</div>}
+      {compatibleRuntimes.length >= 2 && draft.members.length < 2 && <div className="router-resilience-state warning"><CircleAlert size={14} />请选择至少 1 个备用 Runtime</div>}
+      {visiblePublicationStatus && visiblePublicationMessage && <div className="router-resilience-state" data-status={visiblePublicationStatus}>{publishing ? <LoaderCircle className="spin" size={14} /> : publicationHasError || visiblePublicationStatus === "awaiting_authorization" ? <CircleAlert size={14} /> : <CheckCircle2 size={14} />}<span>{visiblePublicationMessage}</span></div>}
+      {error && <div className="router-resilience-state error"><CircleAlert size={14} /><span data-no-localize>{String(error)}</span></div>}
       {!renderFrame && (disableAction || changeActions) && <footer>{disableAction}{changeActions}</footer>}
       <AlertDialog open={removeOpen} onOpenChange={(open) => { if (!busy) setRemoveOpen(open) }}>
-        <AlertDialogContent className="model-delete-dialog gateway-confirm-dialog">
+        <AlertDialogContent className="model-delete-dialog router-confirm-dialog">
           <div className="model-delete-body">
             <AlertDialogTitle>停用 APIM 后端池？</AlertDialogTitle>
             <AlertDialogDescription>恢复单一后端，并影响该模型的所有调用。</AlertDialogDescription>

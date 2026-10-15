@@ -11,6 +11,7 @@ import {
   CircleGauge,
   CircleSlash2,
   Eye,
+  Info,
   MoreHorizontal,
   PanelLeft,
   Pencil,
@@ -67,6 +68,7 @@ import { getIntlLocale, useLocale, type LocalePreference } from "../../../locale
 import { finopsKeys, finopsQueries } from "../queries"
 import { useAuth } from "../../../providers/auth-provider"
 import type {
+  BudgetMode,
   BudgetScopeType,
   DepartmentEnforcement,
   EnforcementMode,
@@ -90,6 +92,7 @@ const statusLabels: Record<TokenBudgetItem["status"], string> = {
   healthy: "正常",
   warning: "预警",
   exceeded: "已超额",
+  unverified: "用量未验证",
 }
 
 const currentPeriod = () => new Date().toISOString().slice(0, 7)
@@ -120,6 +123,23 @@ function formatFullTokens(value: number) {
   return new Intl.NumberFormat(getIntlLocale()).format(value)
 }
 
+function formatBudgetUsd(value: string | number | null | undefined, fractionDigits = 2) {
+  return value == null ? "--" : new Intl.NumberFormat(getIntlLocale(), {
+    style: "currency", currency: "USD", minimumFractionDigits: fractionDigits, maximumFractionDigits: fractionDigits,
+  }).format(Number(value))
+}
+
+function budgetLimit(item: TokenBudgetItem, mode: BudgetMode = item.budget_mode ?? "tokens") {
+  return mode === "usd" ? item.usd_limit == null ? null : Number(item.usd_limit) : item.token_limit
+}
+
+function budgetUsdMetric(item: TokenBudgetItem, field: "used_usd" | "remaining_usd" | "forecast_usd") {
+  const value = item[field]
+  if (field === "remaining_usd" && item.status === "unallocated") return "--"
+  if (value != null) return formatBudgetUsd(value, field === "used_usd" ? 3 : 2)
+  return field === "forecast_usd" ? "预测待计算" : "等待金额数据"
+}
+
 function formatDateTime(value: string) {
   return new Intl.DateTimeFormat(getIntlLocale(), {
     month: "short",
@@ -129,21 +149,34 @@ function formatDateTime(value: string) {
   }).format(new Date(value))
 }
 
-function sumLimits(items: TokenBudgetItem[]) {
-  return items.reduce((total, item) => total + (item.token_limit ?? 0), 0)
+function sumLimits(items: TokenBudgetItem[], mode: BudgetMode = "tokens") {
+  return items.reduce((total, item) => total + (
+    (item.budget_mode ?? "tokens") === mode ? budgetLimit(item, mode) ?? 0 : 0
+  ), 0)
 }
 
 function BudgetKpis({ data }: { data: TokenBudgetResponse }) {
   const organizations = data.items.filter((item) => item.scope_type === "organization")
+  const tokenOrganizations = organizations.filter((item) => item.budget_mode !== "usd")
+  const usdOrganizations = organizations.filter((item) => item.budget_mode === "usd")
   const allocatedBudget = sumLimits(organizations)
-  const usedTokens = organizations.reduce((total, item) => total + item.used_tokens, 0)
+  const usedTokens = tokenOrganizations.reduce((total, item) => total + item.used_tokens, 0)
   const remainingTokens = allocatedBudget - usedTokens
-  const assigned = data.items.filter((item) => item.token_limit != null).length
+  const assigned = data.items.filter((item) => budgetLimit(item) != null).length
   const atRisk = data.risk_count
-  const forecastTokens = organizations.reduce(
+  const forecastTokens = tokenOrganizations.reduce(
     (total, item) => total + item.forecast_tokens,
     0,
   )
+  const usdTotal = (field: "usd_limit" | "used_usd" | "remaining_usd" | "forecast_usd") => {
+    const available = usdOrganizations.filter(item => item[field] != null)
+    return available.length ? available.reduce((total, item) => total + Number(item[field]), 0) : null
+  }
+  const skippedUsage = usdOrganizations.reduce((total, item) => total + (item.unpriced_usage_count ?? 0), 0)
+  const amount = (tokens: number, field: "usd_limit" | "used_usd" | "remaining_usd" | "forecast_usd") => usdOrganizations.length
+    ? `${tokenOrganizations.length ? `${formatTokens(tokens)} Token / ` : ""}${field !== "usd_limit" && usdTotal(field) == null
+      ? field === "forecast_usd" ? "预测待计算" : "等待金额数据" : formatBudgetUsd(usdTotal(field), field === "used_usd" ? 3 : 2)}`
+    : formatTokens(tokens)
   const kpis = [
     {
       label: data.coverage === "department" ? "可见部门预算" : "组织总预算",
@@ -153,22 +186,22 @@ function BudgetKpis({ data }: { data: TokenBudgetResponse }) {
     },
     {
       label: "本月已使用",
-      value: formatTokens(usedTokens),
-      detail: allocatedBudget
+      value: amount(usedTokens, "used_usd"),
+      detail: skippedUsage ? "仅统计已计费请求" : usdOrganizations.length ? tokenOrganizations.length ? "Token / USD" : "USD" : allocatedBudget
         ? `${Math.round((usedTokens / allocatedBudget) * 1000) / 10}% 预算消耗`
         : "等待组织预算",
       icon: CircleGauge,
     },
     {
       label: "预算余额",
-      value: allocatedBudget ? formatTokens(remainingTokens) : "--",
-      detail: remainingTokens < 0 ? "已超过组织预算" : "本周期剩余额度",
+      value: allocatedBudget || usdOrganizations.length ? amount(remainingTokens, "remaining_usd") : "--",
+      detail: skippedUsage ? "按已计费请求计算" : remainingTokens < 0 ? "已超过组织预算" : "本周期剩余额度",
       icon: CheckCircle2,
     },
     {
       label: "月底预测",
-      value: formatTokens(forecastTokens),
-      detail: allocatedBudget
+      value: amount(forecastTokens, "forecast_usd"),
+      detail: skippedUsage ? "按已计费请求计算" : usdOrganizations.length ? tokenOrganizations.length ? "Token / USD" : "USD" : allocatedBudget
         ? `${Math.round((forecastTokens / allocatedBudget) * 1000) / 10}% 预计使用率`
         : "按当前消耗速度",
       icon: CalendarDays,
@@ -176,18 +209,21 @@ function BudgetKpis({ data }: { data: TokenBudgetResponse }) {
     {
       label: "预算覆盖",
       value: `${assigned}/${data.items.length}`,
-      detail: atRisk ? `${atRisk} 个范围需要关注` : "当前无超额风险",
+      detail: atRisk ? `${atRisk} 个范围需要关注` : skippedUsage ? "已计费请求未超额" : "当前无超额风险",
       icon: atRisk ? AlertTriangle : CheckCircle2,
     },
   ]
-  return <section className="finops-kpis budget-kpis">
+  return <><section className="finops-kpis budget-kpis">
     {kpis.map(({ label, value, detail, icon: Icon }) => <div key={label}>
       <span className="finops-kpi-icon"><Icon size={14} /></span>
       <label>{label}</label>
       <strong>{value}</strong>
       <small className={detail.includes("超过") || detail.includes("关注") ? "up" : ""}>{detail}</small>
     </div>)}
-  </section>
+  </section>{skippedUsage > 0 && <div className="budget-cost-summary" role="status">
+    <Info size={14} aria-hidden="true" /><span>金额仅统计已计费请求；已跳过</span>
+    <strong data-no-localize>{skippedUsage}</strong><span>条未计费记录</span>
+  </div>}</>
 }
 
 type BudgetConstraint = {
@@ -198,7 +234,7 @@ type BudgetConstraint = {
   parentLimit: number | null
 }
 
-function budgetConstraint(item: TokenBudgetItem, items: TokenBudgetItem[]): BudgetConstraint {
+function budgetConstraint(item: TokenBudgetItem, items: TokenBudgetItem[], mode: BudgetMode = item.budget_mode ?? "tokens"): BudgetConstraint {
   const childType = item.scope_type === "organization"
     ? "department"
     : item.scope_type === "department"
@@ -207,10 +243,10 @@ function budgetConstraint(item: TokenBudgetItem, items: TokenBudgetItem[]): Budg
   const childAllocated = childType
     ? sumLimits(items.filter(
         (candidate) => candidate.scope_type === childType && candidate.parent_scope_id === item.scope_id,
-      ))
+      ), mode)
     : 0
   if (item.scope_type === "organization") {
-    return { minimum: Math.max(1, childAllocated), maximum: null, childAllocated, parentName: null, parentLimit: null }
+    return { minimum: Math.max(mode === "usd" ? 0.01 : 1, childAllocated), maximum: null, childAllocated, parentName: null, parentLimit: null }
   }
   const parentType = item.scope_type === "department" ? "organization" : "department"
   const parent = items.find(
@@ -220,21 +256,67 @@ function budgetConstraint(item: TokenBudgetItem, items: TokenBudgetItem[]): Budg
     (candidate) => candidate.scope_type === item.scope_type
       && candidate.parent_scope_id === item.parent_scope_id
       && candidate.scope_id !== item.scope_id,
-  ))
-  const maximum = parent?.token_limit == null ? null : parent.token_limit - siblingAllocated
+  ), mode)
+  const parentLimit = parent && (parent.budget_mode ?? "tokens") === mode ? budgetLimit(parent, mode) : null
+  const maximum = parentLimit == null ? null : parentLimit - siblingAllocated
   return {
-    minimum: Math.max(1, childAllocated),
+    minimum: Math.max(mode === "usd" ? 0.01 : 1, childAllocated),
     maximum,
     childAllocated,
     parentName: parent?.scope_name ?? null,
-    parentLimit: parent?.token_limit ?? null,
+    parentLimit,
+  }
+}
+
+function organizationUsdAllocationPreview(item: TokenBudgetItem, items: TokenBudgetItem[], amount: string) {
+  if (!/^\d{1,16}(\.\d{1,2})?$/.test(amount) || !item.token_limit) return null
+  const [whole, fraction = ""] = amount.split(".")
+  const total = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"))
+  if (total <= 0n) return null
+  const money = (cents: bigint) => {
+    const absolute = cents < 0n ? -cents : cents
+    return `${cents < 0n ? "-" : ""}${absolute / 100n}.${String(absolute % 100n).padStart(2, "0")}`
+  }
+  const departments = items.filter(candidate => candidate.scope_type === "department"
+    && candidate.parent_scope_id === item.scope_id && candidate.token_limit != null)
+  const amounts = new Map<TokenBudgetItem, bigint>([[item, total]])
+  const remaining = new Map<TokenBudgetItem, bigint>([[item, total]])
+  const allocate = (parent: TokenBudgetItem, child: TokenBudgetItem) => {
+    const denominator = BigInt(parent.token_limit!) * 100n
+    const rounded = (amounts.get(parent)! * BigInt(child.token_limit!) + denominator / 2n) / denominator
+    const cents = (rounded < 1n ? 1n : rounded) * 100n
+    amounts.set(child, cents)
+    remaining.set(child, cents)
+    remaining.set(parent, remaining.get(parent)! - cents)
+  }
+  for (const department of departments) {
+    allocate(item, department)
+    for (const person of items.filter(candidate => candidate.scope_type === "user"
+      && candidate.parent_scope_id === department.scope_id && candidate.token_limit != null)) {
+      allocate(department, person)
+    }
+  }
+  return {
+    departments: departments.map(department => ({
+      scopeId: department.scope_id,
+      scopeName: department.scope_name,
+      usdLimit: money(amounts.get(department)!),
+      unallocatedUsd: money(remaining.get(department)!),
+    })),
+    allocatedUsd: money(total - remaining.get(item)!),
+    unallocatedUsd: money(remaining.get(item)!),
+    shortfalls: [item, ...departments].filter(parent => remaining.get(parent)! < 0n)
+      .map(parent => ({scopeId: parent.scope_id, scopeName: parent.scope_name,
+        usd: money(-remaining.get(parent)!)})),
   }
 }
 
 function BudgetEditor({
   item,
   items,
+  period,
   busy,
+  saving = false,
   error,
   onClose,
   onSave,
@@ -242,68 +324,144 @@ function BudgetEditor({
 }: {
   item: TokenBudgetItem
   items: TokenBudgetItem[]
+  period: string
   busy: boolean
+  saving?: boolean
   error: string | null
   onClose: () => void
   onSave: (value: TokenBudgetWrite) => void
   onDelete: () => void
 }) {
-  const constraint = budgetConstraint(item, items)
+  const parentType = item.scope_type === "user" ? "department" : "organization"
+  const parent = items.find(candidate => candidate.scope_type === parentType
+    && candidate.scope_id === item.parent_scope_id)
+  const inheritedMode = item.scope_type === "organization"
+    ? item.budget_mode ?? "tokens" : parent?.budget_mode ?? item.budget_mode ?? "tokens"
+  const [budgetMode, setBudgetMode] = useState<BudgetMode>(inheritedMode)
+  const switchingUnit = item.scope_type === "organization"
+    && budgetLimit(item) != null && budgetMode !== (item.budget_mode ?? "tokens")
+  const constraint = budgetConstraint(item, items, budgetMode)
   const [tokenLimit, setTokenLimit] = useState(String(item.token_limit ?? ""))
+  const [usdLimit, setUsdLimit] = useState(item.usd_limit ?? "")
+  const previewRequired = switchingUnit && budgetMode === "usd"
+  const allocationTree = useQuery({
+    queryKey: [...finopsKeys.budgets(period), "allocation-preview"],
+    queryFn: () => dataSource.budgets(period, true),
+    enabled: previewRequired,
+    staleTime: 0,
+    retry: false,
+  })
+  const allocationRoot = allocationTree.data?.items.find(candidate => candidate.scope_type === "organization"
+    && candidate.scope_id === item.scope_id)
+  const allocationPreview = previewRequired && allocationRoot
+    ? organizationUsdAllocationPreview(allocationRoot, allocationTree.data!.items, usdLimit) : null
+  const previewLoading = previewRequired && (allocationTree.isPending || allocationTree.isFetching)
+  const previewBlocked = previewRequired && (previewLoading || allocationTree.isError
+    || !allocationPreview || allocationPreview.shortfalls.length > 0)
+  const amountLabel = (value: number) => budgetMode === "usd" ? formatBudgetUsd(value) : `${formatFullTokens(value)} Token`
   const [warningThreshold, setWarningThreshold] = useState(
     String(item.warning_threshold_percent),
   )
   const [formError, setFormError] = useState<string | null>(null)
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const parsedLimit = Number(tokenLimit)
+    const parsedLimit = Number(budgetMode === "usd" ? usdLimit : tokenLimit)
     const parsedThreshold = Number(warningThreshold)
-    if (!Number.isSafeInteger(parsedLimit) || parsedLimit < constraint.minimum) {
-      setFormError(`Token 预算不能低于 ${formatFullTokens(constraint.minimum)}`)
+    const validAmount = budgetMode === "usd"
+      ? /^\d{1,16}(\.\d{1,2})?$/.test(usdLimit)
+      : Number.isSafeInteger(parsedLimit)
+    if (!validAmount || !Number.isFinite(parsedLimit) || parsedLimit < constraint.minimum) {
+      setFormError(budgetMode === "usd" ? "请输入有效的 USD 金额" : `Token 预算不能低于 ${formatFullTokens(constraint.minimum)}`)
       return
     }
     if (constraint.maximum != null && parsedLimit > constraint.maximum) {
-      setFormError(`当前层级最多可分配 ${formatFullTokens(constraint.maximum)} Token`)
+      setFormError(budgetMode === "usd" ? "金额超过上级可分配余额" : `当前层级最多可分配 ${formatFullTokens(constraint.maximum)} Token`)
+      return
+    }
+    if (previewBlocked) {
+      setFormError("请先确认有效的分配预览")
       return
     }
     if (!Number.isInteger(parsedThreshold) || parsedThreshold < 1 || parsedThreshold > 100) {
       setFormError("预警阈值必须在 1% 到 100% 之间")
       return
     }
-    onSave({ token_limit: parsedLimit, warning_threshold_percent: parsedThreshold })
+    onSave(budgetMode === "usd"
+      ? { budget_mode: "usd", token_limit: null, usd_limit: usdLimit, warning_threshold_percent: parsedThreshold }
+      : { token_limit: parsedLimit, warning_threshold_percent: parsedThreshold })
   }
   return <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose() }}>
     <DialogContent className="registry-editor-dialog budget-editor-dialog" finalFocus={false}>
       <form className="registry-editor" onSubmit={submit}>
         <DialogHeader className="registry-editor-header">
-          <DialogTitle>{item.token_limit == null ? "分配 Token 预算" : "调整 Token 预算"}</DialogTitle>
+          <DialogTitle>{budgetLimit(item) == null ? "分配预算" : "调整预算"}</DialogTitle>
           <DialogDescription>{scopeLabels[item.scope_type]} · {item.scope_name}</DialogDescription>
         </DialogHeader>
         <div className="registry-editor-body budget-editor-body">
           <div className="budget-editor-context">
-            {constraint.parentName && <div><span>上级范围</span><strong>{constraint.parentName}</strong><small>{constraint.parentLimit == null ? "尚未分配预算" : `${formatFullTokens(constraint.parentLimit)} Token`}</small></div>}
-            <div><span>已使用</span><strong>{formatFullTokens(item.used_tokens)}</strong><small>本自然月实际 Token</small></div>
-            {item.scope_type !== "user" && <div><span>下级已分配</span><strong>{formatFullTokens(constraint.childAllocated)}</strong><small>调整后不可低于此值</small></div>}
+            {constraint.parentName && <div><span>上级范围</span><strong>{constraint.parentName}</strong><small>{constraint.parentLimit == null ? "尚未分配预算" : amountLabel(constraint.parentLimit)}</small></div>}
+            <div><span>已使用</span><strong>{item.budget_mode === "usd" ? budgetUsdMetric(item, "used_usd") : formatFullTokens(item.used_tokens)}</strong><small>{item.budget_mode === "usd" ? "USD" : "本自然月实际 Token"}</small></div>
+            {item.scope_type !== "user" && <div><span>{previewRequired ? "切换后下级分配" : "下级已分配"}</span><strong>{previewRequired
+              ? allocationPreview ? formatBudgetUsd(allocationPreview.allocatedUsd) : "--"
+              : amountLabel(constraint.childAllocated)}</strong><small>调整后不可低于此值</small></div>}
+          </div>
+          <div className="registry-field">
+            <span className="registry-field-label">预算单位</span>
+            <Select value={budgetMode} items={[{ value: "tokens", label: "Token" }, { value: "usd", label: "USD" }]} onValueChange={(value) => {
+              setBudgetMode(value as BudgetMode)
+              setTokenLimit("")
+              setUsdLimit("")
+              setFormError(null)
+            }} disabled={busy || item.scope_type !== "organization"}>
+              <SelectTrigger aria-label="预算单位"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="tokens">Token</SelectItem><SelectItem value="usd">USD</SelectItem></SelectContent>
+            </Select>
+            {switchingUnit && <small>保存后下级额度按原分配比例调整，已用消费不清零；网关结清旧请求后生效。</small>}
           </div>
           <label className="registry-field">
-            <span className="registry-field-label">Token 预算</span>
+            <span className="registry-field-label">{budgetMode === "usd" ? "月度金额上限（USD）" : "Token 预算"}</span>
             <Input
-              name="token_limit"
-              type="number"
-              min={constraint.minimum}
+              name={budgetMode === "usd" ? "usd_limit" : "token_limit"}
+              type={budgetMode === "usd" ? "text" : "number"}
+              min={budgetMode === "usd" ? undefined : constraint.minimum}
               max={constraint.maximum ?? undefined}
-              step="1"
-              inputMode="numeric"
-              value={tokenLimit}
-              onChange={(event) => setTokenLimit(event.target.value)}
-              placeholder="输入本月 Token 额度"
+              step={budgetMode === "usd" ? undefined : "1"}
+              inputMode={budgetMode === "usd" ? "decimal" : "numeric"}
+              value={budgetMode === "usd" ? usdLimit : tokenLimit}
+              onChange={(event) => {
+                if (budgetMode === "usd") setUsdLimit(event.target.value)
+                else setTokenLimit(event.target.value)
+                setFormError(null)
+              }}
+              placeholder={budgetMode === "usd" ? "输入 USD 金额" : "输入本月 Token 额度"}
               required
               autoFocus
             />
             <small>{constraint.maximum == null
-              ? `最低 ${formatFullTokens(constraint.minimum)} Token`
-              : `可分配范围 ${formatFullTokens(constraint.minimum)} - ${formatFullTokens(Math.max(constraint.minimum, constraint.maximum))} Token`}</small>
+              ? amountLabel(constraint.minimum)
+              : `${amountLabel(constraint.minimum)} - ${amountLabel(Math.max(constraint.minimum, constraint.maximum))}`}</small>
           </label>
+          {previewRequired && <section className="budget-allocation-preview" aria-label="分配预览">
+            <h3>分配预览</h3>
+            {previewLoading ? <div className="budget-preview-status" role="status"><RefreshCw className="spin" size={14} /><span>正在加载分配预览</span></div>
+              : allocationTree.isError ? <div className="registry-error" role="alert">分配预览暂不可用</div>
+              : allocationPreview && <>
+                <table><thead><tr><th>部门</th><th>预算额度</th><th>未分配余额</th></tr></thead>
+                  <tbody>{allocationPreview.departments.map(department => <tr key={department.scopeId}>
+                    <td data-no-localize>{department.scopeName}</td><td>{formatBudgetUsd(department.usdLimit)}</td><td>{formatBudgetUsd(department.unallocatedUsd)}</td>
+                  </tr>)}</tbody></table>
+                <div className="smh-notice budget-preview-balance" role="status" aria-live="polite">
+                  <Info size={14} aria-hidden="true" />
+                  <div className="smh-notice-copy">
+                    <div className="budget-preview-total"><span>组织未分配余额</span><strong>{formatBudgetUsd(allocationPreview.unallocatedUsd)}</strong></div>
+                    <small>下级预算按原比例四舍五入到整美元，已分配正额度至少 USD1。</small>
+                  </div>
+                </div>
+                {allocationPreview.shortfalls.map(shortfall => <div className="registry-error" role="alert" key={shortfall.scopeId}>
+                  <span data-no-localize>{shortfall.scopeName}</span><span>取整后额度不足</span><strong>{formatBudgetUsd(shortfall.usd)}</strong>
+                </div>)}
+              </>}
+          </section>}
           <label className="registry-field">
             <span className="registry-field-label">预警阈值</span>
             <div className="budget-threshold-input"><Input
@@ -323,8 +481,8 @@ function BudgetEditor({
         </div>
         <DialogClose render={<Button type="button" variant="ghost" size="icon-sm" className="registry-editor-close" disabled={busy} />}><X size={16} /><span className="sr-only">关闭</span></DialogClose>
         <DialogFooter className="registry-editor-footer budget-editor-footer">
-          <div>{item.token_limit != null && <Button type="button" variant="destructive" disabled={busy || constraint.childAllocated > 0} onClick={onDelete} title={constraint.childAllocated > 0 ? "请先移除下级预算" : "移除预算"}><Trash2 size={14} />移除预算</Button>}</div>
-          <div><DialogClose render={<Button type="button" variant="outline" disabled={busy} />}>取消</DialogClose><Button type="submit" disabled={busy || (item.scope_type !== "organization" && constraint.parentLimit == null)}><Save size={14} />保存预算</Button></div>
+          <div>{budgetLimit(item) != null && <Button type="button" variant="destructive" disabled={busy || constraint.childAllocated > 0} onClick={onDelete} title={constraint.childAllocated > 0 ? "请先移除下级预算" : "移除预算"}><Trash2 size={14} />移除预算</Button>}</div>
+          <div><DialogClose render={<Button type="button" variant="outline" disabled={busy} />}>取消</DialogClose><Button type="submit" aria-busy={saving || undefined} disabled={busy || previewBlocked || (item.scope_type !== "organization" && constraint.parentLimit == null)}>{saving ? <RefreshCw className="spin" size={14} aria-hidden="true" /> : <Save size={14} />}保存预算</Button></div>
         </DialogFooter>
       </form>
     </DialogContent>
@@ -333,10 +491,19 @@ function BudgetEditor({
 
 function BudgetProgress({ item }: { item: TokenBudgetItem }) {
   const progress = Math.min(100, Math.max(0, item.usage_percent ?? 0))
+  const usageStatus = item.usage_percent == null ? item.status
+    : item.usage_percent >= 100 ? "exceeded"
+    : item.usage_percent >= item.warning_threshold_percent ? "warning" : "healthy"
   return <div className="budget-progress-cell" data-label="已使用">
-    <div><strong>{formatFullTokens(item.used_tokens)}</strong><span>{item.usage_percent == null ? "--" : `${item.usage_percent}%`}</span></div>
-    <span className="budget-progress-track" data-status={item.status} role="progressbar" aria-label={`${item.scope_name} 已使用`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={item.usage_percent == null ? undefined : progress}><i style={{ width: `${progress}%` }} /></span>
+    <div><strong>{item.budget_mode === "usd" ? budgetUsdMetric(item, "used_usd") : formatFullTokens(item.used_tokens)}</strong><span>{item.usage_percent == null ? "--" : `${item.usage_percent}%`}</span></div>
+    <span className="budget-progress-track" data-status={usageStatus} role="progressbar" aria-label={`${item.scope_name} 已使用`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={item.usage_percent == null ? undefined : progress}><i style={{ width: `${progress}%` }} /></span>
   </div>
+}
+
+function budgetStatusLabel(item: TokenBudgetItem) {
+  return item.status === "warning" && (item.usage_percent ?? 0) < item.warning_threshold_percent
+    && (item.forecast_percent ?? 0) >= item.warning_threshold_percent
+    ? "预测预警" : statusLabels[item.status]
 }
 
 function BudgetRow({
@@ -390,11 +557,11 @@ function BudgetRow({
       </button>
       {directoryStatus !== "active" && <Badge variant="outline">已归档</Badge>}
     </div>
-    <div className="budget-number-cell" data-label="预算"><strong>{item.token_limit == null ? "--" : formatFullTokens(item.token_limit)}</strong><small>{item.token_limit == null ? "尚未分配" : `预警 ${item.warning_threshold_percent}%`}</small></div>
+    <div className="budget-number-cell" data-label="预算"><strong>{item.budget_mode === "usd" ? formatBudgetUsd(item.usd_limit) : item.token_limit == null ? "--" : formatFullTokens(item.token_limit)}</strong><small>{budgetLimit(item) == null ? "尚未分配" : `预警 ${item.warning_threshold_percent}%`}</small></div>
     <BudgetProgress item={item} />
-    <div className="budget-number-cell" data-label="剩余"><strong>{item.remaining_tokens == null ? "--" : formatFullTokens(item.remaining_tokens)}</strong><small>Token</small></div>
-    <div className="budget-number-cell" data-label="月底预测"><strong>{formatFullTokens(item.forecast_tokens)}</strong><small>{item.forecast_percent == null ? "未设置预算" : `${item.forecast_percent}% 预计使用`}</small></div>
-    <div className="budget-status-cell"><span data-status={item.status}>{statusLabels[item.status]}</span></div>
+    <div className="budget-number-cell" data-label="剩余"><strong>{item.budget_mode === "usd" ? budgetUsdMetric(item, "remaining_usd") : item.remaining_tokens == null ? "--" : formatFullTokens(item.remaining_tokens)}</strong><small>{item.budget_mode === "usd" ? "USD" : "Token"}</small></div>
+    <div className="budget-number-cell" data-label="月底预测"><strong>{item.budget_mode === "usd" ? budgetUsdMetric(item, "forecast_usd") : formatFullTokens(item.forecast_tokens)}</strong><small>{item.forecast_percent == null ? item.budget_mode === "usd" && item.usd_limit != null ? "预测待计算" : "未设置预算" : `${item.forecast_percent}% 预计使用`}</small></div>
+    <div className="budget-status-cell"><span data-status={item.status}>{budgetStatusLabel(item)}</span></div>
     <div className="budget-enforce-cell" data-label="拦截">
       {enforcement
         ? canManage ? <Switch
@@ -420,8 +587,8 @@ function BudgetRow({
           <span className="sr-only">更多操作</span>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" sideOffset={4} className="budget-row-menu-content">
-          {onManagePeople && <DropdownMenuItem disabled={item.token_limit == null} onClick={onManagePeople}><Users size={14} />管理人员预算</DropdownMenuItem>}
-          <DropdownMenuItem disabled={editDisabled} onClick={onEdit}>{item.token_limit == null ? <Plus size={14} /> : <Pencil size={14} />}{item.token_limit == null ? "分配预算" : `编辑${scopeLabels[item.scope_type]}预算`}</DropdownMenuItem>
+          {onManagePeople && <DropdownMenuItem disabled={budgetLimit(item) == null} onClick={onManagePeople}><Users size={14} />管理人员预算</DropdownMenuItem>}
+          <DropdownMenuItem disabled={editDisabled} onClick={onEdit}>{budgetLimit(item) == null ? <Plus size={14} /> : <Pencil size={14} />}{budgetLimit(item) == null ? "分配预算" : `编辑${scopeLabels[item.scope_type]}预算`}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>}
     </div>
@@ -488,7 +655,7 @@ function BudgetTable({
     else next.add(scopeId)
     return next
   })
-  const assignedCount = items.filter((item) => item.token_limit != null).length
+  const assignedCount = items.filter((item) => budgetLimit(item) != null).length
   return <div className="budget-allocation-section">
     <div className="budget-section-heading">
       <div><h2>层级预算分配</h2><p>组织额度约束部门，部门额度约束人员</p></div>
@@ -502,7 +669,7 @@ function BudgetTable({
     </div>
     <section className="finops-panel budget-allocation-panel">
       <div className="budget-table-scroll">
-        <ResizableGridTable className="budget-table" role="table" aria-label="Token 预算层级" headerSelector=".budget-table-head" minWidths={[180, 100, 140, 100, 110, 94, 88, 52]}>
+        <ResizableGridTable className="budget-table" role="table" aria-label="Token 预算层级" headerSelector=".budget-table-head" minWidths={[180, 100, 140, 160, 160, 94, 88, 52]}>
           <div className="budget-table-head" role="row"><span><span>范围</span></span><span><span>预算</span></span><span><span>已使用</span></span><span><span>剩余</span></span><span><span>月底预测</span></span><span><span>状态</span></span><span title="开启后额度用尽的人员会被网关拒绝"><span>拦截</span></span><span /></div>
           {rows.map(({ item, directoryStatus, depth, hasChildren, parentAllocated }) => <BudgetRow
             key={`${item.scope_type}:${item.scope_id}`}
@@ -558,7 +725,7 @@ function BulkPeopleEditor({
     ? people.items.find((item) => item.scope_id === selectedIds[0])
     : undefined
   const [updateBudget, setUpdateBudget] = useState(
-    singlePerson ? singlePerson.token_limit != null : true,
+    singlePerson ? budgetLimit(singlePerson) != null : true,
   )
   const [updateModels, setUpdateModels] = useState(
     singlePerson?.model_policy_configured ?? false,
@@ -567,6 +734,8 @@ function BulkPeopleEditor({
   const [tokenLimit, setTokenLimit] = useState(
     singlePerson?.token_limit == null ? "" : String(singlePerson.token_limit),
   )
+  const usdMode = people.department_usd_limit != null
+  const [usdLimit, setUsdLimit] = useState(singlePerson?.usd_limit ?? "")
   const [threshold, setThreshold] = useState(
     String(singlePerson?.warning_threshold_percent ?? 80),
   )
@@ -586,8 +755,10 @@ function BulkPeopleEditor({
       setFormError("预警阈值必须在 1% 到 100% 之间")
       return
     }
-    if (updateBudget && mode === "fixed" && (!Number.isSafeInteger(parsedLimit) || parsedLimit < 1)) {
-      setFormError("请输入大于 0 的每人 Token 额度")
+    if (updateBudget && mode === "fixed" && (usdMode
+      ? !/^\d{1,16}(\.\d{1,14})?$/.test(usdLimit) || Number(usdLimit) <= 0
+      : !Number.isSafeInteger(parsedLimit) || parsedLimit < 1)) {
+      setFormError(usdMode ? "请输入有效的 USD 金额" : "请输入大于 0 的每人 Token 额度")
       return
     }
     onSave({
@@ -597,7 +768,9 @@ function BulkPeopleEditor({
       query: selection === "all_matching" ? query : undefined,
       status,
       allocation_mode: updateBudget ? mode : "preserve",
-      token_limit: updateBudget && mode === "fixed" ? parsedLimit : undefined,
+      ...(usdMode && updateBudget ? { budget_mode: "usd" as const } : {}),
+      token_limit: updateBudget && mode === "fixed" && !usdMode ? parsedLimit : undefined,
+      usd_limit: updateBudget && mode === "fixed" && usdMode ? usdLimit : undefined,
       warning_threshold_percent: parsedThreshold,
       model_ids: updateModels ? [...modelIds] : undefined,
     })
@@ -614,11 +787,11 @@ function BulkPeopleEditor({
         </DialogHeader>
         <div className="registry-editor-body people-bulk-body">
           <div className="people-bulk-summary">
-            <div><span>部门预算</span><strong>{people.department_token_limit == null ? "--" : formatFullTokens(people.department_token_limit)}</strong></div>
-            <div><span>已分配</span><strong>{formatFullTokens(people.department_allocated_tokens)}</strong></div>
-            <div><span>当前可用</span><strong>{people.department_available_tokens == null ? "--" : formatFullTokens(people.department_available_tokens)}</strong></div>
+            <div><span>部门预算</span><strong>{usdMode ? formatBudgetUsd(people.department_usd_limit) : people.department_token_limit == null ? "--" : formatFullTokens(people.department_token_limit)}</strong></div>
+            <div><span>已分配</span><strong>{usdMode ? formatBudgetUsd(people.department_allocated_usd) : formatFullTokens(people.department_allocated_tokens)}</strong></div>
+            <div><span>当前可用</span><strong>{usdMode ? formatBudgetUsd(people.department_available_usd) : people.department_available_tokens == null ? "--" : formatFullTokens(people.department_available_tokens)}</strong></div>
           </div>
-          <label className="people-update-toggle"><Checkbox checked={updateBudget} onCheckedChange={(checked) => setUpdateBudget(checked === true)} /><span><b>更新月度预算</b><small>按当前预算周期保存 Token 额度</small></span></label>
+          <label className="people-update-toggle"><Checkbox checked={updateBudget} onCheckedChange={(checked) => setUpdateBudget(checked === true)} /><span><b>更新月度预算</b><small>{usdMode ? "USD" : "按当前预算周期保存 Token 额度"}</small></span></label>
           {updateBudget && <div className="registry-field">
             <span className="registry-field-label">分配方式</span>
             <div className="people-allocation-modes">
@@ -627,9 +800,9 @@ function BulkPeopleEditor({
             </div>
           </div>}
           {updateBudget && mode === "fixed" && <label className="registry-field">
-            <span className="registry-field-label">每人 Token 预算</span>
-            <Input type="number" min="1" step="1" inputMode="numeric" value={tokenLimit} onChange={(event) => setTokenLimit(event.target.value)} placeholder="例如 50,000" autoFocus />
-            <small>{projected == null ? "为所有选中人员设置相同额度" : `本次合计 ${formatFullTokens(projected)} Token`}</small>
+            <span className="registry-field-label">{usdMode ? "月度金额上限（USD）" : "每人 Token 预算"}</span>
+            <Input name={usdMode ? "usd_limit" : "token_limit"} type={usdMode ? "text" : "number"} min={usdMode ? undefined : "1"} step={usdMode ? undefined : "1"} inputMode={usdMode ? "decimal" : "numeric"} value={usdMode ? usdLimit : tokenLimit} onChange={(event) => usdMode ? setUsdLimit(event.target.value) : setTokenLimit(event.target.value)} placeholder={usdMode ? "输入 USD 金额" : "例如 50,000"} autoFocus />
+            <small>{usdMode ? "USD" : projected == null ? "为所有选中人员设置相同额度" : `本次合计 ${formatFullTokens(projected)} Token`}</small>
           </label>}
           {updateBudget && mode === "equal_remaining" && <div className="people-equal-notice">{`系统会扣除未选中人员的现有额度，再将可用预算平均分配给这 ${targetCount.toLocaleString(getIntlLocale())} 人。`}</div>}
           {updateBudget && <label className="registry-field">
@@ -921,6 +1094,8 @@ function BudgetHistory({ data, models }: { data: TokenBudgetResponse; models: Ma
     event.event_type !== "budget"
     || event.action !== "updated"
     || event.previous_token_limit !== event.new_token_limit
+    || event.previous_budget_mode !== event.new_budget_mode
+    || event.previous_usd_limit !== event.new_usd_limit
     || event.previous_warning_threshold_percent !== event.new_warning_threshold_percent
   ))
   return <section className="finops-panel budget-history-panel">
@@ -949,13 +1124,21 @@ function BudgetHistory({ data, models }: { data: TokenBudgetResponse; models: Ma
             </div>
           }
           const tokenChanged = event.previous_token_limit !== event.new_token_limit
+            || event.previous_budget_mode !== event.new_budget_mode
+            || event.previous_usd_limit !== event.new_usd_limit
           const thresholdChanged = event.previous_warning_threshold_percent !== event.new_warning_threshold_percent
+          const previousAmount = event.previous_budget_mode === "usd"
+            ? formatBudgetUsd(event.previous_usd_limit)
+            : event.previous_token_limit == null ? "未分配" : formatFullTokens(event.previous_token_limit)
+          const nextAmount = event.new_budget_mode === "usd"
+            ? formatBudgetUsd(event.new_usd_limit)
+            : event.new_token_limit == null ? "未分配" : formatFullTokens(event.new_token_limit)
           return <div key={event.id}>
-            <span data-action={event.action}>Token</span>
+            <span data-action={event.action}>{event.new_budget_mode === "usd" || (event.action === "removed" && event.previous_budget_mode === "usd") ? "USD" : "Token"}</span>
             <div><strong>{event.scope_name}</strong><small>{scopeLabels[event.scope_type]} · {event.changed_by}</small></div>
             <p>{(tokenChanged || event.action !== "updated") && (event.action === "removed"
-              ? `${formatFullTokens(event.previous_token_limit ?? 0)} → 未分配`
-              : `${event.previous_token_limit == null ? "未分配" : formatFullTokens(event.previous_token_limit)} → ${formatFullTokens(event.new_token_limit ?? 0)}`)}
+              ? `${previousAmount} → 未分配`
+              : `${previousAmount} → ${nextAmount}`)}
               {event.action === "updated" && thresholdChanged && <>{tokenChanged && " · "}<span>预警阈值</span> {event.previous_warning_threshold_percent}% → {event.new_warning_threshold_percent}%</>}</p>
             <time>{formatDateTime(event.changed_at)}</time>
           </div>
@@ -1009,8 +1192,11 @@ export function BudgetManagementPage({ onToggleSidebar }: { onToggleSidebar: () 
   const save = useMutation({
     mutationFn: ({ item, value }: { item: TokenBudgetItem; value: TokenBudgetWrite }) =>
       dataSource.saveBudget(period, item.scope_type, item.scope_id, value),
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       queryClient.setQueryData(finopsKeys.budgets(period), data)
+      const peopleKey = ["finops", "budgets", "people", period]
+      await queryClient.cancelQueries({ queryKey: peopleKey })
+      await queryClient.invalidateQueries({ queryKey: peopleKey })
       setEditing(null)
     },
   })
@@ -1123,7 +1309,9 @@ export function BudgetManagementPage({ onToggleSidebar }: { onToggleSidebar: () 
       key={`${period}:${editing.scope_type}:${editing.scope_id}`}
       item={editing}
       items={query.data.items}
+      period={period}
       busy={busy}
+      saving={save.isPending}
       error={mutationError ? queryError(mutationError) : null}
       onClose={() => { if (!busy) setEditing(null) }}
       onSave={(value) => save.mutate({ item: editing, value })}

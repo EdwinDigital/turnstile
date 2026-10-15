@@ -111,10 +111,10 @@ export function ApplicationUsageActivityCard({ applicationId }: { applicationId:
         : !hasVisibleValues ? <ChartState>{metric === "cost" ? "当前筛选范围暂无费用数据" : "当前筛选范围暂无 Token 用量"}</ChartState>
         : <div className="application-usage-chart-canvas finops-chart-surface">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData} margin={{ left: 8, right: 8, top: 8, bottom: 0 }}>
+            <BarChart data={chartData} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
               <CartesianGrid vertical={false} stroke="var(--border)" />
               <XAxis dataKey="label" axisLine={false} tickLine={false} tickMargin={8} />
-              <YAxis axisLine={false} tickLine={false} tickMargin={8} width={56} tickFormatter={(value) => metric === "cost" ? `$${Number(value).toFixed(2)}` : formatCompact(Number(value))} />
+              <YAxis axisLine={false} tickLine={false} tickSize={0} tickMargin={8} width="auto" tickFormatter={(value) => metric === "cost" ? `$${Number(value).toFixed(2)}` : formatCompact(Number(value))} />
               <Tooltip cursor={false} content={<FinOpsChartTooltip nameFormatter={metricLabel} valueFormatter={(value) => metric === "cost" ? formatCost(Number(value)) : `${formatFull(Number(value))} tokens`} />} />
               {metric === "cost" ? <Bar dataKey="cost" fill="var(--chart-1)" radius={[3, 3, 0, 0]} isAnimationActive={false} />
                 : visibleSeries.map((series, index) => <Bar key={series.key} dataKey={series.key} stackId="tokens" fill={series.color} radius={index === visibleSeries.length - 1 ? [3, 3, 0, 0] : 0} isAnimationActive={false} />)}

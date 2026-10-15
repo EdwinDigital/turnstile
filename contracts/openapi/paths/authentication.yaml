@@ -1,80 +1,94 @@
 paths:
   /api/v1/auth/login:
     post:
-      tags:
-      - Authentication
-      operationId: loginWithPassword
       summary: Start a password session
-      security: []
+      operationId: loginWithPassword
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/PasswordLogin
+        required: true
       responses:
         '200':
           description: Signed-in profile and session cookie
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/AuthProfile
+                $ref: ../../openapi.yaml#/components/schemas/Profile
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/auth/entra:
-    post:
+      security: []
       tags:
       - Authentication
-      operationId: loginWithEntra
+  /api/v1/auth/entra:
+    post:
       summary: Exchange a verified Microsoft ID token for a session
-      security: []
+      operationId: loginWithEntra
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/EntraLogin
+        required: true
       responses:
         '200':
           description: Signed-in profile and session cookie
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/AuthProfile
+                $ref: ../../openapi.yaml#/components/schemas/Profile
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/auth/me:
-    get:
+      security: []
       tags:
       - Authentication
-      operationId: getCurrentProfile
+  /api/v1/auth/me:
+    get:
       summary: Read the current session profile
+      operationId: getCurrentProfile
       responses:
         '200':
           description: Current signed-in profile
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/AuthProfile
+                $ref: ../../openapi.yaml#/components/schemas/Profile
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/auth/logout:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Authentication
-      operationId: logout
+  /api/v1/auth/logout:
+    post:
       summary: Revoke the current session when present
-      security: []
+      operationId: logout
       responses:
         '204':
           description: Session revoked and cookie cleared
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security: []
+      tags:
+      - Authentication

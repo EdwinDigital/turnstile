@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from contextlib import nullcontext
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock
+from typing import Any
+from unittest.mock import MagicMock, patch
 from uuid import UUID
 from xml.etree import ElementTree
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
-from pydantic import HttpUrl, SecretStr
+from pydantic import HttpUrl, SecretStr, ValidationError
 
 from backend.http.publication_auth import require_publication_owner
 from backend.services.runtime_service import ModelRuntimeService
@@ -26,7 +32,14 @@ from tests.backend.model_platform.control_plane_support import (
     transition_publication,
 )
 from turnstile_core.config import Settings
+from turnstile_core.domain.budget_counting import (
+    BudgetPublicationContracts,
+    ModelCountContract,
+    NativeCountContract,
+    ProtocolCountContract,
+)
 from turnstile_core.domain.control_plane import (
+    COUNT_TOKENS_REJECTIONS,
     ApiFormat,
     AuthStrategy,
     GatewayBackendFailureStatusCodeRange,
@@ -35,32 +48,2597 @@ from turnstile_core.domain.control_plane import (
     GatewayBackendPoolMemberWrite,
     GatewayBackendPoolWrite,
     GatewayCredentialRotation,
+    GatewayPublication,
     GatewayPublicationCreate,
     GatewayPublicationRetry,
     GatewayPublicationView,
     GatewayRateLimitCircuitBreaker,
     GatewayRateLimitResilience,
     ModelCreateTarget,
+    ModelTarget,
+    PublicationKind,
+    PublicationStatus,
     RuntimeTarget,
+    program_migration_spec_matches,
+    publication_credential_evidence,
+    publication_credential_states,
+    publication_failure,
     publication_materialized_named_values,
+    publication_model_id,
+    publication_provisioning_completed,
     publication_retry_requires_credential,
 )
+from turnstile_core.domain.gateway_targets import GatewayServingDeployment
+from turnstile_core.domain.model_availability import ModelAvailabilityNodeEnrollment
 from turnstile_core.domain.runtime_models import (
+    BrandKey,
     ModelConnectionCreate,
     ModelVendorKey,
+    OAuthClientCredentialsConfig,
+    PriceSource,
     ProviderTarget,
     model_vendor_label,
 )
+from turnstile_core.domain.storage_routes import (
+    MAX_HEAD_BYTES,
+    ActiveRouteHead,
+    ConfigurationApproval,
+    ConnectionApproval,
+    ConnectionRevision,
+    CountCredential,
+    FixedProgramCutover,
+    FixedProgramInstallation,
+    FixedProgramUpgrade,
+    ModelRouteAddition,
+    ProgramCapabilityProof,
+    ProgramIdentity,
+    RouteApprovalRenewal,
+    RouteCandidateProbe,
+    RouteConfigurationPlan,
+    RouteContent,
+    RouteCredential,
+    RoutePublicationTask,
+    RouteScope,
+    RouteSnapshot,
+    RouteTransitionReceipt,
+    RouteWriterReceipt,
+    RouteWriterState,
+    canonical_document,
+    catalog_digest,
+    changed_route_aliases,
+    configuration_manifests,
+    document_digest,
+    parse_document,
+    require_route_storage,
+    text_digest,
+    validate_origin,
+    validate_path,
+)
 from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
+    AzureApimPublisherClient,
     BackendPoolResource,
 )
+from turnstile_core.integrations.apim_control_plane_contract import (
+    CredentialSourceMissingError,
+    PolicyCompilationError,
+)
+from turnstile_core.integrations.apim_policy_components import (
+    component_digest,
+    expression_token_spans,
+    parse_policy,
+    validate_executable_policy,
+)
+from turnstile_core.integrations.apim_storage_routes import (
+    FixedProgramVerifier,
+    compact_fixed_policy,
+    fixed_operation_contracts,
+    fixed_policy_digest,
+    fixed_program_digest,
+)
+from turnstile_core.integrations.apim_target_client_factory import ApimTargetClientConfig
+from turnstile_core.integrations.storage_route_projection import (
+    ModelRouteActivationIntent,
+    RouteActivationIntent,
+    RouteProjectionConflict,
+    RouteProjectionUnknown,
+    RouteWriterIntent,
+    TableRouteProjection,
+    entity_document,
+    require_route_batch,
+    route_entity,
+)
+from turnstile_core.integrations.table_batch import conditional_batch
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository_publications import PostgreSqlPublicationRepositoryMixin
+from turnstile_core.persistence.repository_support import (
+    _model_addition_manifest,
+    _model_removal_manifest,
+)
+from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.control_plane import (
     ControlPlaneConflictError,
+    ControlPlaneUnavailableError,
 )
+from turnstile_core.services.probe_journal import PersistentProbeJournal
+from turnstile_core.services.route_publication import (
+    PersistentModelRouteActivationJournal,
+    PersistentRouteActivationJournal,
+    PersistentRouteWriterJournal,
+    RouteConfigurationExecutor,
+    RouteIntegrityCheckpoint,
+    RouteIntegrityDeferred,
+    _ActivationCheckpoint,
+    _binding_route_contract,
+    _CommitApprovalCheckpoint,
+    _pool_matches_binding,
+    _RouteProgress,
+    build_route_publication_task,
+    configuration_probe_steps,
+    pool_header_name,
+    pool_member_bindings,
+    recorded_route_dependencies,
+    recorded_route_scopes,
+    recorded_route_snapshot,
+    require_model_addition_activation,
+    require_route_specification,
+    route_credential_source,
+)
+from turnstile_core.services.storage_route_publisher import (
+    FixedProgramMigration,
+    FixedRoutePublisherFactory,
+    FixedRoutePublisherPort,
+    RouteCredentialVault,
+    _CredentialBindings,
+    _OAuthWriteIntent,
+    _PoolWriteIntent,
+    _PreparationCheckpoint,
+    _VaultCheckpoint,
+    native_gateway_programs,
+)
+
+
+def test_publication_view_exposes_only_recorded_serving_targets() -> None:
+    repository = InMemoryRepository()
+    publication = GatewayControlPlaneService(repository).publish(
+        external_tenant_foundry_publication(repository), "unit-owner",
+    )
+    assert GatewayPublicationView.from_publication(publication).target_deployments is None
+    deployment = GatewayServingDeployment.model_validate({
+        "deployment_id": str(UUID(int=71)), "native_gateway_id": "unit-edge",
+        "kind": "self_hosted", "endpoint_url": "https://edge.example.test/unit/llm",
+        "release_gate": "required",
+    })
+    binding = publication.desired_spec.bindings[-1].model_copy(update={
+        "serving_deployments": (deployment,),
+    })
+    scoped = publication.model_copy(update={"desired_spec": publication.desired_spec.model_copy(
+        update={"bindings": [*publication.desired_spec.bindings[:-1], binding],
+                "gateway_deployments": (deployment,)},
+    )})
+    view = GatewayPublicationView.from_publication(scoped)
+    assert view.target_deployments == (deployment,)
+    assert view.model_dump(mode="json")["target_deployments"] == [
+        deployment.model_dump(mode="json"),
+    ]
+    assert "unit-secret" not in view.model_dump_json()
+    assert "desired_spec" not in view.model_dump()
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("opaque upstream secret", "publication_failed"),
+    ("The current APIM policy changed after publication was queued", "parent_policy_changed"),
+    ('APIM management failed: {"code":"AuthorizationFailed","status":403}',
+     "publisher_authorization_failed"),
+    ('Publisher permission preflight failed: {"code":"publisher_permissions_unverified"}',
+     "publisher_permissions_unverified"),
+    ('Publisher permission preflight failed: {"code":"publisher_permissions_missing",'
+     '"missing_actions":["Microsoft.ApiManagement/service/apis/write"],'
+     '"request_id":"00000000-0000-4000-8000-000000000123"}', "publisher_permissions_missing"),
+    ('Publisher permission preflight failed: {"code":"publisher_permissions_missing",'
+     '"missing_actions":["opaque upstream secret"]}', "publication_failed"),
+])
+def test_publication_failure_is_structured_and_never_echoes_raw_errors(
+    message: str, expected: str,
+) -> None:
+    repository = InMemoryRepository()
+    publication = GatewayControlPlaneService(repository).publish(
+        external_tenant_foundry_publication(repository), "unit-owner",
+    )
+    assert publication_failure(publication) is None
+    failed = publication.model_copy(update={
+        "status": PublicationStatus.FAILED, "error_message": message,
+    })
+    result = publication_failure(failed, stage=PublicationStatus.VALIDATING)
+    assert result is not None and result.code == expected
+    assert result.stage is PublicationStatus.VALIDATING
+    assert "opaque upstream secret" not in result.model_dump_json()
+    view = GatewayPublicationView.from_publication(failed)
+    assert view.failure is not None and view.failure.code == expected
+    if expected == "publisher_permissions_missing":
+        assert result.request_id == UUID("00000000-0000-4000-8000-000000000123")
+        assert result.missing_actions == ["Microsoft.ApiManagement/service/apis/write"]
+
+
+def test_legacy_publication_hash_omits_only_empty_deployment_fields() -> None:
+    repository = InMemoryRepository()
+    repository.models = []
+    service = GatewayControlPlaneService(repository)
+    publication = service.publish(bedrock_publication(), "unit-owner")
+    payload, digest = service._release_payload(publication.desired_spec)
+    assert "gateway_deployments" not in payload
+    assert all("deployment_scope" not in binding and "serving_deployments" not in binding
+               and "logical_model_id" not in binding for binding in payload["bindings"])
+    expected = hashlib.sha256(json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    assert digest == expected == publication.desired_spec_sha256
+
+
+@pytest.mark.parametrize("change", [
+    {"endpoint": "http://count.example.test/messages/count_tokens"},
+    {"endpoint": "https://count.example.test/messages"},
+    {"endpoint": "https://user:secret@count.example.test/messages/count_tokens"},
+    {"endpoint": "https://count.example.test/messages/count_tokens?key=unit"},
+    {"upper_bound_padding_tokens": 10},
+    {"upper_bound_padding_tokens": True},
+    {"supported_features": ["server_tools"]},
+    {"supported_features": ["background"]},
+])
+def test_budget_native_count_contract_rejects_unsafe_guarantees(change: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        NativeCountContract.model_validate({
+            "kind": "anthropic_messages",
+            "endpoint": "https://count.example.test/messages/count_tokens",
+            "evidence_sha256": "a" * 64,
+            **change,
+        })
+
+
+@pytest.mark.parametrize("change", [
+    {"input_ceiling": True},
+    {"input_ceiling": 2**63 - 1},
+    {"operations": ["images-generations"]},
+    {"operations": ["responses-compact"]},
+    {"output_field": "none"},
+    {"output_estimate": 4096},
+    {"algorithm": "legacy_request_estimate_v1", "output_estimate": 4096},
+])
+def test_budget_count_contract_does_not_conflate_estimates_and_ceilings(
+    change: dict[str, Any],
+) -> None:
+    with pytest.raises(ValidationError):
+        ProtocolCountContract.model_validate({
+            "input_ceiling": 1000, "output_ceiling": 100, "output_field": "max_tokens",
+            "operations": ["anthropic-messages"], "evidence_sha256": "a" * 64,
+            "verified_at": "2026-09-22T00:00:00Z", **change,
+        })
+
+
+def test_budget_count_contract_retains_protocol_specific_estimates() -> None:
+    text = ProtocolCountContract.model_validate({
+        "algorithm": "legacy_request_estimate_v1", "output_estimate": 4096,
+        "output_field": "max_tokens", "operations": ["anthropic-messages"],
+        "evidence_sha256": "a" * 64, "verified_at": "2026-09-22T00:00:00Z",
+    })
+    images = ProtocolCountContract.model_validate({
+        **text.model_dump(), "output_field": "none", "operations": ["images-generations"],
+    })
+    assert text.output_field == "max_tokens" and images.output_field == "none"
+    assert text.input_ceiling == images.input_ceiling == 0
+    assert text.native_counter is images.native_counter is None
+
+
+def budget_publication_contract_fixture() -> tuple[GatewayPublication, dict[str, Any]]:
+    repository = InMemoryRepository()
+    repository.models = []
+    request = foundry_publication()
+    request.provider = ProviderTarget(existing_id=next(
+        item["id"] for item in repository.providers if item["brand_key"] == "microsoft_foundry"
+    ))
+    service = GatewayControlPlaneService(repository, apim_principal_id=str(UUID(int=99)))
+    publication = service.publish(request, "owner@example.com")
+    return publication, {
+        "protocol_version": 2, "mode": "active", "epoch": str(UUID(int=2)),
+        "gateway_profile_id": str(publication.gateway_profile_id), "model_contracts": {},
+    }
+
+
+def test_budget_publication_default_is_explicit_estimate_with_public_model_identity() -> None:
+    publication, fence = budget_publication_contract_fixture()
+    snapshot = BudgetPublicationContracts.capture(publication, {"models": []}, fence)
+    snapshot.validate_publication(publication)
+    binding = publication.desired_spec.bindings[-1]
+    contract = snapshot.model_contracts[binding.model.model_key]
+    assert contract.model_id == publication_model_id(publication.id, binding.model.model_key)
+    assert contract.algorithm == "legacy_request_estimate_v1"
+    assert contract.native_counter is None and contract.input_ceiling == 0
+    assert contract.protocols["responses-compact"].output_field == "none"
+    assert contract.protocols["responses"].output_field == "max_output_tokens"
+
+
+@pytest.mark.parametrize("change", [
+    {"mode": "prepared"}, {"protocol_version": 1},
+    {"gateway_profile_id": str(UUID(int=9))}, {"model_contracts": None},
+])
+def test_budget_publication_requires_active_exact_fence(change: dict[str, Any]) -> None:
+    publication, fence = budget_publication_contract_fixture()
+    with pytest.raises(ValueError):
+        BudgetPublicationContracts.capture(publication, {"models": []}, {**fence, **change})
+
+
+def test_budget_publication_rejects_rebound_publication_and_modified_route() -> None:
+    publication, fence = budget_publication_contract_fixture()
+    snapshot = BudgetPublicationContracts.capture(publication, {"models": []}, fence)
+    with pytest.raises(ValueError, match="another publication"):
+        snapshot.validate_publication(publication.model_copy(update={"id": UUID(int=9)}))
+    binding = publication.desired_spec.bindings[-1].model_copy(update={"backend_path": "/changed"})
+    changed = publication.model_copy(update={
+        "desired_spec": publication.desired_spec.model_copy(update={"bindings": [binding]}),
+    })
+    with pytest.raises(ValueError, match="binding changed"):
+        snapshot.validate_publication(changed)
+
+
+def test_budget_existing_model_cannot_fall_back_to_unapproved_counting() -> None:
+    publication, fence = budget_publication_contract_fixture()
+    binding = publication.desired_spec.bindings[-1]
+    registry = {"models": [{"id": str(UUID(int=5)), "model_key": binding.model.model_key,
+                            "runtime_id": binding.runtime_id}]}
+    with pytest.raises(ValueError, match="missing its approved budget contract"):
+        BudgetPublicationContracts.capture(publication, registry, fence)
+
+
+@pytest.mark.parametrize("identity", [
+    {"deployment_name": "gpt-4.1-845778"},
+    {"model_key": "gpt-4.1", "display_name": "GPT-4.1", "upstream_model_id": "gpt-4.1"},
+])
+def test_new_model_contract_preserves_catalog_pricing(identity: dict[str, str]) -> None:
+    model = ModelCreateTarget.model_validate({
+        **identity,
+        "price_source": "azure_retail",
+        "price_reference": "azure_retail:Azure OpenAI:gpt 4.1:Global:*",
+        "price_discount_percent": 80,
+    })
+
+    assert model.price_source is PriceSource.AZURE_RETAIL
+    assert model.price_reference == "azure_retail:Azure OpenAI:gpt 4.1:Global:*"
+    assert model.price_discount_percent == 80
+    restored = ModelCreateTarget.model_validate(model.model_dump())
+    assert restored.price_reference == model.price_reference
+
+
+@pytest.mark.parametrize("changes", [
+    {"price_source": "azure_retail"},
+    {"price_source": "anthropic", "price_reference": "azure_retail:wrong"},
+    {"price_discount_percent": 0}, {"price_discount_percent": 101},
+    {"price_discount_percent": float("nan")}, {"price_discount_percent": float("inf")},
+    {"operation": "image_generation", "price_source": "anthropic",
+     "price_reference": "anthropic:unit-image"},
+])
+def test_new_model_contract_rejects_invalid_pricing(changes: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        ModelCreateTarget.model_validate({"deployment_name": "unit-deployment", **changes})
+
+
+@pytest.mark.parametrize("method,field,phase", [
+    ("checkpoint_gateway_publication_probes", "probe_verification", "verifying"),
+    ("checkpoint_gateway_publication_activation", "route_activation", "promoting"),
+    ("checkpoint_gateway_publication_writer", "route_writer", "promoting"),
+    ("checkpoint_gateway_publication_dependencies", "route_dependencies", "queued"),
+    ("checkpoint_gateway_publication_credentials", "route_credentials", "queued"),
+    ("checkpoint_gateway_publication_preparation", "route_preparation", "queued"),
+    ("checkpoint_gateway_program_promotion", "route_program_promotion", "promoting"),
+    ("checkpoint_gateway_publication_approval", "route_commit_approval", "promoting"),
+])
+def test_publication_checkpoint_cas_requires_phase_lease_and_expected_old_value(
+    method: str, field: str, phase: str,
+) -> None:
+    repository = InMemoryRepository()
+    publication_id = UUID(int=911)
+    row: dict[str, Any] = {
+        "id": publication_id, "status": phase, "resource_manifest": {"unchanged": "unit"},
+    }
+    repository.gateway_publications.append(row)
+    lease = {"publication_id": publication_id, "status": "leased", "lease_owner": "unit-worker",
+             "lease_expires_at": datetime.now(UTC) + timedelta(minutes=1)}
+    repository.gateway_publication_outbox.append(lease)
+    save = getattr(repository, method)
+    candidate: dict[str, Any] = {"version": 1, "steps": {"a" * 64: "started"}}
+    assert not save(publication_id, "other-worker", None, candidate)
+    assert save(publication_id, "unit-worker", None, candidate)
+    assert row["resource_manifest"]["unchanged"] == "unit"
+    candidate["steps"]["a" * 64] = "passed"
+    assert row["resource_manifest"][field]["steps"]["a" * 64] == "started"
+    assert not save(publication_id, "unit-worker", None, candidate)
+    expected = row["resource_manifest"][field]
+    assert save(publication_id, "unit-worker", expected, candidate)
+    assert len(repository.gateway_publication_audit) == 2
+    row["status"] = "failed"
+    assert not save(publication_id, "unit-worker", candidate, {})
+    row["status"] = phase
+    lease["lease_expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    assert not save(publication_id, "unit-worker", candidate, {})
+
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.return_value = {"id": publication_id}
+    sql = PostgreSqlPublicationRepositoryMixin()
+    with patch.object(sql, "_connection", return_value=connection):
+        assert getattr(sql, method)(publication_id, "unit-worker", expected, candidate)
+    statement, parameters = connection.__enter__().execute.call_args.args
+    assert "FOR UPDATE OF outbox" in statement and "lease_expires_at > now()" in statement
+    assert "IS NOT DISTINCT FROM %(expected)s::jsonb" in statement
+    assert parameters["phase"] == phase and parameters["field"] == field
+
+
+def test_publication_probe_request_reservation_caps_dispatches_and_checks_lease() -> None:
+    repository = InMemoryRepository()
+    publication_id = UUID(int=912)
+    row = {"id": publication_id, "status": "verifying", "resource_manifest": {}}
+    repository.gateway_publications.append(row)
+    repository.gateway_publication_outbox.append({
+        "publication_id": publication_id, "status": "leased", "lease_owner": "unit-worker",
+        "lease_expires_at": datetime.now(UTC) + timedelta(minutes=1),
+    })
+    assert not repository.reserve_gateway_publication_probe(
+        publication_id, "other-worker", 1, "POST", "a" * 64,
+    )
+    assert repository.reserve_gateway_publication_probe(
+        publication_id, "unit-worker", 1, "POST", "a" * 64,
+    )
+    assert not repository.reserve_gateway_publication_probe(
+        publication_id, "unit-worker", 1, "POST", "a" * 64,
+    )
+    assert repository.gateway_publication_audit[-1]["detail"]["probe_request"]["request_index"] == 1
+    with pytest.raises(ValueError, match="must be positive"):
+        repository.reserve_gateway_publication_probe(publication_id, "unit-worker", 0, "POST", "a")
+
+
+@pytest.mark.parametrize("marker", ["model_route_addition", "model_route_removal"])
+def test_model_transaction_activation_requires_validator_before_mutation(marker: str) -> None:
+    repository = InMemoryRepository()
+    repository.providers, repository.runtimes, repository.models = [], [], []
+    publication = GatewayControlPlaneService(
+        repository, apim_principal_id=str(UUID(int=902)),
+    ).publish(foundry_publication(), "unit-owner")
+    row = repository.get_gateway_publication(publication.id)
+    assert row is not None
+    row.update(status="promoting", resource_manifest={marker: {"version": 1}})
+    assert repository.claim_gateway_publication("unit-worker", 180) is not None
+    models = [dict(model) for model in repository.models]
+    with pytest.raises(ValueError, match="complete transaction validator"):
+        repository.activate_gateway_publication(publication.id, "unit-worker")
+    assert repository.models == models and row["status"] == "promoting"
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.execute.return_value.fetchone.side_effect = [{"id": UUID(int=914)}, row]
+    sql = PostgreSqlPublicationRepositoryMixin()
+    with (
+        patch.object(sql, "_connection", return_value=connection),
+        pytest.raises(ValueError, match="complete transaction validator"),
+    ):
+        sql.activate_gateway_publication(publication.id, "unit-worker")
+    assert all(call.args[0].strip().startswith("SELECT")
+               for call in connection.execute.call_args_list)
+    connection.reset_mock()
+    connection.execute.return_value.fetchone.side_effect = None
+    connection.execute.return_value.fetchone.return_value = {**row, "status": "active"}
+    with patch.object(PostgreSqlPublicationRepositoryMixin, "_sync_active_route_bindings"):
+        completed = sql._complete_gateway_activation(
+            connection, row, publication.id, "unit-worker",
+        )
+    assert completed["status"] == "active"
+    statements = [call.args[0] for call in connection.execute.call_args_list]
+    assert all("effective_gateway_release" not in statement for statement in statements)
+    assert all("superseded" not in statement for statement in statements)
+
+
+def test_active_model_route_catalog_is_target_scoped_sorted_and_excludes_active_removals() -> None:
+    repository = InMemoryRepository()
+    manifest: dict[str, Any]
+    for identity, target_id, kind, state, manifest in (
+        (UUID(int=34), APIM_ID, "model_add", "active", {"model_route_addition": {}}),
+        (UUID(int=33), APIM_ID, "model_add", "active", {"model_route_addition": {}}),
+        (UUID(int=35), APIM_ID, "model_add", "failed", {"model_route_addition": {}}),
+        (UUID(int=36), UUID(int=39), "model_add", "active", {"model_route_addition": {}}),
+        (UUID(int=37), APIM_ID, "model_add", "active", {}),
+    ):
+        repository.gateway_publications.append({"id": identity, "gateway_profile_id": target_id,
+            "publication_kind": kind, "status": state, "resource_manifest": manifest})
+    assert [row["id"] for row in repository.active_model_route_publications(APIM_ID)] == [
+        UUID(int=33), UUID(int=34),
+    ]
+    repository.gateway_publications.append({"id": UUID(int=38), "gateway_profile_id": APIM_ID,
+        "publication_kind": "model_remove", "status": "active", "resource_manifest": {
+            "model_route_removal": {"source_publication_id": str(UUID(int=33))},
+        }})
+    assert [row["id"] for row in repository.active_model_route_publications(APIM_ID)] == [
+        UUID(int=34),
+    ]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.execute.return_value.fetchall.return_value = []
+    sql = PostgreSqlPublicationRepositoryMixin()
+    with patch.object(sql, "_connection", return_value=connection):
+        assert sql.active_model_route_publications(APIM_ID) == []
+    statement, parameters = connection.execute.call_args.args
+    assert statement.strip().startswith("SELECT") and "LIMIT 10001" in statement
+    assert "NOT EXISTS" in statement and "source_publication_id" in statement
+    assert parameters == (APIM_ID,)
+
+
+@pytest.mark.parametrize("kind,status,code", [
+    ("unavailable", 404, "count_tokens_unavailable"),
+    ("unpublished", 400, "model_not_published"),
+])
+def test_count_token_rejections_match_exact_source_protocol(
+    kind: str, status: int, code: str,
+) -> None:
+    rejection = COUNT_TOKENS_REJECTIONS[kind]
+    payload = rejection.payload()
+    assert rejection.status_code == status and rejection.code == code
+    assert rejection.matches(status, payload)
+    assert not rejection.matches(503, payload)
+    assert not rejection.matches(status, {"type": "error", "error": {
+        "type": rejection.error_type, "code": "other", "message": rejection.message,
+    }})
+    assert not rejection.matches(status, {"type": "error", "error": {
+        "type": rejection.error_type, "code": code, "message": "  ",
+    }})
+
+
+def test_concrete_route_probe_usage_is_exact_native_and_never_fabricates_missing_counters() -> None:
+    usage = FixedRoutePublisherPort._usage({"usage": {
+        "input_tokens": 10, "output_tokens": 3,
+        "input_tokens_details": {"cached_tokens": 2, "cache_write_tokens": 1},
+    }}, "microsoft-decision")
+    assert (usage.input_tokens, usage.cached_tokens, usage.cache_write_tokens,
+            usage.output_tokens) == (7, 3, 1, 3)
+    assert usage.estimated is False
+    for counters in ({"input_tokens": True, "output_tokens": 3},
+                     {"input_tokens": 10},
+                     {"input_tokens": 10, "output_tokens": 3, "total_tokens": 12}):
+        with pytest.raises(ValueError, match="exact measured usage"):
+            FixedRoutePublisherPort._usage({"usage": counters}, "microsoft-decision")
+    chat = {"choices": [{}], "usage": {
+        "prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13,
+    }}
+    assert FixedRoutePublisherPort._usage(chat, "chat-completions").input_tokens == 10
+    with pytest.raises(ValueError, match="incomplete"):
+        FixedRoutePublisherPort._usage({**chat, "choices": []}, "chat-completions")
+
+
+def test_route_credential_vault_persists_encrypted_intent_once_and_recovers_readonly() -> None:
+    cipher = CredentialCipher(Fernet.generate_key())
+    token = MagicMock()
+    token.token.return_value = "unit-only-token"
+    saved: list[dict[str, Any]] = []
+    requests: list[str] = []
+    document: dict[str, Any] = {}
+    recovered = False
+
+    def dispatch(request: httpx.Request) -> httpx.Response:
+        requests.append(request.method)
+        if request.method == "PUT":
+            assert len(saved) == 1 and "unit-only-value" not in canonical_document(saved[0])
+            document.update(json.loads(request.content))
+            document["id"] = str(request.url).split("?")[0] + "/" + "a" * 32
+            raise httpx.ReadTimeout("unit-only unknown response")
+        if not document or not recovered:
+            return httpx.Response(404)
+        return httpx.Response(200, json=document)
+
+    with httpx.Client(transport=httpx.MockTransport(dispatch)) as client:
+        vault = RouteCredentialVault("https://unitvault.vault.azure.net", cipher, token, client,
+                                      clock=lambda: 101)
+        with pytest.raises(RuntimeError, match="read-only recovery"):
+            vault.materialize(UUID(int=1), "b" * 64, SecretStr("unit-only-value"), checkpoint=None,
+                              persist=lambda old, new: saved.append(new))
+        assert requests == ["GET", "PUT", "GET"]
+        recovered = True
+        secret_id = vault.materialize(
+            UUID(int=1), "b" * 64, SecretStr("unit-only-value"), checkpoint=saved[0],
+            persist=lambda old, new: saved.append(new),
+        )
+        assert requests == ["GET", "PUT", "GET", "GET"]
+        verified = vault.verify(secret_id, SecretStr("unit-only-value"))
+        assert verified.get_secret_value() == "unit-only-value"
+        with pytest.raises(ValueError, match="CHECKPOINT_CHANGED"):
+            vault.materialize(UUID(int=1), "b" * 64, SecretStr("other-value"), checkpoint=saved[-1],
+                              persist=lambda old, new: saved.append(new))
+        with pytest.raises(ValueError, match="TARGET_INVALID"):
+            vault._request("GET", "https://other.vault.azure.net/secrets/unit")
+        assert requests.count("PUT") == 1
+
+
+def test_fixed_policy_compaction_preserves_xml_strings_and_executable_tokens() -> None:
+    expression = ('@{ var url = "https://unit.example.test/a b";\n'
+                  ' // unit comment\n return url + " x"; }')
+    spans = expression_token_spans(expression)
+    assert all(expression[start:end] == token for token, start, end in spans)
+    assert not any(token.startswith("//") for token, _, _ in spans)
+    root = ElementTree.Element("policies")
+    inbound = ElementTree.SubElement(root, "inbound")
+    ElementTree.SubElement(inbound, "set-variable", {"name": "unit", "value": expression})
+    source = ElementTree.tostring(root, encoding="unicode")
+    compacted = compact_fixed_policy(source)
+    assert len(compacted) < len(source)
+    original_digest = component_digest(parse_policy(source), normalize_text_defaults=False)
+    compacted_digest = component_digest(parse_policy(compacted), normalize_text_defaults=False)
+    assert compacted_digest == original_digest
+    assert validate_executable_policy(compacted) == compacted
+    with pytest.raises(ValueError, match="unbound parameters"):
+        validate_executable_policy(
+            '<policies><inbound><set-header name="__UNIT__"/></inbound></policies>',
+        )
+    with pytest.raises(ValueError, match="unsupported XML namespaces"):
+        compact_fixed_policy('<policies xmlns="urn:unit"><inbound/></policies>')
+
+
+def test_fixed_program_verifier_requires_current_management_and_exact_authenticated_head() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    contracts = fixed_operation_contracts()
+    operation = ("<policies><inbound><base/></inbound><backend><base/></backend>"
+                 "<outbound><base/></outbound><on-error><base/></on-error></policies>")
+    parent = operation.replace("<inbound><base/>", '<inbound><base/><set-variable '
+                                'name="routeProgram" value="' + "0" * 64 + '"/>')
+    policies = {name: operation for name in contracts}
+    digest = fixed_program_digest(parent, policies, tuple((name, *route)
+                                                          for name, route in contracts.items()))
+    parent = parent.replace("0" * 64, digest)
+    identity = ProgramIdentity(scope=scope, api_revision="1", instance_id="managed",
+                                program_sha256=digest, trust_binding_sha256="a" * 64)
+    installed = FixedProgramInstallation(
+        program=identity, target_identity_sha256="b" * 64,
+        storage_endpoint="https://unitstore.table.core.windows.net",
+        storage_table="TurnstileRoutes", gateway_endpoint="https://unit-apim.example.test/llm",
+        publisher_subscription_id="unit-only",
+        parent_policy_sha256=fixed_policy_digest(parent), supported_profiles=("openai-v1",),
+        operation_contracts=contracts,
+        operation_policies_sha256={
+            name: fixed_policy_digest(policy) for name, policy in policies.items()
+        },
+    )
+    management = MagicMock()
+    management.current_revision.return_value = "1"
+    management.revision_api_policy.return_value = parent
+    management.route_program_operations.return_value = {
+        name: (*contract, policies[name]) for name, contract in contracts.items()
+    }
+    wrong_head = False
+    requests: list[str] = []
+
+    def probe(request: httpx.Request) -> httpx.Response:
+        requests.append(request.method)
+        fields = {"abi": "2", "nonce": request.headers["x-turnstile-route-probe"],
+                  "target": scope.target_id, "api": scope.api_id, "revision": "1",
+                  "gateway": "managed", "instance": "other" if wrong_head else "managed",
+                  "program": digest, "trust": identity.trust_binding_sha256}
+        return httpx.Response(204, headers={"x-turnstile-route-" + name: value
+                                            for name, value in fields.items()})
+
+    with httpx.Client(transport=httpx.MockTransport(probe)) as client:
+        verifier = FixedProgramVerifier(installed, management, SecretStr("unit-only"), client,
+                                         clock=lambda: 101)
+        proof = verifier.verify()
+        assert proof.identity == identity
+        assert proof.issued_epoch == 101 and proof.expires_epoch == 221
+        management.current_revision.return_value = "2"
+        with pytest.raises(ValueError, match="revision changed"):
+            verifier.verify()
+        assert requests == ["HEAD"]
+        management.current_revision.return_value = "1"
+        wrong_head = True
+        with pytest.raises(ValueError, match="authenticated probe identity changed"):
+            verifier.verify()
+        assert requests == ["HEAD", "HEAD"]
+
+
+def test_fixed_program_operations_and_digest_preserve_exact_source_native_contract() -> None:
+    contracts = fixed_operation_contracts("/v1/models", "/v1/messages", decision_enabled=True)
+    assert contracts["microsoft-decision"] == ("POST", "/providers/microsoft/v1/systemone")
+    assert contracts["anthropic-count-tokens"] == ("POST", "/v1/messages/count_tokens")
+    assert "microsoft-decision" not in fixed_operation_contracts()
+    with pytest.raises(ValueError, match="retired operation"):
+        fixed_operation_contracts(retired_operations={"unit-old": ("POST", "/responses")})
+    with pytest.raises(ValueError, match="catalog path"):
+        fixed_operation_contracts("/other-models")
+    parent = ('<policies><inbound><base/><set-variable name="routeProgram" value="'
+              + "a" * 64 + '"/></inbound><backend><base/></backend>'
+              '<outbound><base/></outbound><on-error><base/></on-error></policies>')
+    operation = ("<policies><inbound><base/></inbound><backend><base/></backend>"
+                 "<outbound><base/></outbound><on-error><base/></on-error></policies>")
+    assert fixed_policy_digest(operation) == fixed_policy_digest(operation.replace(
+        "<inbound>", "\n<inbound>\n",
+    ))
+    identity = fixed_program_digest(parent, {"models": operation}, (("models", "GET", "/models"),))
+    assert identity == fixed_program_digest(parent.replace("a" * 64, "b" * 64),
+                                            {"models": operation}, (("models", "GET", "/models"),))
+    assert identity != fixed_program_digest(parent, {"models": operation},
+                                            (("models", "GET", "/v1/models"),))
+
+
+def test_route_preparation_checkpoints_keep_encrypted_intents_strict_and_bounded() -> None:
+    checkpoint = _PreparationCheckpoint(context_sha256="a" * 64)
+    assert "oauth" not in checkpoint.model_dump(mode="json")
+    with pytest.raises(ValueError):
+        _PreparationCheckpoint.model_validate({
+            **checkpoint.model_dump(), "plaintext_secret": "unit",
+        })
+    with pytest.raises(ValueError):
+        _CredentialBindings(bindings={"invalid-hash": "unit-version"})
+    intent = _OAuthWriteIntent(resource_id="unit-resource", configuration_sha256="b" * 64,
+                                body_sha256="c" * 64, body_ciphertext="unit-encrypted-only")
+    assert "unit-encrypted-only" not in repr(intent)
+    with pytest.raises(ValueError):
+        _OAuthWriteIntent.model_validate_json(canonical_document({
+            **intent.model_dump(mode="json"), "if_none_match": "unconditional",
+        }))
+    pool = _PoolWriteIntent(version=1, method="PUT", resource_id="unit-pool",
+                            api_version="2024-05-01", if_none_match="*",
+                            connection_sha256="a" * 64, body="{}", body_sha256="b" * 64)
+    with pytest.raises(ValueError):
+        _PoolWriteIntent.model_validate_json(canonical_document({
+            **pool.model_dump(mode="json"), "version": True,
+        }))
+    vault = _VaultCheckpoint(publication_id=str(UUID(int=1)), source_sha256="a" * 64,
+                              url="https://unitvault.vault.azure.net/secrets/unit",
+                              issued_epoch=101, body_ciphertext="unit-encrypted-only",
+                              body_sha256="b" * 64)
+    assert "unit-encrypted-only" not in repr(vault)
+
+
+def test_route_publication_checkpoints_are_strict_context_bound_and_bounded() -> None:
+    progress = _RouteProgress(context_sha256="a" * 64, staged=3, verified=2)
+    assert _RouteProgress.model_validate(progress.model_dump()) == progress
+    with pytest.raises(ValueError):
+        _RouteProgress(context_sha256="a" * 64, staged=True)
+    with pytest.raises(ValueError):
+        _RouteProgress(context_sha256="a" * 64, staged=30001)
+    integrity = RouteIntegrityCheckpoint(context_sha256="a" * 64, entities=3)
+    assert RouteIntegrityDeferred(integrity).checkpoint == integrity
+    assert "connection_resources" not in integrity.model_dump(mode="json")
+    with pytest.raises(ValueError):
+        RouteIntegrityCheckpoint(context_sha256="a" * 64, connection_resources=121)
+    activation = _ActivationCheckpoint(
+        context_sha256="a" * 64, intent={"unit": "persisted"}, outcome="unknown_no_replay",
+    )
+    assert "scopes" not in activation.model_dump(mode="json")
+    with pytest.raises(ValueError):
+        _ActivationCheckpoint.model_validate({**activation.model_dump(), "invented_retry": True})
+    with pytest.raises(ValueError, match="activation evidence is incomplete"):
+        require_model_addition_activation({}, None, None)
+
+
+def test_native_decision_budget_contract_never_injects_chat_output_parameters() -> None:
+    repository = InMemoryRepository()
+    repository.providers, repository.runtimes, repository.models = [], [], []
+    service = GatewayControlPlaneService(repository, apim_principal_id=str(UUID(int=902)))
+    publication = service.publish(foundry_publication(), "unit-owner")
+    binding = publication.desired_spec.bindings[0].model_copy(update={
+        "api_format": ApiFormat.MICROSOFT_DECISION,
+    })
+    contract = BudgetPublicationContracts._estimate(publication, binding, UUID(int=901), "a" * 64)
+    assert contract.operations == ("microsoft-decision",)
+    assert set(contract.protocols) == {"microsoft-decision"}
+    assert contract.output_field == "none" and contract.native_counter is None
+    assert contract.algorithm == "legacy_request_estimate_v1"
+    assert contract.output_estimate == 4096 and contract.request_token_ceiling is None
+    native_binding = binding.model_copy(update={
+        "backend_url": HttpUrl("https://unit.services.ai.azure.com"),
+        "backend_path": "/providers/microsoft/v1/systemone",
+        "auth_strategy": AuthStrategy.MANAGED_IDENTITY,
+        "managed_identity_resource": "https://cognitiveservices.azure.com",
+    })
+    profile, paths, credential = _binding_route_contract(native_binding)
+    assert program_migration_spec_matches(publication.desired_spec, publication.desired_spec)
+    resolved = publication.desired_spec.model_copy(update={"bindings": [binding.model_copy(update={
+        "runtime_id": UUID(int=920), "api_format": publication.desired_spec.bindings[0].api_format,
+    })]})
+    assert program_migration_spec_matches(publication.desired_spec, resolved)
+    changed_binding = resolved.bindings[0].model_copy(update={
+        "model": resolved.bindings[0].model.model_copy(update={"model_key": "other-model"}),
+    })
+    changed_alias = resolved.model_copy(update={"bindings": [changed_binding]})
+    assert not program_migration_spec_matches(publication.desired_spec, changed_alias)
+    assert profile == "microsoft-decision"
+    assert paths == {"microsoft-decision": "/providers/microsoft/v1/systemone"}
+    assert credential.mode == "managed_identity"
+    assert credential.audience == "https://cognitiveservices.azure.com"
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    connection = ConnectionRevision(
+        scope=scope, revision_id=str(UUID(int=2)), backend_id="unit-backend",
+        origin="https://unit.services.ai.azure.com", path=paths["microsoft-decision"],
+        dependency_sha256="a" * 64, credential=credential,
+    )
+    assert pool_member_bindings(native_binding) == ()
+    assert _pool_matches_binding(native_binding, connection, {})
+    assert pool_header_name(scope, "unit-header") == pool_header_name(scope, "unit-header")
+    assert pool_header_name(scope, "unit-header") != pool_header_name(
+        scope.model_copy(update={"gateway_id": "unit-edge"}), "unit-header",
+    )
+    assert native_binding.count_tokens_operation.support == "unsupported"
+    supported_count = native_binding.model_copy(update={
+        "api_format": ApiFormat.ANTHROPIC_MESSAGES, "backend_path": "/anthropic/v1/messages",
+    }).count_tokens_operation
+    assert supported_count.support == "supported"
+    assert supported_count.backend_path == "/anthropic/v1/messages/count_tokens"
+    assert native_binding.model_copy(update={"api_format": ApiFormat.ANTHROPIC_MESSAGES,
+                                              "backend_path": "/v1/messages"}) \
+        .count_tokens_operation.support == "unknown"
+    publication = publication.model_copy(update={
+        "desired_spec": publication.desired_spec.model_copy(update={"bindings": [native_binding]}),
+    })
+    alias = native_binding.model.model_key
+    scope = RouteScope(
+        target_id=str(publication.gateway_profile_id), api_id="unit-api", gateway_id="managed",
+    )
+    approved_connection = ConnectionApproval(
+        approval_id=str(UUID(int=903)), connection=connection.model_copy(update={"scope": scope}),
+        state="approved", evidence_sha256="b" * 64, issued_epoch=100, expires_epoch=220,
+    )
+    budgets = BudgetPublicationContracts(
+        publication_id=publication.id, gateway_profile_id=publication.gateway_profile_id,
+        epoch=UUID(int=904), release_spec_sha256=publication.desired_spec_sha256,
+        binding_sha256={alias: BudgetPublicationContracts.binding_digest(native_binding)},
+        model_contracts={alias: contract},
+    )
+    program = ProgramIdentity(scope=scope, api_revision="1", instance_id="managed",
+                               program_sha256="c" * 64, trust_binding_sha256="d" * 64)
+    proof = ProgramCapabilityProof(proof_id=str(UUID(int=905)), identity=program,
+                                   supported_profiles=("microsoft-decision",),
+                                   issued_epoch=100, expires_epoch=220)
+    task = build_route_publication_task(
+        publication, program, proof, None, [], budgets, {alias: approved_connection},
+        "https://unitstore.table.core.windows.net", "TurnstileRoutes", "e" * 64, 101,
+    )
+    assert task.plan.policy_write_count == 0
+    assert task.plan.snapshot.routes[0].profile == "microsoft-decision"
+    steps = configuration_probe_steps(task)
+    assert len(steps) == 1 and steps[0].alias == alias and steps[0].kind == "inference"
+    assert steps[0].operation is None and steps[0].member_backend_id is None
+    assert steps[0].key == document_digest({"context": task.context_sha256, "alias": alias})
+    assert configuration_probe_steps(task.model_copy(update={"configuration_only": True})) == ()
+    unavailable = configuration_probe_steps(task.model_copy(update={
+        "known_unavailable_bindings": {alias: "unit-known-unavailable"},
+    }))
+    assert len(unavailable) == 1 and unavailable[0].kind == "non-dispatch"
+    assert unavailable[0].operation == "microsoft-decision" and unavailable[0].key != steps[0].key
+    requests: list[str] = []
+    recorded_requests: list[tuple[str, str]] = []
+    journal = PersistentProbeJournal(
+        repository, "unit-native-route", UUID(int=906),
+        request_recorder=lambda method, endpoint: recorded_requests.append((method, endpoint)),
+    )
+    route = task.plan.snapshot.routes[0]
+    native_probe_body = FixedRoutePublisherPort._probe_body(route, "microsoft-decision")
+    assert native_probe_body == {
+        "model": alias, "state": "OK",
+        "questions": {"ok": {"type": "noul", "instructions": "Is the state OK?"}},
+    }
+    assert FixedRoutePublisherPort._selected_probe_operations(route, None, None) == (
+        "microsoft-decision",
+    )
+    with pytest.raises(ValueError, match="not approved"):
+        FixedRoutePublisherPort._selected_probe_operations(route, None, "chat-completions")
+    endpoint = "https://unit-apim.example.test/llm/providers/microsoft/v1/systemone"
+    probe_body = {"model": alias, "state": {"text": "unit-only"}, "questions": []}
+
+    def send(request_id: str) -> dict[str, Any]:
+        requests.append(request_id)
+        journal.record_request("POST", endpoint)
+        return {"total_tokens": 10, "correlation_id": "unit-native", "route_validated": True}
+
+    evidence = journal.run_route(route, "microsoft-decision", endpoint, probe_body, send)
+    assert journal.run_route(route, "microsoft-decision", endpoint, probe_body, send) == evidence
+    assert journal.run_route(route, "microsoft-decision", endpoint, probe_body, send,
+                             recovery_only=True) == evidence
+    assert len(requests) == 1 and recorded_requests == [("POST", endpoint)]
+    with pytest.raises(ValueError, match="approved operation"):
+        journal.run_route(route, "microsoft-decision", endpoint, {"model": "other"}, send)
+    unknown = PersistentProbeJournal(repository, "unit-native-unknown", UUID(int=907))
+
+    def unconfirmed(request_id: str) -> dict[str, Any]:
+        requests.append(request_id)
+        raise TimeoutError("unit-only unknown response")
+
+    with pytest.raises(TimeoutError):
+        unknown.run_route(route, "microsoft-decision", endpoint, probe_body, unconfirmed)
+    with pytest.raises(ValueError, match="no request replayed"):
+        unknown.run_route(route, "microsoft-decision", endpoint, probe_body, unconfirmed,
+                          recovery_only=True)
+    assert len(requests) == 2
+    checkpoint = _CommitApprovalCheckpoint(
+        context_sha256=task.context_sha256, approval=task.plan.snapshot.approval,
+    )
+    assert "scopes" not in checkpoint.model_dump(mode="json")
+    assert checkpoint.approval == task.plan.snapshot.approval
+    require_route_specification(publication, task)
+    head = ActiveRouteHead(approval=task.plan.snapshot.approval, activated_epoch=101)
+    recorded = publication.model_copy(update={"resource_manifest": {
+        "fixed_route_snapshot": task.plan.snapshot.model_dump(mode="json"),
+        "fixed_route_head": head.model_dump(mode="json"),
+    }})
+    assert recorded_route_snapshot(recorded) == (task.plan.snapshot, head)
+    assert recorded_route_scopes(recorded) == (scope,)
+    with pytest.raises(ValueError, match="program installation is unavailable"):
+        recorded_route_dependencies(recorded)
+    installation = FixedProgramInstallation(
+        program=program, target_identity_sha256=task.target_identity_sha256,
+        storage_endpoint=task.storage_endpoint, storage_table=task.storage_table,
+        gateway_endpoint="https://unit-apim.example.test/llm",
+        publisher_subscription_id="unit-publisher", parent_policy_sha256="f" * 64,
+        operation_policies_sha256={"microsoft-decision": "1" * 64},
+        operation_contracts={"microsoft-decision": ("POST", paths["microsoft-decision"])},
+        supported_profiles=("microsoft-decision",), decision_enabled=True,
+    )
+    migration = FixedProgramMigration(
+        request_id=UUID(int=921), previous_publication_id=publication.id, previous_revision="old",
+        previous_spec_sha256=publication.desired_spec_sha256, previous_policy_sha256="a" * 64,
+        installation=installation,
+    )
+    assert "known_unavailable_bindings" not in migration.model_dump(mode="json")
+    with pytest.raises(ValueError, match="previous publication changed"):
+        migration.require_previous(publication)
+    recorded = recorded.model_copy(update={
+        "apim_revision": program.api_revision, "policy_sha256": program.program_sha256,
+        "resource_manifest": {**recorded.resource_manifest,
+                              "fixed_route_program": installation.model_dump(mode="json")},
+    })
+    dependencies = recorded_route_dependencies(recorded)
+    projection = MagicMock(spec=TableRouteProjection)
+    verifier = MagicMock(spec=FixedProgramVerifier)
+    verifier.installation = installation
+    projection.read_program_proof.return_value = (proof, 'W/"unit"')
+    fence = {"protocol_version": 2, "mode": "active", "gateway_profile_id": scope.target_id,
+             "epoch": task.plan.snapshot.approval.budget_epoch}
+    verified_connections = MagicMock()
+    with httpx.Client() as client:
+        concrete = FixedRoutePublisherPort(
+            projection, verifier, SecretStr("unit-only"), client, active_fence=lambda: fence,
+            verify_connections=verified_connections, prepare_availability=lambda *_: True,
+            clock=lambda: 101,
+        )
+        assert concrete.check(task) == proof
+        verified_connections.assert_called_once_with(task, fence)
+        verifier.verify.assert_not_called()
+        projection.publish_program_proof.assert_not_called()
+        projection.read_model_active.return_value = ("unit-active-head", 'W/"unit"')
+        with pytest.raises(RuntimeError, match="still active"):
+            concrete.require_model_absent(alias)
+        verifier.verify.assert_not_called()
+        projection.read_model_active.return_value = None
+        absence_requests: list[dict[str, Any]] = []
+
+        def absence_dispatch(request: httpx.Request) -> httpx.Response:
+            absence_requests.append(json.loads(request.content))
+            return httpx.Response(503, json={"error": {"code": "route_configuration_unavailable"}})
+
+        with httpx.Client(transport=httpx.MockTransport(absence_dispatch)) as absence_client:
+            concrete._client = absence_client
+            concrete.require_model_absent(alias)
+            assert absence_requests == [{"model": alias, "input": False}]
+        verifier.verify.reset_mock()
+        native_dispatches: list[dict[str, Any]] = []
+        wrong_response = False
+
+        def candidate_dispatch(request: httpx.Request) -> httpx.Response:
+            candidate = projection.stage_candidate.call_args.args[0]
+            native_dispatches.append(json.loads(request.content))
+            assert native_dispatches[-1] == native_probe_body
+            assert request.headers["x-turnstile-route-candidate"] == candidate.probe_id
+            return httpx.Response(200, json={
+                "answers": {"ok": True}, "usage": {"input_tokens": 10, "output_tokens": 3},
+            }, headers={
+                "x-correlation-id": str(UUID(int=917)),
+                "x-turnstile-route-version": candidate.head.approval.route_version,
+                "x-turnstile-route-candidate": candidate.probe_id,
+                "x-turnstile-route-request": "wrong" if wrong_response else candidate.request_id,
+            })
+
+        with httpx.Client(transport=httpx.MockTransport(candidate_dispatch)) as dispatch_client:
+            concrete._client = dispatch_client
+            evidence = concrete._send_probe(task, route, "microsoft-decision", proof, endpoint,
+                                            native_probe_body, journal, str(UUID(int=916)))
+            assert evidence["total_tokens"] == 13 and evidence["decision_validated"] is True
+            assert evidence["route_validated"] is True
+            wrong_response = True
+            with pytest.raises(PolicyCompilationError, match="candidate request") as failed:
+                concrete._send_probe(task, route, "microsoft-decision", proof, endpoint,
+                                      native_probe_body, journal, str(UUID(int=918)))
+            outcome = failed.value.billable_outcome
+            assert outcome is not None
+            assert outcome.actual_tokens == 13 and outcome.evidence["route_validated"] is False
+            assert len(native_dispatches) == 2
+            wrong_response = False
+            controller_journal = PersistentProbeJournal(
+                repository, "unit-native-controller", UUID(int=919),
+            )
+            concrete.probe_changed(task, alias, controller_journal)
+            concrete.recover_changed(task, alias, controller_journal)
+            concrete.probe_changed(task, alias, controller_journal)
+            assert len(native_dispatches) == 3
+            with pytest.raises(ValueError, match="cannot be dispatched"):
+                concrete.probe_changed(task.model_copy(update={
+                    "known_unavailable_bindings": {alias: "unit-known-unavailable"},
+                }), alias, controller_journal)
+            with pytest.raises(ValueError, match="approved changed route"):
+                concrete.probe_count(task, alias, controller_journal)
+            assert len(native_dispatches) == 3
+        fence["epoch"] = str(UUID(int=909))
+        with pytest.raises(ValueError, match="budget fence changed"):
+            concrete.check(task)
+        fence["epoch"] = task.plan.snapshot.approval.budget_epoch
+        projection.read_program_proof.return_value = None
+        with pytest.raises(RuntimeError, match="independent renewal"):
+            concrete.check(task.model_copy(update={"model_addition": True}))
+        verifier.verify.assert_not_called()
+    assert dependencies.route_configuration_sha256 == task.plan.snapshot.configuration_sha256
+    assert dependencies.route_head_sha256 == document_digest(head)
+    assert dependencies.backends == [approved_connection.connection.backend_id]
+    assert dependencies.recorded_complete and dependencies.live_status == "not_checked"
+    legacy = dependencies.model_copy(update={
+        "route_configuration_sha256": None, "route_head_sha256": None,
+    }).model_dump(mode="json")
+    assert "route_configuration_sha256" not in legacy and "route_head_sha256" not in legacy
+    with pytest.raises(ValueError, match="identity changed"):
+        recorded_route_dependencies(recorded.model_copy(update={"policy_sha256": "2" * 64}))
+    with pytest.raises(ValueError, match="not confirmed"):
+        recorded_route_snapshot(publication.model_copy(update={"resource_manifest": {
+            "route_configuration": task.model_dump(mode="json"),
+            "route_activation": {"context_sha256": task.context_sha256,
+                                 "intent": {}, "outcome": "unknown_no_replay"},
+        }}))
+    with pytest.raises(ValueError, match="incomplete approved dependencies"):
+        build_route_publication_task(publication, program, proof, None, [], budgets, {},
+                                      task.storage_endpoint, task.storage_table, "e" * 64, 101)
+    port = MagicMock()
+    port.check.return_value = proof
+    executor = RouteConfigurationExecutor(repository, lambda current: nullcontext(port),
+                                           clock=lambda: 101)
+    publication_row = repository.get_gateway_publication(publication.id)
+    assert publication_row is not None
+    publication_row.update(status="promoting", resource_manifest={})
+    assert repository.claim_gateway_publication("unit-worker", 180) is not None
+    promoting = publication.model_copy(update={"status": PublicationStatus.PROMOTING,
+                                               "resource_manifest": {}})
+    approved_snapshot = executor._commit_snapshot(
+        promoting, task, port, "unit-worker", lambda: None,
+    )
+    approved_snapshot.approval.require_same_configuration(task.plan.snapshot.approval)
+    assert approved_snapshot.approval.issued_epoch == 101
+    assert approved_snapshot.approval.activate_before_epoch == 701
+    resumed = promoting.model_copy(update={
+        "resource_manifest": publication_row["resource_manifest"],
+    })
+    assert executor._commit_snapshot(
+        resumed, task, port, "unit-worker", lambda: None,
+    ) == approved_snapshot
+    port.check.assert_called_once_with(task)
+
+    def activate_model(
+        addition: ModelRouteAddition, current_proof: ProgramCapabilityProof, epoch: str,
+        operation_id: str, clock: Any, activation_journal: PersistentModelRouteActivationJournal,
+    ) -> None:
+        model_head = addition.active_head(current_proof, epoch, clock())
+        receipt = RouteTransitionReceipt(
+            operation_id=operation_id, scope=scope, before_etag=None, before_generation=0,
+            after_sha256=document_digest(model_head),
+            route_version=model_head.head.approval.route_version,
+            approval_id=model_head.head.approval.approval_id,
+        )
+        content_type, body = conditional_batch(task.storage_endpoint, task.storage_table,
+                                               scope.partition, [
+            (model_head.row_key, route_entity(scope, scope.partition, model_head.row_key,
+                                              canonical_document(model_head)), None),
+            ("model-transition:" + operation_id,
+             route_entity(scope, scope.partition, "model-transition:" + operation_id,
+                          canonical_document(receipt)), None),
+        ])
+        intent = ModelRouteActivationIntent(receipt, model_head, content_type, body,
+                                            task.storage_endpoint, task.storage_table)
+        activation_journal.begin_once(intent)
+        assert publication_row["resource_manifest"]["route_activation"]["outcome"] == "started"
+        activation_journal.record_outcome(operation_id, "confirmed")
+
+    port.projection.activate_model_addition.side_effect = activate_model
+    model_head = executor._activate_model_scope(resumed, task, port, "unit-worker", lambda: None)
+    assert model_head.alias == alias and model_head.publication_id == str(publication.id)
+    latest = promoting.model_copy(update={
+        "resource_manifest": publication_row["resource_manifest"],
+    })
+    port.projection.recover_model_addition.return_value = "confirmed"
+    assert executor._activate_model_scope(
+        latest, task, port, "unit-worker", lambda: None,
+    ) == model_head
+    assert port.projection.activate_model_addition.call_count == 1
+    with (
+        patch.object(executor, "_activate_model_scope", return_value=model_head) as activate_scope,
+        patch.object(repository, "activate_gateway_publication", return_value=promoting.model_copy(
+            update={"status": PublicationStatus.ACTIVE},
+        ).model_dump(mode="python")) as activate_database,
+    ):
+        assert executor._activate_model(
+            promoting, task, port, "unit-worker", lambda: None,
+        ).status is PublicationStatus.ACTIVE
+    assert activate_scope.call_count == 1
+    activate_database.assert_called_once_with(
+        publication.id, "unit-worker", validate_model_activation=require_model_addition_activation,
+    )
+    route_head = ActiveRouteHead(approval=approved_snapshot.approval, activated_epoch=101)
+    transition = RouteTransitionReceipt(
+        operation_id=str(UUID(int=915)), scope=scope, before_etag=None, before_generation=0,
+        after_sha256=document_digest(route_head), route_version=route_head.approval.route_version,
+        approval_id=route_head.approval.approval_id,
+    )
+    content_type, body = conditional_batch(
+        task.storage_endpoint, task.storage_table, scope.partition, [
+        ("active", route_entity(scope, scope.partition, "active",
+                                 canonical_document(route_head)), None),
+        ("transition:" + transition.operation_id,
+         route_entity(scope, scope.partition, "transition:" + transition.operation_id,
+                      canonical_document(transition)), None),
+    ])
+    intent = RouteActivationIntent(transition, route_head, content_type, body,
+                                   text_digest(body.decode()), task.storage_endpoint,
+                                   task.storage_table)
+    publication_row["resource_manifest"] = {
+        "route_commit_approval": _CommitApprovalCheckpoint(
+            context_sha256=task.context_sha256, approval=approved_snapshot.approval,
+        ).model_dump(mode="json"),
+        "route_activation": {"version": 1, "context_sha256": task.context_sha256,
+                             "intent": intent.to_record(), "outcome": "unknown_no_replay"},
+    }
+    ordinary = promoting.model_copy(update={
+        "resource_manifest": publication_row["resource_manifest"],
+    })
+    port.projection.recover_activation.return_value = "unknown"
+    with pytest.raises(RuntimeError, match="writer requires receipt recovery"):
+        executor._activate(ordinary, task, port, "unit-worker", lambda: None)
+    port.projection.activate.assert_not_called()
+    port.projection.takeover_writer.assert_not_called()
+    publication_row.update({
+        **publication.model_dump(mode="python"), "status": "queued",
+        "resource_manifest": {"route_configuration": task.model_dump(mode="json")},
+    })
+    lease = next(item for item in repository.gateway_publication_outbox
+                 if item["publication_id"] == publication.id)
+    lease.update(status="queued", lease_owner=None, lease_expires_at=None)
+    port.program_record = installation.model_dump(mode="json")
+    port.projection.stage_slice.return_value = 3
+    port.projection.verify_slice_recorded.return_value = 3
+    for expected_phase in (
+        "validating", "provisioning", "building_revision", "verifying", "promoting",
+    ):
+        leased = repository.claim_gateway_publication("unit-worker", 180)
+        assert leased is not None
+        current = executor(GatewayPublication.model_validate(leased), "unit-worker", lambda: None)
+        assert current.status.value == expected_phase
+    assert _RouteProgress.model_validate(current.resource_manifest["route_progress"]).verified == 3
+    verified_probes = current.resource_manifest["probe_verification"]
+    assert isinstance(verified_probes, dict)
+    assert verified_probes["steps"] == {steps[0].key: "passed"}
+    assert port.projection.stage_slice.call_count == 1
+    assert port.projection.verify_slice_recorded.call_count == 1
+    assert port.probe_changed.call_count == 1
+    previous = publication.model_copy(update={
+        "id": UUID(int=908), "status": PublicationStatus.ACTIVE,
+        "desired_spec": publication.desired_spec.model_copy(update={
+            "bindings": [native_binding.model_copy(update={
+                "model": native_binding.model.model_copy(update={"model_key": "unit-existing"}),
+            })],
+            "discovery_models": [publication.desired_spec.discovery_models[0].model_copy(
+                update={"id": "unit-existing"},
+            )],
+        }),
+        "resource_manifest": {"fixed_route_program": installation.model_dump(mode="json")},
+    })
+    configuration = ApimTargetClientConfig(
+        publication.gateway_profile_id, "f" * 64, True,
+        Settings.model_construct(apim_api_id=scope.api_id,
+                                 apim_gateway_url=installation.gateway_endpoint,
+                                 apim_probe_subscription_id=installation.publisher_subscription_id,
+                                 apim_probe_subscription_key=SecretStr("unit-only")),
+        route_target_identity_sha256=installation.target_identity_sha256,
+    )
+    configurations = MagicMock()
+    configurations.resolve.return_value = configuration
+    factory = FixedRoutePublisherFactory(repository, configurations, active_fence=MagicMock(),
+                                         availability_projector=MagicMock(), clock=lambda: 101)
+    from datetime import UTC, datetime
+
+    from turnstile_core.domain.model_availability import (
+        ModelAvailabilityCatalogCheck,
+        ModelAvailabilityConfirmationPlan,
+        ModelAvailabilityCoverage,
+        ModelAvailabilityStagedProgram,
+    )
+
+    staged_program = ModelAvailabilityStagedProgram(expected_current_revision="1",
+                                                    installation=installation)
+    assert staged_program.installation == installation
+    with pytest.raises(ValueError):
+        ModelAvailabilityStagedProgram(expected_current_revision="*", installation=installation)
+    staged_surfaces = tuple(sorted([
+        "managed/0/models",
+        *("managed/" + installation.program.api_revision + "/" + name
+          for name in installation.operation_contracts),
+    ]))
+    staged_coverage = ModelAvailabilityCoverage(
+        target_id=UUID(installation.program.scope.target_id), inventory_digest="a" * 64,
+        policy_digest="b" * 64, serving_surfaces=staged_surfaces,
+        verified_surfaces=staged_surfaces, verified_at=datetime.fromtimestamp(100, UTC),
+        expires_at=datetime.fromtimestamp(160, UTC),
+    )
+    staged_plan = ModelAvailabilityConfirmationPlan(
+        resource_id="/unit/resource", api_id=installation.program.scope.api_id,
+        gateway_url=HttpUrl(installation.gateway_endpoint),
+        table_endpoint=HttpUrl(installation.storage_endpoint),
+        table_name=installation.storage_table,
+        coverage=staged_coverage, enrollments=(), catalogs=(ModelAvailabilityCatalogCheck(
+            endpoint_url=HttpUrl(installation.gateway_endpoint), revision="0", route="/models",
+            gateway_id="managed", instance_id="managed", models={}, capability_digest="c" * 64,
+            admission_surfaces={"/v1/chat/completions": "d" * 64},
+        ),),
+        staged_programs=(staged_program.model_copy(update={"expected_current_revision": "0"}),),
+    )
+    assert ModelAvailabilityConfirmationPlan.from_entity(staged_plan.entity()) == staged_plan
+    with pytest.raises(ValueError, match="complete distinct approved coverage"):
+        ModelAvailabilityConfirmationPlan.model_validate({
+            **staged_plan.model_dump(), "staged_programs": (staged_program,),
+        })
+    legacy_coverage = staged_coverage.model_copy(update={
+        "serving_surfaces": ("managed/0/models",), "verified_surfaces": ("managed/0/models",),
+    })
+    legacy_plan = ModelAvailabilityConfirmationPlan.model_validate({
+        **staged_plan.model_dump(), "staged_programs": (), "coverage": legacy_coverage,
+    })
+    assert "staged_programs" not in legacy_plan.model_dump(mode="json")
+    with pytest.raises(ValueError, match="installed base release"), factory.resolve(task):
+        pytest.fail("a task without its base cannot open a route port")
+    with pytest.raises(ValueError, match="migration publication is unavailable"):
+        factory.promote_program(publication, task, "unit-worker", lambda: None)
+    with pytest.raises(ValueError, match="installed base release"):
+        factory.prepare(publication, "unit-worker", lambda: None)
+    with pytest.raises(ValueError, match="installed program"):
+        factory._prepare_model_addition(publication, "unit-worker", lambda: None)
+    with pytest.raises(ValueError, match="removal intent is invalid"):
+        factory.remove_model(publication, "unit-worker", lambda: None)
+    with pytest.raises(ValueError, match="scope removal intent is unavailable"):
+        factory._remove_model_scopes(publication, previous, previous.model_dump(mode="python"),
+            configuration, (installation,), "unit-worker", lambda: None)
+    managed_binding = native_binding.model_copy(update={"runtime_id": UUID(int=923)})
+    metadata_tokens = MagicMock()
+    metadata_tokens.token.return_value = "unit-only"
+    metadata_factory = FixedRoutePublisherFactory(repository, configurations,
+        active_fence=MagicMock(), availability_projector=MagicMock(), clock=lambda: 101)
+    metadata_factory._tokens = metadata_tokens
+    assert managed_binding.backend_url is not None
+    host = managed_binding.backend_url.host
+    assert host is not None
+    resource = host.removesuffix(".openai.azure.com").removesuffix(
+        ".services.ai.azure.com",
+    )
+    metadata_binding = managed_binding.model_copy(update={"runtime_config": {
+        **managed_binding.runtime_config,
+        "project_endpoint": "https://" + resource + ".services.ai.azure.com/api/projects/unit",
+    }})
+    metadata_publication = publication.model_copy(update={"desired_spec":
+        publication.desired_spec.model_copy(update={"bindings": [metadata_binding]}),
+    })
+    metadata_requests: list[httpx.Request] = []
+
+    def deployment_metadata(request: httpx.Request) -> httpx.Response:
+        metadata_requests.append(request)
+        assert request.method == "GET" and request.url.path == "/api/projects/unit/deployments"
+        assert request.url.params.get("api-version") == "v1"
+        return httpx.Response(200, json={"value": [
+            {"name": metadata_binding.model.upstream_model_id},
+        ]})
+
+    with httpx.Client(transport=httpx.MockTransport(deployment_metadata)) as metadata_client:
+        without_project = metadata_publication.model_copy(update={"desired_spec":
+            metadata_publication.desired_spec.model_copy(update={"bindings": [
+                metadata_binding.model_copy(update={"runtime_config": {
+                    key: value for key, value in metadata_binding.runtime_config.items()
+                    if key != "project_endpoint"
+                }}),
+            ]}),
+        })
+        metadata_factory._validate_deployment(
+            without_project, MagicMock(), metadata_client, installation,
+        )
+        assert metadata_requests == []
+        metadata_factory._validate_deployment(
+            metadata_publication, MagicMock(), metadata_client, installation,
+        )
+    assert len(metadata_requests) == 1
+    metadata_tokens.token.assert_called_once_with("https://ai.azure.com")
+    new_connection = factory._new_connection(managed_binding, installation, configuration)
+    assert new_connection == factory._new_connection(managed_binding, installation, configuration)
+    assert new_connection.path == "/providers/microsoft/v1/systemone"
+    assert not new_connection.observer
+    assert new_connection.credential == credential and new_connection.public_count_path is None
+    connection_management = MagicMock()
+
+    def prepare_connection(connection: ConnectionRevision, persist: Any,
+                           *, recovery_only: bool = False) -> str:
+        assert recovery_only is False
+        persist({"unit": "immutable-intent"})
+        return connection.dependency_sha256
+
+    connection_management.prepare_route_connection.side_effect = prepare_connection
+    with patch.object(repository, "checkpoint_gateway_publication_preparation",
+                      return_value=True) as save_connection:
+        prepare = factory._connection_preparer(publication, installation, configuration,
+                                               connection_management, "unit-worker", lambda: None)
+        assert prepare(managed_binding) == (new_connection, 101)
+    assert save_connection.call_count == 1
+    connection_management.prepare_route_connection.side_effect = None
+    connection_management.prepare_route_connection.return_value = new_connection.dependency_sha256
+    connection_management.prepare_route_connection.reset_mock()
+    restored_preparation = publication.model_copy(update={"resource_manifest": {
+        "route_preparation": save_connection.call_args.args[-1],
+    }})
+    recovered_prepare = factory._connection_preparer(
+        restored_preparation, installation, configuration,
+        connection_management, "unit-worker", lambda: None,
+    )
+    assert recovered_prepare(managed_binding) == (new_connection, 101)
+    assert connection_management.prepare_route_connection.call_args.kwargs["recovery_only"] is True
+    approved_runtime: dict[str, Any] = {
+        "id": native_binding.runtime_id, "enabled": True,
+        "gateway_profile_id": publication.gateway_profile_id,
+        "config": {"storage_route_approvals": [approved_connection.model_dump(mode="json")]},
+    }
+    connection_management.verify_route_connection.return_value = (
+        approved_connection.connection.dependency_sha256
+    )
+    assert factory.approved_connections(
+        publication, installation, connection_management, registry={"runtimes": [approved_runtime]},
+    ) == {alias: approved_connection}
+    connection_management.verify_route_connection.assert_called_once_with(
+        approved_connection.connection,
+    )
+    approved_runtime["config"]["storage_route_approvals"].append(
+        approved_connection.model_dump(mode="json"),
+    )
+    with pytest.raises(ValueError, match="one current independent"):
+        factory.approved_connections(publication, installation, connection_management,
+                                     registry={"runtimes": [approved_runtime]})
+    with pytest.raises(ValueError, match="preparation is unsupported"):
+        factory._new_connection(native_binding, installation, configuration)
+    with pytest.raises(ValueError, match="Pool capability is unavailable"):
+        factory._new_pool_connection(managed_binding, installation, configuration, {})
+    assert managed_binding.backend_url is not None
+    pool = GatewayBackendPoolConfig(members=[
+        GatewayBackendPoolMember(runtime_id=UUID(int=923), runtime_name="unit-primary",
+                                 backend_url=managed_binding.backend_url,
+                                 auth_strategy=AuthStrategy.MANAGED_IDENTITY, priority=0, weight=3),
+        GatewayBackendPoolMember(runtime_id=UUID(int=924), runtime_name="unit-secondary",
+                                 backend_url=HttpUrl("https://unit-secondary.services.ai.azure.com"),
+                                 auth_strategy=AuthStrategy.MANAGED_IDENTITY, priority=1, weight=1),
+    ], rate_limit=GatewayRateLimitResilience(
+        max_attempts_per_request=2, retry_interval_seconds=1, first_fast_retry=True,
+        circuit_breaker=GatewayRateLimitCircuitBreaker(
+            failure_count=1, interval_seconds=60, trip_duration_seconds=60, accept_retry_after=True,
+        ),
+    ),
+        session_affinity=True)
+    pool_binding = managed_binding.model_copy(update={"runtime_config": {
+        **managed_binding.runtime_config, "apim_backend_pool": pool.model_dump(mode="json"),
+    }})
+    pool_installation = installation.model_copy(update={"pool_enabled": True})
+    pool_config = ApimTargetClientConfig(configuration.gateway_profile_id, "f" * 64, True,
+        configuration.settings.model_copy(update={"azure_subscription_id": str(UUID(int=1)),
+            "apim_resource_group": "unit-group", "apim_service_name": "unit-apim"}),
+        route_target_identity_sha256=installation.target_identity_sha256)
+    pooled_connection, members = factory._new_pool_connection(
+        pool_binding, pool_installation, pool_config, {},
+    )
+    assert (pooled_connection, members) == factory._new_pool_connection(
+        pool_binding, pool_installation, pool_config, {},
+    )
+    assert pooled_connection.pool is not None
+    assert pooled_connection.pool.session_cookie_name is not None
+    assert [(member.priority, member.weight) for member in pooled_connection.pool.members] == [
+        (0, 3), (1, 1),
+    ]
+    assert len(members) == 2 and all(member.circuit_breaker is not None for member in members)
+    with factory._open(installation, pool_config) as (opened_port, opened_management):
+        assert opened_port.program_record == installation.model_dump(mode="json")
+        assert opened_port.projection._table == installation.storage_table
+        assert isinstance(opened_management, AzureApimPublisherClient)
+        staged_store = MagicMock()
+        staged_store.read_versioned_entity.return_value = None
+        assert opened_management._staged_availability_programs(staged_store,
+            staged_coverage.target_id, installation.storage_endpoint,
+            installation.storage_table) == ()
+        reader_plan = staged_plan.model_copy(update={
+            "resource_id": opened_management._resource_id_base,
+        })
+        staged_store.read_versioned_entity.return_value = (reader_plan.entity(), '"unit"')
+        assert opened_management._staged_availability_programs(staged_store,
+            staged_coverage.target_id, installation.storage_endpoint,
+            installation.storage_table) == reader_plan.staged_programs
+        staged_store.replace_if_match.assert_not_called()
+        staged_store.read_versioned_entity.return_value = (staged_plan.entity(), '"unit"')
+        with pytest.raises(RuntimeError, match="another target"):
+            opened_management._staged_availability_programs(staged_store,
+                staged_coverage.target_id, installation.storage_endpoint,
+                installation.storage_table)
+        wrong_probe = staged_program.model_copy(update={"installation": installation.model_copy(
+            update={"publisher_subscription_id": "unit-other"},
+        )})
+        with pytest.raises(RuntimeError, match="probe identity changed"):
+            opened_management._verify_staged_availability_program(wrong_probe)
+    availability_repository = MagicMock()
+    availability_repository.get_model_availability_state.return_value = None
+    availability_factory = FixedRoutePublisherFactory(availability_repository, configurations,
+        active_fence=MagicMock(), availability_projector=MagicMock(), clock=lambda: 101)
+    with pytest.raises(ValueError, match="availability changed"):
+        availability_factory._prepare_availability(task, route)
+    availability_repository.stage_model_availability.assert_called_once_with(
+        UUID(route.model_id), publication.id,
+    )
+    assert factory._dependency_context(publication, installation) == document_digest({
+        "publication_id": str(publication.id),
+        "desired_spec_sha256": publication.desired_spec_sha256,
+        "specification": publication.desired_spec.model_dump(mode="json"),
+        "installation": installation.model_dump(mode="json"),
+    })
+    assert factory._credential_bindings(publication) == {}
+    assert factory._rollback_source(publication, previous, installation, task.plan.snapshot) == (
+        previous, task.plan.snapshot,
+    )
+    assert factory._connection_source(publication, installation, previous) == (previous, None)
+    scope_context = MagicMock()
+    scope_context.__enter__.return_value = (port, MagicMock())
+    port.projection.read_model_active.return_value = None
+    port.projection.read_program_proof.return_value = None
+    with (
+        patch.object(factory, "_preflight_dependencies"),
+        patch.object(factory, "_open", return_value=scope_context),
+        patch.object(factory, "_prepare_credentials") as prepare_scope_credentials,
+        pytest.raises(RuntimeError, match="proof is not current"),
+    ):
+        factory._prepare_model_scope(publication, previous, (installation,), configuration,
+            {}, "unit-worker", lambda: None, credentials=None, scope_only=False)
+    prepare_scope_credentials.assert_not_called()
+    with patch.object(repository, "get_gateway_publication", return_value=None), \
+            pytest.raises(ValueError, match="publication is unavailable"):
+        factory._verify_connections(installation, MagicMock(), task)
+    with pytest.raises(ValueError, match="rollback source binding is invalid"):
+        factory._rollback_source(publication.model_copy(update={"resource_manifest": {
+            "route_rollback": {"operation_id": "unit-invalid"},
+        }}), previous, installation, task.plan.snapshot)
+    prepared_without_keys, key_bindings = factory._prepare_credentials(
+        publication, previous, installation, MagicMock(), "unit-worker", lambda: None,
+    )
+    assert prepared_without_keys == publication and key_bindings == {}
+    assert factory._prepare_oauth(publication, previous, installation, MagicMock(),
+                                  "unit-worker", lambda: None) == publication
+    oauth = OAuthClientCredentialsConfig(provider_id="turnstile-oauth-" + UUID(int=926).hex,
+                                         client_id=UUID(int=927),
+                                         token_url=HttpUrl("https://adb-unit.1.azuredatabricks.net/oidc/v1/token"))
+    oauth_binding = native_binding.model_copy(update={
+        "auth_strategy": AuthStrategy.OAUTH_CLIENT_CREDENTIALS,
+        "runtime_config": {**native_binding.runtime_config, "oauth": oauth.model_dump(mode="json")},
+        "managed_identity_resource": None,
+    })
+    oauth_publication = publication.model_copy(update={
+        "desired_spec": publication.desired_spec.model_copy(update={"bindings": [oauth_binding]}),
+    })
+    oauth_cipher = CredentialCipher(Fernet.generate_key())
+    oauth_factory = FixedRoutePublisherFactory(repository, configurations, active_fence=MagicMock(),
+        availability_projector=MagicMock(), clock=lambda: 101, cipher=oauth_cipher)
+    oauth_management = MagicMock()
+
+    def prepare_oauth(resource: Any, persist: Any) -> None:
+        assert resource.config == oauth and resource.client_secret is None
+        body = canonical_document({"unit": "opaque-client-secret"})
+        persist({"version": 1, "method": "PUT", "api_version": "2024-05-01",
+                 "resource_id": "/unit/authorizationProviders/" + oauth.provider_id,
+                 "if_none_match": "*", "configuration_sha256": text_digest(oauth.model_dump_json()),
+                 "body": body, "body_sha256": text_digest(body)})
+
+    oauth_management.prepare_route_oauth.side_effect = prepare_oauth
+    with (
+        patch.object(oauth_factory, "_preflight_dependencies"),
+        patch.object(repository, "gateway_publication_credential", return_value=None),
+        patch.object(repository, "checkpoint_gateway_publication_preparation",
+                 return_value=True) as save_oauth,
+    ):
+        prepared_oauth = oauth_factory._prepare_oauth(
+            oauth_publication, previous, installation, oauth_management,
+            "unit-worker", lambda: None,
+        )
+    assert save_oauth.call_count == 2
+    assert "opaque-client-secret" not in canonical_document(prepared_oauth.resource_manifest)
+    with (
+        patch.object(oauth_factory, "_preflight_dependencies"),
+        patch.object(repository, "gateway_publication_credential", return_value=None),
+        patch.object(repository, "checkpoint_gateway_publication_preparation", return_value=False),
+        pytest.raises(RuntimeError, match="preparation lease changed"),
+    ):
+        oauth_factory._prepare_oauth(oauth_publication, previous, installation,
+                                     oauth_management, "unit-worker", lambda: None)
+    assert factory._credential_references(publication, previous, installation) == {}
+    secret_version = "https://unitvault.vault.azure.net/secrets/unit/" + "b" * 32
+    with pytest.raises(ValueError, match="Vault is not approved"):
+        factory._require_credential_vault(secret_version, installation)
+    approved_vault = installation.model_copy(update={
+        "trusted_vault_origins": ("https://unitvault.vault.azure.net",),
+    })
+    factory._require_credential_vault(secret_version, approved_vault)
+    keyed_binding = native_binding.model_copy(update={
+        "runtime_id": UUID(int=925), "auth_strategy": AuthStrategy.NAMED_VALUE_API_KEY,
+        "named_value_name": "unit-key", "managed_identity_resource": None,
+    })
+    keyed = publication.model_copy(update={"desired_spec": publication.desired_spec.model_copy(
+        update={"bindings": [keyed_binding]},
+    )})
+    source_hash = route_credential_source(keyed_binding)
+    keyed_previous = previous.model_copy(update={
+        "desired_spec": keyed.desired_spec, "resource_manifest": {"route_credentials": {
+            "version": 1, "bindings": {source_hash: secret_version},
+        }},
+    })
+    key_runtime = {"id": keyed_binding.runtime_id, "enabled": True,
+                   "gateway_profile_id": publication.gateway_profile_id, "config": {
+                       "control_plane_managed": True, "auth_strategy": "named_value_api_key",
+                       "named_value_name": "unit-key",
+                   }}
+    management = MagicMock()
+    with patch.object(repository, "checkpoint_gateway_publication_credentials",
+                      return_value=True) as save:
+        prepared_keys, inherited_keys = factory._prepare_credentials(
+            keyed, keyed_previous, approved_vault, management, "unit-worker", lambda: None,
+            registry={"runtimes": [key_runtime]},
+        )
+    assert inherited_keys == {source_hash: secret_version}
+    assert factory._credential_bindings(prepared_keys) == inherited_keys
+    save.assert_called_once_with(publication.id, "unit-worker", None, {
+        "version": 1, "bindings": inherited_keys,
+    })
+    management.route_credential_value.assert_not_called()
+    with (
+        patch.object(repository, "checkpoint_gateway_publication_credentials", return_value=False),
+        pytest.raises(RuntimeError, match="bindings lease changed"),
+    ):
+        factory._prepare_credentials(
+            keyed, keyed_previous, approved_vault, management, "unit-worker", lambda: None,
+            registry={"runtimes": [key_runtime]},
+        )
+    with pytest.raises(ValueError, match="preflight is unsupported"):
+        factory._preflight_dependencies(publication, installation, {"runtimes": []})
+    assert not factory._runtime_destination_matches(publication, native_binding, {})
+    bound_credentials = publication.model_copy(update={"resource_manifest": {"route_credentials": {
+        "version": 1, "bindings": {
+            "a" * 64: "https://unitvault.vault.azure.net/secrets/unit/" + "b" * 32,
+        },
+    }}})
+    assert factory._credential_bindings(bound_credentials) == {
+        "a" * 64: "https://unitvault.vault.azure.net/secrets/unit/" + "b" * 32,
+    }
+    with pytest.raises(ValueError, match="bindings are invalid"):
+        factory._credential_bindings(publication.model_copy(update={
+            "resource_manifest": {"route_credentials": "unit-invalid"},
+        }))
+    with patch.object(repository, "effective_gateway_publication",
+                      return_value=previous.model_dump(mode="python")):
+        assert factory.installed(publication.gateway_profile_id, previous.id) == (
+            installation, configuration,
+        )
+        configurations.resolve.assert_called_once_with(publication.gateway_profile_id,
+                                                        include_probe_credentials=True)
+        with pytest.raises(ValueError, match="effective publication changed"):
+            factory.installed(publication.gateway_profile_id, UUID(int=922))
+    marker = {"model_route_addition": {
+        "version": 1, "program_release_id": str(previous.id), "alias": alias,
+    }}
+    desired_spec = publication.desired_spec.model_dump(mode="json")
+    digest = document_digest({**marker, "desired_spec": desired_spec})
+    assert _model_addition_manifest(
+        previous.model_dump(mode="python"), desired_spec, digest, marker,
+    ) == marker
+    with pytest.raises(ValueError, match="cannot contain or replace"):
+        _model_addition_manifest(
+            previous.model_dump(mode="python"), desired_spec, "a" * 64, marker,
+        )
+    with pytest.raises(ValueError, match="cannot contain or replace"):
+        _model_addition_manifest(publication.model_copy(update={
+            "id": previous.id, "status": PublicationStatus.ACTIVE,
+            "resource_manifest": previous.resource_manifest,
+        }).model_dump(mode="python"), desired_spec, digest, marker)
+    removal_source = publication.model_copy(update={
+        "status": PublicationStatus.ACTIVE, "publication_kind": PublicationKind.MODEL_ADD,
+        "resource_manifest": marker,
+    })
+    removal_spec = {**desired_spec, "bindings": [], "discovery_models": [], "removed_models": [{
+        "model_id": route.model_id, "model_key": alias,
+        "display_name": route.display_name, "api_format": native_binding.api_format.value,
+    }]}
+    removal_marker = {"model_route_removal": {
+        "version": 1, "program_release_id": str(previous.id),
+        "source_publication_id": str(removal_source.id),
+        "source_spec_sha256": removal_source.desired_spec_sha256,
+        "model_id": route.model_id, "alias": alias,
+    }}
+    removal_digest = document_digest({**removal_marker, "desired_spec": removal_spec})
+    assert _model_removal_manifest(previous.model_dump(mode="python"),
+        removal_source.model_dump(mode="python"), removal_spec,
+        removal_digest, removal_marker) == removal_marker
+    with pytest.raises(ValueError, match="source or target binding changed"):
+        _model_removal_manifest(previous.model_dump(mode="python"),
+            removal_source.model_dump(mode="python"), removal_spec, "a" * 64, removal_marker)
+
+
+def test_fixed_route_program_promotion_once_never_replays_started_intent() -> None:
+    from unittest.mock import call
+
+    from turnstile_core.services.storage_route_publisher import promote_program_once
+
+    management, persist, verify = MagicMock(), MagicMock(), MagicMock()
+    expected = {"version": 1, "previous_revision": "1", "revision": "2",
+                "release_name": "unit-release", "context_sha256": "a" * 64}
+    started, confirmed = {**expected, "outcome": "started"}, {**expected, "outcome": "confirmed"}
+
+    def promote(revision: str, release: str, previous: str) -> None:
+        assert (revision, release, previous) == ("2", "unit-release", "1")
+        persist.assert_called_once_with(None, started)
+
+    management.promote_fixed_revision.side_effect = promote
+    management.current_revision.side_effect = ["1", "2"]
+    promote_program_once(management, "1", "2", "unit-release", "a" * 64, None, persist, verify)
+    management.promote_fixed_revision.assert_called_once_with("2", "unit-release", "1")
+    assert persist.call_args_list == [call(None, started), call(started, confirmed)]
+    assert verify.call_args_list == [call("1"), call("2")]
+    management.reset_mock()
+    management.current_revision.side_effect = None
+    management.current_revision.return_value = "1"
+    persist.reset_mock()
+    verify.reset_mock()
+    with pytest.raises(RuntimeError, match="read back only"):
+        promote_program_once(management, "1", "2", "unit-release", "a" * 64,
+                             started, persist, verify)
+    management.promote_fixed_revision.assert_not_called()
+    persist.assert_not_called()
+    verify.assert_not_called()
+    management.current_revision.return_value = "2"
+    promote_program_once(management, "1", "2", "unit-release", "a" * 64,
+                         started, persist, verify)
+    management.promote_fixed_revision.assert_not_called()
+    persist.assert_called_once_with(started, confirmed)
+    verify.assert_called_once_with("2")
+
+
+def test_storage_route_document_is_strict_and_canonical_with_no_duplicate_properties() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    document = canonical_document(scope)
+    assert parse_document(RouteScope, document, MAX_HEAD_BYTES) == scope
+    assert scope.partition.startswith("route-v2:") and len(scope.partition) == 73
+    with pytest.raises(ValueError, match="DUPLICATE_JSON_PROPERTY"):
+        parse_document(RouteScope, document.replace('"api_id":', '"api_id":"other","api_id":'),
+                       MAX_HEAD_BYTES)
+    with pytest.raises(ValueError, match="TOO_LARGE"):
+        parse_document(RouteScope, document, 1)
+    with pytest.raises(ValidationError):
+        RouteScope.model_validate({**scope.model_dump(), "policy_abi": True})
+    validate_origin("https://unit.example.test")
+    validate_path("/providers/microsoft/v1/systemone")
+    for origin in ("http://unit.example.test", "https://user:secret@unit.example.test",
+                   "https://unit.example.test/path", "https://unit.example.test?token=unit"):
+        with pytest.raises(ValueError, match="ORIGIN"):
+            validate_origin(origin)
+    for path in ("//unit.example.test", "/a/../b", "/a%2fb", "/a?token=unit", "/a b"):
+        with pytest.raises(ValueError, match="PATH"):
+            validate_path(path)
+
+
+def test_storage_route_credentials_keep_versioned_secret_and_counter_origin_contract() -> None:
+    secret_id = "https://unit-vault.vault.azure.net/secrets/unit-key/" + "a" * 32
+    credential = RouteCredential(mode="key_vault_api_key", header="api-key", secret_id=secret_id)
+    assert credential.secret_id == secret_id
+    for invalid in (secret_id.rsplit("/", 1)[0], secret_id + "?token=unit",
+                    secret_id.replace("https://", "http://")):
+        with pytest.raises(ValidationError, match="VERSIONED_SECRET"):
+            RouteCredential(mode="key_vault_api_key", header="api-key", secret_id=invalid)
+    with pytest.raises(ValidationError, match="UNAUTHENTICATED"):
+        RouteCredential(mode="none", header="Authorization")
+    with pytest.raises(ValidationError, match="MANAGED_IDENTITY"):
+        RouteCredential(mode="managed_identity", header="Authorization")
+    counter = CountCredential(mode="managed_identity", header="Authorization",
+                              audience="https://cognitiveservices.azure.com",
+                              origin="https://unit.services.ai.azure.com",
+                              endpoints=("/responses/input_tokens",))
+    assert counter.origin == "https://unit.services.ai.azure.com"
+    with pytest.raises(ValidationError, match="COUNT_ENDPOINT"):
+        CountCredential.model_validate({**counter.model_dump(),
+                                        "endpoints": ("/providers/microsoft/v1/systemone",)})
+
+
+def test_storage_route_connection_binds_count_origin_and_exact_approval_document() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    credential = RouteCredential(mode="managed_identity", header="Authorization",
+                                 audience="https://cognitiveservices.azure.com")
+    counter = CountCredential(**credential.model_dump(), origin="https://unit.services.ai.azure.com",
+                              endpoints=("/responses/input_tokens",))
+    connection = ConnectionRevision(
+        scope=scope, revision_id=str(UUID(int=2)), backend_id="unit-backend",
+        origin=counter.origin, path="/providers/microsoft/v1/systemone",
+        dependency_sha256="a" * 64, credential=credential, count=counter,
+    )
+    with pytest.raises(ValidationError, match="COUNTER_ORIGIN"):
+        ConnectionRevision.model_validate({**connection.model_dump(), "count": {
+            **counter.model_dump(), "origin": "https://other.services.ai.azure.com",
+        }})
+    approved = ConnectionApproval(approval_id=str(UUID(int=3)), connection=connection,
+                                  state="approved", evidence_sha256="b" * 64,
+                                  issued_epoch=100, expires_epoch=200)
+    approved.require_current(connection, 101)
+    with pytest.raises(ValueError, match="APPROVAL_INVALID"):
+        approved.require_current(connection.model_copy(update={"dependency_sha256": "c" * 64}), 101)
+    with pytest.raises(ValueError, match="POOL_UNEXPECTED"):
+        connection.require_probe_member("unrelated")
+
+
+def test_native_decision_route_content_binds_exact_model_budget_and_profile() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    model_id = UUID(int=901)
+    connection = ConnectionRevision(
+        scope=scope, revision_id=str(UUID(int=2)), backend_id="unit-backend",
+        origin="https://unit.services.ai.azure.com", path="/providers/microsoft/v1/systemone",
+        dependency_sha256="a" * 64,
+        credential=RouteCredential(mode="managed_identity", header="Authorization",
+                                   audience="https://cognitiveservices.azure.com"),
+    )
+    budget = ModelCountContract(model_id=model_id, algorithm="legacy_request_estimate_v1",
+                                output_field="none", output_estimate=4096,
+                                operations=("microsoft-decision",), evidence_sha256="b" * 64,
+                                verified_at=datetime(2026, 10, 12, tzinfo=UTC))
+    content = RouteContent(scope=scope, model_id=str(model_id), alias="unit-decision",
+                           display_name="Unit Decision",
+                           created_at=datetime(2026, 10, 12, tzinfo=UTC),
+                           upstream_model="unit-native-deployment", profile="microsoft-decision",
+                           streaming_mode="buffered", operations=("microsoft-decision",),
+                           connection=connection, budget_epoch=str(UUID(int=3)), budget=budget)
+    assert len(content.sha256) == 64
+    assert RouteContent.model_validate_json(canonical_document(content)) == content
+    connection_approval = ConnectionApproval(approval_id=str(UUID(int=8)), connection=connection,
+                                             state="approved", evidence_sha256="c" * 64,
+                                             issued_epoch=100, expires_epoch=200)
+    version = str(UUID(int=9))
+    approved_connections = {connection.revision_id: connection_approval}
+    members, manifest, dependencies = configuration_manifests(
+        scope, version, [content], approved_connections, 101,
+    )
+    configuration = ConfigurationApproval(
+        approval_id=str(UUID(int=10)), scope=scope, route_version=version, generation=1,
+        manifest_sha256=manifest, dependency_manifest_sha256=dependencies,
+        catalog_sha256=catalog_digest([content]), entry_count=1,
+        required_program_sha256="d" * 64, required_profiles=("microsoft-decision",),
+        budget_epoch=content.budget_epoch, issued_epoch=100, activate_before_epoch=200,
+    )
+    snapshot = RouteSnapshot.prepare(configuration, [content], approved_connections, 101)
+    assert snapshot.members == members and len(snapshot.configuration_sha256) == 64
+    stored: dict[tuple[str, str], str] = {}
+    with httpx.Client() as client:
+        projection = TableRouteProjection("https://unitstore.table.core.windows.net",
+                                          "TurnstileRoutes", scope, MagicMock(), client)
+
+        def store_document(partition: str, row: str, document: str, maximum: int) -> None:
+            stored[(partition, row)] = document
+
+        def read_document(partition: str, row: str, maximum: int) -> tuple[str, str] | None:
+            document = stored.get((partition, row))
+            return (document, 'W/"unit"') if document is not None else None
+
+        with patch.object(projection, "_stage_entity", side_effect=store_document), \
+                patch.object(projection, "_read_document", side_effect=read_document):
+            assert projection.stage_slice(snapshot, 101, 0, maximum=3) == 3
+            with pytest.raises(RouteProjectionConflict, match="FINAL_READBACK"):
+                projection.require_verified_snapshot(snapshot, 101)
+            assert projection.verify_slice_recorded(snapshot, 101, 0, maximum=3) == 3
+            projection.require_verified_snapshot(snapshot, 101)
+            assert len(stored) == 4
+            stored.pop(next(key for key in stored if key[0].endswith(":content")))
+            with pytest.raises(RouteProjectionConflict, match="INCOMPLETE"):
+                projection.verify_snapshot(snapshot, 101)
+    assert changed_route_aliases(
+        [content], [content.model_copy(update={"display_name": "Renamed"})],
+    ) == ()
+    with pytest.raises(ValueError, match="CONNECTION_APPROVAL_REQUIRED"):
+        RouteSnapshot.prepare(configuration, [content], {}, 101)
+    with pytest.raises(ValueError, match="DUPLICATE_ALIAS"):
+        configuration_manifests(scope, version, [content, content], approved_connections, 101)
+    program = ProgramIdentity(scope=scope, api_revision="1", instance_id="managed",
+                               program_sha256="d" * 64, trust_binding_sha256="e" * 64)
+    proof = ProgramCapabilityProof(proof_id=str(UUID(int=11)), identity=program,
+                                   supported_profiles=("microsoft-decision",),
+                                   issued_epoch=100, expires_epoch=220)
+    addition = ModelRouteAddition.prepare(str(UUID(int=12)), program, proof, content,
+                                          connection_approval, content.budget_epoch, 101)
+    model_head = addition.active_head(proof, content.budget_epoch, 101)
+    assert model_head.alias == content.alias and model_head.content_sha256 == content.sha256
+    assert model_head.row_key.startswith("model:") and len(model_head.row_key) == 70
+    transition = RouteTransitionReceipt(operation_id=str(UUID(int=15)), scope=scope,
+                                         before_etag=None, before_generation=0,
+                                         after_sha256=document_digest(model_head),
+                                         route_version=model_head.head.approval.route_version,
+                                         approval_id=model_head.head.approval.approval_id)
+    endpoint, table = "https://unitstore.table.core.windows.net", "TurnstileRoutes"
+    content_type, body = conditional_batch(endpoint, table, scope.partition, [
+        (model_head.row_key, route_entity(scope, scope.partition, model_head.row_key,
+                                          canonical_document(model_head)), None),
+        ("model-transition:" + transition.operation_id,
+         route_entity(scope, scope.partition, "model-transition:" + transition.operation_id,
+                      canonical_document(transition)), None),
+    ])
+    intent = ModelRouteActivationIntent(transition, model_head, content_type, body, endpoint, table)
+    record = intent.to_record()
+    assert ModelRouteActivationIntent.from_record(record) == intent
+    repository = InMemoryRepository()
+    publication_id = UUID(model_head.publication_id)
+    row = {"id": publication_id, "status": "promoting", "resource_manifest": {}}
+    repository.gateway_publications.append(row)
+    repository.gateway_publication_outbox.append({
+        "publication_id": publication_id, "status": "leased", "lease_owner": "unit-worker",
+        "lease_expires_at": datetime.now(UTC) + timedelta(minutes=1),
+    })
+    persistent = PersistentModelRouteActivationJournal(
+        repository, publication_id, "unit-worker", "a" * 64, None, lambda: None,
+    )
+    persistent.begin_once(intent)
+    assert persistent.intent == intent and persistent.outcome == "started"
+    persistent.record_outcome(transition.operation_id, "unknown_no_replay")
+    with pytest.raises(ValueError, match="RECOVER_ONLY"):
+        persistent.begin_once(intent)
+    persistent.record_outcome(transition.operation_id, "confirmed")
+    with pytest.raises(ValueError, match="REGRESSION"):
+        persistent.record_outcome(transition.operation_id, "unknown_no_replay")
+    with pytest.raises(ValueError, match="BODY_CHANGED"):
+        ModelRouteActivationIntent.from_record({**record, "body_sha256": "a" * 64})
+    journal, submissions = MagicMock(), []
+    with httpx.Client() as client:
+        projection = TableRouteProjection(endpoint, table, scope, MagicMock(), client)
+
+        def lost_activation(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            journal.begin_once.assert_called_once()
+            submissions.append(url)
+            raise httpx.ReadTimeout("unit unknown model activation")
+
+        with patch.object(projection, "require_verified_snapshot"), \
+                patch.object(projection, "read_model_active", return_value=None), \
+                patch.object(projection, "_read_document", return_value=None), \
+                patch.object(projection, "_request", side_effect=lost_activation):
+            with pytest.raises(RouteProjectionUnknown, match="UNKNOWN_RECOVER_ONLY"):
+                projection.activate_model_addition(addition, proof, content.budget_epoch,
+                                                    str(UUID(int=17)), lambda: 101, journal)
+            assert projection.recover_model_addition(
+                journal.begin_once.call_args.args[0],
+            ) == "unknown_no_replay"
+        assert len(submissions) == 1
+        journal.record_outcome.assert_called_once_with(str(UUID(int=17)), "unknown_no_replay")
+    plan = RouteConfigurationPlan.prepare([], addition.snapshot, program, proof,
+                                           content.budget_epoch, 101)
+    task = RoutePublicationTask(
+        model_addition=True, configuration_only=True, publication_id=addition.publication_id,
+        base_publication_id=str(UUID(int=14)), desired_spec_sha256="f" * 64,
+        target_identity_sha256="1" * 64, storage_endpoint="https://unitstore.table.core.windows.net",
+        storage_table="TurnstileRoutes", plan=plan, previous_routes=(), previous_head=None,
+    )
+    assert task.plan.policy_write_count == 0 and len(task.context_sha256) == 64
+    candidate = RouteCandidateProbe(probe_id=str(UUID(int=19)), publication_id=task.publication_id,
+                                     request_id=str(UUID(int=20)),
+                                     subscription_id="unit-subscription",
+                                     alias=content.alias, operation="microsoft-decision",
+                                     body_sha256="a" * 64, head=model_head.head,
+                                     issued_epoch=101, expires_epoch=200)
+    with httpx.Client() as client:
+        projection = TableRouteProjection(endpoint, table, scope, MagicMock(), client)
+        with patch.object(projection, "_stage_entity") as stage:
+            projection.stage_candidate(candidate, addition.snapshot, program, proof, 101)
+            stage.assert_called_once()
+            with pytest.raises(RouteProjectionConflict, match="SNAPSHOT_CHANGED"):
+                projection.stage_candidate(
+                    candidate.model_copy(update={"operation": "chat-completions"}),
+                    addition.snapshot, program, proof, 101,
+                )
+    journal, dispatched = MagicMock(), []
+    with httpx.Client() as client:
+        projection = TableRouteProjection(endpoint, table, scope, MagicMock(), client)
+
+        def unknown_configuration(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            journal.begin_once.assert_called_once()
+            dispatched.append(url)
+            raise httpx.ReadTimeout("unit unknown configuration activation")
+
+        with patch.object(projection, "verify_snapshot"), \
+                patch.object(projection, "read_writer", return_value=None), \
+                patch.object(projection, "read_active", return_value=None), \
+                patch.object(projection, "_read_document", return_value=None), \
+                patch.object(projection, "_request", side_effect=unknown_configuration):
+            with pytest.raises(RouteProjectionUnknown, match="UNKNOWN_RECOVER_ONLY"):
+                projection.activate(addition.snapshot, program, proof, content.budget_epoch,
+                                      str(UUID(int=18)), None, lambda: 101, journal)
+            assert projection.recover_activation(journal.begin_once.call_args.args[0]) == "unknown"
+        assert len(dispatched) == 1
+        journal.record_outcome.assert_called_once_with(str(UUID(int=18)), "unknown_no_replay")
+    renewed_approval = connection_approval.model_copy(update={
+        "approval_id": str(UUID(int=16)), "issued_epoch": 101, "expires_epoch": 210,
+    })
+    renewal = RouteApprovalRenewal(scope=scope, content_sha256=content.sha256,
+                                   original_approval_sha256=members[0].approval_sha256,
+                                   required_program_sha256=program.program_sha256,
+                                   budget_epoch=content.budget_epoch, approval=renewed_approval)
+    stored_renewals: dict[str, str] = {}
+    batches = 0
+    with httpx.Client() as client:
+        projection = TableRouteProjection(endpoint, table, scope, MagicMock(), client)
+
+        def renewal_read(partition: str, row: str, maximum: int) -> tuple[str, str] | None:
+            document = stored_renewals.get(row)
+            return (document, 'W/"unit"') if document is not None else None
+
+        def renewal_dispatch(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            nonlocal batches
+            if url.endswith("/$batch"):
+                batches += 1
+                raise httpx.ReadTimeout("unit unknown approval write")
+            entity = kwargs["json"]
+            stored_renewals[entity["RowKey"]] = entity["Document"]
+            return httpx.Response(201)
+
+        with patch.object(projection, "_read_document", side_effect=renewal_read), \
+                patch.object(projection, "_request", side_effect=renewal_dispatch):
+            for _attempt in range(2):
+                with pytest.raises(RouteProjectionUnknown, match="UNKNOWN_RECOVER_ONLY"):
+                    projection.publish_approval_renewal(
+                        renewal, content, members[0], proof, None, 101,
+                    )
+    assert batches == 1
+    task.require_publication(task.publication_id, task.base_publication_id,
+                             task.desired_spec_sha256, scope.target_id)
+    with pytest.raises(ValueError, match="PUBLICATION_CHANGED"):
+        task.require_publication(task.publication_id, task.base_publication_id,
+                                 "2" * 64, scope.target_id)
+    with pytest.raises(ValueError, match="PROGRAM_OR_BUDGET"):
+        ModelRouteAddition.prepare(str(UUID(int=12)), program, proof, content,
+                                    connection_approval, str(UUID(int=13)), 101)
+    changes: list[tuple[dict[str, Any], str]] = [
+        ({"model_id": str(UUID(int=999))}, "IDENTITY_MISMATCH"),
+        ({"profile": "openai-v1"}, "PROFILE_OPERATION_MISMATCH"),
+        ({"operations": ["chat-completions"]}, "PROFILE_OPERATION_MISMATCH"),
+    ]
+    for changed, message in changes:
+        with pytest.raises(ValidationError, match=message):
+            RouteContent.model_validate_json(json.dumps({
+                **content.model_dump(mode="json"), **changed,
+            }))
+
+
+def test_installed_program_requires_native_decision_operation_and_dedicated_public_table() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    identity = ProgramIdentity(scope=scope, api_revision="1", instance_id="managed",
+                                program_sha256="a" * 64, trust_binding_sha256="b" * 64)
+    installed = FixedProgramInstallation(
+        program=identity, target_identity_sha256="c" * 64,
+        storage_endpoint="https://unitstore.table.core.windows.net",
+        storage_table="TurnstileRoutes",
+        gateway_endpoint="https://unit-apim.example.test/llm",
+        publisher_subscription_id="unit-publisher",
+        parent_policy_sha256="d" * 64, operation_policies_sha256={"microsoft-decision": "e" * 64},
+        operation_contracts={"microsoft-decision": ("POST", "/providers/microsoft/v1/systemone")},
+        supported_profiles=("microsoft-decision",), decision_enabled=True,
+    )
+    assert installed.for_native_gateway(
+        "managed", "managed", installed.gateway_endpoint,
+    ) == installed
+    requests: list[str] = []
+
+    def program_probe(request: httpx.Request) -> httpx.Response:
+        requests.append(request.method)
+        headers = {"abi": "2", "nonce": request.headers["x-turnstile-route-probe"],
+                   "target": scope.target_id, "api": scope.api_id, "revision": "1",
+                   "gateway": "managed", "instance": "managed",
+                   "program": identity.program_sha256, "trust": identity.trust_binding_sha256}
+        return httpx.Response(204, headers={"x-turnstile-route-" + key: value
+                                            for key, value in headers.items()})
+
+    with httpx.Client(transport=httpx.MockTransport(program_probe)) as client:
+        verifier = FixedProgramVerifier(installed, MagicMock(), SecretStr("unit-only"), client)
+        verifier._probe(configuration=None)
+        assert requests == ["HEAD"]
+        with pytest.raises(ValueError, match="public protocol contract is missing"):
+            verifier.verify()
+        assert requests == ["HEAD"]
+    enrollment = ModelAvailabilityNodeEnrollment.model_validate({
+        "enrollment_id": UUID(int=21), "target_id": UUID(scope.target_id),
+        "deployment_id": UUID(int=22), "api_id": scope.api_id, "native_gateway_id": "unit-edge",
+        "revision": 1, "controller_evidence_sha256": "1" * 64,
+        "fenced_installation_sha256": "2" * 64,
+        "rejoin_contract": "enrolled_nodes_only_guarded_bootstrap",
+        "enrolled_at": datetime.now(UTC),
+        "nodes": [{"instance_id": "node-b", "endpoint_url": "https://node-b.example.test/llm"},
+                  {"instance_id": "node-a", "endpoint_url": "https://node-a.example.test/llm"}],
+    })
+    deployment = {"id": enrollment.deployment_id, "apim_target_id": enrollment.target_id,
+                  "native_gateway_id": enrollment.native_gateway_id, "declared_state": "present",
+                  "retired_at": None, "endpoint_url": "https://unit-edge.example.test/llm"}
+    native = installed.model_copy(update={"native_gateway_scope": True})
+    programs = native_gateway_programs(native, deployment, enrollment)
+    factory = FixedRoutePublisherFactory(
+        InMemoryRepository(), MagicMock(), active_fence=MagicMock(),
+        availability_projector=MagicMock(), clock=lambda: 101,
+    )
+    assert factory.bound_gateway_programs(
+        native, {**deployment, "kind": "self_hosted"}, (enrollment,),
+    ) == programs
+    with pytest.raises(ValueError, match="ambiguous"):
+        factory.bound_gateway_programs(native, {**deployment, "kind": "self_hosted"},
+                                       (enrollment, enrollment))
+    assert [entry.program.instance_id for entry in programs] == ["node-a", "node-b"]
+    assert all(entry.program.scope.gateway_id == "unit-edge" for entry in programs)
+    assert programs[0].gateway_endpoint == "https://node-a.example.test/llm"
+    for changed in ({"retired_at": datetime.now(UTC)}, {"apim_target_id": UUID(int=23)},
+                    {"native_gateway_id": "other"}, {"declared_state": "missing"}):
+        with pytest.raises(ValueError, match="current node enrollment"):
+            native_gateway_programs(native, {**deployment, **changed}, enrollment)
+    with pytest.raises(ValueError, match="NATIVE_GATEWAY_SCOPE"):
+        installed.for_native_gateway("unit-edge", "instance", "https://unit-edge.example.test/llm")
+    with pytest.raises(ValidationError, match="DECISION_CAPABILITY"):
+        FixedProgramInstallation.model_validate_json(canonical_document({
+            **installed.model_dump(mode="json"), "decision_enabled": False,
+        }))
+    with pytest.raises(ValueError, match="DEDICATED_TABLE"):
+        require_route_storage(installed.storage_endpoint, "TurnstileLedger")
+    upgraded = FixedProgramInstallation.model_validate_json(canonical_document({
+        **installed.model_dump(mode="json"),
+        "program": {**installed.program.model_dump(mode="json"), "program_sha256": "f" * 64},
+        "parent_policy_sha256": "1" * 64, "model_additions_enabled": True,
+        "legacy_program_sha256": installed.program.program_sha256,
+    }))
+    upgrade = FixedProgramUpgrade(previous_publication_id=str(UUID(int=8)),
+                                  previous_installation_sha256=document_digest(installed),
+                                  installation=upgraded)
+    upgrade.require_previous(str(UUID(int=8)), installed)
+    with pytest.raises(ValueError, match="BINDING_CHANGED"):
+        upgrade.require_previous(str(UUID(int=9)), installed)
+    with pytest.raises(ValueError, match="BINDING_CHANGED"):
+        upgrade.model_copy(update={"previous_installation_sha256": "2" * 64}).require_previous(
+            str(UUID(int=8)), installed,
+        )
+    with pytest.raises(ValidationError):
+        FixedProgramCutover(upgrade=upgrade, parent_policy="<policies />", expected_parent_etag="*")
+
+
+def test_program_capability_proof_is_short_and_exact_not_a_program_upgrade() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    identity = ProgramIdentity(scope=scope, api_revision="1", instance_id="managed",
+                                program_sha256="a" * 64, trust_binding_sha256="b" * 64)
+    proof = ProgramCapabilityProof(proof_id=str(UUID(int=2)), identity=identity,
+                                   supported_profiles=("microsoft-decision",),
+                                   issued_epoch=100, expires_epoch=220)
+    assert proof.identity == identity
+    for changed in ({"expires_epoch": 221}, {"expires_epoch": 100},
+                    {"supported_profiles": ["microsoft-decision", "microsoft-decision"]}):
+        with pytest.raises(ValidationError, match="PROOF_INVALID"):
+            ProgramCapabilityProof.model_validate_json(json.dumps({
+                **proof.model_dump(mode="json"), **changed,
+            }))
+
+
+def test_active_route_head_requires_exact_program_profile_budget_and_current_proof() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    identity = ProgramIdentity(scope=scope, api_revision="1", instance_id="managed",
+                                program_sha256="a" * 64, trust_binding_sha256="b" * 64)
+    proof = ProgramCapabilityProof(proof_id=str(UUID(int=2)), identity=identity,
+                                   supported_profiles=("microsoft-decision",),
+                                   issued_epoch=100, expires_epoch=220)
+    approval = ConfigurationApproval(
+        approval_id=str(UUID(int=3)), scope=scope, route_version=str(UUID(int=4)), generation=1,
+        manifest_sha256="c" * 64, dependency_manifest_sha256="d" * 64, catalog_sha256="e" * 64,
+        entry_count=1, required_program_sha256=identity.program_sha256,
+        required_profiles=("microsoft-decision",), budget_epoch=str(UUID(int=5)),
+        issued_epoch=100, activate_before_epoch=200,
+    )
+    head = ActiveRouteHead(approval=approval, activated_epoch=101)
+    head.require_ready(identity, proof, approval.budget_epoch, 101, activating=True)
+    transition = RouteTransitionReceipt(operation_id=str(UUID(int=7)), scope=scope,
+                                         before_etag=None, before_generation=0,
+                                         after_sha256=document_digest(head),
+                                         route_version=approval.route_version,
+                                         approval_id=approval.approval_id)
+    endpoint, table = "https://unitstore.table.core.windows.net", "TurnstileRoutes"
+    content_type, body = conditional_batch(endpoint, table, scope.partition, [
+        ("active", route_entity(scope, scope.partition, "active", canonical_document(head)), None),
+        ("transition:" + transition.operation_id,
+         route_entity(scope, scope.partition, "transition:" + transition.operation_id,
+                      canonical_document(transition)), None),
+    ])
+    intent = RouteActivationIntent(transition, head, content_type, body,
+                                   text_digest(body.decode()), endpoint, table)
+    assert RouteActivationIntent.from_record(intent.to_record()) == intent
+    repository = InMemoryRepository()
+    publication_id = UUID(int=8)
+    repository.gateway_publications.append({
+        "id": publication_id, "status": "promoting", "resource_manifest": {},
+    })
+    repository.gateway_publication_outbox.append({
+        "publication_id": publication_id, "status": "leased", "lease_owner": "unit-worker",
+        "lease_expires_at": datetime.now(UTC) + timedelta(minutes=1),
+    })
+    persistent = PersistentRouteActivationJournal(
+        repository, publication_id, "unit-worker", "a" * 64, None,
+    )
+    persistent.begin_once(intent)
+    assert persistent.intent == intent
+    persistent.record_outcome(transition.operation_id, "unknown_no_replay")
+    resumed = PersistentRouteActivationJournal(
+        repository, publication_id, "unit-worker", "a" * 64, persistent.snapshot(),
+    )
+    with pytest.raises(ValueError, match="RECOVER_ONLY"):
+        resumed.begin_once(intent)
+    recovery = MagicMock(spec=TableRouteProjection)
+    recovery.recover_activation.return_value = "confirmed"
+    assert resumed.recover(recovery) == "confirmed"
+    recovery.recover_activation.assert_called_once_with(intent)
+    with pytest.raises(ValueError, match="REGRESSION"):
+        resumed.record_outcome(transition.operation_id, "unknown")
+    with pytest.raises(ValueError, match="INTENT_INVALID"):
+        RouteActivationIntent.from_record({**intent.to_record(), "body_sha256": "a" * 64})
+    with pytest.raises(ValueError, match="BINDING_INVALID"):
+        head.require_ready(identity, proof, str(UUID(int=6)), 101)
+    with pytest.raises(ValueError, match="BINDING_INVALID"):
+        head.require_ready(identity, proof, approval.budget_epoch, 220)
+    with pytest.raises(ValueError, match="BINDING_INVALID"):
+        head.require_ready(identity, proof, approval.budget_epoch, 102, activating=True)
+    with pytest.raises(ValidationError, match="ACTIVATION_TIME"):
+        ActiveRouteHead(approval=approval, activated_epoch=200)
+
+
+def test_route_writer_state_requires_exact_owner_expiry_and_new_takeover_token() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    owner, publication = str(UUID(int=2)), str(UUID(int=3))
+    writer = RouteWriterState(scope=scope, owner_token=owner, publication_id=publication,
+                              writer_epoch=1, leased_epoch=100, lease_until_epoch=130,
+                              active_generation=0, active_version=None, active_sha256=None)
+    writer.require_owner(owner, publication, 129)
+    receipt = RouteWriterReceipt(operation_id=str(UUID(int=6)), scope=scope, kind="claim",
+                                  before_etag=None, before_sha256=None,
+                                  after_sha256=document_digest(writer),
+                                  owner_token=owner, writer_epoch=1)
+    endpoint, table = "https://unitstore.table.core.windows.net", "TurnstileRoutes"
+    content_type, body = conditional_batch(endpoint, table, scope.partition, [
+        ("writer", route_entity(scope, scope.partition, "writer",
+                     canonical_document(writer)), None),
+        ("writer-transition:" + receipt.operation_id,
+         route_entity(scope, scope.partition, "writer-transition:" + receipt.operation_id,
+                      canonical_document(receipt)), None),
+    ])
+    intent = RouteWriterIntent(receipt, None, writer, content_type, body,
+                               text_digest(body.decode()), endpoint, table)
+    assert RouteWriterIntent.from_record(intent.to_record()) == intent
+    repository = InMemoryRepository()
+    publication_id = UUID(publication)
+    repository.gateway_publications.append({
+        "id": publication_id, "status": "promoting", "resource_manifest": {},
+    })
+    repository.gateway_publication_outbox.append({
+        "publication_id": publication_id, "status": "leased", "lease_owner": "unit-worker",
+        "lease_expires_at": datetime.now(UTC) + timedelta(minutes=1),
+    })
+    persistent = PersistentRouteWriterJournal(
+        repository, publication_id, "unit-worker", "a" * 64, None,
+    )
+    persistent.begin_once(intent)
+    persistent.record_outcome(receipt.operation_id, "unknown_no_replay")
+    resumed = PersistentRouteWriterJournal(
+        repository, publication_id, "unit-worker", "a" * 64, persistent.snapshot(),
+    )
+    assert resumed.intent == intent and resumed.outcome == "unknown_no_replay"
+    with pytest.raises(ValueError, match="OPERATION_REUSED"):
+        resumed.begin_once(intent)
+    recovery = MagicMock(spec=TableRouteProjection)
+    recovery.recover_writer.return_value = "confirmed"
+    assert resumed.recover(recovery) == "confirmed"
+    recovery.recover_writer.assert_called_once_with(intent)
+    with pytest.raises(ValueError, match="REGRESSION"):
+        resumed.record_outcome(receipt.operation_id, "unknown")
+    with pytest.raises(ValueError, match="INTENT_INVALID"):
+        RouteWriterIntent.from_record({**intent.to_record(), "body_sha256": "a" * 64})
+    with pytest.raises(ValueError, match="OWNER_OR_LEASE"):
+        writer.require_owner(owner, publication, 130)
+    with pytest.raises(ValueError, match="NOT_EXPIRED"):
+        writer.takeover(str(UUID(int=4)), str(UUID(int=5)), 129)
+    with pytest.raises(ValueError, match="TOKEN_REUSED"):
+        writer.takeover(owner, publication, 130)
+    changed = writer.takeover(str(UUID(int=4)), str(UUID(int=5)), 130)
+    assert changed.writer_epoch == 2 and changed.lease_until_epoch == 160
+    with pytest.raises(ValidationError, match="STATE_INVALID"):
+        RouteWriterState.model_validate_json(canonical_document({
+            **writer.model_dump(mode="json"), "lease_until_epoch": 131,
+        }))
+
+
+def test_route_projection_read_binds_entity_scope_hash_and_strict_etag() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    document = canonical_document(scope)
+    entity = route_entity(scope, scope.partition, "active", document)
+    assert entity_document(entity, scope, scope.partition, "active", MAX_HEAD_BYTES) == document
+    for field, value in (("Sha256", "a" * 64), ("SchemaVersion", True), ("RowKey", "other")):
+        with pytest.raises(RouteProjectionConflict):
+            entity_document(
+                {**entity, field: value}, scope, scope.partition, "active", MAX_HEAD_BYTES,
+            )
+    token = MagicMock()
+    token.token.return_value = "unit-only"
+    with httpx.Client(transport=httpx.MockTransport(lambda incoming: httpx.Response(
+        200, json=entity, headers={"ETag": 'W/"unit"'},
+    ))) as client:
+        projection = TableRouteProjection(
+            "https://unitstore.table.core.windows.net", "TurnstileRoutes", scope, token, client,
+        )
+        assert projection._read_document(scope.partition, "active", MAX_HEAD_BYTES) == (
+            document, 'W/"unit"',
+        )
+        with pytest.raises(ValueError, match="SCOPE_MISMATCH"):
+            projection._entity_url("unrelated-scope", "active")
+        with pytest.raises(ValueError, match="ORIGIN_CHANGED"):
+            projection._request("GET", "https://other.table.core.windows.net/TurnstileRoutes")
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_route_projection_stage_requires_exact_immutable_readback(confirmed: bool) -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    document = canonical_document(scope)
+    observed: dict[str, Any] | None = None
+    writes = 0
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        nonlocal observed, writes
+        if incoming.method == "GET":
+            return httpx.Response(404) if observed is None else httpx.Response(
+                200, json=observed, headers={"ETag": 'W/"unit"'},
+            )
+        assert incoming.method == "POST"
+        writes += 1
+        if confirmed:
+            observed = json.loads(incoming.content)
+        return httpx.Response(201)
+
+    token = MagicMock()
+    token.token.return_value = "unit-only"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        projection = TableRouteProjection(
+            "https://unitstore.table.core.windows.net", "TurnstileRoutes", scope, token, client,
+        )
+        if confirmed:
+            projection._stage_entity(scope.partition, "unit", document, MAX_HEAD_BYTES)
+            projection._stage_entity(scope.partition, "unit", document, MAX_HEAD_BYTES)
+            with pytest.raises(RouteProjectionConflict, match="IMMUTABLE_ENTITY_CONFLICT"):
+                projection._stage_entity(scope.partition, "unit", "{}", MAX_HEAD_BYTES)
+        else:
+            with pytest.raises(RouteProjectionConflict, match="READBACK_DIFFERS"):
+                projection._stage_entity(scope.partition, "unit", document, MAX_HEAD_BYTES)
+    assert writes == 1
+
+
+def test_route_conditional_batch_binds_actual_target_condition_and_entity() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    endpoint, table = "https://unitstore.table.core.windows.net", "TurnstileRoutes"
+    document = canonical_document(scope)
+    content_type, body = conditional_batch(endpoint, table, scope.partition, [
+        ("writer", route_entity(scope, scope.partition, "writer", document), 'W/"unit"'),
+    ])
+    require_route_batch(endpoint, table, scope, content_type, body, [("writer", scope, 'W/"unit"')])
+    for changed in (body.replace(b'W/"unit"', b"*"),
+                    body.replace(b"unitstore.table.core.windows.net",
+                                 b"other.table.core.windows.net"),
+                    body.replace(b'"SchemaVersion":2', b'"SchemaVersion":1')):
+        with pytest.raises(ValueError):
+            require_route_batch(endpoint, table, scope, content_type, changed,
+                                [("writer", scope, 'W/"unit"')])
+
+
+def test_route_writer_cas_journals_before_dispatch_and_never_replays_unknown_http_outcome() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    journal = MagicMock()
+    writes = 0
+
+    def handler(incoming: httpx.Request) -> httpx.Response:
+        nonlocal writes
+        if incoming.method == "GET":
+            return httpx.Response(404)
+        assert incoming.method == "POST" and incoming.url.path == "/$batch"
+        journal.begin_once.assert_called_once()
+        writes += 1
+        raise httpx.ReadTimeout("unit lost response", request=incoming)
+
+    token = MagicMock()
+    token.token.return_value = "unit-only"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        projection = TableRouteProjection(
+            "https://unitstore.table.core.windows.net", "TurnstileRoutes", scope, token, client,
+        )
+        with pytest.raises(RouteProjectionUnknown, match="UNKNOWN_RECOVER_ONLY"):
+            projection.claim_writer(str(UUID(int=2)), str(UUID(int=3)), str(UUID(int=4)),
+                                     lambda: 100, journal)
+        journal.record_outcome.assert_called_once_with(str(UUID(int=4)), "unknown_no_replay")
+        intent = journal.begin_once.call_args.args[0]
+        assert projection.recover_writer(intent) == "unknown"
+    assert writes == 1
+
+
+def test_table_program_proof_cannot_be_borrowed_from_another_instance_or_scope() -> None:
+    scope = RouteScope(target_id=str(UUID(int=1)), api_id="unit-api", gateway_id="managed")
+    identity = ProgramIdentity(scope=scope, api_revision="1", instance_id="managed",
+                                program_sha256="a" * 64, trust_binding_sha256="b" * 64)
+    proof = ProgramCapabilityProof(proof_id=str(UUID(int=2)), identity=identity,
+                                   supported_profiles=("microsoft-decision",),
+                                   issued_epoch=100, expires_epoch=220)
+    with httpx.Client() as client:
+        projection = TableRouteProjection("https://unitstore.table.core.windows.net",
+                                          "TurnstileRoutes", scope, MagicMock(), client)
+        with patch.object(projection, "_read_document", return_value=(
+            canonical_document(proof), 'W/"unit"',
+        )):
+            assert projection.read_program_proof(identity) == (proof, 'W/"unit"')
+            with pytest.raises(RouteProjectionConflict, match="IDENTITY_CHANGED"):
+                projection.read_program_proof(identity.model_copy(update={"instance_id": "other"}))
+            with pytest.raises(RouteProjectionConflict, match="SCOPE_CHANGED"):
+                projection.read_program_proof(identity.model_copy(update={"scope": scope.model_copy(
+                    update={"gateway_id": "unit-edge"},
+                )}))
+        stored: dict[str, str] = {}
+        batches = 0
+
+        def read_document(partition: str, row: str, maximum: int) -> tuple[str, str] | None:
+            document = stored.get(row)
+            return (document, 'W/"unit"') if document is not None else None
+
+        def dispatch(method: str, url: str, **kwargs: Any) -> httpx.Response:
+            nonlocal batches
+            if url.endswith("/$batch"):
+                batches += 1
+                raise httpx.ReadTimeout("unit unknown proof write")
+            entity = kwargs["json"]
+            stored[entity["RowKey"]] = entity["Document"]
+            return httpx.Response(201)
+
+        with patch.object(projection, "_read_document", side_effect=read_document), \
+                patch.object(projection, "_request", side_effect=dispatch):
+            with pytest.raises(RouteProjectionUnknown, match="UNKNOWN_RECOVER_ONLY"):
+                projection.publish_program_proof(proof, identity, None, 101)
+            with pytest.raises(RouteProjectionUnknown, match="UNKNOWN_RECOVER_ONLY"):
+                projection.publish_program_proof(proof, identity, None, 101)
+        assert batches == 1
+        with patch.object(projection, "_read_document", return_value=None), \
+                patch.object(projection, "read_active", return_value=(MagicMock(), 'W/"unit"')), \
+                patch.object(projection, "_request") as request:
+            with pytest.raises(RouteProjectionConflict, match="CANNOT_REPLACE_HEAD"):
+                projection.initialize_empty_scope(identity, proof, str(UUID(int=3)),
+                                                    str(UUID(int=4)), lambda: 101)
+            request.assert_not_called()
+
+
+def test_native_decision_publication_target_retains_resource_protocol_and_mi_audience() -> None:
+    provider = {"brand_key": BrandKey.MICROSOFT_FOUNDRY}
+    runtime = {
+        "config": {"project_endpoint": "https://unit-decision.services.ai.azure.com/api/projects/unit"},
+        "auth_strategy": AuthStrategy.MANAGED_IDENTITY,
+        "managed_identity_resource": "https://ai.azure.com",
+    }
+    model = GatewayControlPlaneService._release_model(
+        ModelCreateTarget(operation="decision", deployment_name="unit-decision"), provider, runtime,
+    )
+    assert model.capabilities == ["decision"] and model.assignment_required
+    bound = GatewayControlPlaneService._model_binding_runtime(provider, runtime, model)
+    assert bound["api_format"] == ApiFormat.MICROSOFT_DECISION
+    assert bound["backend_url"] == "https://unit-decision.services.ai.azure.com"
+    assert bound["backend_path"] == "/providers/microsoft/v1/systemone"
+    assert bound["streaming_mode"] == "buffered"
+    assert bound["managed_identity_resource"] == "https://cognitiveservices.azure.com"
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://unit.services.ai.azure.com", "https://unit.example.test",
+    "https://user:secret@unit.services.ai.azure.com",
+    "https://unit.services.ai.azure.com:443", "https://unit.services.ai.azure.com?token=unit",
+    "https://unit.services.ai.azure.com#fragment",
+])
+def test_native_decision_publication_rejects_nonresource_endpoint(endpoint: str) -> None:
+    with pytest.raises(ControlPlaneConflictError, match="resource endpoint"):
+        GatewayControlPlaneService._decision_binding_values({"backend_url": endpoint})
+
+
+@pytest.mark.parametrize("custom_rule", [False, True])
+def test_context_pricing_publication_and_activation_keep_the_complete_schedule(
+    custom_rule: bool,
+) -> None:
+    from turnstile_core.domain.runtime_models import PriceCatalogContextTier, PriceCatalogInputRange
+    from turnstile_core.pricing.catalog import CatalogModel, CatalogOption, CatalogOptions
+
+    repository = InMemoryRepository()
+    catalog = MagicMock(spec=CompositeCatalog)
+    entries = {}
+    references = []
+    for index in range(2):
+        label = f"Opaque tier {index}"
+        candidate = CatalogModel(
+            key=f"azure_retail:Unit:{label}", label=label, product="Unit",
+            source=PriceSource.AZURE_RETAIL,
+            context_tier=PriceCatalogContextTier(
+                group_key="arbitrary-model", model_label="Arbitrary model",
+                key=("short" if index == 0 else "long") if custom_rule else str(index),
+                label=label, order=index,
+                input_range=None if custom_rule else PriceCatalogInputRange(
+                    min_input_tokens=0 if index == 0 else 1201,
+                    max_input_tokens=1200 if index == 0 else None,
+                ),
+            ),
+        )
+        reference = f"{candidate.key}:Global:*"
+        references.append(reference)
+        rate = CatalogEntry(
+            reference=reference, label=label, source=candidate.source,
+            input_per_million=2 + index, output_per_million=8 + index,
+        )
+        entries[candidate.key] = CatalogOptions(model=candidate, options=(CatalogOption(
+            reference=reference, deployment="Global", entry=rate, regions=("eastus",),
+            region_required=False,
+        ),))
+    catalog.options.side_effect = entries.get
+    write = foundry_publication("unit-context-model")
+    write.provider = ProviderTarget(existing_id=next(
+        item["id"] for item in repository.providers if item["brand_key"] == "microsoft_foundry"
+    ))
+    write.model = ModelCreateTarget.model_validate(write.model.model_dump() | {
+        "price_source": "azure_retail", "context_price_references": references,
+        "price_discount_percent": 80, "input_cost_per_million": 999,
+        **({"context_price_rule": {"short_context_max_tokens": 1200}} if custom_rule else {}),
+    })
+    service = GatewayControlPlaneService(
+        repository, apim_principal_id=str(UUID(int=99)), price_catalog=catalog,
+    )
+    publication = service.publish(write, "unit-owner")
+    model = publication.desired_spec.bindings[-1].model
+    assert [tier.input_price_per_million for tier in model.context_price_tiers] == [1.6, 2.4]
+    assert model.input_cost_per_million is None
+    if custom_rule:
+        assert model.context_price_rule is not None
+        assert model.context_price_rule.short_context_max_tokens == 1200
+        source = model.context_price_tiers[0].input_range_source
+        assert source is not None and source.origin == "custom"
+    assert service.publish(write, "unit-owner").id == publication.id
+    for before, after in zip(
+        ("queued", "validating", "provisioning", "building_revision", "verifying"),
+        ("validating", "provisioning", "building_revision", "verifying", "promoting"), strict=True,
+    ):
+        transition_publication(repository, publication.id, before, after, {}, "context-worker")
+    activate_publication(repository, publication.id, "context-worker")
+    stored = next(
+        row for row in repository.registry()["models"] if row["model_key"] == model.model_key
+    )
+    assert stored["context_price_tiers"] == [
+        tier.model_dump(mode="json") for tier in model.context_price_tiers
+    ]
+    price = repository.model_prices()[str(stored["id"])].for_input_tokens(1201)
+    assert price.input_price_per_million == 2.4
+
+
+def test_manual_publication_model_preserves_legacy_serialization() -> None:
+    model = ModelTarget(
+        model_key="unit", display_name="Unit", upstream_model_id="unit", capabilities=["chat"],
+    )
+    payload = model.model_dump(mode="json")
+    assert not any(key.startswith(("price_", "list_")) for key in payload)
+    assert ModelTarget.model_validate(payload).model_dump(mode="json") == payload
+
+
+@pytest.mark.parametrize("connection_discount,discount,expected", [
+    (None, None, 2), (90, None, 1.8), (90, 80, 1.6),
+])
+def test_publication_uses_catalog_prices_not_submitted_amounts(
+    connection_discount: float | None, discount: float | None, expected: float,
+) -> None:
+    repository = InMemoryRepository()
+    catalog = MagicMock(spec=CompositeCatalog)
+    reference = "azure_retail:Azure OpenAI:gpt 4.1:Global:*"
+    catalog.lookup.return_value = CatalogEntry(
+        reference=reference, label="gpt 4.1", source=PriceSource.AZURE_RETAIL,
+        input_per_million=2, output_per_million=8, cached_per_million=0.5,
+    )
+    write = foundry_publication("gpt-4.1-845778")
+    write.provider = ProviderTarget(existing_id=next(
+        item["id"] for item in repository.providers if item["brand_key"] == "microsoft_foundry"
+    ))
+    if connection_discount is not None:
+        registry = ModelRuntimeService(
+            repository, Settings(apim_principal_id=str(UUID(int=99))),
+        ).save_connection(
+            ModelConnectionCreate.model_validate({
+                "gateway_profile_id": APIM_ID,
+                "provider": write.provider.model_dump(),
+                "auth_mode": "managed_identity",
+                "foundry_project_endpoint": str(write.runtime.foundry_project_endpoint),
+            })
+        )
+        runtime = next(item for item in registry.runtimes if item.config.get("project_endpoint"))
+        repository.update_registry_item("runtime", runtime.id, {
+            "price_discount_percent": connection_discount,
+        })
+        write.runtime = RuntimeTarget(existing_id=runtime.id)
+    write.model = ModelCreateTarget.model_validate({
+        **write.model.model_dump(), "price_source": "azure_retail",
+        "price_reference": reference, "price_discount_percent": discount,
+        "input_cost_per_million": 999, "output_cost_per_million": 999,
+    })
+    service = GatewayControlPlaneService(
+        repository, apim_principal_id=str(UUID(int=99)), price_catalog=catalog,
+    )
+    publication = service.publish(write, "owner@example.com")
+    model = publication.desired_spec.bindings[-1].model
+    assert model.input_cost_per_million == expected
+    assert model.output_cost_per_million == expected * 4
+    assert model.list_input_cost_per_million == 2
+    assert model.price_reference == reference
+    assert model.price_discount_percent == discount
+    catalog.lookup.assert_called_once_with(reference)
+    repeated = service.publish(write, "owner@example.com")
+    assert repeated.id == publication.id
+    assert repeated.desired_spec_sha256 == publication.desired_spec_sha256
+    for before, after in zip(
+        ("queued", "validating", "provisioning", "building_revision", "verifying"),
+        ("validating", "provisioning", "building_revision", "verifying", "promoting"),
+        strict=True,
+    ):
+        transition_publication(repository, publication.id, before, after, {}, "price-worker")
+    activate_publication(repository, publication.id, "price-worker")
+    saved = next(
+        item for item in repository.registry()["models"] if item["model_key"] == model.model_key
+    )
+    assert saved["price_source"] == "azure_retail"
+    assert saved["price_reference"] == reference
+    assert saved["price_discount_percent"] == discount
+    assert saved["effective_discount_percent"] == (discount or connection_discount)
+    assert saved["input_cost_per_million"] == expected
+    assert saved["list_input_cost_per_million"] == 2
+    assert saved["price_sync_status"] == "ok"
+    assert saved["price_synced_at"] == publication.created_at
+
+
+@pytest.mark.parametrize("failure", ["missing", "partial", "no-output", "unavailable"])
+def test_publication_rejects_unusable_catalog_without_queueing(failure: str) -> None:
+    repository = InMemoryRepository()
+    catalog = MagicMock(spec=CompositeCatalog)
+    reference = "azure_retail:Azure OpenAI:gpt 4.1:Global:*"
+    catalog.lookup.return_value = None if failure == "missing" else CatalogEntry(
+        reference=reference, label="gpt 4.1", source=PriceSource.AZURE_RETAIL,
+        input_per_million=2, output_per_million=None if failure == "no-output" else 8,
+        complete=failure != "partial",
+    )
+    if failure == "unavailable":
+        catalog.lookup.side_effect = TimeoutError("catalog read timed out")
+    write = foundry_publication()
+    write.provider = ProviderTarget(existing_id=next(
+        item["id"] for item in repository.providers if item["brand_key"] == "microsoft_foundry"
+    ))
+    write.model = ModelCreateTarget.model_validate({
+        **write.model.model_dump(), "price_source": "azure_retail", "price_reference": reference,
+    })
+    expected = (
+        ControlPlaneUnavailableError if failure == "unavailable" else ControlPlaneConflictError
+    )
+    with pytest.raises(expected, match="catalog price|price source"):
+        GatewayControlPlaneService(
+            repository, apim_principal_id=str(UUID(int=99)), price_catalog=catalog,
+        ).publish(write, "owner@example.com")
+    catalog.lookup.assert_called_once_with(reference)
+    assert repository.gateway_publications == []
 
 
 def test_openai_existing_connection_publishes_with_a_one_time_encrypted_key(tmp_path: Path) -> None:
@@ -130,10 +2708,15 @@ def test_openai_credential_names_are_isolated_and_persisted(direct_publication: 
     names = []
     for index in range(2):
         repository = InMemoryRepository()
+        gateway_id = UUID(int=900 + index)
+        repository.gateways.append({
+            **next(item for item in repository.gateways if item["id"] == APIM_ID),
+            "id": gateway_id, "name": f"Credential scope {index}", "is_default": False,
+        })
         service = GatewayControlPlaneService(repository)
         if direct_publication:
             request = GatewayPublicationCreate(
-                gateway_profile_id=APIM_ID,
+                gateway_profile_id=gateway_id,
                 provider=ProviderTarget(template="openai_compatible"),
                 runtime=RuntimeTarget(
                     openai_base_url=HttpUrl("https://shared.vendor.test/v1"),
@@ -159,7 +2742,7 @@ def test_openai_credential_names_are_isolated_and_persisted(direct_publication: 
             registry = ModelRuntimeService(
                 repository, Settings(apim_api_id=f"release-{index}-llm")
             ).save_connection(ModelConnectionCreate(
-                gateway_profile_id=APIM_ID,
+                gateway_profile_id=gateway_id,
                 provider=ProviderTarget(template="openai_compatible"),
                 openai_base_url=HttpUrl("https://shared.vendor.test/v1"),
             ))
@@ -169,7 +2752,7 @@ def test_openai_credential_names_are_isolated_and_persisted(direct_publication: 
             )
             name = runtime.config["named_value_name"]
             request = GatewayPublicationCreate(
-                gateway_profile_id=APIM_ID,
+                gateway_profile_id=gateway_id,
                 provider=ProviderTarget(existing_id=runtime.provider_id),
                 runtime=RuntimeTarget(existing_id=runtime.id, api_key=SecretStr("unit-key")),
                 model=ModelCreateTarget(
@@ -373,7 +2956,7 @@ def test_foundry_project_connection_derives_a_managed_identity_binding() -> None
     assert binding.model.upstream_model_id == "gpt-5-mini-deployment"
     assert binding.model.display_name == "gpt-5-mini-deployment · Microsoft Foundry"
     assert binding.model.model_key.startswith("gpt-5-mini-deployment-foundry-")
-    assert binding.model.capabilities == ["chat", "tools", "streaming"]
+    assert binding.model.capabilities == ["chat", "streaming"]
     authorization = binding.runtime_config["authorization"]
     assert isinstance(authorization, dict)
     assert authorization["principal_id"] == (
@@ -427,9 +3010,6 @@ def test_existing_foundry_claude_uses_anthropic_messages_binding() -> None:
     assert binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
     assert binding.model.capabilities == [
         "chat",
-        "tools",
-        "vision",
-        "reasoning",
         "streaming",
     ]
     assert str(binding.backend_url).rstrip("/") == (
@@ -984,7 +3564,7 @@ def test_external_tenant_foundry_key_is_encrypted_outside_the_release() -> None:
     assert binding.backend_path == "/openai/v1/chat/completions"
     assert binding.auth_strategy.value == "named_value_api_key"
     assert binding.named_value_name is not None
-    assert binding.named_value_name.startswith("finops-foundry-key-")
+    assert binding.named_value_name.startswith("turnstile-foundry-key-")
     assert binding.managed_identity_resource is None
     assert binding.runtime_config["max_tokens_field"] == "max_completion_tokens"
     assert binding.runtime_config["supports_temperature"] is False
@@ -1115,7 +3695,7 @@ def test_usage_observer_keeps_same_name_cross_account_projects_separate() -> Non
         current = status
     activate_publication(repository, first.id, "worker")
 
-    second = service.publish(
+    second = service.seed_legacy_publication(
         external_tenant_foundry_publication(
             repository,
             account="tenant-b-resource",
@@ -1248,7 +3828,7 @@ def test_retry_credential_evidence_controls_the_public_view(evidence: str) -> No
             }
         )
 
-    required = evidence == "none"
+    required = evidence != "revision"
     assert publication_retry_requires_credential(publication) is required
     view = GatewayPublicationView.from_publication(publication)
     assert view.retry_requires_credential is required
@@ -1266,10 +3846,43 @@ def test_retry_credential_evidence_does_not_invent_a_key_for_an_unrelated_resour
         update={"resource_manifest": {"named_values": [None, False, "unrelated-key"]}}
     )
     assert publication_retry_requires_credential(publication) is True
-    assert publication_materialized_named_values(publication) == ["unrelated-key"]
+    assert publication_materialized_named_values(publication) == []
     materialized = publication_materialized_named_values(publication, provisioning_completed=True)
     assert publication.desired_spec.bindings[-1].named_value_name in materialized
     assert publication.resource_manifest["named_values"] == [None, False, "unrelated-key"]
+
+
+def test_retry_credential_evidence_is_bound_and_missing_overrides_old_success() -> None:
+    repository = InMemoryRepository()
+    publication = GatewayControlPlaneService(repository).publish(
+        external_tenant_foundry_publication(repository), "unit-owner",
+    )
+    reference = publication.desired_spec.bindings[-1].named_value_name
+    assert reference is not None
+    observed = publication_credential_evidence(publication, {reference: "present"})
+    present = publication.model_copy(update={
+        "resource_manifest": {"credential_evidence": observed},
+    })
+    assert publication_credential_states(present) == {reference: "present"}
+    assert publication_retry_requires_credential(present) is False
+    for state in ("missing", "unverified"):
+        evidence = publication_credential_evidence(publication, {reference: state})
+        missing = publication.model_copy(update={
+            "apim_revision": "old-candidate",
+            "resource_manifest": {"credential_evidence": evidence, "named_values": [reference]},
+        })
+        assert publication_retry_requires_credential(missing) is True
+    stale = present.model_copy(update={"resource_manifest": {
+        **present.resource_manifest, "credential_generation": "replacement",
+    }})
+    assert publication_credential_states(stale) == {}
+    assert publication_retry_requires_credential(stale) is True
+    assert publication_provisioning_completed([
+        {"from_status": "validating", "to_status": "provisioning"},
+        {"from_status": "failed", "to_status": "queued"},
+    ]) is False
+    with pytest.raises(ValueError, match="unrelated binding"):
+        publication_credential_evidence(publication, {"foreign": "present"})
 
 
 def test_retry_credential_evidence_never_requires_a_key_for_managed_identity() -> None:
@@ -1373,9 +3986,9 @@ def test_retry_reuses_materialized_credentials_and_the_same_publication(
     assert retried.generation == publication.generation
     assert retried.status.value == "queued"
     assert retried.apim_revision is None
-    assert retried.resource_manifest == {
-        "named_values": [publication.desired_spec.bindings[-1].named_value_name]
-    }
+    reference = publication.desired_spec.bindings[-1].named_value_name
+    assert retried.resource_manifest["named_values"] == [reference]
+    assert publication_credential_states(retried) == {reference: "present"}
     assert repository.gateway_publication_credential(publication.id) is None
     assert len(repository.gateway_publications) == 1
     assert len(repository.gateway_publication_outbox) == 1
@@ -1383,6 +3996,50 @@ def test_retry_reuses_materialized_credentials_and_the_same_publication(
     repeated = worker.run_once("retry-worker")
     assert repeated is not None and repeated.status.value == "provisioning"
     assert repository.gateway_publication_credential(publication.id) is None
+
+
+def test_credential_preparation_does_not_clear_secret_after_lease_loss() -> None:
+    repository = InMemoryRepository()
+    cipher = CredentialCipher(Fernet.generate_key())
+    service = GatewayControlPlaneService(repository, cipher)
+    publication = service.publish(external_tenant_foundry_publication(repository), "unit-owner")
+    client = FakeApimClient()
+    worker = GatewayPublicationWorker(repository, client, client.policy, cipher=cipher)
+    worker.run_once("worker")
+    original_ensure = client.ensure_backend
+
+    def lose_lease(backend: Any) -> None:
+        original_ensure(backend)
+        repository.gateway_publication_outbox[0]["lease_expires_at"] = (
+            datetime.now(UTC) - timedelta(seconds=1)
+        )
+
+    client.ensure_backend = lose_lease  # type: ignore[method-assign]
+    worker.run_once("worker")
+    current = repository.get_gateway_publication(publication.id)
+    assert current is not None and current["status"] == "validating"
+    assert repository.gateway_publication_credential(publication.id) is not None
+    assert "credential_evidence" not in current["resource_manifest"]
+
+
+def test_missing_credential_observation_is_preserved_on_worker_failure() -> None:
+    repository = InMemoryRepository()
+    cipher = CredentialCipher(Fernet.generate_key())
+    service = GatewayControlPlaneService(repository, cipher)
+    publication = service.publish(external_tenant_foundry_publication(repository), "unit-owner")
+    client = FakeApimClient()
+    worker = GatewayPublicationWorker(repository, client, client.policy, cipher=cipher)
+    worker.run_once("worker")
+
+    def missing(named_value: Any) -> None:
+        raise CredentialSourceMissingError(named_value.id)
+
+    client.ensure_named_value = missing  # type: ignore[method-assign]
+    failed = worker.run_once("worker")
+    assert failed is not None and failed.status == "failed"
+    reference = publication.desired_spec.bindings[-1].named_value_name
+    assert publication_credential_states(failed) == {reference: "missing"}
+    assert publication_retry_requires_credential(service.publication(publication.id))
 
 
 def test_retry_replacement_key_clears_old_materialization_for_reprovisioning() -> None:
@@ -1426,7 +4083,11 @@ def test_retry_postgresql_preserves_audit_proven_credentials_in_one_requeue() ->
     row["status"] = "failed"
     row["resource_manifest"] = {}
     connection = MagicMock()
-    connection.execute.return_value.fetchone.side_effect = [None, {"exists": 1}, row]
+    connection.execute.return_value.fetchone.side_effect = [None, None, row]
+    connection.execute.return_value.fetchall.return_value = [
+        {"from_status": "queued", "to_status": "validating"},
+        {"from_status": "validating", "to_status": "provisioning"},
+    ]
 
     PostgreSqlPublicationRepositoryMixin._requeue_gateway_publication(
         connection, row, "owner@example.com", None
@@ -1434,13 +4095,17 @@ def test_retry_postgresql_preserves_audit_proven_credentials_in_one_requeue() ->
 
     calls = connection.execute.call_args_list
     audit = next(
-        call for call in calls if "SELECT 1 FROM gateway_publication_audit" in call.args[0]
+        call for call in calls if "SELECT from_status, to_status" in call.args[0]
     )
     assert audit.args[1] == (publication.id,)
+    assert "ORDER BY created_at, id" in audit.args[0]
     update = next(call for call in calls if "UPDATE gateway_publication SET" in call.args[0])
-    assert update.args[1][0].obj == {
-        "named_values": [publication.desired_spec.bindings[-1].named_value_name]
-    }
+    manifest = update.args[1][0].obj
+    reference = publication.desired_spec.bindings[-1].named_value_name
+    assert manifest["named_values"] == [reference]
+    assert publication_credential_states(publication.model_copy(update={
+        "resource_manifest": manifest,
+    })) == {reference: "present"}
     assert "apim_revision = NULL" in update.args[0]
     assert any("DELETE FROM gateway_publication_secret" in call.args[0] for call in calls)
     assert not any("INSERT INTO gateway_publication (" in call.args[0] for call in calls)
@@ -1563,5 +4228,5 @@ def test_reusing_a_foundry_project_needs_only_a_deployment_name() -> None:
     assert binding.model.upstream_model_id == "gpt-5.4"
     assert binding.model.display_name == "gpt-5.4 · Microsoft Foundry"
     assert binding.model.model_key.startswith("gpt-5.4-foundry-")
-    assert binding.model.capabilities == ["chat", "tools", "streaming"]
+    assert binding.model.capabilities == ["chat", "streaming"]
     assert binding.backend_path == "/openai/v1/chat/completions"

@@ -23,9 +23,16 @@ from psycopg.rows import dict_row
 
 from backend.services.runtime_service import ModelRuntimeService
 from turnstile_core.config import Settings
-from turnstile_core.domain.runtime_models import ManagedModel, ManagedModelWrite, PriceSource
+from turnstile_core.domain.runtime_models import (
+    ManagedModel,
+    ManagedModelWrite,
+    PriceSource,
+)
 from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
-from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
+from turnstile_core.pricing.catalog import (
+    CatalogEntry,
+    CompositeCatalog,
+)
 from turnstile_core.pricing.sync import plan_price_sync
 
 
@@ -73,13 +80,9 @@ def pricing_postgres() -> Iterator[tuple[str, Event]]:
             )
             root = Path(__file__).resolve().parents[3]
             with psycopg.connect(info, autocommit=True) as connection:
-                connection.execute((root / "migrations/001_initial_schema.up.sql").read_text())
                 connection.execute("SET search_path TO public")
-                for name in (
-                    "007_model_price_source", "008_price_review_and_guard",
-                    "010_models_dev_pricing",
-                ):
-                    connection.execute((root / f"migrations/{name}.up.sql").read_text())
+                for path in sorted((root / "migrations").glob("*.up.sql")):
+                    connection.execute(path.read_text())
             yield info, waiting
         finally:
             if server.poll() is None:

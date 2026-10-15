@@ -60,8 +60,7 @@ export function FilterSelect({ label, value, items, onChange, allowAll = true }:
   allowAll?: boolean
 }) {
   const selected = items.find((item) => item.id === value)
-  const fallback = allowAll ? "全部" : "--"
-  return <div className="finops-filter"><span>{label}</span><Select value={value ?? (allowAll ? ALL_OPTION : "")} onValueChange={(next) => onChange(next == null || next === ALL_OPTION ? undefined : next)}><SelectTrigger aria-label={label} title={selected?.name ?? fallback}><SelectValue>{selected?.name ?? fallback}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false}>{allowAll && <SelectItem value={ALL_OPTION}>全部</SelectItem>}{items.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
+  return <div className="finops-filter"><span>{label}</span><Select value={value ?? (allowAll ? ALL_OPTION : undefined)} onValueChange={(next) => onChange(next == null || next === ALL_OPTION ? undefined : next)}><SelectTrigger aria-label={label} title={selected?.name ?? (allowAll ? "全部" : undefined)}><SelectValue>{selected?.name ?? (allowAll ? "全部" : null)}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false}>{allowAll && <SelectItem value={ALL_OPTION}>全部</SelectItem>}{items.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
 }
 
 export function PanelTitle({ title, meta, action }: { title: string; meta?: string; action?: ReactNode }) {

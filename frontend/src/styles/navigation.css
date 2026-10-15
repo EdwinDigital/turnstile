@@ -334,7 +334,7 @@ img.sidebar-avatar { object-fit: cover; background: var(--accent); }
 }
 .pinned-group:hover .pinned-group-count,
 .pinned-group-trigger:focus-visible .pinned-group-count { opacity: 1; }
-.sidebar-nav-menu { gap: 5px; }
+.sidebar-nav-menu { gap: 4px; }
 .sidebar-nav-menu .sidebar-menu-button em {
 	margin-left: auto;
 	color: inherit;

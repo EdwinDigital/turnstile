@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import re
 import stat
 import subprocess
+import sys
 import tomllib
 import urllib.error
 import zipfile
@@ -15,6 +18,8 @@ from packaging.tags import cpython_tags
 from packaging.utils import parse_wheel_filename
 
 from scripts.deploy import (
+    OBSERVER_RUNTIME_FILES,
+    OBSERVER_SHARED_PATHS,
     CommandRunner,
     DeploymentError,
     DeploymentInputs,
@@ -33,6 +38,7 @@ from scripts.deploy import (
     linux_dependency_command,
     load_existing_core,
     load_or_create_secret_material,
+    observer_build_context,
     observer_names,
     observer_parameters,
     observer_plan_name,
@@ -563,8 +569,27 @@ def test_observer_version_is_scoped_to_its_source_tree(
 
     monkeypatch.setattr(runner, "run", run)
 
-    assert observer_source_version(runner) == "ee355910a942"
-    assert commands == [["git", "rev-parse", "--short=12", "HEAD:infra/envoy-cache-adapter"]]
+    assert observer_source_version(runner) == hashlib.sha256(b"ee355910a942").hexdigest()[:12]
+    assert commands == [["git", "rev-parse", "HEAD:infra/envoy-cache-adapter",
+                         *(f"HEAD:{path}" for path in OBSERVER_SHARED_PATHS)]]
+
+
+def test_observer_context_contains_only_runtime_and_shared_stdlib_modules() -> None:
+    with observer_build_context() as context:
+        files = {
+            path.relative_to(context).as_posix() for path in context.rglob("*") if path.is_file()
+        }
+        assert files == {*OBSERVER_RUNTIME_FILES, *OBSERVER_SHARED_PATHS}
+        for path in context.rglob("*.py"):
+            ast.parse(path.read_text(), feature_version=(3, 10))
+        subprocess.run([
+            sys.executable, "-I", "-S", "-c",
+            "import sys; sys.path.insert(0, sys.argv[1]); import shipper; "
+            "from turnstile_core.integrations.budget_completion import BudgetCompletionClient; "
+            "BudgetCompletionClient('https://ledger.example.test', 'TurnstileLedger', lambda: '')",
+            str(context),
+        ], check=True, capture_output=True, text=True, timeout=10)
+    assert not context.exists()
 
 
 def test_existing_observer_image_skips_rebuild_and_restart(
