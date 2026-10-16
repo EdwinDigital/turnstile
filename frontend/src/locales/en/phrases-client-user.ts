@@ -1,4 +1,5 @@
 export const CLIENT_USER_PHRASES: Record<string, string> = {
+  "暂未开通预算，请联系部门管理员。": "Your personal budget has not been enabled. Please contact your department administrator.",
   "从客户端官网下载；在新标签页打开": "Download from the client's official website; opens in a new tab",
   "在客户端官网选择系统和处理器版本；在新标签页打开": "Choose your system and processor on the client's official website; opens in a new tab",
   "使用个人授权和默认订阅，安装后即可使用。": "Uses your personal authorization and default subscription. Ready after installation.",

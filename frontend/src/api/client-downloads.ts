@@ -24,7 +24,7 @@ function downloadFilename(response: Response, prefix: string, fallback: string):
 }
 
 export const clientDownloadsApi = {
-  userOptions: (signal?: AbortSignal) => request<{ enabled: boolean; plugin_version: string; user_name: string; default_subscription?: ClientSubscription; unavailable_reason?: string }>("/api/v1/client-downloads/user-options", { signal }),
+  userOptions: (signal?: AbortSignal) => request<{ enabled: boolean; budget_configured: boolean; plugin_version: string; user_name: string; default_subscription?: ClientSubscription; unavailable_reason?: string }>("/api/v1/client-downloads/user-options", { signal }),
   async downloadUser(signal?: AbortSignal): Promise<ClientPluginDownload> {
     const response = await fetch(apiUrl("/api/v1/client-downloads/magpie-user"), {
       method: "POST", credentials: "include", cache: "no-store", signal,

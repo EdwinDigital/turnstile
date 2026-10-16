@@ -40,7 +40,8 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
   const items = query.data?.items ?? []
   const selected = items.find((item) => item.subscription_id === subscription) ?? items[0]
   async function downloadUser() {
-    if (!canDownloadUser || activeDownload.current || !userAcknowledged) return
+    if (!canDownloadUser || !personal.data?.enabled || !personal.data.budget_configured
+      || activeDownload.current || !userAcknowledged) return
     const controller = new AbortController()
     activeDownload.current = controller
     setBusy(true); setError(""); setNotice("")
@@ -104,7 +105,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
       {!catalogLoading && <>
       {canDownloadUser && <section className="client-downloads-card">
         <div className="client-downloads-heading"><span className="client-downloads-edition-icon"><ShieldCheck size={18} aria-hidden="true" /></span><div><h2>AIGateway-Proxy 用户版</h2><p>使用个人授权和默认订阅，安装后即可使用。</p></div><Badge variant="outline" data-no-localize>{personal.data?.plugin_version ? `v${personal.data.plugin_version}` : "—"}</Badge></div>
-        <div className="client-downloads-body">
+        {personal.data?.budget_configured && <div className="client-downloads-body">
           <dl className="client-downloads-facts">
             <div><dt>当前用户</dt><dd data-no-localize>{personal.data?.user_name ?? user?.name ?? user?.email}</dd></div>
             {personal.data?.default_subscription && <div><dt>平台默认订阅</dt><dd data-no-localize>{personal.data.default_subscription.application_name} / {personal.data.default_subscription.subscription_name}</dd></div>}
@@ -114,15 +115,15 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
             <p className="client-downloads-help">解压目录与 ZIP 文件名一致（不含 .zip）。</p>
           </section>
           <section className="client-downloads-section"><h3>文生图接入</h3><p className="client-downloads-help">文生图通过配套 MCP 工具使用；首次需登记插件生成的 images-mcp.json，不会自动改写 Agent 配置。</p></section>
-        </div>
+        </div>}
         {personal.isError && <p role="alert">{personal.error.message}</p>}
-        {personal.data && !personal.data.enabled && <p role="status">当前平台暂未启用用户版。</p>}
+        {personal.data && !personal.data.enabled && !personal.data.unavailable_reason && <p role="status">当前平台暂未启用用户版。</p>}
         {personal.data?.unavailable_reason && <p role="alert">{personal.data.unavailable_reason}</p>}
-        <div className="client-downloads-footer">
+        {personal.data?.budget_configured && <div className="client-downloads-footer">
         <div className="client-downloads-warning" id="client-user-secret-warning"><ShieldCheck size={18} /><p>用户版下载包包含个人登录凭据，不包含 APIM 密钥。请勿分享、上传或提交到仓库。</p></div>
         <label className="client-downloads-consent"><input type="checkbox" checked={userAcknowledged} disabled={busy} aria-describedby="client-user-secret-warning" onChange={event => setUserAcknowledged(event.target.checked)} /><span>我已了解用户版下载包包含个人登录凭据</span></label>
         <Button className="client-downloads-download-button" type="button" onClick={() => void downloadUser()} disabled={busy || !personal.data?.enabled || personal.isError || !userAcknowledged}><Download data-icon="inline-start" />{busy ? "正在生成安装包" : "下载用户版插件"}</Button>
-        </div>
+        </div>}
       </section>}
       {canDownloadSubscription && <section className="client-downloads-card">
         <div className="client-downloads-heading"><span className="client-downloads-edition-icon"><Download size={18} aria-hidden="true" /></span><div><h2>AIGateway-Proxy 订阅版</h2><p>使用指定应用订阅与密钥，导入已授权模型。</p></div><Badge variant="outline" data-no-localize>v{query.data?.plugin_version ?? "0.1.4"}</Badge></div>

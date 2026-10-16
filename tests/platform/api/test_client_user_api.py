@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any, cast
 from unittest.mock import Mock
@@ -77,6 +78,10 @@ def desktop(desktop_postgres: ClientUserStore) -> Any:
             (USER,),
         )
     repo = InMemoryRepository()
+    repo.upsert_token_budget(
+        datetime.now(UTC).date().replace(day=1), "user", "owner@contoso.com",
+        None, 1_000_000, 80, "fixture",
+    )
     gateway = repo.gateways[0]
     gateway["base_url"] = "https://gateway.example.com/turnstile/llm"
     publication = uuid4()

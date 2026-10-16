@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import Mock
 from uuid import UUID, uuid4
 from zipfile import ZipFile
@@ -87,7 +87,72 @@ def client_service() -> tuple[ClientUserService, InMemoryRepository, SessionIden
         method="password",
         session_expires_at=datetime.now(UTC),
     )
+    repository.upsert_token_budget(
+        datetime.now(UTC).date().replace(day=1), "user", identity.effective_user_id,
+        None, 1_000_000, 80, "fixture",
+    )
     return service, repository, identity
+
+
+@pytest.mark.parametrize("role", ["owner", "member"])
+def test_user_download_without_personal_budget_denies_before_creating_grant(
+    role: Literal["owner", "member"],
+) -> None:
+    service, repo, identity = client_service()
+    identity = replace(identity, role=role)
+    repo.token_budgets.clear()
+    issue = Mock()
+    service.store.issue_download = issue  # type: ignore[method-assign]
+    with pytest.raises(HTTPException) as denied:
+        service.package(identity)
+    assert denied.value.status_code == 403
+    assert denied.value.detail == "暂未开通预算，请联系部门管理员。"
+    issue.assert_not_called()
+
+
+@pytest.mark.parametrize("budget_mode", ["tokens", "usd"])
+@pytest.mark.parametrize("mode", ["audit", "block"])
+def test_download_budget_gate_reads_configuration_not_balance_or_execution(
+    monkeypatch: pytest.MonkeyPatch, budget_mode: str, mode: str,
+) -> None:
+    service, repo, identity = client_service()
+    identity = replace(identity, governance_user_id="governance-person")
+    repo.token_budgets.clear()
+    period = datetime.now(UTC).date().replace(day=1)
+    repo.upsert_token_budget(
+        period, "user", identity.effective_user_id, "department-test",
+        0 if budget_mode == "tokens" else None, 80, "fixture",
+        budget_mode=budget_mode, usd_limit=Decimal("10") if budget_mode == "usd" else None,
+    )
+    repo.department_enforcement["department-test"] = {"mode": mode}
+    monkeypatch.setattr(repo, "person_budget_state", Mock(
+        side_effect=AssertionError("Download eligibility must not query usage or balance"),
+    ))
+    monkeypatch.setattr(service, "_execution_budget", Mock(
+        side_effect=AssertionError("Download eligibility must not activate atomic execution"),
+    ))
+    assert service.has_personal_budget(identity)
+    assert service.package(identity).startswith(b"PK")
+
+
+@pytest.mark.parametrize("scope", ["organization", "department", "other-user", "past", "future"])
+def test_only_current_month_own_personal_budget_qualifies(scope: str) -> None:
+    service, repo, identity = client_service()
+    repo.token_budgets.clear()
+    now = datetime.now(UTC)
+    period = date(now.year, now.month, 1)
+    if scope == "past":
+        period = date(now.year - 1, now.month, 1)
+    elif scope == "future":
+        period = date(now.year + 1, now.month, 1)
+    repo.upsert_token_budget(
+        period, scope if scope in {"organization", "department"} else "user",
+        "someone-else" if scope == "other-user" else identity.effective_user_id,
+        None, 1_000_000, 80, "fixture",
+    )
+    # The fixture still has valid application subscriptions; they do not qualify either.
+    assert service.default_subscription(identity)["models"]
+    assert not service.has_personal_budget(identity)
 
 
 @pytest.mark.parametrize("name", ["Test", "研发用户"])

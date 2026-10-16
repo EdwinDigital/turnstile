@@ -63,6 +63,7 @@ from .gateway_credentials import with_platform_gateway_credential
 USER_PLUGIN_VERSION = "0.5.0"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
+PERSONAL_BUDGET_REQUIRED = "暂未开通预算，请联系部门管理员。"
 
 
 class ClientUserService:
@@ -124,9 +125,21 @@ class ClientUserService:
     def package_filename(identity: SessionIdentity) -> str:
         return plugin_filename("aigateway-proxy-user", identity.name or identity.email, "user")
 
+    def has_personal_budget(self, identity: SessionIdentity) -> bool:
+        now = datetime.now(UTC)
+        # Read configuration only: download eligibility does not depend on remaining usage.
+        return bool(self.repository.list_token_budgets(
+            date(now.year, now.month, 1), identity.effective_user_id,
+        ))
+
+    def require_personal_budget(self, identity: SessionIdentity) -> None:
+        if not self.has_personal_budget(identity):
+            raise HTTPException(403, PERSONAL_BUDGET_REQUIRED)
+
     def package(self, identity: SessionIdentity) -> bytes:
         require_plugin_download(identity, "user-plugin")
         self.require_enabled()
+        self.require_personal_budget(identity)
         try:
             icons = load_plugin_icons()
         except PluginIconUnavailable as error:

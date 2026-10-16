@@ -19,7 +19,7 @@ from turnstile_core.domain.models import StrictModel
 
 from ..services.auth_service import hash_session_token
 from ..services.client_download_permissions import require_plugin_download
-from ..services.client_user import USER_PLUGIN_VERSION, ClientUserService
+from ..services.client_user import PERSONAL_BUDGET_REQUIRED, USER_PLUGIN_VERSION, ClientUserService
 from ..services.client_user_store import ClientUserStore
 from ..services.download_filename import attachment_header
 from .dependencies import Repository
@@ -132,8 +132,11 @@ def user_options(identity: CurrentSession, response: Response, service: Service)
         "plugin_version": USER_PLUGIN_VERSION,
         "name": "AIGateway-Proxy 用户版",
         "user_name": identity.name or identity.email,
+        "budget_configured": service.has_personal_budget(identity),
     }
-    if result["enabled"]:
+    if not result["budget_configured"]:
+        result.update(enabled=False, unavailable_reason=PERSONAL_BUDGET_REQUIRED)
+    elif result["enabled"]:
         try:
             selected = service.default_subscription(identity)
             result["default_subscription"] = {

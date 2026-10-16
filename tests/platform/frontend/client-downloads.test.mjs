@@ -37,7 +37,7 @@ for (const locale of ["en", "ja", "ko"]) {
     const { CLIENT_USER_PHRASES } = await import(new URL(`../../../frontend/src/locales/${locale}/phrases-client-user.ts`, import.meta.url))
     const { USER_SETTINGS_PHRASES } = await import(new URL(`../../../frontend/src/locales/${locale}/phrases-user-settings.ts`, import.meta.url))
     const phrases = { ...USER_SETTINGS_PHRASES, ...CLIENT_USER_PHRASES }
-    for (const label of ["当前用户", "平台默认订阅", "安装与使用", "文生图接入", "下载订阅版插件", "下载 macOS 客户端", "其他版本",
+    for (const label of ["暂未开通预算，请联系部门管理员。", "当前用户", "平台默认订阅", "安装与使用", "文生图接入", "下载订阅版插件", "下载 macOS 客户端", "其他版本",
       "从客户端官网下载；在新标签页打开", "在客户端官网选择系统和处理器版本；在新标签页打开", "下载客户端",
       "解压安装包，在客户端「插件」页面添加文件夹。", "插件已下载，请解压后在客户端中导入文件夹。",
       "只确认你本人刚从客户端发起的请求。", "这次申请已处理，请回到客户端或重新发起验证。",
@@ -103,7 +103,7 @@ for (const [userMode, prefix, label] of [
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" }
       if (name === "@tanstack/react-query") return { useQuery: options => ({ data:
         options.queryKey[0] === "client-downloads" ? { items: [item], key_management_available: true }
-          : { enabled: true, user_name: "Edwin" },
+          : { enabled: true, budget_configured: true, user_name: "Edwin" },
       }) }
       if (name === "../api/client-downloads") return { clientDownloadsApi: view.downloads }
       if (name === "../api/auth") return authHelpers
@@ -183,7 +183,7 @@ for (const permissions of [[], ["user-plugin"], ["subscription-plugin"], ["user-
       if (name === "@tanstack/react-query") return { useQuery: options => {
         queries.push(options)
         return { data: options.queryKey[0] === "client-downloads"
-          ? { items: [item], key_management_available: true } : { enabled: true, user_name: "Member" } }
+          ? { items: [item], key_management_available: true } : { enabled: true, budget_configured: true, user_name: "Member" } }
       } }
       if (name === "../api/client-downloads") return { clientDownloadsApi: {} }
       if (name === "../api/auth") return authHelpers
@@ -216,6 +216,51 @@ test("download permission defaults preserve legacy behavior and never restrict O
   assert.equal(authHelpers.canDownloadPlugin(null, "user-plugin"), false)
 })
 
+for (const budgetConfigured of [true, false]) {
+  test(`personal budget gates user controls but not subscription download: ${budgetConfigured}`, async () => {
+    const view = api('attachment; filename="aigateway-proxy-Edwin-Agent.zip"')
+    const jsx = (type, props) => ({ type, props })
+    let stateIndex = 0
+    const page = load(pageCode, name => {
+      if (name === "react") return { useEffect: () => {}, useRef: value => ({ current: value }),
+        useState: value => [++stateIndex === 3 ? true : value, () => {}] }
+      if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" }
+      if (name === "@tanstack/react-query") return { useQuery: options => ({ data:
+        options.queryKey[0] === "client-downloads"
+          ? { items: [{ ...item, models: [{ id: "text-model" }] }], key_management_available: true }
+          : { enabled: budgetConfigured, budget_configured: budgetConfigured, user_name: "Edwin",
+            unavailable_reason: budgetConfigured ? undefined : "暂未开通预算，请联系部门管理员。" } }) }
+      if (name === "../api/client-downloads") return { clientDownloadsApi: view.downloads }
+      if (name === "../api/auth") return authHelpers
+      if (name === "../providers/auth-provider") return { useAuth: () => ({ user: { id: "owner", role: "owner" } }) }
+      if (name === "../components/ui/button") return { Button: "button" }
+      if (name === "lucide-react") return { Download: "icon", PanelLeft: "icon", RefreshCw: "icon", ShieldCheck: "icon" }
+      throw new Error(`Unexpected import ${name}`)
+    }, {
+      document: { body: { append() {} }, createElement: () => ({ click() {}, remove() {} }) },
+      URL: { createObjectURL: () => "blob:zip", revokeObjectURL() {} },
+      window: { setTimeout: callback => callback() },
+    })
+    const nodes = []
+    function visit(node) {
+      if (Array.isArray(node)) { node.forEach(visit); return }
+      if (!node || typeof node !== "object") return
+      nodes.push(node); visit(node.props?.children)
+    }
+    visit(page.ClientDownloadsPage({ onToggleSidebar: () => {} }))
+    assert.equal(nodes.some(n => n.type === "button" && n.props.children?.includes?.("下载用户版插件")), budgetConfigured)
+    assert.equal(nodes.some(n => n.props?.id === "client-user-secret-warning"), budgetConfigured)
+    assert.equal(nodes.filter(n => n.type === "input" && n.props.type === "checkbox").length, budgetConfigured ? 2 : 1)
+    assert.equal(nodes.some(n => n.props?.children === "暂未开通预算，请联系部门管理员。"), !budgetConfigured)
+    assert.equal(nodes.some(n => n.props?.children === "当前平台暂未启用用户版。"), false)
+    const form = nodes.find(n => n.type === "form")
+    assert.ok(form)
+    await form.props.onSubmit({ preventDefault() {} })
+    assert.equal(view.calls.length, 1)
+    assert.equal(view.calls[0].url, "/api/v1/client-downloads/magpie")
+  })
+}
+
 for (const [userConsent, subscriptionConsent] of [[false, false], [true, false], [false, true], [true, true]]) {
   test(`both download buttons require their own consent: user=${userConsent}, subscription=${subscriptionConsent}`, async () => {
     const view = api('attachment; filename="aigateway-proxy-Test.zip"')
@@ -231,7 +276,7 @@ for (const [userConsent, subscriptionConsent] of [[false, false], [true, false],
       if (name === "@tanstack/react-query") return { useQuery: options => ({ data:
         options.queryKey[0] === "client-downloads"
           ? { items: [{ ...item, models: [{ id: "text-model" }] }], key_management_available: true }
-          : { enabled: true, user_name: "Edwin" } }) }
+          : { enabled: true, budget_configured: true, user_name: "Edwin" } }) }
       if (name === "../api/client-downloads") return { clientDownloadsApi: view.downloads }
       if (name === "../api/auth") return authHelpers
       if (name === "../providers/auth-provider") return { useAuth: () => ({ user: { id: "owner", role: "owner" } }) }
@@ -276,7 +321,7 @@ for (const [userReady, subscriptionReady] of [[false, false], [true, false], [fa
         queries.push(options)
         const subscription = options.queryKey[0] === "client-downloads"
         return { isPending: false, isFetchedAfterMount: subscription ? subscriptionReady : userReady,
-          data: subscription ? { items: [item], key_management_available: true } : { enabled: true, user_name: "Edwin" } }
+          data: subscription ? { items: [item], key_management_available: true } : { enabled: true, budget_configured: true, user_name: "Edwin" } }
       } }
       if (name === "../api/client-downloads") return { clientDownloadsApi: {} }
       if (name === "../api/auth") return authHelpers
