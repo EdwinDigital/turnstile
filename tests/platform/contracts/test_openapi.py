@@ -154,6 +154,24 @@ def test_openapi_root_is_a_small_domain_index() -> None:
     }
 
 
+def test_split_domains_reference_components_through_the_openapi_root() -> None:
+    def local_component_refs(value: object) -> list[str]:
+        if isinstance(value, list):
+            return [ref for item in value for ref in local_component_refs(item)]
+        if not isinstance(value, dict):
+            return []
+        reference = value.get("$ref")
+        own = (
+            [reference]
+            if isinstance(reference, str) and reference.startswith("#/components/")
+            else []
+        )
+        return own + [ref for item in value.values() for ref in local_component_refs(item)]
+
+    for path in (CONTRACT.parent / "openapi").rglob("*.yaml"):
+        assert not local_component_refs(_yaml_document(path)), path
+
+
 def test_user_settings_contract_matches_served_self_service_routes() -> None:
     documented = _operations(_documented_paths())
     served = _operations(app.openapi()["paths"])

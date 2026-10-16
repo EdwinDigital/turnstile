@@ -30,7 +30,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UserDownload'
+              $ref: '../../openapi.yaml#/components/schemas/UserDownload'
       responses:
         '200':
           description: Successful Response
@@ -51,7 +51,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/DeviceRequest'
+              $ref: '../../openapi.yaml#/components/schemas/DeviceRequest'
         required: true
       responses:
         '200':
@@ -64,7 +64,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
+                $ref: '../../openapi.yaml#/components/schemas/HTTPValidationError'
       security: []
       description: Private desktop client endpoint; credentials and authorization
         are never inferred from caller identity headers.
@@ -92,7 +92,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
+                $ref: '../../openapi.yaml#/components/schemas/HTTPValidationError'
       security:
       - sessionCookie: []
       description: Private desktop client endpoint; credentials and authorization
@@ -107,7 +107,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/Decision'
+              $ref: '../../openapi.yaml#/components/schemas/Decision'
         required: true
       responses:
         '200':
@@ -120,7 +120,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
+                $ref: '../../openapi.yaml#/components/schemas/HTTPValidationError'
       security:
       - sessionCookie: []
       description: Private desktop client endpoint; credentials and authorization
@@ -135,7 +135,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/TokenRequest'
+              $ref: '../../openapi.yaml#/components/schemas/TokenRequest'
         required: true
       responses:
         '200':
@@ -148,7 +148,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
+                $ref: '../../openapi.yaml#/components/schemas/HTTPValidationError'
       security: []
       description: Private desktop client endpoint; credentials and authorization
         are never inferred from caller identity headers.
@@ -293,7 +293,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HTTPValidationError'
+                $ref: '../../openapi.yaml#/components/schemas/HTTPValidationError'
       security:
       - clientBearer: []
       description: Private desktop client endpoint; credentials and authorization
