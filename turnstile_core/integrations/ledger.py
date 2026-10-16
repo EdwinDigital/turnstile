@@ -971,7 +971,7 @@ class LedgerSyncService:
         return written
 
     def project_application_mappings(self, application_id: UUID | None = None) -> int:
-        from ..services.directory_catalog import catalog_for
+        from ..persistence.directory_catalog import catalog_for
 
         written = 0
         catalog = catalog_for(self._repository, include_inactive=True)

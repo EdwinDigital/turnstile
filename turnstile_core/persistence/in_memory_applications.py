@@ -361,7 +361,7 @@ class InMemoryApplicationRepositoryMixin:
         *, department_id: str | None = None, update_department: bool = False,
         owner_id: str | None = None, update_owner: bool = False,
     ) -> dict[str, Any] | None:
-        from ..services.directory_catalog import catalog_for
+        from .directory_catalog import catalog_for
         from .repository_contract import QueryRepository
 
         application = self.get_gateway_application(application_id)
