@@ -113,6 +113,8 @@ def plan_budget_parent_upgrade(
     candidate_parent = compose_budget_execution_parent(
         materialized, canonical_parent, enabled=True, delegation=delegation,
     )
+    # The execution component adds its own slots after the legacy parent is bound.
+    candidate_parent = serialize_policy(materialize(parse_policy(candidate_parent)))
     validate_parent_policy(candidate_parent, compose_budget_execution_parent(
         canonical_parent, canonical_parent, enabled=True, delegation=delegation,
     ))

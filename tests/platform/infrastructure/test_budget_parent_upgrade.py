@@ -58,6 +58,12 @@ def test_offline_upgrade_preserves_configuration_and_uses_the_shared_delegation_
     assert result.adopted_bindings["__TOKENS_PER_MINUTE__"] == "200000"
     assert result.adopted_bindings["__EMPLOYEE_TOKEN_ENABLED__"] == "false"
     assert result.adopted_bindings["__LEDGER_TABLE_NAME__"] == "UnitLedger"
+    assert not re.search(r"__[A-Z][A-Z0-9_]*__", result.candidate_parent)
+    assert "https://unit.table.core.windows.net/UnitLedger" in result.candidate_parent
+    assert all(node.get("logger-id") == "unit-logger" for node in root.iter("log-to-eventhub"))
+    execution_plan = root.find(".//set-variable[@name='executionPlan']")
+    assert execution_plan is not None
+    assert str(TARGET) in execution_plan.get("value", "")
 
 
 def test_offline_upgrade_refuses_the_wrong_gateway() -> None:
