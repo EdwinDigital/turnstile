@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from ..domain.application_access import MAX_TOKENS_PER_MINUTE, application_organization
-from ..domain.enterprise import enterprise_catalog
 from ..integrations.apim_control_plane_contract import (
     PolicyCompilationError,
     RetryablePublicationError,
@@ -21,6 +20,7 @@ from ..integrations.ledger import (
     model_access_value,
 )
 from ..persistence.repository import QueryRepository
+from .directory_catalog import catalog_for
 
 
 def read_application_rate_limit(
@@ -111,8 +111,9 @@ def prepare_application_ledger(
     partition = application_partition_key(application_id, now.strftime("%Y-%m"))
     quota = application_quota_entity(snapshot)
     access = {"Configured": policy is not None, "Models": identifiers}
-    organization = application_organization(dict(mapping.get("tags") or {}))
-    department = next((item for item in enterprise_catalog().departments
+    catalog = catalog_for(repository, include_inactive=True)
+    organization = application_organization(dict(mapping.get("tags") or {}), catalog=catalog)
+    department = next((item for item in catalog.departments
                        if item.id == mapping.get("department_id")), None)
     identity = {
         "ApplicationId": str(application_id),
