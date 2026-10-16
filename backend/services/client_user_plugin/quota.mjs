@@ -7,12 +7,19 @@ const escape = value => String(value).replace(/[&<>"']/g, char => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[char]);
 const number = value => typeof value === "number" && Number.isFinite(value) && value >= 0;
+const personalUnits = new Map([["个人月度 Token", "tokens"], ["个人月度 USD", "USD"]]);
+const windowUnit = window => window.unit ?? (window.name === "个人月度 Token" ? "tokens" : null);
+const unitLabel = window => windowUnit(window) === "USD" ? "USD" : "Token";
+const formatAmount = (value, window) => value.toLocaleString("en-US", {
+  maximumFractionDigits: windowUnit(window) === "USD" ? 8 : 0,
+});
 
 export function personalQuota(usage) {
-  const windows = (usage.windows ?? []).filter(window => window.name === "个人月度 Token");
+  const windows = (usage.windows ?? []).filter(window => personalUnits.has(window.name));
   if (!windows.length) return null;
   const window = windows[0];
-  if (windows.length !== 1 || typeof window.aside !== "boolean"
+  if (windows.length !== 1 || windowUnit(window) !== personalUnits.get(window.name)
+      || typeof window.aside !== "boolean"
       || !number(window.amount) || !number(window.limit) || !window.limit
       || !number(window.used) || window.used > 100
       || !number(window.span) || !window.span || !Number.isFinite(Date.parse(window.resetsAt)))
@@ -84,8 +91,8 @@ export function quotaHTML(history, usage) {
     const y = point => 24 + 192 * (1 - left(point) / 100);
     const coords = points.filter(point => point.reset === current.reset)
       .map(point => `${x(point).toFixed(2)},${y(point).toFixed(2)}`).join(" ");
-    return `<section><h2>${escape(window.name)}</h2><p class="metric">${current.amount.toLocaleString("en-US")} / ${current.limit.toLocaleString("en-US")} Token</p>
-<p>剩余 ${Math.max(0, current.limit - current.amount).toLocaleString("en-US")} Token · ${current.aside ? "平台仅记录，不阻断" : "平台预算阻断已启用"}</p>
+    return `<section><h2>${escape(window.name)}</h2><p class="metric">${formatAmount(current.amount, window)} / ${formatAmount(current.limit, window)} ${unitLabel(window)}</p>
+<p>剩余 ${formatAmount(Math.max(0, current.limit - current.amount), window)} ${unitLabel(window)} · ${current.aside ? "平台仅记录，不阻断" : "平台预算阻断已启用"}</p>
 <div class="plot"><div class="axis" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div><svg viewBox="0 0 800 248" role="img" aria-label="个人剩余额度百分比的真实采样趋势"><path class="grid" d="M32 24H768 M32 120H768 M32 216H768"/>
 <polyline class="line" points="${coords}"/><circle cx="${x(current).toFixed(2)}" cy="${y(current).toFixed(2)}" r="4"/></svg></div>
 <div class="dates"><time datetime="${escape(new Date(start).toISOString())}"></time><time datetime="${escape(current.reset)}"></time></div>
@@ -116,12 +123,14 @@ async function record(directory, cfg, usage) {
     throw new Error("Quota history is invalid; preserve it for recovery");
   for (const window of usage.windows ?? []) {
     const reset = Date.parse(window.resetsAt);
-    if (typeof window.name !== "string" || window.name !== "个人月度 Token"
+    if (!personalUnits.has(window.name) || windowUnit(window) !== personalUnits.get(window.name)
         || !number(window.amount) || !number(window.limit) || !window.limit
         || !Number.isFinite(reset) || !number(window.span) || !window.span
         || at >= reset || at < reset - window.span * 1000) continue;
     let line = history.windows.find(item => item.name === window.name);
-    if (!line) { line = { name: window.name, points: [] }; history.windows.push(line); }
+    if (!line) { line = { name: window.name, unit: windowUnit(window), points: [] }; history.windows.push(line); }
+    if (line.unit != null && line.unit !== windowUnit(window))
+      throw new Error("Quota history unit changed; preserve it for recovery");
     const point = { at: new Date(at).toISOString(), start: reset - window.span * 1000,
       reset: new Date(reset).toISOString(), amount: window.amount, limit: window.limit, aside: window.aside === true };
     const last = line.points.at(-1);

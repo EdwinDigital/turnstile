@@ -3,12 +3,35 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { quotaHTML, recordQuota } from "../../../backend/services/client_user_plugin/quota.mjs";
+import { personalQuota, quotaHTML, quotaRefusal, recordQuota } from "../../../backend/services/client_user_plugin/quota.mjs";
 
 const cfg = { userId: "stable-user" };
 const usage = (at, amount, aside = true) => ({ user: 'Edwin<script>alert(1)</script>', as_of: at,
   windows: [{ name: "个人月度 Token", amount, limit: 1000, unit: "tokens", aside,
     resetsAt: "2026-11-01T00:00:00Z", span: 31 * 86400 }] });
+
+test("USD allowances retain their unit, local blocking and a separate history from Tokens", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ts-usd-quota-"));
+  try {
+    await recordQuota(directory, cfg, usage("2026-10-13T00:00:00Z", 100));
+    const money = usage("2026-10-13T00:01:00Z", 0.01234567, false);
+    money.windows[0] = { ...money.windows[0], name: "个人月度 USD", unit: "USD", limit: 10, used: 0.1234567 };
+    assert.equal(personalQuota(money), money.windows[0]);
+    assert.equal(quotaRefusal(money, true), null);
+    const file = await recordQuota(directory, cfg, money);
+    const html = await readFile(file, "utf8");
+    assert.ok(html.includes("0.01234567 / 10 USD"));
+    assert.ok(!html.includes("0.01234567 / 10 Token"));
+    const history = JSON.parse(await readFile(join(directory, "quota-history.json"), "utf8"));
+    assert.equal(history.windows.length, 2);
+    assert.equal(history.windows[0].points[0].amount, 100);
+    assert.equal(history.windows[1].unit, "USD");
+    money.windows[0].amount = 10;
+    assert.equal(quotaRefusal(money, true).status, 429);
+    money.windows[0].unit = "tokens";
+    assert.throws(() => personalQuota(money), /无效/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test("private trends capture only real personal snapshots, keep audit mode and never change host history", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ts-quota-trend-"));

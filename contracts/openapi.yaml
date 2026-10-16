@@ -119,6 +119,8 @@ paths:
     $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1reservations
   /api/v1/budgets/reservations/resolve:
     $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1reservations~1resolve
+  /api/v1/budgets/capabilities:
+    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1capabilities
   /api/v1/budgets:
     $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets
   /api/v1/budgets/users:
@@ -966,6 +968,8 @@ components:
       $ref: ./openapi/schemas/budgets.yaml#/schemas/DepartmentEnforcementAuditEvent
     TokenBudgetRiskItem:
       $ref: ./openapi/schemas/budgets.yaml#/schemas/TokenBudgetRiskItem
+    BudgetCapabilities:
+      $ref: ./openapi/schemas/budgets.yaml#/schemas/BudgetCapabilities
     TokenBudgetResponse:
       $ref: ./openapi/schemas/budgets.yaml#/schemas/TokenBudgetResponse
     TokenBudgetPeopleResponse:

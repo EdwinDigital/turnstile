@@ -112,7 +112,11 @@ from turnstile_core.pricing.context import context_price_reference, resolve_cont
 from turnstile_core.pricing.sync import ModelPriceUpdate, plan_price_sync
 from turnstile_core.security import CredentialCipher, credential_hint
 from turnstile_core.services.application_access import ApplicationAccessService
-from turnstile_core.services.budget_settlement import BudgetScopeRepository, BudgetStatusRepository
+from turnstile_core.services.budget_delegation import (
+    BudgetDelegationError,
+    prepare_budget_delegation,
+)
+from turnstile_core.services.budget_settlement import BudgetStatusRepository
 from turnstile_core.services.directory_catalog import catalog_for, directory_store
 
 from .gateway_credentials import with_platform_gateway_credential
@@ -2019,47 +2023,18 @@ class ModelRuntimeService:
         if target is None or not self._settings.budget_execution_enabled:
             return
         target_id = UUID(str(target))
-        if target_id not in self._settings.budget_execution_target_ids:
-            return
         try:
-            if not isinstance(self._repository, BudgetScopeRepository):
-                raise TypeError("Budget delegation requires a durable rollout")
-            rollout = self._repository.active_budget_execution_rollout()
-        except Exception as error:
-            logger.warning("Budget rollout unavailable error_type=%s", type(error).__name__)
-            raise HTTPException(
-                status_code=503, detail="Budget rollout state is unavailable",
-            ) from None
-        if rollout is None or target_id not in rollout["gateway_profile_ids"]:
-            return
-        configuration = self._settings.budget_delegation_targets.get(target_id)
-        if configuration is None or route.get("gateway_implementation") != GatewayKind.APIM:
-            raise HTTPException(
-                status_code=503, detail="Trusted budget delegation is not configured",
+            token = prepare_budget_delegation(
+                self._repository, self._settings,
+                gateway_id=target_id,
+                gateway_implementation=str(route.get("gateway_implementation") or ""),
+                gateway_url=str(route.get("gateway_base_url") or ""),
+                user_id=request.metadata.user_id,
             )
-        destination = urlsplit(str(route.get("gateway_base_url") or ""))
-        origins = {urlsplit(str(value)).netloc.lower() for value in configuration.allowed_origins}
-        if (
-            destination.scheme != "https" or destination.netloc.lower() not in origins
-            or destination.username or destination.password
-            or destination.query or destination.fragment
-        ):
-            raise HTTPException(
-                status_code=503,
-                detail="Budget delegation target does not match its trusted origin",
-            )
-        if not request.metadata.user_id.strip() or request.metadata.user_id == "unattributed":
-            raise HTTPException(
-                status_code=403, detail="Budget delegation requires a verified person",
-            )
-        try:
-            token = ManagedIdentityTokenProvider().token(configuration.audience)
-        except Exception as error:
-            logger.warning("Budget delegation unavailable error_type=%s", type(error).__name__)
-            raise HTTPException(
-                status_code=503, detail="Budget delegation identity is unavailable",
-            ) from None
-        route["budget_delegation_token"] = SecretStr(token)
+        except BudgetDelegationError as error:
+            raise HTTPException(status_code=error.status_code, detail=str(error)) from None
+        if token is not None:
+            route["budget_delegation_token"] = SecretStr(token)
 
     def _deny(
         self,

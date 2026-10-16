@@ -2,7 +2,12 @@
 
 本目录保存功能的需求分析和设计方案。各功能的实现状态见下表及对应文档；拟议接口、字段和组件不代表已经实现。
 
-更新日期：2026-10-12。最新运行包来自 `92378f7`（兼容核心）和 `47595da`（请求追踪时区前端），监控修复已验收。
+2026-10-16 新增：[客户端鉴权与 Token/USD 预算兼容升级方案](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)。
+方案覆盖自主组织/密码账号、main 受信后端委托、原生协议、双单位预算、性能、备份、切换与回退；尚未实现或激活。
+当前合并发布基线见[2026-10-16 发布记录](aigateway-proxy-client/release-main-merge-2026-10-16.md)。
+
+以下运行包与 PR 叙述是 2026-10-12 的历史状态快照，不代表上述新方案已交付：
+当时运行包来自 `92378f7`（兼容核心）和 `47595da`（请求追踪时区前端），监控修复已验收。
 应用TPM修复此前从功能分支提交 `217fbd2` 构建并发布，真实限流回归完成。
 此前从用户仓库 `main` 提交 `22897a5` 构建并发布，
 运行内容保留 `4c2dadc` 单菜单权限修复。组织/权限治理上游 PR #34 已提交，
@@ -14,6 +19,7 @@ main本地与线上验收通过，结果见实施记录；上游CI待维护者�
 | 初始化私网与请求监控 | [需求与设计](gateway-network-monitoring/design.md) | [design.md](gateway-network-monitoring/design.md) | 已实现；监控已上线，1812项Python/157项前端通过，现网hotfix no-op及00:37记录/自动刷新/时区已验收，见[实施记录](gateway-network-monitoring/implementation.md) | 未提交 |
 | 应用 TPM 与额度同步 | [设计与需求](application-tpm-sync/design.md) | [design.md](application-tpm-sync/design.md) | 已上线；1805项本地通过，保存即时投影、正式低TPM 429/提高TPM 200已验证，见[实施记录](application-tpm-sync/implementation.md) | 未提交 |
 | AIGateway-Proxy 客户端 | [requirements.md](aigateway-proxy-client/requirements.md) | [design.md](aigateway-proxy-client/design.md) | 核心功能已上线；cc-switch 下载、magpie 导入及5模型连通验收通过，精细权限延期，见[实施记录](aigateway-proxy-client/implementation.md) | 未提交上游 PR |
+| 客户端鉴权与 Token/USD 兼容升级 | [目标与边界](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md#1-基线目标与范围) | [详细方案](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)、[实施记录](aigateway-proxy-client/budget-auth-compatibility-upgrade-implementation.md) | 兼容实现进入回归；新备份及隔离还原完成，软件发布与 USD 金融激活分别验收 | 当前开发分支 |
 | 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已实现、已上线；010不可变，后续共享包保留；原验收边界见验证记录 | [xuleihive/turnstile#31](https://github.com/xuleihive/turnstile/pull/31)，Open，待合并 |
 | 用户设置 | [requirements.md](user-settings/requirements.md) | [design.md](user-settings/design.md) | 已实现、已上线；当前目录集成及本人只读接口已随 `9cc17fa` 复验；真实 Microsoft OAuth/Graph 未重新验收 | [xuleihive/turnstile#32](https://github.com/xuleihive/turnstile/pull/32)，Open，待合并 |
 | 组织管理 | [requirements.md](organization-management/requirements.md) | [design.md](organization-management/design.md) | P1 已上线；001-018 已应用，成员/权限/预算与用量兼容已复验；P2 代码已部署，真实 Entra 与动态网关未验收且开关关闭 | [xuleihive/turnstile#34](https://github.com/xuleihive/turnstile/pull/34)，Open，待上游审查 |

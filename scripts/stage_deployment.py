@@ -76,6 +76,9 @@ def _stage_api(root: Path, destination: Path) -> None:
         "infra/policies/foundry-finops-policy.xml",
         policy_dir,
     )
+    legacy = root / "infra/policies/foundry-finops-policy.schema1.xml"
+    if legacy.is_file():
+        _copy_file(root, "infra/policies/foundry-finops-policy.schema1.xml", policy_dir)
     for source in ("requirements.txt", "pyproject.toml", "uv.lock"):
         _copy_file(root, source, destination)
 
@@ -95,6 +98,9 @@ def _stage_function(root: Path, destination: Path, project: str) -> None:
             "infra/policies/foundry-finops-policy.xml",
             policy_dir,
         )
+        legacy = root / "infra/policies/foundry-finops-policy.schema1.xml"
+        if legacy.is_file():
+            _copy_file(root, "infra/policies/foundry-finops-policy.schema1.xml", policy_dir)
 
 
 def stage_deployment(target: str, destination: Path, root: Path = REPOSITORY_ROOT) -> None:

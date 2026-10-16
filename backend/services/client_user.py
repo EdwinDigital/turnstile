@@ -9,7 +9,9 @@ import os
 import secrets
 import threading
 import time
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
@@ -17,15 +19,34 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+import httpx
 import jwt
 from fastapi import HTTPException
 
 from turnstile_core.config import Settings
+from turnstile_core.domain.budget_counting import (
+    BudgetOperation,
+    BudgetPublicationContracts,
+    verified_budget_operations,
+)
+from turnstile_core.domain.ledger import LedgerScope
 from turnstile_core.domain.menu_permissions import menu_permissions
+from turnstile_core.domain.models import ModelPrice
+from turnstile_core.integrations.atomic_ledger import AtomicTableLedger
+from turnstile_core.integrations.budget_delegation_headers import encode_delegation_metadata
 from turnstile_core.integrations.gateway_protocol import invocation_api_paths
 from turnstile_core.persistence.repository import QueryRepository
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.application_access import ApplicationAccessService
+from turnstile_core.services.budget_delegation import (
+    BudgetDelegationError,
+    prepare_budget_delegation,
+)
+from turnstile_core.services.budget_settlement import (
+    BudgetScopeRepository,
+    BudgetStatusRepository,
+    execution_budget_view,
+)
 from turnstile_core.services.directory_catalog import catalog_for, directory_store
 
 from .auth_service import SessionIdentity
@@ -34,11 +55,12 @@ from .client_downloads import RESERVED, SDK
 from .client_icons import PluginIconUnavailable, load_plugin_icons
 from .client_namespace import plugin_namespace
 from .client_pricing import plugin_model_cost
+from .client_telemetry import client_telemetry_headers
 from .client_user_store import ClientUserStore
 from .download_filename import plugin_filename
 from .gateway_credentials import with_platform_gateway_credential
 
-USER_PLUGIN_VERSION = "0.4.6"
+USER_PLUGIN_VERSION = "0.5.0"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 
@@ -372,18 +394,23 @@ class ClientUserService:
         *,
         force: bool = False,
     ) -> list[dict[str, Any]]:
+        personal_status = self._personal_execution_status(identity)
         key = f"directory:{identity.id}:{identity.role}:{identity.directory_permission_revision}"
+        if personal_status is not None:
+            key += f":{personal_status.get('budget_mode')}:{personal_status.get('policy_revision')}"
         with self._lock:
             cached = self._cache.get(key)
             if not force and cached and cached[0] > time.monotonic():
                 return cast(list[dict[str, Any]], cached[1]["items"])
-            items = self._build_subscriptions(identity)
+            items = self._build_subscriptions(identity, personal_status=personal_status)
             if len(self._cache) > 256:
                 self._cache.clear()
             self._cache[key] = (time.monotonic() + 60, {"items": items})
             return items
 
-    def _build_subscriptions(self, identity: SessionIdentity) -> list[dict[str, Any]]:
+    def _build_subscriptions(
+        self, identity: SessionIdentity, *, personal_status: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         self.require_enabled()
         if self.settings.directory_source == "database" and (
             not identity.governance_user_id or identity.directory_person_active is not True
@@ -430,6 +457,14 @@ class ClientUserService:
             publication = self.repository.effective_gateway_publication(app.gateway_profile_id)
             if not publication:
                 continue
+            money_contracts = None
+            if personal_status and personal_status.get("budget_mode") == "usd":
+                try:
+                    money_contracts = BudgetPublicationContracts.model_validate(
+                        publication.get("resource_manifest", {}).get("budget_contracts"),
+                    ).model_contracts
+                except ValueError:
+                    raise HTTPException(503, "Personal USD model catalogue is not ready") from None
             spec = publication["desired_spec"]
             if not isinstance(spec, dict):
                 spec = spec.model_dump(mode="json")
@@ -485,6 +520,18 @@ class ClientUserService:
                     protocol = chosen_protocol.value
                 else:
                     continue
+                if money_contracts is not None:
+                    contract = money_contracts.get(str(m["model_key"]))
+                    operations: dict[str, BudgetOperation] = {
+                        "openai_responses": "responses", "openai_chat": "chat-completions",
+                        "anthropic_messages": "anthropic-messages",
+                        "openai_images": "images-generations",
+                    }
+                    operation = operations[protocol]
+                    if (contract is None or str(contract.model_id) != str(m["id"])
+                        or operation not in verified_budget_operations(contract)
+                        or ModelPrice.from_registry(m) is None):
+                        continue
                 models.append(
                     {
                         "id": m["model_key"],
@@ -691,28 +738,84 @@ class ClientUserService:
         cache_key = f"usage:{grant['id']}:{identity.directory_permission_revision}"
         with self._lock:
             hit = self._cache.get(cache_key)
-            if not fresh and hit and hit[0] > time.monotonic():
+            if (not fresh and not self.settings.budget_execution_enabled
+                and hit and hit[0] > time.monotonic()):
                 return hit[1]
         now = datetime.now(UTC)
         start = date(now.year, now.month, 1)
         end = date(now.year + 1, 1, 1) if now.month == 12 else date(now.year, now.month + 1, 1)
         reset = datetime(end.year, end.month, 1, tzinfo=UTC).isoformat()
         windows = []
+        budget: dict[str, Any] | None = None
         person = self.repository.person_budget_state(identity.effective_user_id, start, end)
         if person:
-            amount, limit = int(person["used_tokens"]), int(person["token_limit"])
+            execution = self._execution_budget(
+                LedgerScope(
+                    scope_type="person", scope_id=identity.effective_user_id, period_start=start,
+                )
+            )
+            mode = person.get("budget_mode", "tokens")
+            if mode not in {"tokens", "usd"}:
+                raise HTTPException(503, "Personal budget unit is unsupported")
+            if mode == "usd" and execution is None:
+                raise HTTPException(503, "USD budget execution is not ready")
+            if execution is not None and (
+                execution.get("ledger_status") != "current" or execution.get("policy_pending")
+                or execution.get("budget_mode", "tokens") != mode
+            ):
+                raise HTTPException(503, "Personal budget is unavailable or still synchronizing")
+            current = execution or person
+            enforced = bool(current.get("enforce", person["mode"] == "block"))
+            if mode == "usd":
+                try:
+                    values = {key: Decimal(str(current[key])) for key in (
+                        "usd_limit", "used_usd", "pending_reserved_usd",
+                        "finalized_upper_bound_usd",
+                    )}
+                except (KeyError, ValueError, InvalidOperation):
+                    raise HTTPException(
+                        503, "Personal USD budget has no verified balance",
+                    ) from None
+                if (any(not value.is_finite() or value < 0 for value in values.values())
+                    or values["usd_limit"] == 0):
+                    raise HTTPException(503, "Personal USD budget has no verified balance")
+                limit_value = values["usd_limit"]
+                occupied = sum((values[key] for key in values if key != "usd_limit"), Decimal(0))
+                available = max(limit_value - occupied, Decimal(0))
+                budget = {
+                    "mode": "usd", "currency": "USD", "period": f"{start:%Y-%m}",
+                    "limit": format(limit_value, "f"), "confirmed": format(values["used_usd"], "f"),
+                    "reserved": format(values["pending_reserved_usd"], "f"),
+                    "upper_bound": format(values["finalized_upper_bound_usd"], "f"),
+                    "available": format(available, "f"), "enforce": enforced,
+                    "ledger_version": current.get("ledger_version"),
+                }
+                amount, limit = float(occupied), float(limit_value)
+                name, unit = "个人月度 USD", "USD"
+            else:
+                limit = int(current["token_limit"])
+                amount = (
+                    int(current["used_tokens"]) + int(current.get("pending_reserved_tokens") or 0)
+                    + int(current.get("finalized_upper_bound_tokens") or 0)
+                )
+                name, unit = "个人月度 Token", "tokens"
             windows.append(
                 {
-                    "name": "个人月度 Token",
+                    "name": name,
                     "used": min(100, amount / limit * 100),
                     "amount": amount,
                     "limit": limit,
-                    "unit": "tokens",
+                    "unit": unit,
                     "resetsAt": reset,
                     "span": (end - start).days * 86400,
-                    "aside": person["mode"] != "block",
+                    "aside": not enforced,
                 }
             )
+            if budget is not None:
+                windows[-1]["display"] = (
+                    f"已结算 USD {budget['confirmed']} · 预留 {budget['reserved']}"
+                    f" · 保守占用 {budget['upper_bound']}"
+                )
         result = {
             "user": identity.name or identity.email,
             "plan": "AIGateway 用户授权",
@@ -722,15 +825,109 @@ class ClientUserService:
             "balance": "未配置额度" if not windows else "",
             "signIn": "kept",
         }
+        if budget is not None:
+            result["quota_contract_version"] = 2
+            result["budget"] = budget
         with self._lock:
             if len(self._cache) > 256:
                 self._cache.clear()
             self._cache[cache_key] = (time.monotonic() + 60, result)
         return result
 
+    def _execution_budget(self, scope: LedgerScope) -> dict[str, Any] | None:
+        if not self.settings.budget_execution_enabled:
+            return None
+        if (not isinstance(self.repository, BudgetScopeRepository)
+            or not isinstance(self.repository, BudgetStatusRepository)):
+            raise HTTPException(503, "Personal budget requires a durable execution repository")
+        if self.repository.active_budget_execution_rollout() is None:
+            return None
+        if not self.settings.ledger_table_endpoint:
+            raise HTTPException(503, "Personal execution ledger is not configured")
+        with AtomicTableLedger(
+            self.settings.ledger_table_endpoint, self.settings.ledger_table_name, timeout=2,
+        ) as store:
+            return execution_budget_view(self.repository, store, scope)
+
+    def _personal_execution_status(self, identity: SessionIdentity) -> dict[str, Any] | None:
+        if (not self.settings.budget_execution_enabled
+            or not isinstance(self.repository, BudgetStatusRepository)):
+            return None
+        try:
+            return self.repository.budget_execution_status(LedgerScope(
+                scope_type="person", scope_id=identity.effective_user_id,
+                period_start=datetime.now(UTC).date().replace(day=1),
+            ))
+        except Exception:
+            raise HTTPException(503, "Personal budget status is unavailable") from None
+
     def context(
         self, identity: SessionIdentity, selection: dict[str, Any], model: str, rid: str
     ) -> str:
+        return jwt.encode(
+            self._context_payload(identity, selection, model, rid), self.signing_key,
+            algorithm="HS256",
+        )
+
+    def invocation_headers(
+        self, identity: SessionIdentity, selection: dict[str, Any], model: str, rid: str,
+        *, telemetry: Mapping[str, str] | None = None,
+    ) -> httpx.Headers:
+        payload = self._context_payload(identity, selection, model, rid)
+        try:
+            delegation = prepare_budget_delegation(
+                self.repository, self.settings,
+                gateway_id=UUID(str(selection["gateway_id"])), gateway_implementation="apim",
+                gateway_url=str(selection["base_url"]), user_id=identity.effective_user_id,
+            )
+        except BudgetDelegationError as error:
+            raise HTTPException(error.status_code, str(error)) from None
+        if (delegation is None and self.settings.budget_execution_enabled
+            and UUID(str(selection["gateway_id"])) in self.settings.budget_execution_target_ids):
+            now = datetime.now(UTC).date()
+            start = now.replace(day=1)
+            end = date(start.year + 1, 1, 1) if start.month == 12 else date(
+                start.year, start.month + 1, 1,
+            )
+            person = self.repository.person_budget_state(identity.effective_user_id, start, end)
+            if person and person.get("budget_mode") == "usd":
+                raise HTTPException(503, "Trusted USD budget execution is not ready")
+        headers = {
+            "Ocp-Apim-Subscription-Key": self.subscription_credential(selection),
+            "x-request-id": rid, "x-request-source": "aigateway-user",
+            "Content-Type": "application/json", "Accept-Encoding": "identity",
+        }
+        headers.update(client_telemetry_headers(telemetry or {}))
+        if delegation is None:
+            headers["x-turnstile-client-context"] = jwt.encode(
+                payload, self.signing_key, algorithm="HS256",
+            )
+        else:
+            if self.settings.budget_execution_enabled:
+                status = self._personal_execution_status(identity)
+                if (status is None or status.get("state") != "active"
+                    or status["policy_revision"] != status["policy_applied_revision"]):
+                    raise HTTPException(
+                        503, "Personal budget is still initializing or synchronizing",
+                    )
+            headers["x-turnstile-delegation-token"] = "Bearer " + delegation
+            for header, claim in (
+                ("x-user-id", "preferred_username"), ("x-user-name", "user_name"),
+                ("x-org-id", "organization_id"), ("x-org-name", "organization_name"),
+                ("x-department-id", "department_id"), ("x-department-name", "department_name"),
+            ):
+                headers[header] = str(payload[claim])
+        if any(any(ord(c) < 32 or ord(c) == 127 for c in value) for value in headers.values()):
+            raise HTTPException(409, "Invocation metadata contains invalid header characters")
+        if delegation is not None:
+            headers = encode_delegation_metadata(headers)
+        return httpx.Headers([
+            (key.encode("ascii"), value.encode("utf-8")) for key, value in headers.items()
+        ])
+
+    def _context_payload(
+        self, identity: SessionIdentity, selection: dict[str, Any], model: str, rid: str,
+    ) -> dict[str, Any]:
         if self.settings.directory_source == "database" and (
             not identity.governance_user_id or identity.directory_person_active is not True
         ):
@@ -767,4 +964,4 @@ class ClientUserService:
             "subscription": selection["apim_subscription_id"],
             "application_id": selection["application_id"],
         }
-        return jwt.encode(payload, self.signing_key, algorithm="HS256")
+        return payload

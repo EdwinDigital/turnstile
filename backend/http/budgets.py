@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
+from turnstile_core.config import get_settings
+from turnstile_core.domain.budget_delegation import BudgetCapabilities
 from turnstile_core.domain.ledger import (
     BudgetReservationResolution,
     BudgetReservationResolutionWrite,
@@ -22,7 +24,9 @@ from turnstile_core.domain.models import (
     TokenBudgetWrite,
 )
 
+from ..services.budget_readiness import budget_capabilities
 from ..services.budget_service import BudgetConflictError, BudgetNotFoundError
+from .dependencies import Repository
 from .service_dependencies import BudgetReservationServiceDependency, TokenBudgetServiceDependency
 from .session import (
     CurrentSession,
@@ -37,6 +41,16 @@ router = APIRouter(
         Depends(require_allowed_write_origin),
     ]
 )
+
+
+@router.get("/api/v1/budgets/capabilities", response_model=BudgetCapabilities)
+def get_budget_capabilities(
+    identity: CurrentSession, repository: Repository, response: Response,
+) -> BudgetCapabilities:
+    if identity.directory_department_ids == ():
+        raise HTTPException(status_code=403, detail="Budget scope access is not granted")
+    response.headers["Cache-Control"] = "no-store"
+    return budget_capabilities(repository, get_settings())
 
 
 @router.get("/api/v1/budgets/reservations", response_model=list[LedgerAttempt])

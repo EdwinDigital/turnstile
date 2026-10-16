@@ -19,6 +19,48 @@ from turnstile_core.domain.data_access import DataAccessScope
 from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
 
 
+def test_execution_period_uses_persistent_people_not_the_legacy_demo_directory(
+    directory_database: str,
+) -> None:
+    epoch = uuid4()
+    period = datetime.now(UTC).date().replace(day=1)
+    with psycopg.connect(directory_database) as db:
+        db.execute("UPDATE directory_control_state SET source='database', phase='active'")
+        db.execute(
+            "INSERT INTO directory_organization(id,code,name,updated_by) "
+            "VALUES('custom-org','custom-org','Custom Organization','test')",
+        )
+        for identity, status in (
+            ("custom@example.com", "active"), ("past@example.com", "archived"),
+        ):
+            db.execute(
+                "INSERT INTO directory_person(governance_user_id,display_name,status,"
+                "organization_id,updated_by) VALUES(%s,%s,%s,'custom-org','test')",
+                (identity, identity, status),
+            )
+        db.execute(
+            "INSERT INTO budget_execution_rollout(epoch,state,gateway_profile_ids,"
+            "admitted_after,legacy_fence_verified_at,scope_sync_enabled) "
+            "VALUES(%s,'active',%s,clock_timestamp(),clock_timestamp(),TRUE)",
+            (epoch, [uuid4()]),
+        )
+    repo = PostgreSqlOpsDbProxy(directory_database)
+    try:
+        repo.prepare_budget_execution_period(epoch, period, ["demo-only@example.com"])
+        with psycopg.connect(directory_database) as db:
+            people = {row[0] for row in db.execute(
+                "SELECT scope_id FROM budget_execution_scope WHERE scope_type='person'",
+            )}
+            assert "custom@example.com" in people
+            assert not people & {"demo-only@example.com", "past@example.com"}
+            # Preparation creates disabled scope seeds, not accounts, budgets, or consumption.
+            assert db.execute("SELECT count(*) FROM app_user").fetchone() == (0,)
+            assert db.execute("SELECT count(*) FROM token_budget").fetchone() == (0,)
+            assert db.execute("SELECT count(*) FROM token_usage").fetchone() == (0,)
+    finally:
+        repo.close()
+
+
 @pytest.mark.parametrize("canonical", [False, True])
 def test_exact_personal_attempts_are_included_in_department_people_without_rewriting_history(
     directory_database: str,

@@ -625,6 +625,12 @@ def _validate_budget_components(root: ET.Element, template: ET.Element) -> dict[
         "ledgerState", "applicationLedgerState", "applicationTokensPerMinute",
         "effectiveApplicationTpm",
     ):
+        if (variable_name == "applicationTokensPerMinute"
+            and root.find(".//set-variable[@name='telemetryUsageId']") is None
+            and template.find(".//set-variable[@name='telemetryUsageId']") is None
+            and not root.findall(f".//set-variable[@name='{variable_name}']")
+            and not template.findall(f".//set-variable[@name='{variable_name}']")):
+            continue
         actual = actual_parents[_variable(root, variable_name)]
         expected = expected_parents[_variable(template, variable_name)]
         if (

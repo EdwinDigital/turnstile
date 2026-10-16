@@ -338,6 +338,16 @@ function BudgetEditor({
   const inheritedMode = item.scope_type === "organization"
     ? item.budget_mode ?? "tokens" : parent?.budget_mode ?? item.budget_mode ?? "tokens"
   const [budgetMode, setBudgetMode] = useState<BudgetMode>(inheritedMode)
+  const capabilities = useQuery({
+    queryKey: ["apim", "budget-capabilities"],
+    queryFn: () => dataSource.budgetCapabilities(),
+    staleTime: 30_000,
+    retry: false,
+  })
+  const usdUnavailable = capabilities.data?.usd_available !== true
+  const capabilityMessage = capabilities.isPending ? "正在验证金额预算能力…"
+    : capabilities.isError ? "暂时无法验证金额预算能力，请刷新后重试。"
+      : capabilities.data?.message
   const switchingUnit = item.scope_type === "organization"
     && budgetLimit(item) != null && budgetMode !== (item.budget_mode ?? "tokens")
   const constraint = budgetConstraint(item, items, budgetMode)
@@ -365,6 +375,10 @@ function BudgetEditor({
   const [formError, setFormError] = useState<string | null>(null)
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (budgetMode === "usd" && usdUnavailable) {
+      setFormError(capabilityMessage ?? "金额预算尚未就绪。")
+      return
+    }
     const parsedLimit = Number(budgetMode === "usd" ? usdLimit : tokenLimit)
     const parsedThreshold = Number(warningThreshold)
     const validAmount = budgetMode === "usd"
@@ -408,14 +422,16 @@ function BudgetEditor({
           <div className="registry-field">
             <span className="registry-field-label">预算单位</span>
             <Select value={budgetMode} items={[{ value: "tokens", label: "Token" }, { value: "usd", label: "USD" }]} onValueChange={(value) => {
+              if (value === "usd" && usdUnavailable) return
               setBudgetMode(value as BudgetMode)
               setTokenLimit("")
               setUsdLimit("")
               setFormError(null)
             }} disabled={busy || item.scope_type !== "organization"}>
               <SelectTrigger aria-label="预算单位"><SelectValue /></SelectTrigger>
-              <SelectContent><SelectItem value="tokens">Token</SelectItem><SelectItem value="usd">USD</SelectItem></SelectContent>
+              <SelectContent><SelectItem value="tokens">Token</SelectItem><SelectItem value="usd" disabled={usdUnavailable}>USD</SelectItem></SelectContent>
             </Select>
+            {usdUnavailable && <small role="status">{capabilityMessage}</small>}
             {switchingUnit && <small>保存后下级额度按原分配比例调整，已用消费不清零；网关结清旧请求后生效。</small>}
           </div>
           <label className="registry-field">

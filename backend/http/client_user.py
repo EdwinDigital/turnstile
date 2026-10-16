@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from functools import lru_cache
+from http.cookiejar import Cookie, CookieJar, DefaultCookiePolicy
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -27,6 +28,21 @@ from .session import CurrentSession, Store, require_allowed_write_origin
 
 router = APIRouter(tags=["Client User"], dependencies=[Depends(require_allowed_write_origin)])
 PRIVATE = {"Cache-Control": "no-store", "Pragma": "no-cache", "X-Content-Type-Options": "nosniff"}
+
+
+class _NoUpstreamCookies(DefaultCookiePolicy):
+    def set_ok(self, cookie: Cookie, request: Any) -> bool:
+        return False
+
+
+def create_client_runtime_http(
+    *, transport: httpx.AsyncBaseTransport | None = None,
+) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(300, connect=15), follow_redirects=False,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        cookies=CookieJar(policy=_NoUpstreamCookies()), transport=transport,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -327,7 +343,7 @@ async def proxy(path: str, request: Request, service: Service) -> Response:
     except (ValueError, TypeError) as error:
         raise HTTPException(400, "A JSON body with an authorized model is required") from error
 
-    def prepare() -> tuple[str, dict[str, str], bytes]:
+    def prepare() -> tuple[str, httpx.Headers, bytes]:
         service.require_enabled()
         credential = bearer(request)
         image_key = credential.startswith("tsci_")
@@ -344,33 +360,31 @@ async def proxy(path: str, request: Request, service: Service) -> Response:
             raise HTTPException(403, "Model access or protocol is not granted")
         service.validate_model(identity, selected, model)
         rid = str(uuid4())
-        context = service.context(identity, selected, body["model"], rid)
-        key = service.subscription_credential(selected)
+        headers = service.invocation_headers(
+            identity, selected, body["model"], rid, telemetry=request.headers,
+        )
         suffix = (
             "v1/messages" if endpoints[path] == "anthropic_messages" else path.removeprefix("v1/")
         )
         # Never forward an Agent-supplied user identity, including nested Anthropic metadata.
         return (
             selected["base_url"] + "/" + suffix,
-            {
-                "Ocp-Apim-Subscription-Key": key,
-                "x-turnstile-client-context": context,
-                "x-request-id": rid,
-                "x-request-source": "aigateway-user",
-                "Content-Type": "application/json",
-                "Accept-Encoding": "identity",
-            },
+            headers,
             attributed_body(body, identity.effective_user_id, endpoints[path]),
         )
 
     url, headers, raw = await run_in_threadpool(prepare)
-    upstream = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=15), follow_redirects=False)
+    upstream = getattr(request.app.state, "client_runtime_http", None)
+    owns_client = upstream is None
+    if upstream is None:
+        upstream = create_client_runtime_http()
     try:
         response = await upstream.send(
             upstream.build_request("POST", url, headers=headers, content=raw), stream=True
         )
     except httpx.HTTPError as error:
-        await upstream.aclose()
+        if owns_client:
+            await upstream.aclose()
         raise HTTPException(502, "The model gateway is unavailable") from error
 
     async def chunks() -> Any:
@@ -379,7 +393,8 @@ async def proxy(path: str, request: Request, service: Service) -> Response:
                 yield chunk
         finally:
             await response.aclose()
-            await upstream.aclose()
+            if owns_client:
+                await upstream.aclose()
 
     response_headers = {
         **PRIVATE,

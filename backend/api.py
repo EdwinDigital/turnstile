@@ -25,7 +25,7 @@ from .http.authentication import get_entra_verifier as _get_entra_verifier
 from .http.authentication import router as authentication_router
 from .http.budgets import router as budgets_router
 from .http.client_downloads import router as client_downloads_router
-from .http.client_user import close_client_store
+from .http.client_user import close_client_store, create_client_runtime_http
 from .http.client_user import router as client_user_router
 from .http.dependencies import get_repository
 from .http.directory_sync import router as directory_sync_router
@@ -55,7 +55,7 @@ runtime_service = _runtime_service
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     # Fail fast on misconfiguration. Without this, a deployment missing
     # CREDENTIAL_ENCRYPTION_KEY starts healthy and only breaks on the first
     # request that touches the model registry, surfacing as an opaque 500.
@@ -72,10 +72,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if settings.directory_empty_initialization_allowed:
             store.initialize_empty()
         store.require_ready()
+    upstream = create_client_runtime_http()
+    application.state.client_runtime_http = upstream
     try:
         yield
     finally:
-        close_client_store()
+        try:
+            await upstream.aclose()
+        finally:
+            del application.state.client_runtime_http
+            close_client_store()
 
 
 app = FastAPI(title="Token Observability API", version="0.1.0", lifespan=lifespan)

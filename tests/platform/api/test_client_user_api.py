@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from io import BytesIO
 from typing import Any, cast
 from unittest.mock import Mock
+from urllib.parse import unquote
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -15,7 +17,11 @@ from cryptography.fernet import Fernet
 from pydantic import SecretStr
 
 from backend.api import app
-from backend.http.client_user import attributed_body, client_user_service
+from backend.http.client_user import (
+    attributed_body,
+    client_user_service,
+    create_client_runtime_http,
+)
 from backend.services.client_user import ClientUserService
 from backend.services.client_user_store import ClientUserStore
 from tests.backend.model_platform.test_application_access import _discovery
@@ -32,6 +38,34 @@ pytest_plugins = [
     "tests.backend.persistence.test_client_user_grants",
 ]
 USER = "00000000-0000-4000-8000-000000000001"
+
+
+def test_budget_capability_read_disables_uninstalled_usd_without_disabling_tokens() -> None:
+    response = client.get("/api/v1/budgets/capabilities")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["token_available"] is True
+    assert response.json()["usd_available"] is False
+    assert response.json()["reason_code"] == "execution_disabled"
+
+
+def test_shared_native_connection_pool_never_replays_upstream_cookies_or_user_headers() -> None:
+    requests: list[httpx.Request] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, headers={"set-cookie": "identity=private; Path=/"}, json={})
+
+    async def run() -> None:
+        connection = create_client_runtime_http(transport=httpx.MockTransport(upstream))
+        async with connection:
+            await connection.get("https://gateway.example.com/one", headers={"x-user-id": "one"})
+            await connection.get("https://gateway.example.com/two", headers={"x-user-id": "two"})
+            assert not list(connection.cookies.jar)
+
+    asyncio.run(run())
+    assert [request.headers["x-user-id"] for request in requests] == ["one", "two"]
+    assert all("cookie" not in request.headers for request in requests)
 
 
 @pytest.fixture
@@ -253,9 +287,13 @@ def test_download_is_authorized_and_refresh_keeps_binding(desktop: ClientUserSer
     assert client.post("/api/v1/client-runtime/refresh-models", headers=auth).status_code == 401
 
 
+@pytest.mark.parametrize("delegated", [False, True])
+@pytest.mark.parametrize("pooled", [False, True])
 def test_proxy_reuses_platform_subscription_and_verified_personal_identity(
     desktop: ClientUserService,
     monkeypatch: pytest.MonkeyPatch,
+    delegated: bool,
+    pooled: bool,
 ) -> None:
     response = client.post("/api/v1/client-downloads/magpie-user", json={"acknowledged": True})
     assert response.status_code == 200
@@ -266,12 +304,18 @@ def test_proxy_reuses_platform_subscription_and_verified_personal_identity(
     catalog.users.append(
         EnterpriseEntity(
             id="owner@contoso.com",
-            name="Edwin",
+            name="研发用户" if delegated else "Edwin",
             parent_id="department-platform",
         )
     )
     monkeypatch.setattr("backend.services.client_user.catalog_for", lambda *_: catalog)
+    if delegated:
+        monkeypatch.setattr(
+            "backend.services.client_user.prepare_budget_delegation",
+            lambda *a, **kw: "backend-token",
+        )
     sent: list[httpx.Request] = []
+    closed: list[bool] = []
 
     class Upstream:
         def __init__(self, **kwargs: Any) -> None:
@@ -289,15 +333,20 @@ def test_proxy_reuses_platform_subscription_and_verified_personal_identity(
             )
 
         async def aclose(self) -> None:
-            pass
+            closed.append(True)
 
     monkeypatch.setattr("backend.http.client_user.httpx.AsyncClient", Upstream)
+    if pooled:
+        monkeypatch.setattr(app.state, "client_runtime_http", Upstream(), raising=False)
     reply = client.post(
         "/api/v1/client-runtime/responses",
         headers={
             "Authorization": "Bearer " + cfg["authorization"]["access"],
             "Ocp-Apim-Subscription-Key": "forged-key",
             "x-user-id": "forged-user",
+            "x-agent-name": "WorkBuddy",
+            "x-magpie-session": "native-session",
+            "x-hive-turn-index": "2",
         },
         json={
             "model": model,
@@ -306,12 +355,23 @@ def test_proxy_reuses_platform_subscription_and_verified_personal_identity(
         },
     )
     assert reply.status_code == 200, reply.text
+    assert len(closed) == (0 if pooled else 1)
     assert len(sent) == 1
     outbound = sent[0]
     assert outbound.headers["ocp-apim-subscription-key"] == "platform-primary"
     assert "authorization" not in outbound.headers
-    assert "x-user-id" not in outbound.headers
+    assert outbound.headers["x-agent-name"] == "WorkBuddy"
+    assert outbound.headers["x-hive-run-id"] == "native-session"
+    assert outbound.headers["x-hive-turn-index"] == "2"
     assert json.loads(outbound.content)["user"] == "owner@contoso.com"
+    if delegated:
+        assert "x-turnstile-client-context" not in outbound.headers
+        assert outbound.headers["x-turnstile-delegation-token"] == "Bearer backend-token"
+        assert unquote(outbound.headers["x-user-id"]) == "owner@contoso.com"
+        assert outbound.headers["x-turnstile-metadata-encoding"] == "percent-v1"
+        assert unquote(outbound.headers["x-user-name"]) == "研发用户"
+        return
+    assert "x-user-id" not in outbound.headers
     claims = jwt.decode(
         outbound.headers["x-turnstile-client-context"],
         desktop.signing_key,

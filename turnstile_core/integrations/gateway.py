@@ -29,6 +29,7 @@ from ..domain.runtime_models import (
     ToolCall,
     ToolFunctionCall,
 )
+from .budget_delegation_headers import encode_delegation_metadata
 from .gateway_protocol import model_protocol_route
 
 if TYPE_CHECKING:
@@ -709,7 +710,7 @@ class OpenAICompatibleGatewayAdapter:
             raise GatewayInvocationError(
                 "Budget delegation requires a trusted APIM route", status_code=503,
             )
-        return {
+        headers = {
             **self._auth_headers(route),
             **({"x-turnstile-delegation-token": "Bearer " + delegation.get_secret_value()}
                if isinstance(delegation, SecretStr) else {}),
@@ -738,6 +739,12 @@ class OpenAICompatibleGatewayAdapter:
             "x-hive-model": str(route["model_key"]),
             "x-hive-runtime": str(route["runtime_name"]),
         }
+        if delegation is not None:
+            try:
+                return encode_delegation_metadata(headers)
+            except ValueError as error:
+                raise GatewayInvocationError(str(error), status_code=400) from None
+        return headers
 
     def invoke(self, request: ModelInvocationRequest, route: dict[str, Any]) -> GatewayResult:
         has_tool_context = bool(request.tools) or any(

@@ -376,6 +376,9 @@ export const dataSource = {
   createAnomalyRule: (value: AnomalyRuleWrite) => writeJson<AnomalyRule>("/api/v1/anomaly-rules", value),
   updateAnomalyRule: (id: string, value: AnomalyRuleWrite) => writeJson<AnomalyRule>(`/api/v1/anomaly-rules/${encodeURIComponent(id)}`, value, "PUT"),
   deleteAnomalyRule: (id: string) => request<void>(`/api/v1/anomaly-rules/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  budgetCapabilities: () => request<{
+    token_available: boolean; usd_available: boolean; reason_code: string; message: string
+  }>("/api/v1/budgets/capabilities"),
   budgets: (period: string, includeUsers = false) => request<TokenBudgetResponse>(
     `/api/v1/budgets?period=${encodeURIComponent(period)}${includeUsers ? "&include_users=true" : ""}`,
   ).then((response) => {

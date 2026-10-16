@@ -4,8 +4,63 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from backend.services.client_user_policy import CONTEXT_KEY_NAME, compose_client_user_policy
+from backend.services.client_user_policy import (
+    CONTEXT_KEY_NAME,
+    compose_client_user_policy,
+    strip_verified_client_user_policy,
+)
 from tests.support.paths import REPOSITORY_ROOT
+from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
+from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
+from turnstile_core.integrations.apim_policy_components import (
+    component_digest,
+    parse_policy,
+    validate_parent_policy,
+)
+
+
+@pytest.mark.parametrize("template", [
+    "foundry-finops-policy.xml", "foundry-finops-policy.schema1.xml",
+])
+def test_offline_client_policy_reversal_proves_the_entire_composition(template: str) -> None:
+    source = (REPOSITORY_ROOT / "infra/policies" / template).read_text()
+    installed = compose_client_user_policy(source)
+    restored = strip_verified_client_user_policy(installed)
+    assert component_digest(parse_policy(source)) == component_digest(parse_policy(restored))
+    validate_parent_policy(restored, source)
+
+
+@pytest.mark.parametrize("mutation", ["signing_key", "binding", "cleanup", "version"])
+def test_offline_client_policy_reversal_refuses_tampered_or_unknown_authentication(
+    mutation: str,
+) -> None:
+    source = (REPOSITORY_ROOT / "infra/policies/foundry-finops-policy.schema1.xml").read_text()
+    root = parse_policy(compose_client_user_policy(source))
+    if mutation == "signing_key":
+        node = root.find(".//validate-jwt/issuer-signing-keys/key")
+        assert node is not None
+        node.text = "other-secret"
+    elif mutation == "binding":
+        node = root.find(".//validate-jwt/../choose/when")
+        assert node is not None
+        node.set("condition", "@(false)")
+    elif mutation == "cleanup":
+        node = root.find("./inbound/set-header[@name='x-turnstile-client-context']")
+        assert node is not None
+        node.set("exists-action", "override")
+    else:
+        node = root.find(".//set-variable[@name='clientContextPolicyVersion']")
+        assert node is not None
+        node.set("value", "@(2)")
+    with pytest.raises(ValueError):
+        strip_verified_client_user_policy(ET.tostring(root, encoding="unicode"))
+
+
+def test_legacy_parent_can_be_verified_but_cannot_silently_enable_budget_execution() -> None:
+    source = (REPOSITORY_ROOT / "infra/policies/foundry-finops-policy.schema1.xml").read_text()
+    validate_parent_policy(source, source)
+    with pytest.raises(PolicyCompilationError, match="schema-two"):
+        compose_budget_execution_parent(source, source, enabled=True)
 
 
 def test_trusted_client_preserves_employee_and_subscription_branches() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
@@ -21,6 +22,8 @@ from backend.services.client_user_store import ClientUserStore
 from tests.backend.model_platform.test_application_access import _discovery
 from tests.platform.api.test_application_access_api import StubSubscriptionKeyClient
 from turnstile_core.config import Settings
+from turnstile_core.domain.budget_counting import BudgetPublicationContracts, ModelCountContract
+from turnstile_core.domain.models import ModelPrice
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.application_access import ApplicationAccessService
 
@@ -113,7 +116,7 @@ def test_personal_package_has_bound_authorization_and_distinct_identity(name: st
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
         package = json.loads(archive.read(f"{archive_root}/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.4.6"
+        assert package["version"] == "0.5.0"
         assert f"{archive_root}/native-images.mjs" in archive.namelist()
         image_source = archive.read(f"{archive_root}/images.mjs").decode()
         assert "isAbsolute(entry.spec)" in image_source
@@ -261,6 +264,90 @@ def test_usage_without_personal_budget_does_not_fall_back_to_an_application(
     assert result["balance"] == "未配置额度"
     assert result["signIn"] == "kept"
     application.assert_not_called()
+
+
+def test_usd_personal_usage_retains_exact_costs_and_counts_reserved_amounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repo, owner = client_service()
+    monkeypatch.setattr(repo, "person_budget_state", Mock(return_value={
+        "budget_mode": "usd", "token_limit": None, "used_tokens": 0, "mode": "block",
+    }))
+    monkeypatch.setattr(service, "_execution_budget", Mock(return_value={
+        "budget_mode": "usd", "ledger_status": "current", "policy_pending": False,
+        "usd_limit": Decimal("10"), "used_usd": Decimal("0.12345678901234"),
+        "pending_reserved_usd": Decimal("0.2"), "finalized_upper_bound_usd": Decimal("0.1"),
+        "enforce": True, "ledger_version": 3,
+    }))
+    result = service.usage({"id": uuid4()}, owner)
+    assert result["quota_contract_version"] == 2
+    assert result["budget"]["confirmed"] == "0.12345678901234"
+    assert result["budget"]["available"] == "9.57654321098766"
+    assert result["windows"][0]["name"] == "个人月度 USD"
+    assert result["windows"][0]["unit"] == "USD"
+    assert result["windows"][0]["amount"] == pytest.approx(0.42345678901234)
+    assert result["windows"][0]["aside"] is False
+
+
+@pytest.mark.parametrize("view", [None, {"ledger_status": "unavailable"}, {
+    "ledger_status": "current", "budget_mode": "usd", "policy_pending": True,
+}])
+def test_usd_usage_never_invents_zero_for_an_unverified_or_pending_scope(
+    monkeypatch: pytest.MonkeyPatch, view: Any,
+) -> None:
+    service, repo, owner = client_service()
+    monkeypatch.setattr(repo, "person_budget_state", Mock(return_value={
+        "budget_mode": "usd", "token_limit": None, "used_tokens": 0, "mode": "block",
+    }))
+    monkeypatch.setattr(service, "_execution_budget", Mock(return_value=view))
+    with pytest.raises(HTTPException) as error:
+        service.usage({"id": uuid4()}, owner)
+    assert error.value.status_code == 503
+
+
+def test_personal_usd_catalog_requires_verified_operation_model_identity_and_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repo, owner = client_service()
+    status = {"budget_mode": "usd", "policy_revision": 1}
+    monkeypatch.setattr(service, "_personal_execution_status", lambda *_: status)
+    models = repo.models
+    publication = repo.gateway_publications[0]
+    contracts = {
+        m["model_key"]: ModelCountContract(
+            model_id=m["id"], algorithm="request_total_ceiling_v1", output_field="none",
+            request_token_ceiling=100000, evidence_sha256="a" * 64,
+            verified_at=datetime.now(UTC),
+        ) for m in models
+    }
+    snapshot = BudgetPublicationContracts(
+        publication_id=publication["id"], gateway_profile_id=repo.gateways[0]["id"], epoch=uuid4(),
+        release_spec_sha256="b" * 64, binding_sha256={}, model_contracts=contracts,
+    )
+    publication["resource_manifest"] = {"budget_contracts": snapshot.model_dump(mode="json")}
+    selected = service.default_subscription(owner)
+    assert selected["models"]
+    first = selected["models"][0]["id"]
+    raw_contracts = publication["resource_manifest"]["budget_contracts"]["model_contracts"]
+    for contract in raw_contracts.values():
+        contract["model_id"] = str(uuid4())
+    # A new policy revision invalidates the catalogue cache; old assignments cannot leak through.
+    status["policy_revision"] = 2
+    assert all(not item["models"] for item in service.subscriptions(owner))
+    matching = next(m for m in models if m["model_key"] == first)
+    raw = raw_contracts[first]
+    raw.update(model_id=str(matching["id"]), algorithm="legacy_request_estimate_v1",
+               output_field="max_tokens", request_token_ceiling=None, output_estimate=4096)
+    status["policy_revision"] = 3
+    assert all(not item["models"] for item in service.subscriptions(owner))
+    raw.update(algorithm="request_total_ceiling_v1", output_field="none",
+               request_token_ceiling=100000, output_estimate=None)
+    with monkeypatch.context() as patch:
+        patch.setattr(ModelPrice, "from_registry", lambda *_: None)
+        status["policy_revision"] = 4
+        assert all(not item["models"] for item in service.subscriptions(owner))
+    status.update(budget_mode="tokens", policy_revision=5)
+    assert first in {m["id"] for m in service.default_subscription(owner)["models"]}
 
 
 def test_personal_usage_keeps_the_sixty_second_cache(monkeypatch: pytest.MonkeyPatch) -> None:

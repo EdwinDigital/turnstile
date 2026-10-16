@@ -5,11 +5,48 @@ from __future__ import annotations
 import copy
 from xml.etree import ElementTree as ET
 
-from turnstile_core.integrations.apim_policy_components import parse_policy, serialize_policy
+from turnstile_core.integrations.apim_policy_components import (
+    component_digest,
+    parse_policy,
+    serialize_policy,
+)
 
 from .client_user import CLIENT_AUDIENCE, CLIENT_ISSUER
 
 CONTEXT_KEY_NAME = "turnstile-client-context-key"
+
+
+def strip_verified_client_user_policy(source: str) -> str:
+    """Reverse only a complete v1 composition, for reviewed offline upgrades."""
+    root = parse_policy(source)
+    inbound = root.find("inbound")
+    if inbound is None:
+        raise ValueError("APIM inbound policy is missing")
+    markers = root.findall(".//set-variable[@name='clientContextPolicyVersion']")
+    validators = root.findall(".//validate-jwt[@header-name='x-turnstile-client-context']")
+    if not markers and not validators:
+        return source
+    if (len(markers) != 1 or markers[0] not in inbound or markers[0].get("value") != "@(1)"
+        or len(validators) != 1):
+        raise ValueError("Unrecognized client context policy")
+    parents = {child: parent for parent in root.iter() for child in parent}
+    branch = parents[validators[0]]
+    choice = parents.get(branch)
+    if branch.tag != "when" or choice is None or choice not in inbound:
+        raise ValueError("Client context authentication is outside its reviewed boundary")
+    choice.remove(branch)
+    inbound.remove(markers[0])
+    removals = inbound.findall("set-header[@name='x-turnstile-client-context']")
+    if len(removals) != 1:
+        raise ValueError("Client context header cleanup is missing or ambiguous")
+    inbound.remove(removals[0])
+    base = serialize_policy(root)
+    restored = parse_policy(compose_client_user_policy(base))
+    if component_digest(restored, normalize_text_defaults=False) != component_digest(
+        parse_policy(source), normalize_text_defaults=False,
+    ):
+        raise ValueError("Client context policy differs from the complete reviewed v1 contract")
+    return base
 
 
 def _header(parent: ET.Element, name: str, value: str) -> None:
