@@ -249,14 +249,16 @@ class AssistantService:
     def _eligible_models(self) -> list[ManagedModel]:
         return [model for model, _ in self._eligible_model_routes()]
 
-    @staticmethod
     def _resolve_selection(
+        self,
         candidates: list[tuple[ManagedModel, dict[str, Any]]],
         stored: dict[str, Any],
     ) -> tuple[ManagedModel | None, dict[str, Any] | None, bool]:
         requested = InvocationApiFormat(stored["api_format"]) if stored.get("api_format") else None
         configured = stored.get("model_id")
         pinned = next((item for item in candidates if item[0].id == configured), None)
+        if self._selected_candidate([item[0] for item in candidates], configured) is None:
+            return None, None, requested is None
         compatible = [
             item
             for item in candidates
@@ -301,6 +303,13 @@ class AssistantService:
         runtime_id, model_id, model_key, _ = self._select_invocation()
         return runtime_id, model_id, model_key
 
+    def _selected_candidate(self, candidates: list[Any], configured: UUID | None) -> Any:
+        if configured is not None:
+            return next((model for model in candidates if model.id == configured), None)
+        if any(model.is_default and not model.enabled for model in self._runtime.registry().models):
+            return None
+        return candidates[0] if candidates else None
+
     # -- settings --------------------------------------------------------------
 
     def settings(self) -> AssistantSettings:
@@ -317,7 +326,7 @@ class AssistantService:
             effective_model_name=effective.display_name if effective else None,
             # True when nothing is pinned, because automatic selection cannot be
             # unavailable -- the empty-registry case is reported by a null effective model.
-            model_available=configured is None or pinned is not None,
+            model_available=effective is not None and (configured is None or pinned is not None),
             api_available=api_available,
             effective_api_format=route["runtime_config"]["api_format"] if route else None,
             effective_api_path=route["runtime_config"]["path"] if route else None,
@@ -352,10 +361,12 @@ class AssistantService:
         if write.model_id is not None:
             candidates = [item for item in candidates if item[0].id == write.model_id]
         if write.model_id is not None and not candidates:
-            raise HTTPException(
-                status_code=409,
-                detail="That model is not enabled, or its runtime cannot carry tool calls",
-            )
+            stored = self._repository.assistant_settings()
+            if stored.get("model_id") != write.model_id or "api_format" in write.model_fields_set:
+                raise HTTPException(
+                    status_code=409,
+                    detail="That model is not enabled, or its runtime cannot carry tool calls",
+                )
         requested = write.api_format
         if "api_format" not in write.model_fields_set:
             stored = self._repository.assistant_settings()
@@ -427,7 +438,6 @@ class AssistantService:
                     max_output_tokens=1200,
                     api_format=api_format,
                 ),
-                enforce_user_model_access=False,
             )
             if response.usage is not None:
                 total_tokens += (
@@ -646,7 +656,6 @@ class AssistantService:
                     ),
                     api_format=api_format,
                 ),
-                enforce_user_model_access=False,
             )
         except Exception:  # noqa: BLE001 - a name is worth less than the conversation
             logger.exception("Failed to summarise conversation title")

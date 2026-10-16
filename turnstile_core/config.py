@@ -4,12 +4,48 @@ import hashlib
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .domain.application_access import MAX_TOKENS_PER_MINUTE
+from .domain.budget_counting import (
+    ApprovedModelCountContract,
+    BudgetOperation,
+    ModelRequestPolicyBinding,
+    ProtocolRequestPolicy,
+)
+from .domain.budget_delegation import BudgetDelegationTarget, BudgetDelegationTrust
 from .domain.image_profiles import ImageGenerationLimits
+
+
+class ApimUsageObserverConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: HttpUrl
+    key_named_value: str = Field(
+        min_length=1, max_length=127, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+    )
+
+    @model_validator(mode="after")
+    def require_secure_endpoint(self) -> ApimUsageObserverConfig:
+        if (
+            self.url.scheme != "https" or self.url.username is not None
+            or self.url.password is not None or self.url.query is not None
+            or self.url.fragment is not None or self.url.path not in {None, "", "/"}
+        ):
+            raise ValueError("APIM usage observer must be a credential-free HTTPS origin")
+        return self
 
 
 def core_runtime_digest(root: Path | None = None) -> str:
@@ -44,13 +80,27 @@ class Settings(BaseSettings):
     # Budget ledger projected into Table Storage so the APIM admission check never
     # depends on this application.
     ledger_sync_enabled: bool = False
+    budget_execution_enabled: bool = False
+    budget_execution_target_ids: list[UUID] = Field(default_factory=list)
+    budget_request_policies: dict[UUID, dict[BudgetOperation, ProtocolRequestPolicy]] = Field(
+        default_factory=dict,
+    )
+    budget_model_request_policies: dict[UUID, dict[UUID, ModelRequestPolicyBinding]] = Field(
+        default_factory=dict,
+    )
+    budget_approved_model_contracts: dict[UUID, dict[UUID, ApprovedModelCountContract]] = Field(
+        default_factory=dict,
+    )
+    budget_delegation_targets: dict[UUID, BudgetDelegationTarget] = Field(default_factory=dict)
+    budget_delegation_trust: dict[UUID, BudgetDelegationTrust] = Field(default_factory=dict)
+    budget_settlement_enabled: bool = False
+    budget_reservation_resolution_enabled: bool = False
     ledger_table_endpoint: str | None = None
     ledger_table_name: str = "TurnstileLedger"
     ledger_reservation_recovery_lag_minutes: int = Field(default=10, ge=6, le=120)
     ledger_reservation_finalization_lag_hours: int = Field(default=24, ge=1, le=168)
     management_api_key: SecretStr | None = None
     production: bool = False
-    image_generation_enabled: bool = False
     image_generation_defaults: ImageGenerationLimits = Field(
         default_factory=lambda: ImageGenerationLimits(
             max_request_bytes=24576,
@@ -61,22 +111,24 @@ class Settings(BaseSettings):
     )
     bootstrap_owner_email: str = ""
     bootstrap_owner_password_hash: SecretStr | None = None
-    directory_source: Literal["legacy", "database"] = "legacy"
-    directory_empty_initialization_allowed: bool = False
-    organization_management_enabled: bool = False
-    directory_sync_enabled: bool = False
-    directory_identity_projection_enabled: bool = False
-    directory_protocol_version: int = Field(default=1, ge=1, le=1)
-    directory_expected_core_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    directory_managed_identity_tenant_id: str | None = None
-    directory_deployment_cloud: Literal["public", "usgov", "china"] = "public"
-    entra_allowed_tenant_ids: list[str] = Field(default_factory=list)
 
     # --- APIM control plane --------------------------------------------------------
     # Disabled unless an operator explicitly provisions the isolated publisher Function
     # and grants its managed identity narrowly scoped APIM rights. None of these settings
     # is read on the inference path.
     control_plane_enabled: bool = False
+    apim_target_registry_enabled: bool = False
+    apim_legacy_target_compatibility_enabled: bool = False
+    apim_gateway_profile_id: UUID | None = None
+    self_hosted_gateway_enabled: bool = False
+    self_hosted_gateway_provisioning_enabled: bool = False
+    self_hosted_gateway_image: str = Field(
+        default="mcr.microsoft.com/azure-api-management/gateway:2.12.1",
+        pattern=(r"^mcr\.microsoft\.com/azure-api-management/gateway"
+                 r"(?::[0-9]+\.[0-9]+\.[0-9]+|@sha256:[a-f0-9]{64})$"),
+    )
+    self_hosted_gateway_trusted_endpoints: dict[UUID, HttpUrl] = Field(default_factory=dict)
+    multi_apim_target_rollout_enabled: bool = False
     gateway_publication_worker_enabled: bool = False
     gateway_release_worker_enabled: bool = False
     gateway_application_provisioning_enabled: bool = False
@@ -99,21 +151,43 @@ class Settings(BaseSettings):
     apim_probe_subscription_key: SecretStr | None = None
     apim_probe_subscription_id: str = "turnstile-publisher-probe"
     apim_regression_model_key: str = ""
+    controlled_gateway_bootstrap_api_resources: tuple[str, ...] = Field(default=(), max_length=8)
     apim_usage_observer_url: str | None = None
     apim_usage_observer_key_named_value: str | None = None
+    apim_usage_observers: dict[UUID, ApimUsageObserverConfig] = Field(default_factory=dict)
     control_plane_lease_seconds: int = Field(default=180, ge=30, le=900)
+    control_plane_parent_policy_path: Path = Path("policies/foundry-finops-policy.xml")
     # A normal publication advances through six leased steps. Thirty leaves propagation
     # headroom while still bounding a pathological crash loop.
     control_plane_max_attempts: int = Field(default=30, ge=6, le=60)
+    control_plane_probe_request_limits: dict[
+        UUID, Annotated[int, Field(ge=1, le=10_000, strict=True)]
+    ] = Field(default_factory=dict)
     gateway_release_retention_count: int = Field(default=20, ge=2, le=1000)
     gateway_release_retention_days: int = Field(default=180, ge=1, le=3650)
     gateway_failed_release_retention_days: int = Field(default=30, ge=1, le=3650)
     gateway_release_protected_labels: list[str] = Field(
         default_factory=lambda: ["milestone", "rollback"]
     )
-    gateway_application_default_monthly_token_limit: int = Field(default=100_000, ge=1)
-    gateway_application_default_tokens_per_minute: int = Field(default=100_000, ge=1)
-    apim_subscription_agent_map: dict[str, dict[str, str]] = Field(default_factory=dict)
+    gateway_application_default_monthly_token_limit: int = Field(
+        default=100_000, ge=1
+    )
+    gateway_application_default_tokens_per_minute: int = Field(
+        default=100_000, ge=1, le=MAX_TOKENS_PER_MINUTE,
+    )
+
+    @field_validator("gateway_application_default_tokens_per_minute", mode="before")
+    @classmethod
+    def validate_application_tpm_default(cls, value: object) -> object:
+        if type(value) is int or (
+            isinstance(value, str) and value.isascii() and value.isdecimal()
+        ):
+            return value
+        raise ValueError("Application TPM must be a positive integer")
+
+    apim_subscription_agent_map: dict[str, dict[str, str]] = Field(
+        default_factory=dict
+    )
 
     # --- Sign-in -------------------------------------------------------------------
     # The client this deployment uses for Microsoft sign-in. A public identifier, not a
@@ -130,7 +204,9 @@ class Settings(BaseSettings):
     # Which mail domains may sign in with Microsoft. Empty means "any domain in the
     # tenant", which is a much weaker rule than it looks -- the tenant can invite guests --
     # so it is deliberately not the default.
-    entra_allowed_email_domains: list[str] = Field(default_factory=list)
+    entra_allowed_email_domains: list[str] = Field(
+        default_factory=list
+    )
     # Application sessions are role-bound because an Owner can change budgets, model
     # access and gateway credentials while a Member is primarily a reader/caller.
     member_session_ttl_hours: int = Field(default=24, ge=1, le=168)
@@ -189,6 +265,82 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def require_target_registry_for_extended_gateway_features(self) -> Settings:
+        if self.self_hosted_gateway_provisioning_enabled and not self.self_hosted_gateway_enabled:
+            raise ValueError("Gateway creation requires Self-hosted Gateway support")
+        if not self.apim_target_registry_enabled and (
+            self.self_hosted_gateway_enabled or self.multi_apim_target_rollout_enabled
+            or self.self_hosted_gateway_trusted_endpoints or self.apim_usage_observers
+        ):
+            raise ValueError("Extended Gateway features require the APIM target registry")
+        if (self.apim_target_registry_enabled and self.apim_gateway_profile_id is None
+                and (self.apim_usage_observer_url or self.apim_legacy_target_compatibility_enabled)
+                and self.legacy_apim_identity is None):
+            raise ValueError("Legacy APIM configuration requires an explicit target identity")
+        for endpoint in self.self_hosted_gateway_trusted_endpoints.values():
+            if (endpoint.scheme != "https" or endpoint.username is not None
+                    or endpoint.password is not None or endpoint.query is not None
+                    or endpoint.fragment is not None):
+                raise ValueError("Trusted Gateway endpoints must be credential-free HTTPS URLs")
+        return self
+
+    @property
+    def legacy_apim_identity(self) -> tuple[str, str, str, str] | None:
+        values = tuple((value or "").strip().casefold() for value in (
+            self.apim_resource_group, self.apim_service_name, self.apim_api_id,
+        ))
+        if not all(values):
+            return None
+        try:
+            subscription_id = str(UUID((self.azure_subscription_id or "").strip()))
+        except ValueError:
+            return None
+        return subscription_id, values[0], values[1], values[2]
+
+    def usage_observer_for(self, gateway_profile_id: UUID) -> tuple[str | None, str | None]:
+        observer = self.apim_usage_observers.get(gateway_profile_id)
+        if (observer is None and gateway_profile_id == self.apim_gateway_profile_id
+                and (self.apim_usage_observer_url or "").strip()):
+            observer = ApimUsageObserverConfig.model_validate({
+                "url": self.apim_usage_observer_url,
+                "key_named_value": self.apim_usage_observer_key_named_value,
+            })
+        if observer is None:
+            return None, None
+        return str(observer.url).rstrip("/"), observer.key_named_value
+
+    @model_validator(mode="after")
+    def require_budget_execution_dependencies(self) -> Settings:
+        selected = set(self.budget_execution_target_ids)
+        if not self.budget_delegation_targets.keys() <= selected:
+            raise ValueError("Delegation targets must be explicitly enabled execution targets")
+        if not self.budget_delegation_trust.keys() <= selected:
+            raise ValueError("Delegation trust must be bound to enabled execution targets")
+        if selected and not self.budget_execution_enabled:
+            raise ValueError("Budget execution targets require the execution reader gate")
+        if self.budget_request_policies and not self.budget_execution_enabled:
+            raise ValueError("Budget request policies require the execution reader gate")
+        if self.budget_model_request_policies and not self.budget_execution_enabled:
+            raise ValueError("Model request policies require the execution reader gate")
+        if self.budget_approved_model_contracts and not self.budget_execution_enabled:
+            raise ValueError("Approved model contracts require the execution reader gate")
+        if any(
+            model_id != approved.contract.model_id
+            for contracts in self.budget_approved_model_contracts.values()
+            for model_id, approved in contracts.items()
+        ):
+            raise ValueError("Approved model contract identity does not match its key")
+        if (selected and self.apim_legacy_target_compatibility_enabled
+            and self.apim_gateway_profile_id in selected):
+            raise ValueError("Budget execution requires a separately adopted schema-two target")
+        if (self.budget_settlement_enabled or self.budget_reservation_resolution_enabled) and (
+            not self.budget_execution_enabled or not (self.ledger_table_endpoint or "").strip()
+            or self.data_backend != "postgresql"
+        ):
+            raise ValueError("Budget settlement requires enabled execution, PostgreSQL and Table")
+        return self
+
     @field_validator("delegated_invocation_tester_ids")
     @classmethod
     def normalize_delegated_invocation_tester_ids(cls, values: list[str]) -> list[str]:
@@ -199,13 +351,12 @@ class Settings(BaseSettings):
             raise ValueError("delegated invocation tester IDs must be unique")
         return normalized
 
-    @field_validator("directory_expected_core_digest", mode="before")
-    @classmethod
-    def empty_directory_digest(cls, value: object) -> object:
-        return None if value == "" else value
-
     def session_ttl_hours_for(self, role: str) -> int:
-        return self.owner_session_ttl_hours if role == "owner" else self.member_session_ttl_hours
+        return (
+            self.owner_session_ttl_hours
+            if role == "owner"
+            else self.member_session_ttl_hours
+        )
 
     @property
     def model_coefficients(self) -> dict[str, float]:
@@ -213,6 +364,33 @@ class Settings(BaseSettings):
         if not isinstance(values, dict):
             raise ValueError("MODEL_COEFFICIENTS_JSON must be an object")
         return {str(key): float(value) for key, value in values.items()}
+
+    image_generation_enabled: bool = False
+
+    directory_source: Literal["legacy", "database"] = "legacy"
+
+    directory_empty_initialization_allowed: bool = False
+
+    organization_management_enabled: bool = False
+
+    directory_sync_enabled: bool = False
+
+    directory_identity_projection_enabled: bool = False
+
+    directory_protocol_version: int = Field(default=1, ge=1, le=1)
+
+    directory_expected_core_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    directory_managed_identity_tenant_id: str | None = None
+
+    directory_deployment_cloud: Literal["public", "usgov", "china"] = "public"
+
+    entra_allowed_tenant_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("directory_expected_core_digest", mode="before")
+    @classmethod
+    def empty_directory_digest(cls, value: object) -> object:
+        return None if value == "" else value
 
 
 @lru_cache

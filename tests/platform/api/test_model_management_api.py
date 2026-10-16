@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import cast
+from unittest.mock import Mock, patch
 from uuid import UUID
 
 import pytest
@@ -18,19 +20,29 @@ from backend.api import (
 )
 from backend.http.dependencies import get_repository
 from backend.http.publication_auth import require_publication_owner
+from backend.http.service_dependencies import model_availability_service
 from backend.http.session import SessionIdentity, require_authenticated_session
 from backend.services.runtime_service import ModelRuntimeService
 from tests.backend.model_platform.control_plane_support import (
     activate_publication,
     transition_publication,
 )
+from tests.backend.model_platform.test_gateway_targets import TARGET, target
 from tests.backend.model_platform.test_image_publication import image_publication
 from turnstile_core.config import Settings
 from turnstile_core.domain.control_plane import GatewayPublication, GatewayPublicationCreate
+from turnstile_core.domain.gateway_targets import SelfHostedGatewayBootstrap
+from turnstile_core.domain.model_availability import (
+    ModelAvailabilityConflict,
+    ModelAvailabilityOperation,
+    ModelAvailabilityReadback,
+    ModelAvailabilityUnavailable,
+)
 from turnstile_core.integrations.apim_control_plane import ApimPolicyCompiler
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.security import CredentialCipher
 from turnstile_core.services.control_plane import GatewayControlPlaneService
+from turnstile_core.services.model_availability import ModelAvailabilityService
 
 client = TestClient(app)
 
@@ -50,7 +62,8 @@ def publication_api() -> Iterator[InMemoryRepository]:
         repository,
         CredentialCipher(Fernet.generate_key()),
         apim_principal_id="39deeba0-9799-4806-96c4-2f65eb0f22d1",
-    )
+        image_generation_defaults=Settings(image_generation_enabled=True).image_generation_defaults,
+    image_generation_enabled=True)
     app.dependency_overrides[get_repository] = lambda: repository
     app.dependency_overrides[control_plane_service] = lambda: service
     app.dependency_overrides[require_authenticated_session] = lambda: owner
@@ -62,13 +75,244 @@ def publication_api() -> Iterator[InMemoryRepository]:
     app.dependency_overrides.pop(require_publication_owner, None)
 
 
+def test_availability_api_reports_uninstalled_storage_without_mutating_models(
+    publication_api: InMemoryRepository,
+) -> None:
+    before = deepcopy(publication_api.models)
+    response = client.get("/api/v1/model-management/model-availability")
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "model_availability_unavailable"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert publication_api.models == before
+
+
+def test_availability_api_returns_versioned_operation_without_claiming_effective_success(
+    publication_api: InMemoryRepository,
+) -> None:
+    model_id, operation_id, intent_id = UUID(int=20), UUID(int=21), UUID(int=22)
+    now = datetime.now(UTC)
+    operation = ModelAvailabilityOperation(
+        id=operation_id, model_id=model_id, idempotency_key=intent_id, expected_revision=1,
+        desired_revision=2, desired_enabled=False, created_by="owner@contoso.com",
+        created_at=now, updated_at=now, status="pending",
+    )
+    state = ModelAvailabilityReadback(
+        model_id=model_id, desired_enabled=False, desired_revision=2, status="pending",
+        effective_enabled=True, effective_revision=1, verified_at=now, operation=operation,
+    )
+    service = Mock(spec=ModelAvailabilityService)
+    service.inventory.return_value = [state]
+    service.read.return_value = state
+    service.change.return_value = operation
+    service.operation.return_value = operation
+    service.retry.return_value = operation
+    path = f"/api/v1/model-management/models/{model_id}/availability"
+    operations = f"/api/v1/model-management/model-availability/operations/{operation_id}"
+    payload = {"enabled": False, "expected_revision": 1, "idempotency_key": str(intent_id)}
+    with patch.dict(app.dependency_overrides, {model_availability_service: lambda: service}):
+        listed = client.get("/api/v1/model-management/model-availability")
+        readback = client.get(path)
+        accepted = client.put(path, json=payload)
+        progress = client.get(operations)
+        retry = client.post(operations + "/retry", json={"expected_revision": 2})
+    assert listed.json()["items"][0]["status"] == "pending"
+    assert readback.json()["effective_enabled"] is True
+    assert readback.json()["desired_enabled"] is False
+    for response in (accepted, retry):
+        assert response.status_code == 202
+        assert response.headers["Location"] == operations
+        assert response.json()["status_url"] == operations
+        assert response.json()["operation"]["status"] == "pending"
+    for response in (listed, readback, accepted, progress, retry):
+        assert response.headers["Cache-Control"] == "no-store"
+    service.change.assert_called_once()
+    assert service.change.call_args.args[0] == model_id
+    assert service.change.call_args.args[1].idempotency_key == intent_id
+    assert service.change.call_args.args[2] == "owner@contoso.com"
+    service.retry.assert_called_once_with(operation_id, 2, "owner@contoso.com")
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "model-availability"),
+    ("GET", f"models/{UUID(int=20)}/availability"),
+    ("PUT", f"models/{UUID(int=20)}/availability"),
+    ("GET", f"model-availability/operations/{UUID(int=21)}"),
+    ("POST", f"model-availability/operations/{UUID(int=21)}/retry"),
+])
+@pytest.mark.parametrize("access", ["anonymous", "member"])
+def test_availability_endpoints_require_owner_before_any_command(
+    publication_api: InMemoryRepository, method: str, path: str, access: str,
+) -> None:
+    owner = app.dependency_overrides[require_authenticated_session]()
+
+    def identity() -> SessionIdentity:
+        if access == "anonymous":
+            raise HTTPException(status_code=401, detail="Sign in required")
+        return SessionIdentity(id=owner.id, email=owner.email, name=owner.name, role="member",
+                               method=owner.method, session_expires_at=owner.session_expires_at)
+
+    service = Mock(spec=ModelAvailabilityService)
+    with patch.dict(app.dependency_overrides, {
+        require_authenticated_session: identity, model_availability_service: lambda: service,
+    }):
+        response = client.request(method, "/api/v1/model-management/" + path, json={})
+    assert response.status_code == (401 if access == "anonymous" else 403)
+    assert service.method_calls == []
+
+
+@pytest.mark.parametrize("method,path", [
+    ("PUT", f"models/{UUID(int=20)}/availability"),
+    ("POST", f"model-availability/operations/{UUID(int=21)}/retry"),
+])
+def test_availability_commands_reject_cross_origin(
+    publication_api: InMemoryRepository, method: str, path: str,
+) -> None:
+    response = client.request(method, "/api/v1/model-management/" + path,
+                              json={}, headers={"Origin": "https://foreign.example.test"})
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("change", [
+    {"enabled": "unit-secret"}, {"enabled": 1}, {"expected_revision": 1.5},
+    {"expected_revision": True}, {"expected_revision": 2147483648},
+    {"idempotency_key": "not-an-id"}, {"unexpected": "unit-secret"},
+])
+def test_availability_commands_reject_coercion_and_redact_validation_input(
+    publication_api: InMemoryRepository, change: dict[str, object],
+) -> None:
+    response = client.put(f"/api/v1/model-management/models/{UUID(int=20)}/availability", json={
+        "enabled": False, "expected_revision": 1, "idempotency_key": str(UUID(int=22)), **change,
+    })
+    assert response.status_code == 422
+    assert "unit-secret" not in response.text
+    assert all("input" not in issue for issue in response.json()["detail"])
+
+
+@pytest.mark.parametrize("error,status,code", [
+    (ModelAvailabilityConflict("Version changed"), 409, "model_availability_conflict"),
+    (ModelAvailabilityUnavailable("unit-secret"), 503, "model_availability_unavailable"),
+])
+def test_availability_command_failures_never_report_accepted_success(
+    publication_api: InMemoryRepository, error: Exception, status: int, code: str,
+) -> None:
+    service = Mock(spec=ModelAvailabilityService)
+    service.change.side_effect = error
+    with patch.dict(app.dependency_overrides, {model_availability_service: lambda: service}):
+        response = client.put(f"/api/v1/model-management/models/{UUID(int=20)}/availability", json={
+            "enabled": False, "expected_revision": 1, "idempotency_key": str(UUID(int=22)),
+        })
+    assert response.status_code == status and response.json()["detail"]["code"] == code
+    assert "unit-secret" not in response.text
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_gateway_creation_api_generates_identity_and_retries_the_same_request(
+    publication_api: InMemoryRepository,
+) -> None:
+    publication_api.upsert_apim_target(target(
+        capabilities={"self_hosted_gateway": "supported"}, drift_state="in_sync",
+        last_inventory_sync_at=datetime.now(UTC),
+    ))
+    service = GatewayControlPlaneService(
+        publication_api, self_hosted_gateway_provisioning_enabled=True,
+    image_generation_enabled=True)
+    app.dependency_overrides[control_plane_service] = lambda: service
+    path = f"/api/v1/model-management/apim-targets/{TARGET}/self-hosted-gateway-provisions"
+    payload = {"display_name": "New Docker gateway", "endpoint_url": "https://edge.example.test/unit/llm",
+               "endpoint_control_confirmed": True}
+    headers = {"Idempotency-Key": str(UUID(int=101))}
+    assert client.post(path, json=payload).status_code == 422
+    created = client.post(path, json=payload, headers=headers)
+    assert created.status_code == 202
+    operation = created.json()["operation"]
+    assert operation["semantic_preview"]["native_gateway_id"].startswith("turnstile-")
+    repeated = client.post(path, json=payload, headers=headers)
+    assert repeated.json()["operation"]["id"] == operation["id"]
+    assert len(publication_api.gateway_release_operations) == 1
+    assert publication_api.gateway_deployments == {}
+    jobs = client.get("/api/v1/model-management/self-hosted-gateway-provisions").json()
+    assert jobs["items"][0]["id"] == operation["id"]
+    prior = publication_api.gateway_release_operations[0]
+    prior.update(
+        status="failed", error_code="missing_permission", error_message="Grant required rights",
+    )
+    retried = client.post(
+        f"/api/v1/model-management/self-hosted-gateway-provisions/{operation['id']}/retry",
+    )
+    assert retried.status_code == 202
+    assert retried.json()["operation"]["id"] == operation["id"]
+    assert retried.json()["operation"]["status"] == "queued"
+    assert retried.json()["operation"]["audit"][-1]["detail"]["error_code"] == "missing_permission"
+    assert publication_api.gateway_release_operation_secrets == {}
+
+
+@pytest.mark.parametrize("access", ["anonymous", "member", "foreign-origin"])
+@pytest.mark.parametrize("action", ["create", "retry", "bootstrap"])
+def test_gateway_provision_endpoints_preserve_owner_and_origin_guards(
+    publication_api: InMemoryRepository, access: str, action: str,
+) -> None:
+    owner = app.dependency_overrides[require_authenticated_session]()
+
+    def identity() -> SessionIdentity:
+        if access == "anonymous":
+            raise HTTPException(status_code=401, detail="Sign in required")
+        return SessionIdentity(
+            id=owner.id, email=owner.email, name=owner.name,
+            role="member" if access == "member" else "owner", method=owner.method,
+            session_expires_at=owner.session_expires_at,
+        )
+
+    paths = {
+        "create": f"apim-targets/{TARGET}/self-hosted-gateway-provisions",
+        "retry": f"self-hosted-gateway-provisions/{UUID(int=101)}/retry",
+        "bootstrap": f"self-hosted-gateways/{UUID(int=102)}/bootstrap",
+    }
+    headers = {"Idempotency-Key": str(UUID(int=103))}
+    if access == "foreign-origin":
+        headers["Origin"] = "https://foreign.example.test"
+    with patch.dict(app.dependency_overrides, {require_authenticated_session: identity}):
+        response = client.post(
+            "/api/v1/model-management/" + paths[action], json={}, headers=headers,
+        )
+    assert response.status_code == (401 if access == "anonymous" else 403)
+    assert publication_api.gateway_release_operations == []
+
+
+def test_gateway_bootstrap_response_is_not_cached_and_never_uses_model_keys(
+    publication_api: InMemoryRepository,
+) -> None:
+    service = GatewayControlPlaneService(publication_api, image_generation_enabled=True)
+    app.dependency_overrides[control_plane_service] = lambda: service
+    result = SelfHostedGatewayBootstrap.model_validate({
+        "deployment_id": UUID(int=104), "native_gateway_id": "turnstile-generated",
+        "configuration_endpoint": "https://unit.configuration.azure-api.net",
+        "expires_at": "2026-10-01T00:00:00Z", "image": "official-pinned-image",
+        "environment_file_name": "turnstile-generated.env",
+        "environment_file": "config.service.auth=GatewayKey unit-bootstrap-secret",
+        "docker_command": "docker run --env-file turnstile-generated.env official-image",
+        "renewal_command": "docker stop turnstile-generated && docker rm turnstile-generated",
+    })
+    with patch.object(service, "self_hosted_gateway_bootstrap", return_value=result) as bootstrap:
+        response = client.post(
+            f"/api/v1/model-management/self-hosted-gateways/{UUID(int=104)}/bootstrap",
+            json={"endpoint_control_confirmed": True, "expires_in_hours": 24},
+        )
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store, private"
+    assert response.headers["Pragma"] == "no-cache"
+    assert bootstrap.call_args.args[1].expires_in_hours == 24
+    assert "unit-bootstrap-secret" in response.json()["environment_file"]
+    assert "unit-bootstrap-secret" not in response.json()["docker_command"]
+    assert publication_api.gateway_release_operation_secrets == {}
+
+
 @pytest.mark.parametrize("deployment_name", ["   ", "\t\n"])
 def test_invalid_image_deployment_returns_conflict_without_publication(
     publication_api: InMemoryRepository, deployment_name: str
 ) -> None:
     service = GatewayControlPlaneService(
-        publication_api, image_generation_enabled=True, apim_principal_id="unit-principal"
-    )
+        publication_api, apim_principal_id="unit-principal"
+    , image_generation_enabled=True)
     app.dependency_overrides[control_plane_service] = lambda: service
     payload = image_publication(publication_api).model_dump(mode="json")
     payload["model"]["deployment_name"] = deployment_name
@@ -88,11 +332,122 @@ def management_runtime_service(
             management_api_key=SecretStr("management-secret"),
             credential_encryption_key=SecretStr(Fernet.generate_key().decode()),
             apim_principal_id="39deeba0-9799-4806-96c4-2f65eb0f22d1",
-        ),
+        image_generation_enabled=True),
     )
     app.dependency_overrides[runtime_service] = lambda: service
     yield service
     app.dependency_overrides.pop(runtime_service, None)
+
+
+@pytest.mark.parametrize("minimal", [False, True])
+def test_gateway_name_save_is_name_only_and_does_not_read_after_write(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+    minimal: bool,
+) -> None:
+    gateway = publication_api.gateways[0]
+    original = deepcopy(gateway)
+    path = f"/api/v1/model-management/gateways/{gateway['id']}/name"
+    headers = {"Prefer": "return=minimal"} if minimal else {}
+    snapshot = management_runtime_service.registry()
+    with patch.object(management_runtime_service, "registry", side_effect=(
+        AssertionError("No inventory read is allowed") if minimal
+        else [snapshot, AssertionError("No inventory read after write")]
+    )) as read:
+        response = client.patch(path, json={"name": "  Finance Gateway  "}, headers=headers)
+    assert response.status_code == (204 if minimal else 200)
+    assert read.call_count == (0 if minimal else 1)
+    assert gateway["name"] == "Finance Gateway"
+    assert {key: value for key, value in gateway.items() if key not in {"name", "updated_at"}} == {
+        key: value for key, value in original.items() if key not in {"name", "updated_at"}
+    }
+    if minimal:
+        assert not response.content and response.headers["Preference-Applied"] == "return=minimal"
+    else:
+        registry = response.json()
+        assert registry["gateway_name_edit_supported"] is True
+        assert next(item for item in registry["gateways"] if item["id"] == str(gateway["id"]))[
+            "name"
+        ] == "Finance Gateway"
+        assert all(runtime["gateway_name"] == "Finance Gateway" for runtime in registry["runtimes"]
+                   if runtime["gateway_profile_id"] == str(gateway["id"]))
+
+
+@pytest.mark.parametrize("payload", [
+    {"name": "   "}, {"name": "x" * 121}, {"name": "New", "enabled": False},
+    {"name": "New", "credential": "never-accepted"},
+])
+def test_gateway_name_rejects_extra_fields_and_invalid_names(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+    payload: dict[str, object],
+) -> None:
+    del management_runtime_service
+    original = deepcopy(publication_api.gateways)
+    path = f"/api/v1/model-management/gateways/{original[0]['id']}/name"
+    response = client.patch(path, json=payload, headers={"Prefer": "return=minimal"})
+    assert response.status_code == 422
+    assert publication_api.gateways == original
+    assert "never-accepted" not in response.text
+
+
+@pytest.mark.parametrize("access", ["anonymous", "member", "foreign-origin"])
+def test_gateway_name_preserves_session_owner_and_origin_guards(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+    access: str,
+) -> None:
+    del management_runtime_service
+    original = deepcopy(publication_api.gateways)
+    owner = app.dependency_overrides[require_authenticated_session]()
+
+    def identity() -> SessionIdentity:
+        if access == "anonymous":
+            raise HTTPException(status_code=401, detail="Sign in required")
+        return SessionIdentity(
+            id=owner.id, email=owner.email, name=owner.name,
+            role="member" if access == "member" else "owner", method=owner.method,
+            session_expires_at=owner.session_expires_at,
+        )
+
+    with patch.dict(app.dependency_overrides, {require_authenticated_session: identity}):
+        response = client.patch(
+            f"/api/v1/model-management/gateways/{original[0]['id']}/name",
+            json={"name": "Not saved"},
+            headers=(
+                {"Origin": "https://foreign.example.test"} if access == "foreign-origin" else {}
+            ),
+        )
+    assert response.status_code == (401 if access == "anonymous" else 403)
+    assert publication_api.gateways == original
+
+
+def test_gateway_name_missing_record_returns_404_without_management_key(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+) -> None:
+    del management_runtime_service
+    original = deepcopy(publication_api.gateways)
+    response = client.patch(
+        f"/api/v1/model-management/gateways/{UUID(int=900)}/name",
+        json={"name": "Missing"}, headers={"Prefer": "return=minimal"},
+    )
+    assert response.status_code == 404
+    assert publication_api.gateways == original
+
+
+def test_default_backend_advertises_and_accepts_image_models(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+) -> None:
+    registry = client.get("/api/v1/model-management")
+    assert registry.status_code == 200
+    assert registry.json()["image_generation_supported"] is True
+    assert registry.json()["image_configuration_schema_version"] == 4
+    payload = image_publication(publication_api).model_dump(mode="json")
+    payload["model"].pop("image_configuration")
+    response = client.post("/api/v1/model-management/publications", json=payload)
+    assert response.status_code == 202
+    assert len(publication_api.gateway_publications) == 1
+    profile = publication_api.gateway_publications[0]["desired_spec"]["bindings"][-1][
+        "model"
+    ]["image_profile"]
+    assert profile["version"] == 4
 
 
 def bedrock_publication(gateway_id: str) -> dict[str, object]:
@@ -353,7 +708,7 @@ def test_release_operation_queueing_fails_fast_when_worker_is_disabled(
     publication_api: InMemoryRepository,
 ) -> None:
     cipher = CredentialCipher(Fernet.generate_key())
-    enabled = GatewayControlPlaneService(publication_api, cipher)
+    enabled = GatewayControlPlaneService(publication_api, cipher, image_generation_enabled=True)
     publication = enabled.publish(
         GatewayPublicationCreate.model_validate(
             bedrock_publication(gateway_id(publication_api))
@@ -364,7 +719,7 @@ def test_release_operation_queueing_fails_fast_when_worker_is_disabled(
         publication_api,
         cipher,
         release_worker_enabled=False,
-    )
+    image_generation_enabled=True)
     app.dependency_overrides[control_plane_service] = lambda: disabled
 
     release_list = client.get("/api/v1/model-management/releases?limit=100")
@@ -1355,7 +1710,7 @@ def test_model_backend_pool_rejects_incompatible_runtime_path(
     effective = GatewayControlPlaneService(
         publication_api,
         apim_principal_id="39deeba0-9799-4806-96c4-2f65eb0f22d1",
-    ).publish(
+    image_generation_enabled=True).publish(
         GatewayPublicationCreate.model_validate(
             {
                 "gateway_profile_id": gateway_id(publication_api),
@@ -1452,7 +1807,7 @@ def test_model_backend_pool_rejects_runtime_without_equivalent_deployment(
     effective = GatewayControlPlaneService(
         publication_api,
         apim_principal_id="39deeba0-9799-4806-96c4-2f65eb0f22d1",
-    ).publish(
+    image_generation_enabled=True).publish(
         GatewayPublicationCreate.model_validate(
             {
                 "gateway_profile_id": gateway_id(publication_api),

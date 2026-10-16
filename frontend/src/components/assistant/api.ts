@@ -11,6 +11,7 @@ import type {
   PinnedReport,
 } from "./types"
 
+
 const path = (source: AssistantSource, suffix: string) =>
   source === "github-copilot"
     ? `/api/v1/copilot/assistant${suffix}`
@@ -31,6 +32,7 @@ export const assistantApi = {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   }),
+
   conversations: (source: AssistantSource) => request<{ items: ConversationSummary[] }>(
     path(source, "/conversations"),
   ).then((response) => response.items),

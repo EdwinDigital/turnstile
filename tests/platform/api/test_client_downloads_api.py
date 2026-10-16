@@ -268,7 +268,13 @@ def test_validation_body_limits_and_secret_errors(service: ClientDownloadService
     invalid = client.post("/api/v1/client-downloads/magpie", json={**request, "key": "DO-NOT-ECHO"})
     assert invalid.status_code == 422 and "DO-NOT-ECHO" not in invalid.text
     assert client.post("/api/v1/client-downloads/magpie", content=b"x" * 8193).status_code == 413
-    service.applications._key_client = ForbiddenSubscriptionKeyClient()
+    from turnstile_core.integrations.apim_control_plane_contract import (
+        coerce_apim_subscription_key_client_resolver,
+    )
+
+    service.applications._key_client_resolver = coerce_apim_subscription_key_client_resolver(
+        ForbiddenSubscriptionKeyClient()
+    )
     response = client.post("/api/v1/client-downloads/magpie", json=request)
     assert response.status_code == 503 and "secret" not in response.text
     assert response.headers["cache-control"] == "no-store"

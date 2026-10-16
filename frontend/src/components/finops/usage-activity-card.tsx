@@ -41,7 +41,11 @@ const usageSeries: Array<{ key: UsageSeriesKey; label: string; color: string }> 
   { key: "cacheWrite", label: "缓存写入", color: "var(--chart-cache-write)" },
 ]
 
-export function UsageActivityCard({ filters, costAvailable }: { filters: UsageFilters; costAvailable: boolean }) {
+export function UsageActivityCard({ filters, costAvailable, windowMode = "rolling" }: {
+  filters: UsageFilters
+  costAvailable: boolean
+  windowMode?: "rolling" | "fixed"
+}) {
   const { timezone } = useTimezone()
   const [metric, setMetric] = useState<ActivityMetric>("tokens")
   const [grain, setGrain] = useState<"hour" | "day">("hour")
@@ -57,10 +61,10 @@ export function UsageActivityCard({ filters, costAvailable }: { filters: UsageFi
   // Hourly buckets answer both grains: the server already bucketed them in the viewer's zone, so
   // truncating an hourly bucket to its own date is exact and keeps the grain toggle free of a
   // second request.
-  const activity = useQuery(finopsQueries.usageActivity(filters, "hour", timezone))
-  const heatmapFilters = useMemo<UsageFilters>(() => withWindowDays(filters, 182), [filters])
+  const activity = useQuery(finopsQueries.usageActivity(filters, "hour", timezone, windowMode))
+  const heatmapFilters = useMemo<UsageFilters>(() => withWindowDays(filters, 182, windowMode), [filters, windowMode])
   const heatmapActivity = useQuery({
-    ...finopsQueries.usageActivity(heatmapFilters, "day", timezone),
+    ...finopsQueries.usageActivity(heatmapFilters, "day", timezone, windowMode),
     enabled: showHeatmap,
   })
   const points = activity.data?.points

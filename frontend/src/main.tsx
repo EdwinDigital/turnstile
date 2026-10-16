@@ -1,5 +1,5 @@
 import { StrictMode } from "react"
-import { createRoot } from "react-dom/client"
+import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { App } from "./app"
 import { ApiError } from "./data-sources/apim/api"
@@ -10,6 +10,7 @@ import { AuthProvider, useAuth } from "./providers/auth-provider"
 import { ThemeProvider } from "./providers/theme-provider"
 import { TimezoneProvider } from "./providers/timezone-provider"
 import { DataRefreshProvider } from "./providers/data-refresh-provider"
+import "@xyflow/react/dist/style.css"
 import "./styles.css"
 
 /** Local development only: move the whole page to `localhost` before anything else runs.
@@ -32,7 +33,7 @@ if (window.location.hostname === "127.0.0.1") {
   )
 }
 
-const queryClient = new QueryClient({
+const queryClient: QueryClient = import.meta.hot?.data.queryClient ?? new QueryClient({
   defaultOptions: {
     queries: {
       gcTime: 30 * 60_000,
@@ -95,7 +96,13 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-createRoot(document.getElementById("root")!).render(
+const root: Root = import.meta.hot?.data.root ?? createRoot(document.getElementById("root")!)
+if (import.meta.hot) {
+  import.meta.hot.data.root = root
+  import.meta.hot.data.queryClient = queryClient
+}
+
+root.render(
   <StrictMode>
     <LocaleProvider>
       <TimezoneProvider>

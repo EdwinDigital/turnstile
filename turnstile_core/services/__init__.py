@@ -1,1 +1,1 @@
-"""Shared services used by the API and background workers."""
+"""Background-worker services shared by non-HTTP runtimes."""

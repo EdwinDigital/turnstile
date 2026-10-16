@@ -1,0 +1,1 @@
+ALTER TABLE model_runtime DROP CONSTRAINT model_runtime_name_key;

@@ -14,12 +14,9 @@ export function ImageOptions({ value, onChange, disabled }: {
   disabled: boolean
 }) {
   return <div className="invoke-image-options">
-    {([{ key: "size", label: "图像尺寸" }, { key: "quality", label: "图像质量" }, { key: "output_format", label: "文件格式" }] as const).map(({ key, label }) => (
-      <label key={key} className="registry-field invoke-select"><span>{label}</span>
-        <Input aria-label={label} value={value[key] ?? ""} disabled={disabled} data-no-localize
-          onChange={event => onChange({ ...value, [key]: event.target.value || undefined })} />
-      </label>
-    ))}
+    {([{ key: "size", label: "图像尺寸" }, { key: "quality", label: "图像质量" }, { key: "output_format", label: "文件格式" }] as const).map(({ key, label }) => <label key={key} className="registry-field invoke-select"><span>{label}</span>
+      <Input aria-label={label} value={value[key] ?? ""} disabled={disabled} data-no-localize onChange={event => onChange({ ...value, [key]: event.target.value || undefined })} />
+    </label>)}
   </div>
 }
 
@@ -54,13 +51,12 @@ export function ImageGenerationResult({ result, pending, available }: {
     anchor.download = imageDownloadFilename(result)
     anchor.click()
   }
+
   const header = <PanelTitle title="调用结果" action={<>
-    <Button variant="ghost" size="icon-sm" className="rounded-full" title="查看原图" aria-label="查看原图"
-      disabled={actionsUnavailable} onClick={() => {
-        if (source && !actionsUnavailable) window.open(source, "_blank", "noopener,noreferrer")
-      }}><Maximize2 size={14} /></Button>
-    <Button variant="ghost" size="icon-sm" className="rounded-full" title="下载图片" aria-label="下载图片"
-      disabled={actionsUnavailable} onClick={download}><Download size={14} /></Button>
+    <Button variant="ghost" size="icon-sm" className="rounded-full" title="查看原图" aria-label="查看原图" disabled={actionsUnavailable} onClick={() => {
+      if (source && !actionsUnavailable) window.open(source, "_blank", "noopener,noreferrer")
+    }}><Maximize2 size={14} /></Button>
+    <Button variant="ghost" size="icon-sm" className="rounded-full" title="下载图片" aria-label="下载图片" disabled={actionsUnavailable} onClick={download}><Download size={14} /></Button>
   </>} />
 
   if (!result) return <>{header}<div className="invoke-image-state" role="status" aria-busy={pending}>
@@ -71,17 +67,16 @@ export function ImageGenerationResult({ result, pending, available }: {
   const [imageWidth, imageHeight] = result.size.split("x").map(Number)
   return <>{header}<div className="invoke-response invoke-image-response">
     <figure className="invoke-image-viewport" aria-busy={!loaded && !invalid}>
-      {invalid ? <div className="invoke-error" role="alert">图片数据不可用</div>
-        : source ? <img src={source} alt="生成的图像" onLoad={event => {
-          if (event.currentTarget.naturalWidth !== imageWidth || event.currentTarget.naturalHeight !== imageHeight) setInvalid(true)
-          else setLoaded(true)
-        }} onError={() => setInvalid(true)} /> : <RefreshCw className="spin" size={24} />}
+      {invalid ? <div className="invoke-error" role="alert">图片数据不可用</div> : source ? <img src={source} alt="生成的图像" onLoad={event => {
+        if (event.currentTarget.naturalWidth !== imageWidth || event.currentTarget.naturalHeight !== imageHeight) setInvalid(true)
+        else setLoaded(true)
+      }} onError={() => setInvalid(true)} /> : <RefreshCw className="spin" size={24} />}
     </figure>
     <dl className="invoke-result-facts">
       <div className="invoke-image-identity"><dt>模型</dt><dd title={result.model}>{result.model}</dd></div>
       <div className="invoke-image-identity"><dt>运行时</dt><dd title={result.runtime}>{result.runtime}</dd></div>
       <div><dt>图像尺寸</dt><dd>{result.size}</dd></div>
-      <div><dt>图像质量</dt><dd>{result.quality ?? "\u2014"}</dd></div>
+      <div><dt>图像质量</dt><dd>{result.quality ?? "—"}</dd></div>
       <div><dt>文件格式</dt><dd>{result.output_format.toUpperCase()}</dd></div>
       <div><dt>延迟</dt><dd>{formatLatency(result.latency_ms)}</dd></div>
       <div><dt>文字输入 Token</dt><dd>{result.usage ? compact.format(result.usage.input_tokens + result.usage.cached_tokens) : "未测量"}</dd></div>

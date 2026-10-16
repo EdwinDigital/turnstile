@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from turnstile_core.domain.ledger import (
+    BudgetReservationResolution,
+    BudgetReservationResolutionWrite,
+    LedgerAttempt,
+    LedgerProtocolConflict,
+    LedgerScope,
+)
 from turnstile_core.domain.models import (
     DepartmentEnforcementWrite,
     PeopleBudgetFilter,
@@ -15,7 +23,7 @@ from turnstile_core.domain.models import (
 )
 
 from ..services.budget_service import BudgetConflictError, BudgetNotFoundError
-from .service_dependencies import TokenBudgetServiceDependency
+from .service_dependencies import BudgetReservationServiceDependency, TokenBudgetServiceDependency
 from .session import (
     CurrentSession,
     OwnerSession,
@@ -29,6 +37,43 @@ router = APIRouter(
         Depends(require_allowed_write_origin),
     ]
 )
+
+
+@router.get("/api/v1/budgets/reservations", response_model=list[LedgerAttempt])
+def review_budget_reservations(
+    identity: OwnerSession,
+    service: BudgetReservationServiceDependency,
+    scope_type: Literal["person", "application"],
+    scope_id: Annotated[str, Query(min_length=1, max_length=255)],
+    period: Annotated[str, Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")],
+    limit: Annotated[int, Query(ge=1, le=20)] = 20,
+    include_resolved: bool = False,
+) -> list[LedgerAttempt]:
+    del identity
+    try:
+        scope = LedgerScope(
+            scope_type=scope_type, scope_id=scope_id,
+            period_start=date.fromisoformat(period + "-01"),
+        )
+        return service.review(scope, limit=limit, include_resolved=include_resolved)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Invalid reservation scope") from error
+
+
+@router.post(
+    "/api/v1/budgets/reservations/resolve",
+    response_model=BudgetReservationResolution,
+    status_code=202,
+)
+def approve_budget_reservation_resolution(
+    write: BudgetReservationResolutionWrite,
+    identity: OwnerSession,
+    service: BudgetReservationServiceDependency,
+) -> BudgetReservationResolution:
+    try:
+        return service.approve(write, identity.email)
+    except LedgerProtocolConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.get("/api/v1/budgets", response_model=TokenBudgetResponse)

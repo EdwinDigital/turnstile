@@ -13,6 +13,8 @@ import {
 } from "./queries"
 import { useAuth } from "../../providers/auth-provider"
 import { useTimezone } from "../../providers/timezone-provider"
+import { finopsKeys } from "../../data-sources/apim/queries"
+
 import type {
   AssistantReply,
   AssistantSource,
@@ -27,6 +29,8 @@ export type Exchange = {
   reply: AssistantReply | null
   error: string | null
 }
+
+
 
 /** Only the text turns go back to the model. Charts are rebuilt by tools, never replayed
  *  through the context window, which keeps a long conversation from growing unboundedly. */
@@ -74,6 +78,7 @@ export function useAssistantController({
   const [conversationTitle, setConversationTitle] = useState<string | undefined>()
   const [loadingConversation, setLoadingConversation] = useState<string | null>(null)
   const [pinTarget, setPinTarget] = useState<{ chart: ChartSpec; question: string } | null>(null)
+
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const queryClient = useQueryClient()
   const { user } = useAuth()
@@ -133,11 +138,14 @@ export function useAssistantController({
     },
   })
 
+
+
   const reset = useCallback(() => {
     setExchanges([])
     setConversationId(undefined)
     setConversationTitle(undefined)
     setQuestion("")
+
     inputRef.current?.focus()
   }, [])
 
@@ -233,6 +241,8 @@ export function useAssistantController({
     openConversation, loadingConversation,
     removeConversation,
     pin, pinTarget, setPinTarget, pinnedReports,
+
+
     inputRef,
   }
 }

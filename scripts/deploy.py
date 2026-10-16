@@ -81,6 +81,12 @@ OBSERVER_ORCHESTRATOR_PARAMETERS = {
     "observerPlanSkuName",
     "observerPlanWorkerCount",
 }
+OBSERVER_SHARED_PATHS = (
+    "turnstile_core/domain/budget_completion.py",
+    "turnstile_core/integrations/budget_completion.py",
+    "turnstile_core/integrations/table_batch.py",
+)
+OBSERVER_RUNTIME_FILES = ("Dockerfile", "entrypoint.py", "shipper.py", "envoy.yaml.template")
 
 
 class DeploymentError(RuntimeError):
@@ -726,11 +732,29 @@ def source_version(runner: CommandRunner) -> str:
 
 def observer_source_version(runner: CommandRunner) -> str:
     result = runner.run(
-        ["git", "rev-parse", "--short=12", "HEAD:infra/envoy-cache-adapter"],
+        ["git", "rev-parse", "HEAD:infra/envoy-cache-adapter",
+         *(f"HEAD:{path}" for path in OBSERVER_SHARED_PATHS)],
         cwd=REPOSITORY_ROOT,
         capture=True,
     )
-    return result.stdout.strip()
+    return hashlib.sha256(result.stdout.strip().encode()).hexdigest()[:12]
+
+
+@contextmanager
+def observer_build_context(root: Path = REPOSITORY_ROOT) -> Iterator[Path]:
+    with tempfile.TemporaryDirectory(prefix="turnstile-observer-build-") as temporary:
+        context = Path(temporary)
+        sources = {
+            **{name: root / "infra/envoy-cache-adapter" / name for name in OBSERVER_RUNTIME_FILES},
+            **{name: root / name for name in OBSERVER_SHARED_PATHS},
+        }
+        for relative, source in sources.items():
+            if not source.is_file() or source.is_symlink():
+                raise DeploymentError("Observer build requires regular allowlisted source files")
+            destination = context / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        yield context
 
 
 def deterministic_zip(source: Path, destination: Path) -> None:
@@ -1200,23 +1224,15 @@ def build_and_start_observer(
     else:
         print(f"Observer image already exists: {image_repository_and_tag} ({version})")
         return
-    runner.run(
-        [
-            "az",
-            "acr",
-            "build",
-            "--subscription",
-            inputs.subscription,
-            "--registry",
-            acr_name,
-            "--image",
-            image_repository_and_tag,
-            "--file",
-            "Dockerfile",
-            ".",
-        ],
-        cwd=REPOSITORY_ROOT / "infra" / "envoy-cache-adapter",
-    )
+    with observer_build_context() as context:
+        runner.run(
+            [
+                "az", "acr", "build", "--subscription", inputs.subscription,
+                "--registry", acr_name, "--image", image_repository_and_tag,
+                "--file", "Dockerfile", ".",
+            ],
+            cwd=context,
+        )
     web_app_name = _output_string(observer_outputs, "webAppName")
     runner.run(
         [

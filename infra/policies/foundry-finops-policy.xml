@@ -16,6 +16,28 @@
       var separator = id.LastIndexOf('/');
       return separator &gt;= 0 ? id.Substring(separator + 1) : id;
     }" />
+    <set-variable name="telemetryNativeGatewayId" value="@(context.Deployment.Gateway.Id)" />
+    <set-variable name="telemetryNativeGatewayInstanceId" value="@(string.IsNullOrWhiteSpace(context.Deployment.Gateway.InstanceId) ? context.Deployment.Gateway.Id : context.Deployment.Gateway.InstanceId)" />
+    <set-variable name="telemetryGatewayIsManaged" value="@(context.Deployment.Gateway.IsManaged)" />
+    <set-variable name="telemetryApimServiceId" value="@(context.Deployment.ServiceId)" />
+    <set-variable name="telemetryApimRegion" value="@(string.IsNullOrWhiteSpace(context.Deployment.Region) ? &quot;unattributed&quot; : context.Deployment.Region)" />
+    <set-variable name="telemetryApiRevision" value="@(context.Api.Revision)" />
+    <set-variable name="telemetryUsageId" value="@{
+      var values = new [] {
+        &quot;__GATEWAY_PROFILE_ID__&quot;,
+        context.Deployment.ServiceId.ToLowerInvariant(),
+        context.Deployment.Gateway.Id.ToLowerInvariant(),
+        context.RequestId.ToString().ToLowerInvariant()
+      };
+      var canonical = string.Join(&quot;.&quot;, values.Select(value =&gt;
+        Convert.ToBase64String(Encoding.UTF8.GetBytes(value))));
+      using (var algorithm = System.Security.Cryptography.SHA256.Create())
+      {
+        return &quot;turnstile-v2-&quot; + BitConverter.ToString(
+          algorithm.ComputeHash(Encoding.UTF8.GetBytes(canonical))
+        ).Replace(&quot;-&quot;, &quot;&quot;).ToLowerInvariant();
+      }
+    }" />
     <choose>
       <when condition="@((bool)context.Variables[&quot;hasEmployeeToken&quot;])">
         <validate-azure-ad-token
@@ -387,9 +409,18 @@
                 <!-- Emitted before return-response for the same reason as the budget denial:
                      the pipeline aborts, so the outbound emitter never runs and a blocked
                      person would otherwise leave no trace at all. -->
-                <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@((string)context.Variables[&quot;callerRequestId&quot;])">@{
+                <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@((string)context.Variables[&quot;telemetryUsageId&quot;])">@{
                   return new JObject(
-                    new JProperty(&quot;id&quot;, (string)context.Variables[&quot;callerRequestId&quot;]),
+                    new JProperty(&quot;event_schema_version&quot;, 2),
+                    new JProperty(&quot;usage_event_source&quot;, &quot;apim&quot;),
+                    new JProperty(&quot;usage_id&quot;, (string)context.Variables[&quot;telemetryUsageId&quot;]),
+                    new JProperty(&quot;native_gateway_id&quot;, (string)context.Variables[&quot;telemetryNativeGatewayId&quot;]),
+                    new JProperty(&quot;native_gateway_instance_id&quot;, (string)context.Variables[&quot;telemetryNativeGatewayInstanceId&quot;]),
+                    new JProperty(&quot;gateway_is_managed&quot;, (bool)context.Variables[&quot;telemetryGatewayIsManaged&quot;]),
+                    new JProperty(&quot;apim_service_id&quot;, (string)context.Variables[&quot;telemetryApimServiceId&quot;]),
+                    new JProperty(&quot;apim_region&quot;, (string)context.Variables[&quot;telemetryApimRegion&quot;]),
+                    new JProperty(&quot;api_revision&quot;, (string)context.Variables[&quot;telemetryApiRevision&quot;]),
+                    new JProperty(&quot;id&quot;, (string)context.Variables[&quot;telemetryUsageId&quot;]),
                     new JProperty(&quot;request_id&quot;, (string)context.Variables[&quot;callerRequestId&quot;]),
                     new JProperty(&quot;correlation_id&quot;, context.RequestId.ToString()),
                     new JProperty(&quot;ts&quot;, DateTime.UtcNow.ToString(&quot;o&quot;)),
@@ -472,9 +503,18 @@
                      invisible to the administrator, which is a worse failure than a silent
                      fail-open — enforcement would look like it never fired. The zeros are
                      exact rather than estimated: nothing reached the provider. -->
-                <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@((string)context.Variables[&quot;callerRequestId&quot;])">@{
+                <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@((string)context.Variables[&quot;telemetryUsageId&quot;])">@{
                   return new JObject(
-                    new JProperty(&quot;id&quot;, (string)context.Variables[&quot;callerRequestId&quot;]),
+                    new JProperty(&quot;event_schema_version&quot;, 2),
+                    new JProperty(&quot;usage_event_source&quot;, &quot;apim&quot;),
+                    new JProperty(&quot;usage_id&quot;, (string)context.Variables[&quot;telemetryUsageId&quot;]),
+                    new JProperty(&quot;native_gateway_id&quot;, (string)context.Variables[&quot;telemetryNativeGatewayId&quot;]),
+                    new JProperty(&quot;native_gateway_instance_id&quot;, (string)context.Variables[&quot;telemetryNativeGatewayInstanceId&quot;]),
+                    new JProperty(&quot;gateway_is_managed&quot;, (bool)context.Variables[&quot;telemetryGatewayIsManaged&quot;]),
+                    new JProperty(&quot;apim_service_id&quot;, (string)context.Variables[&quot;telemetryApimServiceId&quot;]),
+                    new JProperty(&quot;apim_region&quot;, (string)context.Variables[&quot;telemetryApimRegion&quot;]),
+                    new JProperty(&quot;api_revision&quot;, (string)context.Variables[&quot;telemetryApiRevision&quot;]),
+                    new JProperty(&quot;id&quot;, (string)context.Variables[&quot;telemetryUsageId&quot;]),
                     new JProperty(&quot;request_id&quot;, (string)context.Variables[&quot;callerRequestId&quot;]),
                     new JProperty(&quot;correlation_id&quot;, context.RequestId.ToString()),
                     new JProperty(&quot;ts&quot;, DateTime.UtcNow.ToString(&quot;o&quot;)),
@@ -737,6 +777,50 @@
           return state;
         }" />
         <set-variable name="applicationAdmission" value="@((string)((JObject)context.Variables[&quot;applicationMapState&quot;])[&quot;status&quot;])" />
+        <set-variable name="applicationRateLimitPartition" value="@(&quot;app-tpm|&quot; + (string)((JObject)context.Variables[&quot;applicationMapState&quot;])[&quot;applicationId&quot;])" />
+        <set-variable name="applicationRateLimitUrl" value="@{
+          return &quot;__LEDGER_TABLE_ENDPOINT__/__LEDGER_TABLE_NAME__(PartitionKey=\u0027&quot;
+            + Uri.EscapeDataString((string)context.Variables[&quot;applicationRateLimitPartition&quot;])
+            + &quot;\u0027,RowKey=\u0027T\u0027)&quot;;
+        }" />
+        <choose>
+          <when condition="@((string)context.Variables[&quot;applicationAdmission&quot;] == &quot;ok&quot;)">
+            <send-request mode="new" response-variable-name="applicationRateLimitRead" timeout="2" ignore-error="true">
+              <set-url>@((string)context.Variables[&quot;applicationRateLimitUrl&quot;])</set-url>
+              <set-method>GET</set-method>
+              <set-header name="x-ms-version" exists-action="override"><value>2020-12-06</value></set-header>
+              <set-header name="Accept" exists-action="override"><value>application/json;odata=nometadata</value></set-header>
+              <authentication-managed-identity resource="https://storage.azure.com/" />
+            </send-request>
+          </when>
+        </choose>
+        <set-variable name="applicationTokensPerMinute" value="@{
+          try
+          {
+            var response = context.Variables.GetValueOrDefault&lt;IResponse&gt;(&quot;applicationRateLimitRead&quot;, null);
+            if (response == null || response.StatusCode != 200) { return 0L; }
+            var version = response.Headers.GetValueOrDefault(&quot;ETag&quot;, &quot;&quot;);
+            if (string.IsNullOrWhiteSpace(version) || version == &quot;*&quot;
+              || version.Contains(&quot;\r&quot;) || version.Contains(&quot;\n&quot;)) { return 0L; }
+            var row = response.Body.As&lt;JObject&gt;(preserveContent: true);
+            if ((string)row[&quot;PartitionKey&quot;] != (string)context.Variables[&quot;applicationRateLimitPartition&quot;]
+              || (string)row[&quot;RowKey&quot;] != &quot;T&quot;) { return 0L; }
+            var configuredRate = row[&quot;TokensPerMinute&quot;];
+            int rate;
+            return configuredRate != null &amp;&amp; configuredRate.Type == JTokenType.Integer
+              &amp;&amp; int.TryParse((string)configuredRate, out rate) &amp;&amp; rate &gt; 0 ? (long)rate : 0L;
+          }
+          catch (Exception) { return 0L; }
+        }" />
+        <choose>
+          <when condition="@(context.Variables.GetValueOrDefault&lt;long&gt;(&quot;applicationTokensPerMinute&quot;, 0L) &lt;= 0)">
+            <return-response>
+              <set-status code="503" reason="Service Unavailable" />
+              <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+              <set-body>{&quot;error&quot;:{&quot;code&quot;:&quot;application_tpm_unavailable&quot;,&quot;message&quot;:&quot;Application rate limit configuration is unavailable.&quot;}}</set-body>
+            </return-response>
+          </when>
+        </choose>
         <choose>
           <when condition="@((string)context.Variables[&quot;applicationAdmission&quot;] == &quot;ok&quot; &amp;&amp; (string)((JObject)context.Variables[&quot;applicationMapState&quot;])[&quot;applicationType&quot;] == &quot;agent&quot;)">
             <set-header name="x-agent-id" exists-action="override">
@@ -943,9 +1027,18 @@
             }" />
             <choose>
               <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;applicationDenialReason&quot;]))">
-                <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@((string)context.Variables[&quot;callerRequestId&quot;])">@{
+                <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@((string)context.Variables[&quot;telemetryUsageId&quot;])">@{
                   return new JObject(
-                    new JProperty(&quot;id&quot;, (string)context.Variables[&quot;callerRequestId&quot;]),
+                    new JProperty(&quot;event_schema_version&quot;, 2),
+                    new JProperty(&quot;usage_event_source&quot;, &quot;apim&quot;),
+                    new JProperty(&quot;usage_id&quot;, (string)context.Variables[&quot;telemetryUsageId&quot;]),
+                    new JProperty(&quot;native_gateway_id&quot;, (string)context.Variables[&quot;telemetryNativeGatewayId&quot;]),
+                    new JProperty(&quot;native_gateway_instance_id&quot;, (string)context.Variables[&quot;telemetryNativeGatewayInstanceId&quot;]),
+                    new JProperty(&quot;gateway_is_managed&quot;, (bool)context.Variables[&quot;telemetryGatewayIsManaged&quot;]),
+                    new JProperty(&quot;apim_service_id&quot;, (string)context.Variables[&quot;telemetryApimServiceId&quot;]),
+                    new JProperty(&quot;apim_region&quot;, (string)context.Variables[&quot;telemetryApimRegion&quot;]),
+                    new JProperty(&quot;api_revision&quot;, (string)context.Variables[&quot;telemetryApiRevision&quot;]),
+                    new JProperty(&quot;id&quot;, (string)context.Variables[&quot;telemetryUsageId&quot;]),
                     new JProperty(&quot;request_id&quot;, (string)context.Variables[&quot;callerRequestId&quot;]),
                     new JProperty(&quot;correlation_id&quot;, context.RequestId.ToString()),
                     new JProperty(&quot;ts&quot;, DateTime.UtcNow.ToString(&quot;o&quot;)),
@@ -1418,10 +1511,19 @@ __USAGE_OBSERVER_HEADERS__
     </choose>
     <choose>
       <when condition="@((bool)context.Variables[&quot;isInferenceOperation&quot;])">
-    <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@((string)context.Variables[&quot;callerRequestId&quot;])">@{
+    <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@((string)context.Variables[&quot;telemetryUsageId&quot;])">@{
       var usage = (JObject)context.Variables[&quot;usagePayload&quot;];
       return new JObject(
-        new JProperty(&quot;id&quot;, (string)context.Variables[&quot;callerRequestId&quot;]),
+        new JProperty(&quot;event_schema_version&quot;, 2),
+        new JProperty(&quot;usage_event_source&quot;, &quot;apim&quot;),
+        new JProperty(&quot;usage_id&quot;, (string)context.Variables[&quot;telemetryUsageId&quot;]),
+        new JProperty(&quot;native_gateway_id&quot;, (string)context.Variables[&quot;telemetryNativeGatewayId&quot;]),
+        new JProperty(&quot;native_gateway_instance_id&quot;, (string)context.Variables[&quot;telemetryNativeGatewayInstanceId&quot;]),
+        new JProperty(&quot;gateway_is_managed&quot;, (bool)context.Variables[&quot;telemetryGatewayIsManaged&quot;]),
+        new JProperty(&quot;apim_service_id&quot;, (string)context.Variables[&quot;telemetryApimServiceId&quot;]),
+        new JProperty(&quot;apim_region&quot;, (string)context.Variables[&quot;telemetryApimRegion&quot;]),
+        new JProperty(&quot;api_revision&quot;, (string)context.Variables[&quot;telemetryApiRevision&quot;]),
+        new JProperty(&quot;id&quot;, (string)context.Variables[&quot;telemetryUsageId&quot;]),
         new JProperty(&quot;request_id&quot;, (string)context.Variables[&quot;callerRequestId&quot;]),
         new JProperty(&quot;correlation_id&quot;, context.RequestId.ToString()),
         new JProperty(&quot;ts&quot;, DateTime.UtcNow.ToString(&quot;o&quot;)),
@@ -1492,7 +1594,7 @@ __USAGE_OBSERVER_HEADERS__
          throw inside the error handler itself. -->
     <choose>
       <when condition="@(context.Variables.GetValueOrDefault&lt;bool&gt;(&quot;isInferenceOperation&quot;, false))">
-    <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@(context.RequestId.ToString())">@{
+    <log-to-eventhub logger-id="__LOGGER_ID__" partition-key="@(context.Variables.GetValueOrDefault&lt;string&gt;(&quot;telemetryUsageId&quot;, context.RequestId.ToString()))">@{
       var statusCode = context.Response?.StatusCode ?? 500;
       var latency = context.Variables.ContainsKey(&quot;requestStarted&quot;)
         ? (long)(DateTime.UtcNow - (DateTime)context.Variables[&quot;requestStarted&quot;]).TotalMilliseconds
@@ -1506,9 +1608,21 @@ __USAGE_OBSERVER_HEADERS__
         : context.Variables.GetValueOrDefault&lt;bool&gt;(&quot;hasEmployeeToken&quot;, false)
           ? context.Variables.GetValueOrDefault&lt;string&gt;(&quot;employeeName&quot;, &quot;unattributed&quot;)
           : &quot;service:&quot; + apimSubscriptionId;
+      var callerRequestId = context.Variables.GetValueOrDefault&lt;string&gt;(&quot;callerRequestId&quot;, context.Request.Headers.GetValueOrDefault(&quot;x-request-id&quot;, context.RequestId.ToString()));
+      var usageId = context.Variables.GetValueOrDefault&lt;string&gt;(&quot;telemetryUsageId&quot;, &quot;&quot;);
+      var hasGatewayContext = !string.IsNullOrEmpty(usageId);
       return new JObject(
-        new JProperty(&quot;id&quot;, context.Variables.GetValueOrDefault&lt;string&gt;(&quot;callerRequestId&quot;, context.Request.Headers.GetValueOrDefault(&quot;x-request-id&quot;, context.RequestId.ToString()))),
-        new JProperty(&quot;request_id&quot;, context.Variables.GetValueOrDefault&lt;string&gt;(&quot;callerRequestId&quot;, context.Request.Headers.GetValueOrDefault(&quot;x-request-id&quot;, context.RequestId.ToString()))),
+        new JProperty(&quot;event_schema_version&quot;, hasGatewayContext ? 2 : 1),
+        new JProperty(&quot;usage_event_source&quot;, &quot;apim&quot;),
+        new JProperty(&quot;usage_id&quot;, hasGatewayContext ? (JToken)new JValue(usageId) : JValue.CreateNull()),
+        new JProperty(&quot;native_gateway_id&quot;, hasGatewayContext ? (JToken)new JValue((string)context.Variables[&quot;telemetryNativeGatewayId&quot;]) : JValue.CreateNull()),
+        new JProperty(&quot;native_gateway_instance_id&quot;, hasGatewayContext ? (JToken)new JValue((string)context.Variables[&quot;telemetryNativeGatewayInstanceId&quot;]) : JValue.CreateNull()),
+        new JProperty(&quot;gateway_is_managed&quot;, hasGatewayContext ? (JToken)new JValue((bool)context.Variables[&quot;telemetryGatewayIsManaged&quot;]) : JValue.CreateNull()),
+        new JProperty(&quot;apim_service_id&quot;, hasGatewayContext ? (JToken)new JValue((string)context.Variables[&quot;telemetryApimServiceId&quot;]) : JValue.CreateNull()),
+        new JProperty(&quot;apim_region&quot;, hasGatewayContext ? (JToken)new JValue((string)context.Variables[&quot;telemetryApimRegion&quot;]) : JValue.CreateNull()),
+        new JProperty(&quot;api_revision&quot;, hasGatewayContext ? (JToken)new JValue((string)context.Variables[&quot;telemetryApiRevision&quot;]) : JValue.CreateNull()),
+        new JProperty(&quot;id&quot;, hasGatewayContext ? usageId : callerRequestId),
+        new JProperty(&quot;request_id&quot;, callerRequestId),
         new JProperty(&quot;correlation_id&quot;, context.RequestId.ToString()),
         new JProperty(&quot;ts&quot;, DateTime.UtcNow.ToString(&quot;o&quot;)),
         new JProperty(&quot;organization&quot;, context.Variables.GetValueOrDefault&lt;string&gt;(&quot;telemetryOrganization&quot;, context.Request.Headers.GetValueOrDefault(&quot;x-org-name&quot;, &quot;unattributed&quot;))),

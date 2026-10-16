@@ -1,10 +1,5 @@
 schemas:
   PinnedChartWrite:
-    type: object
-    additionalProperties: false
-    required:
-    - original_question
-    - chart
     properties:
       report_id:
         type:
@@ -16,9 +11,10 @@ schemas:
         type:
         - string
         - 'null'
-        minLength: 1
         maxLength: 120
-        description: 'Required only when starting a new report. An existing report already has a
+        minLength: 1
+        description: 'Required only when starting a new report. An existing report
+          already has a
 
           name, and letting this field rename it would make adding a chart destructive.
 
@@ -29,92 +25,103 @@ schemas:
         default: ''
       original_question:
         type: string
-        minLength: 1
         maxLength: 4000
+        minLength: 1
       chart:
         $ref: ../../openapi.yaml#/components/schemas/ChartSpec
-  PinnedChartRename:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - title
+    - original_question
+    - chart
+    title: PinnedChartWrite
+    description: 'Pin one chart.
+
+
+      `report_id` decides between the two cases the dialog offers: absent means "start
+      a
+
+      new report", present means "add to that one". `title` is therefore only required
+      in
+
+      the first case — an existing report already has a name, and letting this field
+      rename
+
+      it would make adding a chart a destructive act.'
+  PinnedChartRename:
     properties:
       title:
         type: string
-        minLength: 1
         maxLength: 120
+        minLength: 1
       description:
         type: string
         maxLength: 500
         default: ''
-  PinnedReportVisibilityWrite:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - visibility
+    - title
+    title: PinnedChartRename
+  PinnedReportVisibilityWrite:
     properties:
       visibility:
         type: string
         enum:
         - private
         - public
-  PinnedChartOrder:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - chart_ids
-    description: 'The report''s charts in their new order. The whole list is sent rather than a moved
-
-      id and an index, so the request states the outcome instead of describing an edit.
-
-      '
+    - visibility
+    title: PinnedReportVisibilityWrite
+  PinnedChartOrder:
     properties:
       chart_ids:
-        type: array
-        minItems: 1
         items:
           type: string
           format: uuid
-  PinnedReportLayout:
-    type: object
+        type: array
+        minItems: 1
     additionalProperties: false
-    description: Versioned canonical desktop card widths and row heights.
+    type: object
+    required:
+    - chart_ids
+    title: PinnedChartOrder
+    description: 'The report''s charts in their new order. The whole list is sent
+      rather than a moved
+
+      id and an index, so the request states the outcome instead of describing an
+      edit.
+
+      '
+  PinnedReportLayout:
     properties:
       version:
         type: integer
         const: 1
         default: 1
       spans:
-        type: object
-        maxProperties: 500
+        additionalProperties:
+          type: integer
+          maximum: 12.0
+          minimum: 1.0
         propertyNames:
           format: uuid
-        additionalProperties:
-          type: integer
-          minimum: 1
-          maximum: 12
-        default: {}
-      row_heights:
         type: object
         maxProperties: 500
-        propertyNames:
-          pattern: ^\d+$
+      row_heights:
         additionalProperties:
           type: integer
-          minimum: 200
-          maximum: 1400
-        default: {}
-  PinnedChart:
-    type: object
+          maximum: 1400.0
+          minimum: 200.0
+        type: object
+        maxProperties: 500
     additionalProperties: false
-    required:
-    - id
-    - report_id
-    - original_question
-    - chart
-    - position
-    - created_at
-    - updated_at
+    type: object
+    title: PinnedReportLayout
+    description: Versioned canonical desktop card widths and row heights.
+  PinnedChart:
     properties:
       id:
         type: string
@@ -128,28 +135,25 @@ schemas:
         $ref: ../../openapi.yaml#/components/schemas/ChartSpec
       position:
         type: integer
-        minimum: 0
+        minimum: 0.0
       created_at:
         type: string
         format: date-time
       updated_at:
         type: string
         format: date-time
-  PinnedReport:
-    type: object
     additionalProperties: false
+    type: object
     required:
     - id
-    - title
-    - description
-    - owner_id
-    - visibility
-    - can_manage
+    - report_id
+    - original_question
+    - chart
     - position
-    - layout
     - created_at
     - updated_at
-    description: One nav item, holding one or more charts.
+    title: PinnedChart
+  PinnedReport:
     properties:
       id:
         type: string
@@ -165,11 +169,13 @@ schemas:
         enum:
         - private
         - public
+        default: private
       can_manage:
         type: boolean
+        default: false
       position:
         type: integer
-        minimum: 0
+        minimum: 0.0
       layout:
         $ref: ../../openapi.yaml#/components/schemas/PinnedReportLayout
       created_at:
@@ -179,30 +185,41 @@ schemas:
         type: string
         format: date-time
       charts:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/PinnedChart
-  PinnedReportList:
-    type: object
+        type: array
     additionalProperties: false
+    type: object
     required:
-    - items
+    - id
+    - title
+    - description
+    - owner_id
+    - position
+    - created_at
+    - updated_at
+    title: PinnedReport
+    description: One nav item, holding one or more charts.
+  PinnedReportList:
     properties:
       items:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/PinnedReport
-  AssistantSettingsWrite:
-    type: object
+        type: array
     additionalProperties: false
+    type: object
+    required:
+    - items
+    title: PinnedReportList
+  AssistantSettingsWrite:
     properties:
       model_id:
         type:
         - string
         - 'null'
         format: uuid
-        default: null
-        description: 'The model the assistant calls. Null means automatic selection, which is the
+        description: 'The model the assistant calls. Null means automatic selection,
+          which is the
 
           registry''s own order: the default model first, then alphabetically.
 
@@ -210,17 +227,101 @@ schemas:
       auto_title:
         type: boolean
         default: true
-        description: 'Whether a new conversation is named by the model. One small extra call per
+        description: 'Whether a new conversation is named by the model. One small
+          extra call per
 
           thread; switching it off leaves the first question as the title.
 
           '
       api_format:
-        type: [string, 'null']
-        enum: [openai_chat, openai_responses, anthropic_messages, null]
+        type:
+        - string
+        - 'null'
+        enum:
+        - openai_chat
+        - openai_responses
+        - anthropic_messages
+        - null
         default: null
-        description: Optional API protocol. Null automatically matches the model and gateway route.
+        description: Optional API protocol. Null automatically matches the model and
+          gateway route.
+    additionalProperties: false
+    type: object
+    title: AssistantSettingsWrite
+    description: What an administrator can change about how the assistant runs.
   AssistantSettings:
+    properties:
+      model_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Model Id
+      auto_title:
+        type: boolean
+        title: Auto Title
+        default: true
+      effective_model_id:
+        anyOf:
+        - type: string
+          format: uuid
+        - type: 'null'
+        title: Effective Model Id
+      effective_model_name:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Effective Model Name
+      model_available:
+        type: boolean
+        title: Model Available
+        default: true
+      available_models:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/AssistantModelChoice
+        type: array
+        title: Available Models
+      updated_at:
+        anyOf:
+        - type: string
+          format: date-time
+        - type: 'null'
+        title: Updated At
+      updated_by:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Updated By
+    additionalProperties: false
+    type: object
+    title: AssistantSettings
+    description: 'The configuration plus what it actually resolves to right now.
+
+
+      `effective_*` exists because the two can legitimately differ: a pinned model
+      that is
+
+      later disabled, or moved to a runtime that cannot carry tool calls, stops qualifying
+
+      and the assistant falls back to automatic selection rather than refusing to
+      answer.
+
+      That fallback has to be visible somewhere or it is just a setting that quietly
+      does
+
+      nothing -- `model_available` is what the settings page reads to say so.
+
+
+      `available_models` is served rather than derived in the browser on purpose.
+      Deciding
+
+      which models qualify is a server rule with three parts, one of which is the
+      runtime''s
+
+      tool protocol; reimplementing it client-side would let the picker offer a model
+      the
+
+      server then rejects, and the two copies would drift on the next adapter added.'
     allOf:
     - $ref: ../../openapi.yaml#/components/schemas/AssistantSettingsWrite
     - type: object
@@ -238,7 +339,8 @@ schemas:
           - 'null'
         model_available:
           type: boolean
-          description: 'False when a model is pinned but no longer qualifies, so the assistant has
+          description: 'False when a model is pinned but no longer qualifies, so the
+            assistant has
 
             fallen back to automatic selection. True whenever nothing is pinned.
 
@@ -246,21 +348,34 @@ schemas:
         api_available:
           type: boolean
           default: true
-          description: False when a saved protocol no longer matches the effective model route.
+          description: False when a saved protocol no longer matches the effective
+            model route.
         effective_api_format:
-          type: [string, 'null']
-          enum: [openai_chat, openai_responses, anthropic_messages, null]
+          type:
+          - string
+          - 'null'
+          enum:
+          - openai_chat
+          - openai_responses
+          - anthropic_messages
+          - null
         effective_api_path:
-          type: [string, 'null']
+          type:
+          - string
+          - 'null'
           description: The public gateway path used by the effective API protocol.
         available_api_formats:
           type: array
           items:
             type: string
-            enum: [openai_chat, openai_responses, anthropic_messages]
+            enum:
+            - openai_chat
+            - openai_responses
+            - anthropic_messages
         available_models:
           type: array
-          description: 'The models the assistant may be pointed at. Served rather than derived by
+          description: 'The models the assistant may be pointed at. Served rather
+            than derived by
 
             the client because eligibility is a server rule that includes the
 
@@ -281,13 +396,6 @@ schemas:
           - string
           - 'null'
   AssistantModelChoice:
-    type: object
-    additionalProperties: false
-    required:
-    - id
-    - display_name
-    - model_key
-    - runtime_name
     properties:
       id:
         type: string
@@ -310,4 +418,33 @@ schemas:
         type: array
         items:
           type: string
-          enum: [openai_chat, openai_responses, anthropic_messages]
+          enum:
+          - openai_chat
+          - openai_responses
+          - anthropic_messages
+    additionalProperties: false
+    type: object
+    required:
+    - id
+    - display_name
+    - model_key
+    - runtime_name
+    title: AssistantModelChoice
+    description: 'A model the assistant is allowed to use, with what it costs to use
+      it.
+
+
+      The prices are here because choosing a model is a cost decision -- the registry
+      spans
+
+      $1.00 to $30.00 per million output tokens -- and a picker that hides them makes
+      the
+
+      expensive choice as easy as the cheap one.'
+  InvocationApiFormat:
+    type: string
+    enum:
+    - openai_chat
+    - openai_responses
+    - anthropic_messages
+    title: InvocationApiFormat

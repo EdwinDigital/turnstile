@@ -177,6 +177,7 @@ def test_api_staging_contains_runtime_contract(tmp_path: Path, staging_root: Pat
     assert (destination / "backend/http/user_settings.py").is_file()
     assert (destination / "turnstile_core/config.py").is_file()
     assert (destination / "frontend/dist/index.html").is_file()
+    assert (destination / "policies/foundry-finops-policy.xml").is_file()
     assert (destination / "migrations/001_token_observability.up.sql").is_file()
     assert (destination / "migrations/011_user_settings_profile.up.sql").read_bytes() == (
         REPOSITORY_ROOT / "migrations/011_user_settings_profile.up.sql"
@@ -211,7 +212,7 @@ def test_function_staging_contains_runtime_contract(
 
 @pytest.mark.parametrize(
     ("target", "expected_functions"),
-    (("telemetry", 4), ("control-plane", 4)),
+    (("telemetry", 5), ("control-plane", 9)),
 )
 def test_staged_function_indexes_without_backend(
     tmp_path: Path,

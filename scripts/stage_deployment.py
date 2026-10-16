@@ -69,6 +69,13 @@ def _stage_api(root: Path, destination: Path) -> None:
     _copy_file(root, "scripts/directory_upgrade.py", destination / "scripts")
     (destination / "frontend").mkdir()
     shutil.copytree(root / "frontend/dist", destination / "frontend/dist")
+    policy_dir = destination / "policies"
+    policy_dir.mkdir()
+    _copy_file(
+        root,
+        "infra/policies/foundry-finops-policy.xml",
+        policy_dir,
+    )
     for source in ("requirements.txt", "pyproject.toml", "uv.lock"):
         _copy_file(root, source, destination)
 

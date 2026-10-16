@@ -16,6 +16,7 @@ something is missing reports success while checking nothing.
 
 from __future__ import annotations
 
+import json
 from functools import cache
 from pathlib import Path
 from typing import cast
@@ -87,15 +88,54 @@ def _documented_schemas() -> dict[str, dict[str, object]]:
     return _resolve_index(cast(dict[str, object], components["schemas"]))
 
 
+def _schema_contract(value: object) -> object:
+    if isinstance(value, list):
+        return [_schema_contract(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {
+        key: _schema_contract(item)
+        for key, item in value.items() if key not in {"title", "description"}
+    }
+    types = result.get("type")
+    if isinstance(types, list):
+        result = {"anyOf": [{**result, "type": kind} for kind in types]}
+    variants = result.get("anyOf")
+    if isinstance(variants, list):
+        result["anyOf"] = sorted(variants, key=lambda item: json.dumps(item, sort_keys=True))
+    return result
+
+
+def test_execution_event_has_bounded_receipts_and_default_off_completion() -> None:
+    schema = _documented_schemas()["UsageEvent"]
+    properties = cast(dict[str, dict[str, object]], schema["properties"])
+    receipts = properties["budget_execution"]
+    assert receipts["maxItems"] == 2 and receipts["default"] == []
+    item = cast(dict[str, object], receipts["items"])
+    assert item["additionalProperties"] is False
+    assert set(cast(list[str], item["required"])) == {"identity", "epoch", "reserved_tokens"}
+    fields = cast(dict[str, dict[str, object]], item["properties"])
+    assert fields["reserved_tokens"]["minimum"] == 1
+    assert set(cast(list[str], fields["identity"]["required"])) == {
+        "scope", "gateway_profile_id", "native_gateway_id", "correlation_id", "model_id",
+        "admitted_at",
+    }
+    assert properties["usage_complete"]["default"] is False
+    assert properties["native_gateway_id"]["maxLength"] == 80
+    assert "cache_write_tokens" in properties
+
+
 def test_openapi_root_is_a_small_domain_index() -> None:
     root = _yaml_document(CONTRACT.resolve())
     paths = cast(dict[str, dict[str, str]], root["paths"])
     components = cast(dict[str, object], root["components"])
     schemas = cast(dict[str, dict[str, str]], components["schemas"])
 
-    assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 900
-    assert len(paths) == 134
-    assert len(schemas) == 225
+    assert len(CONTRACT.read_text(encoding="utf-8").splitlines()) < 120 + 2 * (
+        len(paths) + len(schemas)
+    )
+    assert set(paths) == set(app.openapi()["paths"]) - UNDOCUMENTED
+    assert set(app.openapi()["components"]["schemas"]) <= set(schemas)
     assert all(set(value) == {"$ref"} for value in paths.values())
     assert all(set(value) == {"$ref"} for value in schemas.values())
     assert {path.name for path in (CONTRACT.parent / "openapi" / "paths").glob("*.yaml")} == {
@@ -216,11 +256,15 @@ def test_application_provisioning_defaults_are_nullable_positive_limits() -> Non
     schema = _documented_schemas()["GatewayApplicationList"]
     properties = cast(dict[str, dict[str, object]], schema["properties"])
     defaults = properties["provisioning_defaults"]
-    assert defaults["type"] == ["object", "null"]
-    assert defaults["additionalProperties"] is False
-    limits = cast(dict[str, dict[str, object]], defaults["properties"])
+    variants = cast(list[dict[str, object]], defaults["anyOf"])
+    assert {"type": "null"} in variants
+    reference = next(item for item in variants if "$ref" in item)
+    value = _documented_schemas()[cast(str, reference["$ref"]).rsplit("/", 1)[-1]]
+    assert value["additionalProperties"] is False
+    limits = cast(dict[str, dict[str, object]], value["properties"])
     assert set(limits) == {"monthly_token_limit", "tokens_per_minute"}
-    assert all(value["minimum"] == 1 for value in limits.values())
+    assert all(item["type"] == "integer" and item["exclusiveMinimum"] == 0
+               for item in limits.values())
 
 
 def test_image_contract_is_single_nonstreaming_passthrough_and_session_protected() -> None:
@@ -280,7 +324,8 @@ def test_application_ledger_fields_preserve_unknown_and_zero() -> None:
     )
     for field in numeric:
         assert properties[field]["type"] == ["integer", "null"]
-        assert properties[field]["default"] is None
+        assert properties[field].get("default") is None
+        assert "default" not in properties[field]
         assert properties[field]["minimum"] == 0
     required = cast(list[str], schema["required"])
     assert not set(numeric).intersection(required)

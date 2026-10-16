@@ -24,9 +24,8 @@ def test_image_operation_has_budget_marker_and_bypasses_text_observer() -> None:
     repository = InMemoryRepository()
     publication = GatewayControlPlaneService(
         repository,
-        image_generation_enabled=True,
         apim_principal_id="unit-principal",
-    ).publish(image_publication(repository), "owner@example.com")
+    image_generation_enabled=True).publish(image_publication(repository), "owner@example.com")
     compiled = ApimPolicyCompiler(
         usage_observer_url="https://observer.example",
         usage_observer_key_named_value="adapter-key",
@@ -49,9 +48,7 @@ def test_image_operation_has_budget_marker_and_bypasses_text_observer() -> None:
 def image_parent() -> tuple[str, str]:
     source = (REPOSITORY_ROOT / "infra/policies/foundry-finops-policy.xml").read_text()
     profile = create_image_profile(_limits(), "unit-image")
-    if "imageGenerationPolicyVersion" in source:
-        return source, source
-    return source, compose_image_parent_policy(source, [profile])
+    return source, compose_image_parent_policy(source, source, [profile], previous_profiles=())
 
 
 def test_public_parent_composition_preserves_text_and_has_full_image_budget() -> None:

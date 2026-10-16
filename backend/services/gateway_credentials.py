@@ -7,6 +7,10 @@ from turnstile_core.config import Settings
 
 def with_platform_gateway_credential(route: dict[str, Any], settings: Settings) -> dict[str, Any]:
     result = dict(route)
+    target_url = str(result.get("gateway_base_url") or "").rstrip("/")
+    platform_url = (settings.apim_gateway_url or "").rstrip("/")
+    if target_url and target_url != platform_url:
+        return result
     if (
         result.get("gateway_implementation") == "apim"
         and not result.get("gateway_credential")

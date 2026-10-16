@@ -2,17 +2,16 @@
 .invoke-modebar .usage-metric-segment { width: fit-content; }
 .invoke-modebar button { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; }
 .invoke-image-options { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
-.invoke-image-options .invoke-select, .invoke-image-options input { min-width: 0; width: 100%; }
+.invoke-image-options .invoke-select { min-width: 0; }
+.invoke-image-options [data-slot="select-trigger"] { width: 100%; min-width: 0; }
 .invoke-image-state { display: grid; justify-items: center; align-content: center; gap: 12px; min-height: 280px; color: var(--muted-foreground); font-size: 13px; }
 .invoke-result > .finops-panel-title .finops-panel-title-actions > [data-slot="button"] { border: 0; background: transparent; }
-.invoke-result > .finops-panel-title .finops-panel-title-actions > [data-slot="button"].rounded-full { border-radius: 999px; }
 .invoke-result > .finops-panel-title .finops-panel-title-actions > [data-slot="button"]:enabled:hover { background: var(--muted); }
 .invoke-image-viewport { margin: 0; display: grid; place-items: center; width: 100%; aspect-ratio: 1; max-height: 520px; overflow: hidden; background: var(--muted); border: 0; border-radius: 0; }
 .invoke-image-viewport img { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
 .invoke-image-response .invoke-result-facts { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; border-top: 1px solid var(--border); background: var(--border); }
-.invoke-image-response .invoke-result-facts > div:nth-child(n) { border: 0; background: var(--card); min-width: 0; }
+.invoke-image-response .invoke-result-facts > div:nth-child(n) { border: 0; background: var(--card); }
 .invoke-image-response .invoke-image-identity { grid-column: span 2; }
-.invoke-image-response dd { overflow-wrap: anywhere; }
 .invoke-image-response .invoke-result-ids { border-bottom: 0; }
 @media (max-width: 760px) {
   .invoke-image-response .invoke-result-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }

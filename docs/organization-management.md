@@ -17,7 +17,12 @@ reads still govern organization-page data and actions; backend scope checks rema
 The dynamic report group loads after the fixed menu groups so new reports do not shift their
 positions. No persisted menu or cached permission snapshot is used to bypass session checking.
 
-Readiness requires schemas 012-017, the configured directory authority and compatible packages.
+Readiness requires the complete pending candidate chain through `backend.migrate`, the configured
+directory authority and compatible packages. Directory migrations include
+`012_organization_directory`, `013_menu_permission_groups`, `014_multiple_menu_permission_groups`,
+`015_scoped_menu_administrators`, `016_organization_members`, `017_department_memberships` and
+`018_permission_management`. Use the [full inventory](testing.md#migration-inventory), not numeric
+prefix ranges that can refer to unrelated migrations from the other history.
 An HTTP health response alone does not prove directory, Graph or gateway readiness.
 
 `/api/v1/enterprise/entities` remains the active assignment/invocation projection.
@@ -336,20 +341,25 @@ different code digest. Back up the current compatible package trio, settings and
 then build all three new packages with an identical core digest. Verify all applied migration
 checksums and the isolated backup restore before publication.
 
-For compatible updates after 018 with no new migrations, require all 18 applied checksums
-to match the candidate and require both migration runs to return an empty result.
-Compare every restored table before and after the isolated no-op migration. Do not replay
-the 015-017 backfill assertions or accept an older migration baseline. Production verification
+The historical directory-only baseline ended at `018_permission_management`; it is not the
+entire merged candidate chain. For compatible updates with no new migrations, require every
+applied checksum to match the candidate and require both migration runs to return an empty
+result. The post-merge candidate adds upstream migrations to that baseline and is not a
+no-migration update: validate the pending chain and preservation of the actual applied ledger
+first. Compare every restored table before and after an isolated no-op migration. Do not replay
+the directory backfill assertions from `015_scoped_menu_administrators` through
+`017_department_memberships` or accept an older migration baseline. Production verification
 must preserve directory rows, historical billing and the current APIM revision. Read-only
 release smoke tests must not save budgets, archive customer nodes or enable Graph workers.
 
-For the 015-017 upgrade, compare all existing personnel fields except the added
+For the historical directory upgrade from `015_scoped_menu_administrators` through
+`017_department_memberships`, compare all existing personnel fields except the added
 `organization_id`, and verify that its backfill matches current primary memberships.
-Only legal legacy department appointments may be imported by 015. The control state's
-permission revision advances twice; other control fields and gateway-projection versions
+Only legal legacy department appointments may be imported by `015_scoped_menu_administrators`.
+The control state's permission revision advances twice; other control fields and gateway-projection versions
 remain unchanged. Verify that only scheduled/conflicted transfer plans are cancelled by
-016, while all other historical rows, original migration checksums/timestamps and billing
-tables remain unchanged. Repeat migration and require an empty result.
+`016_organization_members`, while all other historical rows, original migration checksums/timestamps
+and billing tables remain unchanged. Repeat migration and require an empty result.
 
 Stop the three writers, temporarily disable write triggers (including telemetry Event Hub
 consumption) and merge the new

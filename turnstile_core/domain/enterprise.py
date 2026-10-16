@@ -46,14 +46,14 @@ def historical_entity_catalog(rows: Iterable[Mapping[str, Any]]) -> UsageQueryEn
 
 
 def configured_invocation_testers(
-    catalog: EnterpriseEntityCatalog, tester_ids: Iterable[str]
+    catalog: EnterpriseEntityCatalog, tester_ids: Iterable[str],
 ) -> list[EnterpriseEntity]:
     users = {user.id.casefold(): user for user in catalog.users}
     return [users[user_id.casefold()] for user_id in tester_ids if user_id.casefold() in users]
 
 
 def configured_invocation_tester(
-    catalog: EnterpriseEntityCatalog, tester_ids: Iterable[str], user_id: str
+    catalog: EnterpriseEntityCatalog, tester_ids: Iterable[str], user_id: str,
 ) -> EnterpriseEntity | None:
     configured = {
         tester.id.casefold(): tester
@@ -65,7 +65,6 @@ def configured_invocation_tester(
 def merge_application_owners(
     catalog: EnterpriseEntityCatalog, users: Iterable[Mapping[str, Any]]
 ) -> EnterpriseEntityCatalog:
-    """Add Owner accounts before they generate gateway traffic."""
     existing = {item.id for item in catalog.users}
     discovered: list[EnterpriseEntity] = []
     for row in users:

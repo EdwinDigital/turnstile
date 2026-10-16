@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Respons
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -29,28 +30,16 @@ from .http.client_user import router as client_user_router
 from .http.dependencies import get_repository
 from .http.directory_sync import router as directory_sync_router
 from .http.governance import router as governance_router
-from .http.model_platform import (
-    protected_router as model_platform_protected_router,
-)
-from .http.model_platform import (
-    publication_router as model_platform_publication_router,
-)
+from .http.model_platform import protected_router as model_platform_protected_router
+from .http.model_platform import publication_router as model_platform_publication_router
 from .http.observability import router as observability_router
 from .http.organization_management import router as organization_management_router
 from .http.permission_management import router as permission_management_router
 from .http.private_routes import PrivateRouteBodyLimit
-from .http.service_dependencies import (
-    application_access_service as _application_access_service,
-)
-from .http.service_dependencies import (
-    assistant_service as _assistant_service,
-)
-from .http.service_dependencies import (
-    control_plane_service as _control_plane_service,
-)
-from .http.service_dependencies import (
-    runtime_service as _runtime_service,
-)
+from .http.service_dependencies import application_access_service as _application_access_service
+from .http.service_dependencies import assistant_service as _assistant_service
+from .http.service_dependencies import control_plane_service as _control_plane_service
+from .http.service_dependencies import runtime_service as _runtime_service
 from .http.session import require_allowed_write_origin, require_authenticated_session
 from .http.static_files import validate_production_web_dist
 from .http.user_settings import UserSettingsBodyLimit
@@ -196,7 +185,11 @@ web_dist = get_settings().web_dist_dir
 if web_dist.is_dir():
     assets_dir = web_dist / "assets"
     if assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="web-assets")
+        app.mount(
+            "/assets",
+            GZipMiddleware(StaticFiles(directory=assets_dir), minimum_size=1024, compresslevel=6),
+            name="web-assets",
+        )
 
     @app.get("/{client_path:path}", include_in_schema=False)
     def web_application(client_path: str) -> FileResponse:

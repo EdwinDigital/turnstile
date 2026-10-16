@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -24,6 +25,9 @@ from turnstile_core.domain.ledger import BudgetReservationAdmission
 from turnstile_core.domain.models import ReconciledUsage
 from turnstile_core.integrations.ledger import LedgerSyncService, partition_key, reservation_row_key
 from turnstile_core.persistence.in_memory import InMemoryRepository
+from turnstile_core.persistence.repository_billable_requests import (
+    PostgreSqlBillableRequestRepositoryMixin,
+)
 
 
 def _plan(**overrides: Any) -> BillableRequestPlan:
@@ -76,7 +80,9 @@ def test_attempt_exact_state_requires_measured_total(state: str, tokens: int | N
     with pytest.raises(ValueError):
         BillableRequestAttempt.model_validate(
             {
-                **_plan().model_dump(exclude={"attempt_limit", "reuse_requires"}),
+                **_plan().model_dump(exclude={
+                    "attempt_limit", "reuse_requires", "admission_authority",
+                }),
                 "id": uuid4(),
                 "attempt_index": 1,
                 "state": state,
@@ -133,6 +139,45 @@ def test_billable_attempt_requires_fresh_authorization_and_preserves_exact_resul
             evidence={},
         )
     assert repository.billable_requests[retry.id] == stored
+
+
+@pytest.mark.parametrize("authority", ["postgresql", "apim_execution"])
+def test_billable_recovery_is_readonly_and_requires_exact_original_authority(
+    authority: str,
+) -> None:
+    repository = InMemoryRepository()
+    plan = _plan(scope_type="system", authorization_id=uuid4(), admission_authority=authority,
+                 reuse_requires={"route_validated": True})
+    with pytest.raises(BillableOutcomeUncertain):
+        repository.recover_billable_request(plan)
+    assert repository.billable_requests == {}
+    attempt = repository.begin_billable_request(plan)
+    with pytest.raises(BillableOutcomeUncertain):
+        repository.recover_billable_request(plan)
+    repository.finish_billable_request(
+        attempt.id, actual_tokens=30, correlation_id="unit-correlation",
+        evidence={"route_validated": True, "admission_authority": "forged"},
+    )
+    original = repository.billable_requests[attempt.id]
+    assert repository.recover_billable_request(plan) == original
+    assert original.evidence.get("admission_authority", "postgresql") == authority
+    for changes in ({"model_id": "other-model"}, {"authorization_id": uuid4()},
+                    {"plan_sha256": "b" * 64}, {"reuse_requires": {"route_validated": False}},
+                    {"admission_authority": "apim_execution" if authority == "postgresql"
+                                              else "postgresql"}):
+        with pytest.raises(BillableOutcomeUncertain):
+            repository.recover_billable_request(plan.model_copy(update=changes))
+    assert repository.billable_requests == {attempt.id: original}
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.execute.return_value.fetchall.return_value = [original.model_dump()]
+    sql = PostgreSqlBillableRequestRepositoryMixin()
+    with patch.object(sql, "_connection", return_value=connection):
+        assert sql.recover_billable_request(plan) == original
+    statement, parameters = connection.execute.call_args.args
+    assert statement.strip().startswith("SELECT") and "LIMIT 33" in statement
+    assert parameters == (plan.operation_key,) and connection.execute.call_count == 1
 
 
 def test_application_budget_includes_unsettled_attempts_before_dispatch() -> None:
@@ -225,12 +270,11 @@ def test_v2_preserves_admission_month_and_first_equal_rank_recovery() -> None:
         )
     }
     assert scoped[("user", USER)] == 160
-    assert (
-        repository.token_usage_by_budget_scope(
-            datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC)
-        )
-        == []
+    following_period = repository.token_usage_by_budget_scope(
+        datetime(2026, 8, 1, tzinfo=UTC), datetime(2026, 9, 1, tzinfo=UTC),
     )
+    assert following_period and all(row["used_tokens"] == 0 for row in following_period)
+    assert all(row["unpriced_usage_count"] == 1 for row in following_period)
 
 
 @pytest.mark.parametrize("effective_at", [None, datetime(2099, 1, 1, tzinfo=UTC)])
@@ -307,7 +351,7 @@ def test_platform_and_gateway_reservations_settle_once_without_rewriting_ack(
     attempt = BillableRequestAttempt.model_validate(
         {
             **_plan(scope_id=USER, period_start=PERIOD_START.date()).model_dump(
-                exclude={"attempt_limit", "reuse_requires"}
+                exclude={"attempt_limit", "reuse_requires", "admission_authority"}
             ),
             "id": uuid4(),
             "attempt_index": 1,

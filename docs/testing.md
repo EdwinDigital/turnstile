@@ -63,15 +63,99 @@ uv run ruff check backend turnstile_core scripts tests functions/telemetry/funct
 uv run mypy backend turnstile_core scripts tests
 uv run pytest -q
 npm --prefix frontend run build
+node --import ./tests/support/register_typescript.mjs --test tests/platform/frontend/*.test.mjs
 az bicep build --file infra/main.bicep
 xmllint --noout infra/policies/foundry-finops-policy.xml
 npx --yes @redocly/cli@2.38.0 lint contracts/openapi.yaml
 git diff --check
 ```
 
+The standalone frontend suites require Node with native TypeScript stripping and
+`registerHooks` support. The resolver keeps the application's extensionless TypeScript
+imports usable under Node without changing the browser bundler's module contract. These
+isolated component checks do not replace authenticated browser or production acceptance.
+
 ## Database validation
 
-For a clean installation, run `uv run python -m backend.migrate` against an authorized new PostgreSQL 16+ database. Verify one `schema_migration` row per numbered migration (currently `001_initial_schema`, `002_apim_request_attempt_identity`, `003_budget_reservation_finalization`, `004_apim_usage_identity_guard`, `005_billable_request_lifecycle`, `006_versioned_budget_evidence`, `007_model_price_source`, `008_price_review_and_guard`, `009_assistant_api_format`, `010_models_dev_pricing`, and `011_user_settings_profile`), then run the command again and verify that no migration is reapplied.
+The merged fork preserves migration identities from both histories. The runner uses the full
+filename minus `.up.sql`, not just the numeric prefix: `009_assistant_api_format` and
+`009_context_tier_pricing` are separate migrations. Never rename or edit either applied file.
+Validate both a fresh database and an upgrade from the fork's existing 18-file ledger.
+Keep existing usage, financial/audit history, directory memberships and menu assignments.
+SQL source checks do not prove applied migrations. Do not initialize a shared database.
+
+Upstream additions retained in this fork are `009_context_tier_pricing`,
+`010_budget_execution_protocol`, `011_gateway_targets`, `012_apim_onboarding`,
+`013_multi_target_rollout`, `014_self_hosted_gateway_provisioning`,
+`015_platform_invocation_trace`, `016_model_availability`,
+`017_budget_terminal_observation`, `018_budget_reservation_resolution`,
+`019_runtime_display_name`, `020_failed_publication_spec`, `021_usd_budget_reservations`,
+`022_subscription_tags`, `023_usd_reservation_resolution`, `024_gateway_usage_attribution`,
+`025_usage_cost_component_prices`, `026_invocation_trace_service_identity`,
+`027_product_schema_alignment` and `028_product_index_alignment`.
+Budget execution and settlement remain independently gated. Unknown usage is not refundable
+merely because time has elapsed or a request failed. Verify atomic reservations, immutable
+prices, settlement idempotency and late formal evidence on an isolated PostgreSQL target.
+Model availability tests and recording adapters do not prove PostgreSQL transaction isolation
+or real APIM propagation. These require separately authorized validation, not a Git merge.
+
+For a clean installation, run `uv run python -m backend.migrate` against an authorized new
+PostgreSQL 16+ database. Verify exactly one `schema_migration` row for every full version in
+the inventory below, with its matching source checksum. Run the command again and verify that
+no migration is reapplied and all checksums and applied timestamps remain unchanged.
+
+### Migration inventory
+
+The current chain contains **40 migrations**, listed in the runner's lexicographic filename
+order. Shared files belong to both histories; Fork and Upstream identify additions on each
+side of the merge. These are source identities, not a choice of deployment subsets. Existing
+installations apply all pending files from the compatible candidate through `backend.migrate`
+while preserving every already-applied version and checksum.
+
+| Migration file | Origin | Effect |
+| --- | --- | --- |
+| `001_initial_schema.up.sql` | Shared | Empty platform schema, including consolidated historical schema definitions; no customer data. |
+| `002_apim_request_attempt_identity.up.sql` | Shared | Non-unique caller request index; distinct APIM attempt identities. |
+| `003_budget_reservation_finalization.up.sql` | Shared | Immutable reservation finalization/recovery and Application ledger snapshots. |
+| `004_apim_usage_identity_guard.up.sql` | Shared | Guarded APIM usage identity and immutable discrepancy evidence. |
+| `005_billable_request_lifecycle.up.sql` | Shared | Durable billable-request journal and effective budget-usage views. |
+| `006_versioned_budget_evidence.up.sql` | Shared | Versioned evidence selection and separately scheduled, initially unset cutoff. |
+| `007_model_price_source.up.sql` | Shared | Pricing side tables, source metadata and connection discounts; no existing-model backfill. |
+| `008_price_review_and_guard.up.sql` | Shared | Separate pending-price review baseline and superseded sync status. |
+| `009_assistant_api_format.up.sql` | Fork | Assistant API format selection, defaulting to automatic. |
+| `009_context_tier_pricing.up.sql` | Upstream | Context-tier catalog prices and per-request tier snapshots. |
+| `010_budget_execution_protocol.up.sql` | Upstream | Default-off budget rollout/scopes, immutable execution evidence and settlement outbox. |
+| `010_models_dev_pricing.up.sql` | Fork | Public catalog source, matching/sync metadata and absent-row reader semantics; explicit choices preserved. |
+| `011_gateway_targets.up.sql` | Upstream | Registered APIM targets, Gateway deployments and model target bindings. |
+| `011_user_settings_profile.up.sql` | Fork | Private normalized avatars and account-security audit/throttling records. |
+| `012_apim_onboarding.up.sql` | Upstream | APIM onboarding release-operation kind. |
+| `012_organization_directory.up.sql` | Fork | Empty directory/synchronization tables, versioned authority state and stored query scopes. |
+| `013_menu_permission_groups.up.sql` | Fork | Local navigation group with Ordinary User as the default. |
+| `013_multi_target_rollout.up.sql` | Upstream | Multi-target publication parent/child tasks and target validation. |
+| `014_multiple_menu_permission_groups.up.sql` | Fork | Authoritative menu-group array preserving earlier single-group assignments. |
+| `014_self_hosted_gateway_provisioning.up.sql` | Upstream | Self-hosted Gateway provisioning operation and deployment metadata. |
+| `015_platform_invocation_trace.up.sql` | Upstream | Persisted platform attempts, telemetry matching and unified trace view. |
+| `015_scoped_menu_administrators.up.sql` | Fork | Scoped administrator appointments, valid legacy department imports and effective menu view. |
+| `016_model_availability.up.sql` | Upstream | Versioned model availability, tasks, coverage/enrollment evidence and immutable audit. |
+| `016_organization_members.up.sql` | Fork | Explicit organization ownership backfill and retirement of pending transfers. |
+| `017_budget_terminal_observation.up.sql` | Upstream | Immutable budget execution terminal observations. |
+| `017_department_memberships.up.sql` | Fork | Additional non-billing department memberships and hierarchy validation. |
+| `018_budget_reservation_resolution.up.sql` | Upstream | Immutable execution-reservation resolution documents. |
+| `018_permission_management.up.sql` | Fork | Persisted menu permission matrix/audit and effective appointment projection. |
+| `019_client_user_authorization.up.sql` | Fork | Independent desktop device authorizations, user grants and installation generations. |
+| `019_runtime_display_name.up.sql` | Upstream | Drops the global `model_runtime_name_key` uniqueness constraint; adds no metadata columns. |
+| `020_failed_publication_spec.up.sql` | Upstream | Rebuilds the reusable-spec unique index, excluding failed, superseded and rolled-back publications. |
+| `020_plugin_download_permissions.up.sql` | Fork | Independent user/subscription plugin download permissions with legacy-compatible role defaults. |
+| `021_usd_budget_reservations.up.sql` | Upstream | USD budget limits, reservations, immutable admission prices and cost-aware settlement. |
+| `022_subscription_tags.up.sql` | Upstream | Application subscription-tag storage. |
+| `023_usd_reservation_resolution.up.sql` | Upstream | USD settlement/release evidence validation against immutable admission and approval. |
+| `024_gateway_usage_attribution.up.sql` | Upstream | Per-request APIM target, Gateway deployment/instance and revision attribution. |
+| `025_usage_cost_component_prices.up.sql` | Upstream | Replaces `budget_usage_usd_cost` to prefer stored exact USD cost or require prices only for nonzero usage components; estimated/unpriced usage stays unknown. Adds no price columns. |
+| `026_invocation_trace_service_identity.up.sql` | Upstream | Matches platform invocation telemetry using service identity. |
+| `027_product_schema_alignment.up.sql` | Upstream | Application recovery/finalization and Gateway provisioning tables; aligned finalization and invocation views. |
+| `028_product_index_alignment.up.sql` | Upstream | Scope/period finalization index and unique self-hosted provisioning request index. |
+
+### Upgrade validation
 
 Migration `012_organization_directory` adds empty organizational-directory and synchronization
 tables, versioned control state, audit guards and stored assistant/report scope metadata.
@@ -124,7 +208,21 @@ historical query catalogs, billing records and immutable audit data remain avail
 
 The initial schema contains no users, credentials, provider connections, runtimes, business models, usage events, or customer data.
 
-For an existing installation, run the same migration command to apply only pending upgrades. Verify that the initial migration checksum and existing usage rows are unchanged. Migration `002` replaces the unique caller-request index with a non-unique `(request_id, ts DESC)` index; it does not rewrite historical usage. Apply it before running the updated telemetry consumer, and drain older telemetry consumers before enabling the new version. Do not overlap consumers that use the old and new identity rules. Index replacement takes a table lock, so schedule the upgrade for an appropriate maintenance window. Migration `007` only adds nullable columns and defaults every existing model to `price_source = 'manual'`, so rates already in the registry are left exactly as they were and the price sync skips those rows until someone opts a model in.
+For an existing installation, run the same migration command to apply all pending upgrades.
+Verify that every previously applied checksum and existing usage row is unchanged. Migration
+`002_apim_request_attempt_identity` replaces the unique caller-request index with a non-unique
+`(request_id, ts DESC)` index; it does not rewrite historical usage. Apply it before running
+the updated telemetry consumer, and drain older telemetry consumers before enabling the new
+version. Do not overlap consumers that use the old and new identity rules. Index replacement
+takes a table lock, so schedule the upgrade for an appropriate maintenance window.
+
+Migration `007_model_price_source` creates the side tables `model_runtime_price` and
+`managed_model_price`, not nullable columns on the registry tables. The `price_source` SQL
+column default remains `manual`. Explicit manual rows remain manual and are skipped by sync.
+With `010_models_dev_pricing` and compatible readers, an absent row follows the default public
+catalog; neither migration backfills existing models or rewrites charged rates. A later accepted
+price synchronization is a separate write. Do not infer an explicit manual choice from the
+absence of a price-source row or from the SQL default.
 
 Request-attempt validation must prove that two APIM attempts with the same `request_id` and different `correlation_id` values both persist, while redelivery of one attempt is idempotent. Replay a pre-upgrade event whose stored primary key differs from its correlation ID: the existing primary key and Application attribution must remain unchanged, an estimated record may gain exact usage, and an already exact record must not be charged again. Detail lookup prefers an exact `correlation_id`; a legacy `request_id` selects the latest matching APIM attempt. Verify both lookups and confirm that Copilot records remain excluded. Isolated unit and migration-source tests do not substitute for this database validation.
 
@@ -185,6 +283,33 @@ In a separately authorized PostgreSQL/Table/Log Analytics environment, verify ex
 
 For API and browser checks, distinguish a missing snapshot from zero pending usage. Verify that available Tokens subtract both pending reservations and finalized upper bounds. Recovery records have no model pricing or cache classification; they must not invent prices, latency or per-user cache measurements. Unit tests and SQL source checks do not establish live data-plane or migration correctness.
 
+### Budget execution validation
+
+Migration `010_budget_execution_protocol` adds default-off execution scopes, immutable admission
+and evidence records, and a durable settlement outbox. It does not activate a rollout or rewrite
+historical usage. Apply it only to the separately authorized database after preserving the existing
+migration checksums and data readback. Runtime activation requires a verified legacy-admission fence,
+drained in-flight work, equal opening balances, compatible readers, and an explicit epoch.
+
+```bash
+uv run --frozen --no-sync pytest -q tests/backend/telemetry/test_atomic_ledger.py \
+	tests/platform/infrastructure/test_budget_execution_policy.py
+```
+
+The policy suite requires an installed
+.NET 8 SDK and executes the generated expressions as C# 7.3 with the SDK's Newtonsoft.Json assembly;
+it does not substitute a Python parser or mock results for C# execution. Cover tool schemas and
+arguments, text containing JSON, protocol-specific mixed/remote content, incomplete structures,
+strict versus estimate contracts, native-count guarantees, error ownership, CAS conflicts and
+completion idempotence. Local HTTP doubles and SQL structure checks are not real database acceptance.
+
+For a separately approved deployed run, preserve parent-policy ETags and component hashes, prove
+all affected parents match the candidate, and verify exact request-to-receipt-to-settlement identity.
+Use the actual subscription header and model setting in a supported normal Claude Code session;
+do not treat bare-mode diagnostics or private-environment results as public acceptance. Unknown
+request outcomes cannot authorize a replay. Record unresolved transport errors without attributing
+their cause to the platform without evidence.
+
 ## Browser validation
 
 ### Assistant API protocols
@@ -234,7 +359,12 @@ and promotion, resume without duplication, rerun after success, and verify expli
 before introducing later model publications. Never make the current revision writable through
 a fabricated success response or relax the shared Publisher role to pass these checks.
 
-Image generation is off by default. The version-2 budget evidence cutoff is independently disabled (`budget_evidence_policy.effective_at IS NULL`). Applying migrations does not enable either feature or reassess historical requests. Enabling a future cutoff requires separate operational authorization; it cannot be cleared or moved after being set.
+This fork preserves `IMAGE_GENERATION_ENABLED=false` by default. Test the disabled capability
+and rejection paths separately, then use an explicitly enabled local fixture for image protocols.
+The version-2 budget evidence cutoff remains independently disabled
+(`budget_evidence_policy.effective_at IS NULL`). Applying migrations does not enable that cutoff
+or reassess historical requests. Enabling a future cutoff requires separate operational
+authorization; it cannot be cleared or moved after being set.
 
 Focused local checks include `tests/backend/model_platform/test_image_*.py`, `tests/backend/telemetry/test_billable_requests.py`, `tests/backend/telemetry/test_ledger.py`, and `tests/platform/frontend/test_image_generation.py`. These use unit fixtures and mocked transports, not live images or database evidence.
 
@@ -255,6 +385,13 @@ For images, verify model-operation selection, required text-input/cached-text/im
 Unit tests may use in-memory repositories. Integration and E2E results must identify the real deployed environment and resource boundary used for validation.
 
 ## Feature acceptance matrix
+
+Multi-target local coverage must include bounded distinct targets, stable parent identity,
+all-or-none child queueing, truthful partial status, canonical manual and tiered catalog prices,
+all price-identity drift fields, and route removal preserving shared access until the final target.
+Validate the same logic with concurrent PostgreSQL transactions and independent real APIM
+publications before operational acceptance. No local double proves distributed promotion,
+pricing under production load or per-target upstream invoice equivalence.
 
 Passing a helper test or finding a source string does not establish complete feature delivery.
 The image Node suites execute the production registry normalization, publication component and

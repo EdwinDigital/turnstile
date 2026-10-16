@@ -1,15 +1,5 @@
 schemas:
   CopilotConnectionSummary:
-    type: object
-    additionalProperties: false
-    required:
-    - id
-    - organization
-    - display_name
-    - credential_configured
-    - credential_hint
-    - write_enabled
-    - is_default
     properties:
       id:
         type: string
@@ -28,17 +18,23 @@ schemas:
         type: boolean
       is_default:
         type: boolean
-  CopilotConnectionWrite:
-    type: object
     additionalProperties: false
+    type: object
     required:
+    - id
     - organization
-    - token
+    - display_name
+    - credential_configured
+    - write_enabled
+    - is_default
+    title: CopilotConnectionSummary
+  CopilotConnectionWrite:
     properties:
       organization:
         type: string
-        minLength: 1
         maxLength: 39
+        minLength: 1
+        pattern: ^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$
       token:
         type: string
         minLength: 8
@@ -50,20 +46,19 @@ schemas:
       set_default:
         type: boolean
         default: true
-  CopilotStatus:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - configured
-    - oauth_configured
-    - viewer_role
-    - viewer_github_login
-    - connections
+    - organization
+    - token
+    title: CopilotConnectionWrite
+  CopilotStatus:
     properties:
       configured:
         type: boolean
       oauth_configured:
         type: boolean
+        default: false
       viewer_role:
         type: string
         enum:
@@ -74,19 +69,23 @@ schemas:
         - string
         - 'null'
       connections:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotConnectionSummary
-  CopilotOAuthConfigWrite:
-    type: object
+        type: array
     additionalProperties: false
+    type: object
     required:
-    - client_id
+    - configured
+    - viewer_role
+    - viewer_github_login
+    - connections
+    title: CopilotStatus
+  CopilotOAuthConfigWrite:
     properties:
       client_id:
         type: string
-        minLength: 1
         maxLength: 255
+        minLength: 1
       client_secret:
         type:
         - string
@@ -99,15 +98,12 @@ schemas:
         - string
         - 'null'
         maxLength: 1000
-  CopilotOAuthConfigSummary:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - configured
     - client_id
-    - client_secret_hint
-    - callback_url
-    - effective_callback_url
+    title: CopilotOAuthConfigWrite
+  CopilotOAuthConfigSummary:
     properties:
       configured:
         type: boolean
@@ -125,24 +121,25 @@ schemas:
         - 'null'
       effective_callback_url:
         type: string
-  CopilotIdentityWrite:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - github_login
+    - configured
+    - effective_callback_url
+    title: CopilotOAuthConfigSummary
+  CopilotIdentityWrite:
     properties:
       github_login:
         type: string
-        minLength: 1
         maxLength: 39
-  CopilotIdentityMapping:
-    type: object
+        minLength: 1
+        pattern: ^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$
     additionalProperties: false
+    type: object
     required:
-    - app_user_id
-    - email
-    - display_name
     - github_login
+    title: CopilotIdentityWrite
+  CopilotIdentityMapping:
     properties:
       app_user_id:
         type: string
@@ -157,128 +154,127 @@ schemas:
         type:
         - string
         - 'null'
-  CopilotUsageTotals:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - seats
-    - active_users
-    - interactions
-    - generations
-    - acceptances
-    - acceptance_rate
-    - loc_added
-    - loc_deleted
-    - ai_credits_used
-    - gross_amount
-    - net_amount
-    - cli_prompt_tokens
-    - cli_output_tokens
+    - app_user_id
+    - email
+    - display_name
+    - github_login
+    title: CopilotIdentityMapping
+  CopilotUsageTotals:
     properties:
       seats:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       active_users:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       interactions:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       generations:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       acceptances:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       acceptance_rate:
         type: number
-        minimum: 0
-        maximum: 100
+        maximum: 100.0
+        minimum: 0.0
+        default: 0
       loc_added:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       loc_deleted:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       ai_credits_used:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       gross_amount:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       net_amount:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       cli_prompt_tokens:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       cli_output_tokens:
         type: integer
-        minimum: 0
-  CopilotDailyUsage:
-    type: object
+        minimum: 0.0
+        default: 0
     additionalProperties: false
-    required:
-    - day
-    - active_users
-    - weekly_active_users
-    - monthly_active_users
-    - agent_users
-    - chat_users
-    - interactions
-    - generations
-    - acceptances
-    - loc_added
-    - loc_deleted
-    - ai_credits_used
+    type: object
+    title: CopilotUsageTotals
+  CopilotDailyUsage:
     properties:
       day:
         type: string
         format: date
       active_users:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       weekly_active_users:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       monthly_active_users:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       agent_users:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       chat_users:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       interactions:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       generations:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       acceptances:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       loc_added:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       loc_deleted:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       ai_credits_used:
         type: number
-        minimum: 0
-  CopilotBreakdownItem:
-    type: object
+        minimum: 0.0
+        default: 0
     additionalProperties: false
+    type: object
     required:
-    - key
-    - label
-    - interactions
-    - generations
-    - acceptances
-    - loc_added
-    - loc_deleted
+    - day
+    title: CopilotDailyUsage
+  CopilotBreakdownItem:
     properties:
       key:
         type: string
@@ -286,60 +282,56 @@ schemas:
         type: string
       interactions:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       generations:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       acceptances:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       loc_added:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       loc_deleted:
         type: integer
-        minimum: 0
-  CopilotAiCreditItem:
-    type: object
+        minimum: 0.0
+        default: 0
     additionalProperties: false
+    type: object
     required:
-    - model
-    - gross_quantity
-    - discount_quantity
-    - net_quantity
-    - net_cost
+    - key
+    - label
+    title: CopilotBreakdownItem
+  CopilotAiCreditItem:
     properties:
       model:
         type: string
       gross_quantity:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       discount_quantity:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       net_quantity:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       net_cost:
         type: number
-        minimum: 0
-  CopilotMemberUsage:
-    type: object
+        minimum: 0.0
+        default: 0
     additionalProperties: false
+    type: object
     required:
-    - login
-    - avatar_url
-    - plan_type
-    - seat_created_at
-    - last_activity_at
-    - last_activity_editor
-    - pending_cancellation_date
-    - assigning_team
-    - adoption_phase
-    - budget_amount
-    - budget_consumed
-    - budget_remaining
-    - totals
+    - model
+    title: CopilotAiCreditItem
+  CopilotMemberUsage:
     properties:
       login:
         type: string
@@ -393,15 +385,14 @@ schemas:
         - 'null'
       totals:
         $ref: ../../openapi.yaml#/components/schemas/CopilotUsageTotals
-  CopilotSubscription:
-    type: object
     additionalProperties: false
+    type: object
     required:
+    - login
     - plan_type
-    - seat_management_setting
-    - seat_breakdown
-    - estimated_monthly_seat_cost
-    - price_per_seat
+    - totals
+    title: CopilotMemberUsage
+  CopilotSubscription:
     properties:
       plan_type:
         type: string
@@ -410,36 +401,24 @@ schemas:
         - string
         - 'null'
       seat_breakdown:
-        type: object
         additionalProperties:
           type: integer
-          minimum: 0
+        type: object
       estimated_monthly_seat_cost:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       price_per_seat:
         type: number
-        minimum: 0
-  CopilotDashboard:
-    type: object
+        minimum: 0.0
+        default: 0
     additionalProperties: false
+    type: object
     required:
-    - organization
-    - report_start_day
-    - report_end_day
-    - generated_at
-    - viewer_github_login
-    - can_view_members
-    - subscription
-    - totals
-    - daily
-    - models
-    - features
-    - languages
-    - ides
-    - ai_credit_breakdown
-    - members
-    - warnings
+    - plan_type
+    - seat_breakdown
+    title: CopilotSubscription
+  CopilotDashboard:
     properties:
       organization:
         type: string
@@ -467,47 +446,56 @@ schemas:
       totals:
         $ref: ../../openapi.yaml#/components/schemas/CopilotUsageTotals
       daily:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotDailyUsage
+        type: array
       models:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotBreakdownItem
+        type: array
       features:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotBreakdownItem
+        type: array
       languages:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotBreakdownItem
+        type: array
       ides:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotBreakdownItem
-      ai_credit_breakdown:
         type: array
+      ai_credit_breakdown:
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotAiCreditItem
-      members:
         type: array
+      members:
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotMemberUsage
-      warnings:
         type: array
+      warnings:
         items:
           type: string
-  CopilotGovernanceMember:
-    type: object
+        type: array
     additionalProperties: false
+    type: object
     required:
-    - login
-    - avatar_url
-    - has_seat
-    - last_activity_at
-    - last_activity_editor
-    - plan_type
+    - organization
+    - report_start_day
+    - report_end_day
+    - generated_at
+    - viewer_github_login
+    - can_view_members
+    - subscription
+    - totals
+    - daily
+    - models
+    - features
+    - languages
+    - ides
+    - members
+    title: CopilotDashboard
+  CopilotGovernanceMember:
     properties:
       login:
         type: string
@@ -531,18 +519,13 @@ schemas:
         type:
         - string
         - 'null'
-  CopilotTeamSummary:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - slug
-    - name
-    - description
-    - organization_selection_type
-    - organizations
-    - members
-    - member_count
-    - seat_count
+    - login
+    - has_seat
+    title: CopilotGovernanceMember
+  CopilotTeamSummary:
     properties:
       slug:
         type: string
@@ -557,40 +540,40 @@ schemas:
         - string
         - 'null'
       organizations:
-        type: array
         items:
           type: string
-      members:
         type: array
+      members:
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotGovernanceMember
+        type: array
       member_count:
         type: integer
-        minimum: 0
+        minimum: 0.0
       seat_count:
         type: integer
-        minimum: 0
-  CopilotCostCenterResource:
-    type: object
+        minimum: 0.0
     additionalProperties: false
+    type: object
     required:
-    - type
+    - slug
     - name
+    - member_count
+    - seat_count
+    title: CopilotTeamSummary
+  CopilotCostCenterResource:
     properties:
       type:
         type: string
       name:
         type: string
-  CopilotCostCenterSummary:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - id
+    - type
     - name
-    - state
-    - resources
-    - members
-    - member_count
+    title: CopilotCostCenterResource
+  CopilotCostCenterSummary:
     properties:
       id:
         type: string
@@ -602,32 +585,25 @@ schemas:
         - active
         - archived
       resources:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotCostCenterResource
-      members:
         type: array
+      members:
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotGovernanceMember
+        type: array
       member_count:
         type: integer
-        minimum: 0
-  CopilotBudgetSummary:
-    type: object
+        minimum: 0.0
     additionalProperties: false
+    type: object
     required:
     - id
-    - budget_type
-    - scope
-    - entity_name
-    - product_skus
-    - amount
-    - consumed_amount
-    - remaining_amount
-    - usage_percent
-    - prevent_further_usage
-    - will_alert
-    - alert_recipients
+    - name
+    - state
+    - member_count
+    title: CopilotCostCenterSummary
+  CopilotBudgetSummary:
     properties:
       id:
         type: string
@@ -638,12 +614,12 @@ schemas:
       entity_name:
         type: string
       product_skus:
-        type: array
         items:
           type: string
+        type: array
       amount:
         type: number
-        minimum: 0
+        minimum: 0.0
       consumed_amount:
         type:
         - number
@@ -663,22 +639,21 @@ schemas:
       will_alert:
         type: boolean
       alert_recipients:
-        type: array
         items:
           type: string
-  CopilotGovernance:
-    type: object
+        type: array
     additionalProperties: false
+    type: object
     required:
-    - organization
-    - generated_at
-    - write_enabled
-    - seats
-    - teams
-    - cost_centers
-    - unassigned_seats
-    - budgets
-    - warnings
+    - id
+    - budget_type
+    - scope
+    - entity_name
+    - amount
+    - prevent_further_usage
+    - will_alert
+    title: CopilotBudgetSummary
+  CopilotGovernance:
     properties:
       organization:
         type: string
@@ -688,37 +663,76 @@ schemas:
       write_enabled:
         type: boolean
       seats:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotGovernanceMember
-      teams:
         type: array
+      teams:
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotTeamSummary
-      cost_centers:
         type: array
+      cost_centers:
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotCostCenterSummary
-      unassigned_seats:
         type: array
+      unassigned_seats:
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotGovernanceMember
-      budgets:
         type: array
+      budgets:
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotBudgetSummary
-      warnings:
         type: array
+      warnings:
         items:
           type: string
+        type: array
+    additionalProperties: false
+    type: object
+    required:
+    - organization
+    - generated_at
+    - write_enabled
+    title: CopilotGovernance
   CopilotUsageImportKind:
     type: string
     enum:
     - ai_usage
     - usage_report
   CopilotUsageImportSummary:
-    type: object
+    properties:
+      upload_id:
+        type: string
+        format: uuid
+      source_kind:
+        type: string
+        enum:
+        - ai_usage
+        - usage_report
+      filename:
+        type: string
+      content_sha256:
+        type: string
+        pattern: ^[0-9a-f]{64}$
+      row_count:
+        type: integer
+        minimum: 1.0
+      inserted_count:
+        type: integer
+        minimum: 0.0
+      duplicate_count:
+        type: integer
+        minimum: 0.0
+      first_usage_date:
+        type: string
+        format: date
+      last_usage_date:
+        type: string
+        format: date
+      created_at:
+        type: string
+        format: date-time
     additionalProperties: false
+    type: object
     required:
     - upload_id
     - source_kind
@@ -730,98 +744,59 @@ schemas:
     - first_usage_date
     - last_usage_date
     - created_at
-    properties:
-      upload_id:
-        type: string
-        format: uuid
-      source_kind:
-        $ref: ../../openapi.yaml#/components/schemas/CopilotUsageImportKind
-      filename:
-        type: string
-      content_sha256:
-        type: string
-        pattern: ^[0-9a-f]{64}$
-      row_count:
-        type: integer
-        minimum: 1
-        maximum: 25000
-      inserted_count:
-        type: integer
-        minimum: 0
-      duplicate_count:
-        type: integer
-        minimum: 0
-      first_usage_date:
-        type: string
-        format: date
-      last_usage_date:
-        type: string
-        format: date
-      created_at:
-        type: string
-        format: date-time
+    title: CopilotUsageImportSummary
   CopilotImportedUsageBreakdown:
-    type: object
+    properties:
+      key:
+        type: string
+      quantity:
+        type: number
+        minimum: 0.0
+      gross_amount:
+        type: number
+        minimum: 0.0
+      net_amount:
+        type: number
+        minimum: 0.0
+      user_count:
+        type: integer
+        minimum: 0.0
     additionalProperties: false
+    type: object
     required:
     - key
     - quantity
     - gross_amount
     - net_amount
     - user_count
-    properties:
-      key:
-        type: string
-      quantity:
-        type: number
-        minimum: 0
-      gross_amount:
-        type: number
-        minimum: 0
-      net_amount:
-        type: number
-        minimum: 0
-      user_count:
-        type: integer
-        minimum: 0
+    title: CopilotImportedUsageBreakdown
   CopilotImportedUsageDaily:
-    type: object
-    additionalProperties: false
-    required:
-    - day
-    - quantity
-    - gross_amount
-    - net_amount
-    - active_users
     properties:
       day:
         type: string
         format: date
       quantity:
         type: number
-        minimum: 0
+        minimum: 0.0
       gross_amount:
         type: number
-        minimum: 0
+        minimum: 0.0
       net_amount:
         type: number
-        minimum: 0
+        minimum: 0.0
       active_users:
         type: integer
-        minimum: 0
-  CopilotImportedUsageUser:
-    type: object
+        minimum: 0.0
     additionalProperties: false
+    type: object
     required:
-    - login
-    - organization
-    - cost_center_name
+    - day
     - quantity
     - gross_amount
     - net_amount
-    - active_days
-    - monthly_quota
-    - usage_percent
+    - active_users
+    title: CopilotImportedUsageDaily
+  CopilotImportedUsageUser:
     properties:
       login:
         type: string
@@ -833,16 +808,16 @@ schemas:
         - 'null'
       quantity:
         type: number
-        minimum: 0
+        minimum: 0.0
       gross_amount:
         type: number
-        minimum: 0
+        minimum: 0.0
       net_amount:
         type: number
-        minimum: 0
+        minimum: 0.0
       active_days:
         type: integer
-        minimum: 0
+        minimum: 0.0
       monthly_quota:
         type:
         - number
@@ -853,32 +828,23 @@ schemas:
         - number
         - 'null'
         minimum: 0
-  CopilotImportedUsage:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - source_kind
-    - has_data
-    - first_usage_date
-    - last_usage_date
-    - total_quantity
-    - total_gross_amount
-    - total_net_amount
-    - unique_users
-    - unique_organizations
-    - daily
-    - primary_breakdown
-    - product_breakdown
-    - organization_breakdown
-    - cost_center_breakdown
-    - users
-    - organizations
-    - cost_centers
-    - products
-    - skus
+    - login
+    - organization
+    - quantity
+    - gross_amount
+    - net_amount
+    - active_days
+    title: CopilotImportedUsageUser
+  CopilotImportedUsage:
     properties:
       source_kind:
-        $ref: ../../openapi.yaml#/components/schemas/CopilotUsageImportKind
+        type: string
+        enum:
+        - ai_usage
+        - usage_report
       has_data:
         type: boolean
       first_usage_date:
@@ -893,66 +859,71 @@ schemas:
         format: date
       total_quantity:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       total_gross_amount:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       total_net_amount:
         type: number
-        minimum: 0
+        minimum: 0.0
+        default: 0
       unique_users:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       unique_organizations:
         type: integer
-        minimum: 0
+        minimum: 0.0
+        default: 0
       daily:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotImportedUsageDaily
+        type: array
       primary_breakdown:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotImportedUsageBreakdown
+        type: array
       product_breakdown:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotImportedUsageBreakdown
+        type: array
       organization_breakdown:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotImportedUsageBreakdown
+        type: array
       cost_center_breakdown:
-        type: array
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotImportedUsageBreakdown
-      users:
         type: array
+      users:
         items:
           $ref: ../../openapi.yaml#/components/schemas/CopilotImportedUsageUser
+        type: array
       organizations:
-        type: array
         items:
           type: string
+        type: array
       cost_centers:
-        type: array
         items:
           type: string
+        type: array
       products:
-        type: array
         items:
           type: string
+        type: array
       skus:
-        type: array
         items:
           type: string
-  CopilotCostCenterOption:
-    type: object
+        type: array
     additionalProperties: false
+    type: object
     required:
-    - id
-    - name
-    - state
+    - source_kind
+    - has_data
+    title: CopilotImportedUsage
+  CopilotCostCenterOption:
     properties:
       id:
         type: string
@@ -963,30 +934,34 @@ schemas:
         enum:
         - active
         - archived
-  CopilotCostCenterRequestCreate:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - organization
-    - cost_center_id
+    - id
+    - name
+    - state
+    title: CopilotCostCenterOption
+  CopilotCostCenterRequestCreate:
     properties:
       organization:
         type: string
-        minLength: 1
         maxLength: 39
+        minLength: 1
       cost_center_id:
         type: string
-        minLength: 1
         maxLength: 255
+        minLength: 1
       reason:
         type: string
         maxLength: 1000
         default: ''
-  CopilotCostCenterRequestReview:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - decision
+    - organization
+    - cost_center_id
+    title: CopilotCostCenterRequestCreate
+  CopilotCostCenterRequestReview:
     properties:
       decision:
         type: string
@@ -1000,27 +975,12 @@ schemas:
       apply_to_github:
         type: boolean
         default: false
-  CopilotCostCenterRequest:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - id
-    - organization
-    - app_user_id
-    - user_email
-    - user_display_name
-    - github_login
-    - cost_center_id
-    - cost_center_name
-    - reason
-    - status
-    - github_sync_status
-    - github_sync_error
-    - reviewed_by
-    - review_comment
-    - created_at
-    - updated_at
-    - reviewed_at
+    - decision
+    title: CopilotCostCenterRequestReview
+  CopilotCostCenterRequest:
     properties:
       id:
         type: string
@@ -1080,55 +1040,74 @@ schemas:
         - string
         - 'null'
         format: date-time
-  CopilotCostCenterRequestList:
-    type: object
     additionalProperties: false
+    type: object
+    required:
+    - id
+    - organization
+    - app_user_id
+    - user_email
+    - user_display_name
+    - github_login
+    - cost_center_id
+    - cost_center_name
+    - reason
+    - status
+    - github_sync_status
+    - github_sync_error
+    - reviewed_by
+    - review_comment
+    - created_at
+    - updated_at
+    - reviewed_at
+    title: CopilotCostCenterRequest
+  CopilotCostCenterRequestList:
+    properties:
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/CopilotCostCenterRequest
+        type: array
+      can_review:
+        type: boolean
+      pending_count:
+        type: integer
+        minimum: 0.0
+      approved_count:
+        type: integer
+        minimum: 0.0
+      rejected_count:
+        type: integer
+        minimum: 0.0
+    additionalProperties: false
+    type: object
     required:
     - items
     - can_review
     - pending_count
     - approved_count
     - rejected_count
-    properties:
-      items:
-        type: array
-        items:
-          $ref: ../../openapi.yaml#/components/schemas/CopilotCostCenterRequest
-      can_review:
-        type: boolean
-      pending_count:
-        type: integer
-        minimum: 0
-      approved_count:
-        type: integer
-        minimum: 0
-      rejected_count:
-        type: integer
-        minimum: 0
+    title: CopilotCostCenterRequestList
   CopilotBudgetRequestCreate:
-    type: object
-    additionalProperties: false
-    required:
-    - organization
-    - amount_usd
     properties:
       organization:
         type: string
-        minLength: 1
         maxLength: 39
+        minLength: 1
       amount_usd:
         type: integer
-        minimum: 1
-        maximum: 1000000
+        maximum: 1000000.0
+        minimum: 1.0
       reason:
         type: string
         maxLength: 1000
         default: ''
-  CopilotBudgetRequestReview:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - decision
+    - organization
+    - amount_usd
+    title: CopilotBudgetRequestCreate
+  CopilotBudgetRequestReview:
     properties:
       decision:
         type: string
@@ -1139,8 +1118,8 @@ schemas:
         type:
         - integer
         - 'null'
-        minimum: 1
         maximum: 1000000
+        minimum: 1
       comment:
         type: string
         maxLength: 1000
@@ -1148,27 +1127,12 @@ schemas:
       apply_to_github:
         type: boolean
         default: false
-  CopilotBudgetRequest:
-    type: object
     additionalProperties: false
+    type: object
     required:
-    - id
-    - organization
-    - app_user_id
-    - user_email
-    - user_display_name
-    - github_login
-    - requested_amount_usd
-    - approved_amount_usd
-    - reason
-    - status
-    - github_sync_status
-    - github_sync_error
-    - reviewed_by
-    - review_comment
-    - created_at
-    - updated_at
-    - reviewed_at
+    - decision
+    title: CopilotBudgetRequestReview
+  CopilotBudgetRequest:
     properties:
       id:
         type: string
@@ -1188,7 +1152,6 @@ schemas:
         type: string
       requested_amount_usd:
         type: integer
-        minimum: 1
       approved_amount_usd:
         type:
         - integer
@@ -1233,28 +1196,50 @@ schemas:
         - string
         - 'null'
         format: date-time
-  CopilotBudgetRequestList:
-    type: object
     additionalProperties: false
+    type: object
+    required:
+    - id
+    - organization
+    - app_user_id
+    - user_email
+    - user_display_name
+    - github_login
+    - requested_amount_usd
+    - approved_amount_usd
+    - reason
+    - status
+    - github_sync_status
+    - github_sync_error
+    - reviewed_by
+    - review_comment
+    - created_at
+    - updated_at
+    - reviewed_at
+    title: CopilotBudgetRequest
+  CopilotBudgetRequestList:
+    properties:
+      items:
+        items:
+          $ref: ../../openapi.yaml#/components/schemas/CopilotBudgetRequest
+        type: array
+      can_review:
+        type: boolean
+      pending_count:
+        type: integer
+        minimum: 0.0
+      approved_count:
+        type: integer
+        minimum: 0.0
+      rejected_count:
+        type: integer
+        minimum: 0.0
+    additionalProperties: false
+    type: object
     required:
     - items
     - can_review
     - pending_count
     - approved_count
     - rejected_count
-    properties:
-      items:
-        type: array
-        items:
-          $ref: ../../openapi.yaml#/components/schemas/CopilotBudgetRequest
-      can_review:
-        type: boolean
-      pending_count:
-        type: integer
-        minimum: 0
-      approved_count:
-        type: integer
-        minimum: 0
-      rejected_count:
-        type: integer
-        minimum: 0
+    title: CopilotBudgetRequestList

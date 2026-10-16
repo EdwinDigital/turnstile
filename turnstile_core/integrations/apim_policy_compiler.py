@@ -12,7 +12,9 @@ from urllib.parse import urlsplit
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
+from ..domain.budget_counting import BudgetPublicationContracts
 from ..domain.control_plane import (
+    COUNT_TOKENS_REJECTIONS,
         ApiFormat,
         AuthStrategy,
         GatewayBackendPoolConfig,
@@ -22,6 +24,7 @@ from ..domain.control_plane import (
         StreamingMode,
 )
 from ..domain.image_profiles import validate_image_profile
+from ..domain.model_availability import ModelAvailabilityPublication
 from ..domain.runtime_models import BrandKey
 from .apim_application_tpm import compose_application_tpm_policy
 from .apim_control_plane_contract import (
@@ -35,7 +38,18 @@ from .apim_control_plane_contract import (
         OperationResource,
         PolicyCompilationError,
 )
-from .apim_image_policy import IMAGE_OPERATION_ID, IMAGE_POLICY_VERSION, image_request_validation
+from .apim_image_policy import IMAGE_OPERATION_ID, image_request_validation
+from .apim_model_availability import (
+    AVAILABILITY_PROBE_PREFIX,
+    compile_availability_operation,
+    compile_protocol_fenced_probe,
+)
+from .apim_policy_components import (
+    IMAGE_POLICY_VERSION,
+    NATIVE_STREAM_REQUEST,
+    validate_native_stream_policy,
+)
+from .apim_storage_routes import FixedRouteBinding, FixedRouteProgram, compile_fixed_route_program
 
 
 def _chat_completions_policy(publication: GatewayPublication) -> str:
@@ -98,7 +112,34 @@ class ApimPolicyCompiler:
         self._usage_observer_url = observer_url or None
         self._usage_observer_key_named_value = observer_key or None
 
+    def without_usage_observer(self) -> ApimPolicyCompiler:
+        return ApimPolicyCompiler(self._probe_subscription_id)
+
+    def with_usage_observer(
+        self, url: str | None, key_named_value: str | None,
+    ) -> ApimPolicyCompiler:
+        return ApimPolicyCompiler(self._probe_subscription_id, url, key_named_value)
+
+    def with_probe_subscription(self, probe_subscription_id: str) -> ApimPolicyCompiler:
+        return ApimPolicyCompiler(
+            probe_subscription_id,
+            self._usage_observer_url,
+            self._usage_observer_key_named_value,
+        )
+
+    def compile_fixed_program(
+        self, baseline: str, binding: FixedRouteBinding, *, canonical_parent: str,
+    ) -> FixedRouteProgram:
+        if binding.observer_key_named_value != self._usage_observer_key_named_value:
+            raise PolicyCompilationError("Fixed program Observer binding differs from compiler")
+        return compile_fixed_route_program(baseline, binding, canonical_parent=canonical_parent)
+
     def compile(self, publication: GatewayPublication) -> CompiledGatewayRelease:
+        native_stream = self._native_stream_contract(publication)
+        if publication.resource_manifest.get("budget_contracts") is not None:
+            BudgetPublicationContracts.model_validate(
+                publication.resource_manifest["budget_contracts"],
+            ).validate_publication(publication)
         bindings = publication.desired_spec.bindings
         backend_ids: dict[str, str] = {}
         pool_member_backend_ids: dict[str, tuple[str, ...]] = {}
@@ -201,7 +242,7 @@ class ApimPolicyCompiler:
                 backends.append(
                     BackendPoolResource(
                         id=pool_backend_id,
-                        title=f"Turnstile {binding.model.display_name} deployment pool",
+                        title=f"FinOps {binding.model.display_name} deployment pool",
                         url="",
                         members=tuple(member_resources),
                         session_cookie_name=(
@@ -227,13 +268,7 @@ class ApimPolicyCompiler:
             )
             backend_id = target_backends.get(target_key)
             if backend_id is None:
-                backend_kind = (
-                    "img"
-                    if image_backend
-                    else "obs"
-                    if self._usage_observer_url is not None
-                    else "dyn"
-                )
+                backend_kind = "img" if image_backend else "obs" if self._usage_observer_url is not None else "dyn"
                 target_digest = hashlib.sha256(
                     "\n".join(target_key).encode("utf-8")
                 ).hexdigest()[:10]
@@ -242,14 +277,13 @@ class ApimPolicyCompiler:
                 )
                 target_backends[target_key] = backend_id
                 backend_url, backend_headers = (
-                    (source_backend_url, ())
-                    if image_backend
-                    else self._observer_backend(source_backend_url, upstream)
+                    (source_backend_url, ()) if image_backend else
+                    self._observer_backend(source_backend_url, upstream)
                 )
                 backends.append(
                     BackendResource(
                         id=backend_id,
-                        title=f"Turnstile {binding.runtime_name}",
+                        title=f"FinOps {binding.runtime_name}",
                         url=backend_url,
                         headers=backend_headers,
                     )
@@ -287,14 +321,47 @@ class ApimPolicyCompiler:
             backend_ids,
             pool_member_backend_ids,
         )
-        count_tokens = self._count_tokens_policy(publication)
+        count_tokens = self._count_tokens_policy(
+            publication,
+            backend_ids,
+            pool_member_backend_ids,
+        )
         models = self._models_policy(publication)
         includes_images = any(binding.api_format is ApiFormat.OPENAI_IMAGES for binding in bindings)
         includes_images = includes_images or any(
-            item.api_format is ApiFormat.OPENAI_IMAGES
-            for item in publication.desired_spec.removed_models
+            removed.api_format is ApiFormat.OPENAI_IMAGES
+            for removed in publication.desired_spec.removed_models
         )
         image_policy = self._images_policy(publication, backend_ids) if includes_images else None
+        availability = publication.resource_manifest.get("model_availability")
+        operations = [OperationResource(
+            IMAGE_OPERATION_ID, "Image generations", "POST", "/images/generations",
+        )] if image_policy is not None else []
+        probe_policies: list[tuple[str, str]] = []
+        if availability is not None:
+            snapshot = ModelAvailabilityPublication.model_validate(availability)
+            snapshot.validate_publication(publication)
+            chat_completions, responses, responses_compact, messages, count_tokens = (
+                compile_availability_operation(policy, publication, snapshot)
+                for policy in (chat_completions, responses, responses_compact, messages, count_tokens)
+            )
+            models = compile_availability_operation(models, publication, snapshot, catalog=True)
+            if image_policy is not None:
+                image_policy = compile_availability_operation(image_policy, publication, snapshot)
+            diagnostic_surfaces = [
+                ("chat-completions", "/chat/completions", chat_completions),
+                ("responses", "/responses", responses),
+                ("responses-compact", "/responses/compact", responses_compact),
+                ("anthropic-messages", "/v1/messages", messages),
+                ("anthropic-count-tokens", "/v1/messages/count_tokens", count_tokens),
+                ("anthropic-models", "/v1/models", models),
+            ]
+            if image_policy is not None:
+                diagnostic_surfaces.append((IMAGE_OPERATION_ID, "/images/generations", image_policy))
+            for operation_id, path, source in diagnostic_surfaces:
+                probe_id = AVAILABILITY_PROBE_PREFIX + operation_id
+                operations.append(OperationResource(probe_id, "Availability " + operation_id, "HEAD", path))
+                probe_policies.append((probe_id, compile_protocol_fenced_probe(source)))
         for value in (
             chat_completions,
             responses,
@@ -305,6 +372,13 @@ class ApimPolicyCompiler:
             *([image_policy] if image_policy is not None else []),
         ):
             ElementTree.fromstring(value)
+        for operation_id, policy in (
+            ("chat-completions", chat_completions),
+            ("responses", responses),
+            ("anthropic-messages", messages),
+        ):
+            if native_stream:
+                validate_native_stream_policy(policy, operation_id)
         digest = hashlib.sha256(
             "\n".join(
                 (
@@ -315,6 +389,7 @@ class ApimPolicyCompiler:
                     count_tokens,
                     models,
                     *([image_policy] if image_policy is not None else []),
+                    *(source for _, source in probe_policies),
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -330,13 +405,8 @@ class ApimPolicyCompiler:
             named_values=tuple(named_values.values()),
             oauth_credentials=tuple(oauth_credentials.values()),
             images_generations_policy=image_policy,
-            operations=(
-                OperationResource(
-                    IMAGE_OPERATION_ID, "Image generations", "POST", "/images/generations"
-                ),
-            )
-            if image_policy is not None
-            else (),
+            operations=tuple(operations),
+            availability_probe_policies=tuple(probe_policies),
         )
 
     @staticmethod
@@ -447,10 +517,1051 @@ class ApimPolicyCompiler:
             return ((header, f"{{{{{named_value}}}}}"),)
         raise PolicyCompilationError("The pool member authentication strategy is unsupported")
 
+    def _chat_completions_policy(
+        self,
+        publication: GatewayPublication,
+        backend_ids: dict[str, str],
+        pool_member_backend_ids: dict[str, tuple[str, ...]],
+    ) -> str:
+        metadata_branches = "\n".join(
+            self._metadata_branch(binding, "dynamicChatModel", publication)
+            for binding in publication.desired_spec.bindings
+            if binding.api_format is ApiFormat.OPENAI_CHAT
+        )
+        metadata_choose = (
+            f"""    <choose>
+{metadata_branches}
+    </choose>
+"""
+            if metadata_branches
+            else ""
+        )
+        routing_branches = "\n".join(
+            self._routing_branch(
+                binding,
+                backend_ids[binding.model.model_key],
+                "dynamicChatModel",
+                probe_backend_ids=pool_member_backend_ids.get(
+                    binding.model.model_key,
+                    (),
+                ),
+            )
+            for binding in publication.desired_spec.bindings
+            if binding.api_format is ApiFormat.OPENAI_CHAT
+            and binding.routing_managed
+        )
+        known_condition = self._condition(
+            [
+                item.id
+                for item in publication.desired_spec.discovery_models
+                if item.api_format is ApiFormat.OPENAI_CHAT
+            ],
+            "dynamicChatModel",
+            publication.desired_spec.bindings,
+        )
+        return f"""<policies>
+  <inbound>
+    <set-variable name="dynamicChatModel" value="@{{
+      try
+      {{
+        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+        return ((string)body[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant();
+      }}
+      catch (Exception) {{ return &quot;&quot;; }}
+    }}" />
+{self._pool_probe_variable()}
+    <set-variable name="selectedModelKnown" value="@({known_condition})" />
+{metadata_choose.rstrip()}
+    <base />
+    <choose>
+{routing_branches}
+      <when condition="@({known_condition})" />
+      <otherwise>
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-body>{{"error":{{"type":"invalid_request_error","message":"The requested model is not published by this gateway revision"}}}}</set-body>
+        </return-response>
+      </otherwise>
+    </choose>
+  </inbound>
+{self._backend_policy(publication.desired_spec.bindings, "dynamicChatModel", ApiFormat.OPENAI_CHAT, native_stream=self._native_stream_contract(publication))}
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>"""
+
+    def _images_policy(
+        self, publication: GatewayPublication, backend_ids: dict[str, str]
+    ) -> str:
+        bindings = [
+            binding for binding in publication.desired_spec.bindings
+            if binding.api_format is ApiFormat.OPENAI_IMAGES and binding.routing_managed
+        ]
+        known = self._condition(
+            [binding.model.model_key for binding in bindings], "dynamicImageModel", bindings,
+        )
+        profiles = {
+            binding.model.model_key: validate_image_profile(binding.model.image_profile)
+            for binding in bindings
+        }
+        validation = "\n".join(
+            f'<when condition="@({self._model_condition(binding, "dynamicImageModel")})">'
+            + image_request_validation(profiles[binding.model.model_key]) + '</when>'
+            for binding in bindings
+        ) or '<when condition="@(false)" />'
+        metadata = "\n".join(self._metadata_branch(binding, "dynamicImageModel", publication) for binding in bindings)
+        routing = "\n".join(self._routing_branch(
+            binding, backend_ids[binding.model.model_key], "dynamicImageModel",
+            backend_path=profiles[binding.model.model_key].backend_path
+            + "?api-version=" + profiles[binding.model.model_key].api_version,
+        ) for binding in bindings)
+        metadata_choose = f"<choose>\n{metadata}\n</choose>" if metadata else ""
+        routing = routing or '      <when condition="@(false)" />'
+        return f"""<policies>
+    <inbound>
+        <set-variable name="dynamicImageModel" value="@{{ try {{ return ((string)context.Request.Body.As&lt;JObject&gt;(preserveContent: true)[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant(); }} catch {{ return &quot;&quot;; }} }}" />
+        <choose>{validation}<otherwise><return-response><set-status code="400" reason="Bad Request" /><set-body>{{"error":"image_model_not_published"}}</set-body></return-response></otherwise></choose>
+        <set-variable name="selectedModelKnown" value="@({known})" />
+    {metadata_choose}
+        <base />
+        <choose><when condition="@(context.Variables.GetValueOrDefault&lt;int&gt;(&quot;imageGenerationPolicyVersion&quot;, 0) != {IMAGE_POLICY_VERSION})">
+            <return-response><set-status code="503" reason="Service Unavailable" /><set-body>{{"error":"image_budget_policy_unavailable"}}</set-body></return-response>
+        </when></choose>
+        <choose>
+{routing}
+            <otherwise><return-response><set-status code="400" reason="Bad Request" /><set-body>{{"error":{{"code":"image_model_not_published","message":"The image model is not published by this gateway revision"}}}}</set-body></return-response></otherwise>
+        </choose>
+    </inbound>
+    <backend><forward-request timeout="{max((profile.timeout_seconds for profile in profiles.values()), default=1)}" buffer-response="true" /></backend>
+    <outbound><base /><set-header name="Cache-Control" exists-action="override"><value>no-store</value></set-header></outbound>
+    <on-error><base /></on-error>
+</policies>"""
+
+    def _messages_policy(
+        self,
+        publication: GatewayPublication,
+        backend_ids: dict[str, str],
+        pool_member_backend_ids: dict[str, tuple[str, ...]],
+    ) -> str:
+        metadata_branches = "\n".join(
+            self._metadata_branch(binding, "dynamicRequestedModel", publication)
+            for binding in publication.desired_spec.bindings
+            if binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
+        )
+        metadata_choose = (
+            f"""    <choose>
+{metadata_branches}
+    </choose>
+"""
+            if metadata_branches
+            else ""
+        )
+        routing_branches = "\n".join(
+            self._routing_branch(
+                binding,
+                backend_ids[binding.model.model_key],
+                "dynamicRequestedModel",
+                probe_backend_ids=pool_member_backend_ids.get(
+                    binding.model.model_key,
+                    (),
+                ),
+            )
+            for binding in publication.desired_spec.bindings
+            if binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
+            and binding.routing_managed
+        )
+        buffered_aliases = [
+            binding.model.model_key
+            for binding in publication.desired_spec.bindings
+            if binding.streaming_mode is StreamingMode.BUFFERED
+            and binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
+        ]
+        known_condition = self._condition(
+            [
+                item.id
+                for item in publication.desired_spec.discovery_models
+                if item.api_format is ApiFormat.ANTHROPIC_MESSAGES
+            ],
+            "dynamicRequestedModel",
+            publication.desired_spec.bindings,
+        )
+        buffered_condition = self._condition(
+            buffered_aliases,
+            "dynamicRequestedModel",
+            publication.desired_spec.bindings,
+        )
+        return f"""<policies>
+  <inbound>
+    <set-variable name="dynamicRequestedModel" value="@{{
+      try
+      {{
+        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+        return ((string)body[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant();
+      }}
+      catch (Exception) {{ return &quot;&quot;; }}
+    }}" />
+    <set-variable name="dynamicRequestedStream" value="@{{
+      try
+      {{
+        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+        return (bool?)body[&quot;stream&quot;] ?? false;
+      }}
+      catch (Exception) {{ return false; }}
+    }}" />
+{self._pool_probe_variable()}
+    <set-variable name="selectedModelKnown" value="@({known_condition})" />
+{metadata_choose.rstrip()}
+    <base />
+    <choose>
+{routing_branches}
+      <when condition="@({known_condition})" />
+            <otherwise>
+                <return-response>
+                    <set-status code="400" reason="Bad Request" />
+                    <set-body>{{"type":"error","error":{{"type":"invalid_request_error","message":"The requested model is not published by this gateway revision"}}}}</set-body>
+                </return-response>
+            </otherwise>
+    </choose>
+  </inbound>
+{self._backend_policy(publication.desired_spec.bindings, "dynamicRequestedModel", ApiFormat.ANTHROPIC_MESSAGES, native_stream=self._native_stream_contract(publication))}
+  <outbound>
+    <base />
+    <choose>
+      <when condition="@(({buffered_condition}) &amp;&amp; (bool)context.Variables[&quot;dynamicRequestedStream&quot;] &amp;&amp; context.Response.StatusCode &lt; 400)">
+{self._buffered_sse_body()}
+      </when>
+    </choose>
+  </outbound>
+  <on-error><base /></on-error>
+</policies>"""
+
+    def _responses_policy(
+        self,
+        publication: GatewayPublication,
+        backend_ids: dict[str, str],
+        pool_member_backend_ids: dict[str, tuple[str, ...]],
+        *,
+        compact: bool = False,
+    ) -> str:
+        bindings = [
+            (binding, responses_path)
+            for binding in publication.desired_spec.bindings
+            if (
+                responses_path := self._responses_backend_path(
+                    binding,
+                    compact=compact,
+                )
+            )
+            is not None
+        ]
+        metadata_branches = "\n".join(
+            self._metadata_branch(binding, "dynamicResponsesModel", publication)
+            for binding, _ in bindings
+        )
+        metadata_choose = (
+            f"""    <choose>
+{metadata_branches}
+    </choose>
+"""
+            if metadata_branches
+            else ""
+        )
+        routing_branches = "\n".join(
+            self._routing_branch(
+                binding,
+                backend_ids[binding.model.model_key],
+                "dynamicResponsesModel",
+                backend_path=responses_path,
+                observer_api_format="openai_responses",
+                include_chat_stream_usage=False,
+                probe_backend_ids=pool_member_backend_ids.get(
+                    binding.model.model_key,
+                    (),
+                ),
+            )
+            for binding, responses_path in bindings
+        )
+        known_condition = self._condition(
+            [binding.model.model_key for binding, _ in bindings],
+            "dynamicResponsesModel",
+            [binding for binding, _ in bindings],
+        )
+        return f"""<policies>
+  <inbound>
+    <set-variable name="dynamicResponsesModel" value="@{{
+      try
+      {{
+        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+        return ((string)body[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant();
+      }}
+      catch (Exception) {{ return &quot;&quot;; }}
+    }}" />
+{self._pool_probe_variable()}
+    <set-variable name="selectedModelKnown" value="@({known_condition})" />
+{metadata_choose.rstrip()}
+    <base />
+    <choose>
+{routing_branches}
+        <when condition="@({known_condition})" />
+      <otherwise>
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-body>{{"error":{{"type":"invalid_request_error","message":"The requested model does not support the Responses API on this gateway revision"}}}}</set-body>
+        </return-response>
+      </otherwise>
+    </choose>
+  </inbound>
+{self._backend_policy([binding for binding, _ in bindings], "dynamicResponsesModel", native_stream=not compact and self._native_stream_contract(publication))}
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>"""
+
+    def _metadata_branch(
+        self,
+        binding: GatewayModelBinding,
+        model_variable: str,
+        publication: GatewayPublication | None = None,
+        *,
+        force_buffering: bool = True,
+    ) -> str:
+        provider = escape(binding.provider_brand_key.value)
+        runtime = escape(binding.runtime_name)
+        routing_managed = "true" if binding.routing_managed else "false"
+        requires_assignment = "false"
+        if binding.model.assignment_required:
+            requires_assignment = (
+                "!(context.Api.IsCurrentRevision == false &amp;&amp; context.Subscription != null "
+                f"&amp;&amp; context.Subscription.Id == &quot;{escape(self._probe_subscription_id)}&quot; "
+                "&amp;&amp; context.Request.Headers.GetValueOrDefault(&quot;x-request-source&quot;, "
+                "&quot;&quot;) == &quot;gateway-publication-probe&quot;)"
+            )
+        force_buffered = ""
+        if force_buffering and binding.streaming_mode is StreamingMode.BUFFERED:
+            force_buffered = """
+        <set-body>@{
+          var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+          body[&quot;stream&quot;] = false;
+          return body.ToString(Newtonsoft.Json.Formatting.None);
+        }</set-body>"""
+        match_condition = self._model_condition(binding, model_variable)
+        counter_metadata = self._budget_counter_metadata(binding)
+        contract_metadata = ""
+        if publication is not None and publication.resource_manifest.get("budget_contracts") is not None:
+            snapshot = BudgetPublicationContracts.model_validate(publication.resource_manifest["budget_contracts"])
+            contract = snapshot.model_contracts[binding.model.model_key]
+            encoded = json.dumps({
+                "version": snapshot.version, "epoch": str(snapshot.epoch),
+                "gateway_profile_id": str(snapshot.gateway_profile_id),
+                "model_key": binding.model.model_key, "contract": contract.model_dump(mode="json"),
+            }, separators=(",", ":"))
+            contract_metadata = "\n        " + ElementTree.tostring(ElementTree.Element(
+                "set-variable", {"name": "selectedBudgetCountContract", "value": encoded},
+            ), encoding="unicode")
+        return f"""      <when condition="@({match_condition})">
+        <set-header name="x-hive-runtime" exists-action="override"><value>{runtime}</value></set-header>
+        <set-variable name="selectedProviderName" value="{provider}" />
+        <set-variable name="selectedBudgetModelKey" value="{escape(binding.model.model_key)}" />{contract_metadata}
+        <set-variable name="selectedBudgetObserver" value="@({str(self._usage_observer_url is not None).lower()})" />
+        <set-variable name="selectedRuntimeName" value="{runtime}" />
+        <set-variable name="selectedContextWindow" value="@((long){binding.model.context_window or 0})" />
+        <set-variable name="selectedRoutingManaged" value="@({routing_managed})" />
+            <set-variable name="selectedRequiresAssignment" value="@({requires_assignment})" />{force_buffered}{counter_metadata}
+      </when>"""
+
+    @staticmethod
+    def _budget_counter_metadata(binding: GatewayModelBinding) -> str:
+        if not binding.routing_managed or binding.backend_url is None or binding.backend_pool is not None:
+            return ""
+        if binding.auth_strategy not in {
+            AuthStrategy.MANAGED_IDENTITY, AuthStrategy.NAMED_VALUE_API_KEY,
+            AuthStrategy.NAMED_VALUE_BEARER, AuthStrategy.NONE,
+        }:
+            return ""
+        header = (
+            "x-api-key" if binding.provider_brand_key.value == "microsoft_foundry"
+            and binding.api_format is ApiFormat.ANTHROPIC_MESSAGES else "api-key"
+        )
+        values = {
+            "selectedBudgetCounterOrigin": str(binding.backend_url),
+            "selectedBudgetUpstreamModel": binding.model.upstream_model_id,
+            "selectedBudgetCounterAuth": binding.auth_strategy.value,
+            "selectedBudgetCounterHeader": header,
+            "selectedBudgetCounterAudience": binding.managed_identity_resource or "",
+        }
+        nodes = "".join(
+            f'\n        <set-variable name="{name}" value="{escape(value)}" />'
+            for name, value in values.items()
+        )
+        if binding.named_value_name:
+            nodes += (
+                '\n        <set-variable name="selectedBudgetCounterKey" value="{{'
+                + escape(binding.named_value_name) + '}}" />'
+            )
+        return nodes
+
+    def _routing_branch(
+        self,
+        binding: GatewayModelBinding,
+        backend_id: str,
+        model_variable: str,
+        *,
+        backend_path: str | None = None,
+        observer_api_format: str | None = None,
+        include_chat_stream_usage: bool = True,
+        probe_backend_ids: tuple[str, ...] = (),
+    ) -> str:
+        upstream = escape(binding.model.upstream_model_id)
+        path = escape(
+            (backend_path or binding.backend_path).replace("{upstream_model_id}", upstream)
+        )
+        auth = self._auth_policy(binding)
+        backend_host = ""
+        if binding.backend_url is not None:
+            backend_host = escape(urlsplit(str(binding.backend_url)).netloc)
+        host_header = (
+            f'''\n        <set-header name="Host" exists-action="override"><value>{backend_host}</value></set-header>'''
+            if backend_host and self._usage_observer_url is None and binding.backend_pool is None
+            else ""
+        )
+        provider_headers = ""
+        if (
+            binding.provider_brand_key.value in {"microsoft_foundry", "azure_databricks"}
+            and binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
+        ):
+            provider_headers = """
+        <set-header name="anthropic-version" exists-action="override"><value>2023-06-01</value></set-header>"""
+        transform = ""
+        if binding.provider_brand_key.value == "amazon_bedrock":
+            transform = """
+        <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+        <set-body>@{
+          var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+          body.Remove(&quot;model&quot;);
+          body.Remove(&quot;stream&quot;);
+          body.Remove(&quot;context_management&quot;);
+          body[&quot;anthropic_version&quot;] = &quot;bedrock-2023-05-31&quot;;
+          return body.ToString(Newtonsoft.Json.Formatting.None);
+        }</set-body>"""
+        elif (
+            binding.api_format is ApiFormat.OPENAI_CHAT
+            or binding.provider_brand_key.value in {"microsoft_foundry", "azure_databricks"}
+        ):
+                        stream_usage = ""
+                        if binding.api_format is ApiFormat.OPENAI_CHAT and include_chat_stream_usage:
+                                stream_usage = """
+                    if ((bool?)body[&quot;stream&quot;] ?? false)
+                    {
+                        var streamOptions = body[&quot;stream_options&quot;] as JObject ?? new JObject();
+                        streamOptions[&quot;include_usage&quot;] = true;
+                        body[&quot;stream_options&quot;] = streamOptions;
+                    }"""
+                        transform = f"""
+        <set-body>@{{
+          var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+                    body[&quot;model&quot;] = &quot;{upstream}&quot;;{stream_usage}
+          return body.ToString(Newtonsoft.Json.Formatting.None);
+        }}</set-body>"""
+        observer_headers = self._observer_headers(binding, observer_api_format)
+        response_encoding = """
+        <set-header name="Accept-Encoding" exists-action="override"><value>identity</value></set-header>"""
+        backend_selection = self._backend_selection(backend_id, probe_backend_ids)
+        match_condition = self._model_condition(binding, model_variable)
+        return f"""      <when condition="@({match_condition})">
+    {backend_selection}
+        <rewrite-uri template="{path}" copy-unmatched-params="false" />
+    {auth}{host_header}{provider_headers}{response_encoding}{observer_headers}{transform}
+      </when>"""
+
+    def _pool_probe_variable(self) -> str:
+        return f"""    <set-variable name="selectedPoolProbeBackend" value="@(
+      context.Subscription != null
+      &amp;&amp; context.Subscription.Id == &quot;{escape(self._probe_subscription_id)}&quot;
+      &amp;&amp; context.Request.Headers.GetValueOrDefault(&quot;x-request-source&quot;, &quot;&quot;) == &quot;gateway-publication-probe&quot;
+        ? context.Request.Headers.GetValueOrDefault(&quot;x-turnstile-pool-member&quot;, &quot;&quot;)
+        : &quot;&quot;)" />"""
+
+    @staticmethod
+    def _backend_selection(
+        backend_id: str,
+        probe_backend_ids: tuple[str, ...],
+    ) -> str:
+        if not probe_backend_ids:
+            return f'        <set-backend-service backend-id="{escape(backend_id)}" />'
+        branches = "\n".join(
+            "        <when condition=\"@((string)context.Variables[&quot;"
+            f"selectedPoolProbeBackend&quot;] == &quot;{escape(probe_id)}&quot;)\">\n"
+            f'          <set-backend-service backend-id="{escape(probe_id)}" />\n'
+            "        </when>"
+            for probe_id in probe_backend_ids
+        )
+        return f"""        <choose>
+{branches}
+          <otherwise>
+            <set-backend-service backend-id="{escape(backend_id)}" />
+          </otherwise>
+        </choose>"""
+
+    @staticmethod
+    def _native_stream_contract(publication: GatewayPublication) -> bool:
+        version = publication.resource_manifest.get("native_stream_contract_version")
+        if "native_stream_contract_version" not in publication.resource_manifest:
+            return publication.policy_sha256 is None and publication.status.value == "queued"
+        if type(version) is not int or version != 1:
+            raise PolicyCompilationError("Unknown native stream contract version")
+        return True
+
+    @classmethod
+    def _backend_policy(
+        cls,
+        bindings: Any,
+        model_variable: str,
+        api_format: ApiFormat | None = None,
+        *,
+        native_stream: bool = True,
+    ) -> str:
+        pooled: list[tuple[GatewayModelBinding, GatewayBackendPoolConfig]] = []
+        for binding in bindings:
+            if api_format is not None and binding.api_format is not api_format:
+                continue
+            pool = binding.backend_pool
+            if pool is not None:
+                pooled.append((binding, pool))
+        if not pooled:
+            if not native_stream:
+                return "  <backend><base /></backend>"
+            condition = escape(NATIVE_STREAM_REQUEST, {'"': "&quot;"})
+            return f"""  <backend>
+        <choose>
+            <when condition="{condition}">
+                <forward-request buffer-response="false" />
+            </when>
+            <otherwise><forward-request /></otherwise>
+        </choose>
+    </backend>"""
+        branches = "\n".join(
+            f"""      <when condition="@({cls._model_condition(binding, model_variable)})">
+                <choose>
+                    <when condition="@(context.Variables.ContainsKey(&quot;executionReceiptHeader&quot;))">
+                        <forward-request timeout="{pool.rate_limit.backend_timeout_seconds}" buffer-request-body="true" buffer-response="false" />
+                    </when>
+                    <otherwise>
+        <retry condition="@(context.Response != null &amp;&amp; context.Response.StatusCode == 429)"
+          count="{pool.rate_limit.max_attempts_per_request - 1}"
+          interval="{pool.rate_limit.retry_interval_seconds}"
+          first-fast-retry="{str(pool.rate_limit.first_fast_retry).lower()}">
+                    <forward-request timeout="{pool.rate_limit.backend_timeout_seconds}" buffer-request-body="true" buffer-response="false" />
+        </retry>
+                    </otherwise>
+                </choose>
+      </when>"""
+            for binding, pool in pooled
+        )
+        return f"""  <backend>
+    <choose>
+{branches}
+      <otherwise>
+        <forward-request buffer-response="false" />
+      </otherwise>
+    </choose>
+  </backend>"""
+
+    def _observer_headers(
+        self,
+        binding: GatewayModelBinding,
+        api_format: str | None = None,
+    ) -> str:
+        if self._usage_observer_url is None or binding.api_format is ApiFormat.OPENAI_IMAGES:
+            return ""
+        literal_headers = {
+            "x-provider-name": binding.provider_brand_key.value,
+            "x-hive-runtime": binding.runtime_name,
+            "x-turnstile-api-format": api_format or binding.api_format.value,
+        }
+        versioned_headers = {
+            "x-turnstile-usage-id": "telemetryUsageId",
+            "x-turnstile-gateway-profile-id": "telemetryGatewayProfileId",
+            "x-turnstile-native-gateway-id": "telemetryNativeGatewayId",
+            "x-turnstile-native-gateway-instance-id": (
+                "telemetryNativeGatewayInstanceId"
+            ),
+            "x-turnstile-apim-service-id": "telemetryApimServiceId",
+            "x-turnstile-apim-region": "telemetryApimRegion",
+            "x-turnstile-api-revision": "telemetryApiRevision",
+        }
+        variable_headers = {
+            "x-request-id": "callerRequestId",
+            "x-org-name": "telemetryOrganization",
+            "x-org-id": "telemetryOrganizationId",
+            "x-department-name": "telemetryDepartment",
+            "x-department-id": "telemetryDepartmentId",
+            "x-project-name": "telemetryProject",
+            "x-project-id": "telemetryProjectId",
+            "x-agent-name": "telemetryAgent",
+            "x-agent-id": "telemetryAgentId",
+            "x-user-name": "telemetryUser",
+            "x-user-id": "telemetryUserId",
+            "x-hive-workflow": "telemetryWorkflow",
+            "x-hive-run-id": "telemetryRunId",
+            "x-hive-turn-index": "telemetryTurnIndex",
+            "x-hive-model": "telemetryModel",
+            "x-model-id": "telemetryModelId",
+            "x-request-source": "telemetryRequestSource",
+        }
+        lines = [
+            '        <set-header name="x-turnstile-correlation-id" exists-action="override">'
+            '<value>@(context.RequestId.ToString())</value></set-header>'
+        ]
+        lines.append(
+            '        <choose><when condition="@(context.Variables.ContainsKey('
+            '&quot;executionReceiptHeader&quot;))">'
+        )
+        lines.append(
+            '        <set-header name="x-turnstile-budget-execution" exists-action="override">'
+            '<value>@(context.Variables.GetValueOrDefault&lt;string&gt;('
+            '&quot;executionReceiptHeader&quot;, &quot;&quot;))</value></set-header>'
+        )
+        for field, variable in (
+            ("apim-subscription-id", "telemetryApimSubscriptionId"),
+            ("application-actor-type", "telemetryApplicationActorType"),
+            ("application-actor-id", "telemetryApplicationActorId"),
+        ):
+            lines.append(
+                f'        <set-header name="x-turnstile-{field}" exists-action="override">'
+                '<value>@(context.Variables.GetValueOrDefault&lt;string&gt;('
+                f'&quot;{variable}&quot;, &quot;&quot;))</value></set-header>'
+            )
+        lines.append('        </when><otherwise>')
+        for field in (
+            "budget-execution", "apim-subscription-id", "application-actor-type", "application-actor-id",
+        ):
+            lines.append(
+                f'        <set-header name="x-turnstile-{field}" exists-action="delete" />'
+            )
+        lines.append('        </otherwise></choose>')
+        lines.extend(
+            f'        <set-header name="{name}" exists-action="override">'
+            f'<value>{escape(value)}</value></set-header>'
+            for name, value in literal_headers.items()
+        )
+        lines.extend(
+            f'        <set-header name="{name}" exists-action="override">'
+            + (f'<value>@(context.Variables.GetValueOrDefault&lt;string&gt;('
+               f'&quot;executionModelId&quot;, (string)context.Variables[&quot;{variable}&quot;]))'
+               if variable == "telemetryModelId" else
+               f'<value>@((string)context.Variables[&quot;{variable}&quot;])')
+            + '</value></set-header>'
+            for name, variable in variable_headers.items()
+        )
+        lines.append(
+            '        <choose><when condition="@(context.Variables.ContainsKey('
+            '&quot;telemetryUsageId&quot;))">'
+            '<set-header name="x-turnstile-event-schema-version" exists-action="override">'
+            '<value>2</value></set-header>'
+        )
+        lines.extend(
+            f'        <set-header name="{name}" exists-action="override">'
+            f'<value>@((string)context.Variables[&quot;{variable}&quot;])</value></set-header>'
+            for name, variable in versioned_headers.items()
+        )
+        lines.append(
+            '        <set-header name="x-turnstile-gateway-is-managed" '
+            'exists-action="override"><value>@(((bool)context.Variables['
+            '&quot;telemetryGatewayIsManaged&quot;]).ToString().ToLowerInvariant())'
+            "</value></set-header>"
+        )
+        lines.append('        </when><otherwise>')
+        lines.extend(
+            f'        <set-header name="{name}" exists-action="delete" />'
+            for name in (
+                "x-turnstile-event-schema-version", *versioned_headers,
+                "x-turnstile-gateway-is-managed",
+            )
+        )
+        lines.append('        </otherwise></choose>')
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _responses_backend_path(
+        binding: GatewayModelBinding,
+        *,
+        compact: bool = False,
+    ) -> str | None:
+        if (
+            binding.api_format is ApiFormat.OPENAI_CHAT
+            and binding.routing_managed
+            and binding.backend_path.rstrip("/") == "/openai/v1/chat/completions"
+        ):
+            return (
+                "/openai/v1/responses/compact"
+                if compact
+                else "/openai/v1/responses"
+            )
+        return None
+
+    @staticmethod
+    def _auth_policy(binding: GatewayModelBinding) -> str:
+        oauth = binding.oauth
+        if oauth is not None:
+            return (
+                f'        <get-authorization-context provider-id="{escape(oauth.provider_id)}" '
+                f'authorization-id="{escape(oauth.authorization_id)}" '
+                'context-variable-name="turnstileProviderAuthorization" '
+                'identity-type="managed" ignore-error="false" />\n'
+                '        <set-header name="Authorization" exists-action="override">\n'
+                '          <value>@("Bearer " + ((Authorization)context.Variables['
+                '"turnstileProviderAuthorization"]).AccessToken)</value>\n'
+                '        </set-header>\n'
+            )
+        if binding.auth_strategy is AuthStrategy.NAMED_VALUE_BEARER:
+            # Bedrock API keys use this bearer shape. Named Values keep the actual key out
+            # of PostgreSQL, generated policy, Function logs and browser responses.
+            return f"""        <set-header name="Authorization" exists-action="override">
+          <value>Bearer {{{{{escape(binding.named_value_name or "")}}}}}</value>
+        </set-header>
+"""
+        if binding.auth_strategy is AuthStrategy.MANAGED_IDENTITY:
+                        return f"""        <authentication-managed-identity resource="{escape(binding.managed_identity_resource or "")}" output-token-variable-name="turnstileProviderAccessToken" ignore-error="false" />
+                <set-header name="Authorization" exists-action="override">
+                    <value>@("Bearer " + (string)context.Variables["turnstileProviderAccessToken"])</value>
+                </set-header>
+"""
+        if binding.auth_strategy is AuthStrategy.NAMED_VALUE_API_KEY:
+            header = (
+                "x-api-key"
+                if binding.provider_brand_key.value == "microsoft_foundry"
+                and binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
+                else "api-key"
+            )
+            return f"""        <set-header name="{header}" exists-action="override">
+          <value>{{{{{escape(binding.named_value_name or "")}}}}}</value>
+        </set-header>
+"""
+        if binding.auth_strategy is AuthStrategy.NONE:
+            return ""
+        raise PolicyCompilationError("The selected authentication strategy is unsupported")
+
+    def _count_tokens_policy(
+        self,
+        publication: GatewayPublication,
+        backend_ids: dict[str, str],
+        pool_member_backend_ids: dict[str, tuple[str, ...]],
+    ) -> str:
+        supported = [
+            binding for binding in publication.desired_spec.bindings
+            if binding.count_tokens_operation.support == "supported"
+        ]
+        known = [
+            item.id
+            for item in publication.desired_spec.discovery_models
+            if item.api_format is ApiFormat.ANTHROPIC_MESSAGES
+        ]
+        supported_aliases = {binding.model.model_key.casefold() for binding in supported}
+        unavailable_condition = self._condition(
+            [alias for alias in known if alias.casefold() not in supported_aliases],
+            "dynamicCountModel",
+            publication.desired_spec.bindings,
+        )
+        known_condition = self._condition(
+            known,
+            "dynamicCountModel",
+            publication.desired_spec.bindings,
+        )
+        metadata_branches = "\n".join(
+            self._metadata_branch(
+                binding, "dynamicCountModel", publication, force_buffering=False,
+            ) for binding in supported
+        )
+        metadata_choose = (
+            f"    <choose>\n{metadata_branches}\n    </choose>\n"
+            if metadata_branches else ""
+        )
+        routing_branches = "\n".join(
+            self._routing_branch(
+                binding,
+                backend_ids[binding.model.model_key],
+                "dynamicCountModel",
+                backend_path=binding.count_tokens_operation.backend_path,
+                observer_api_format="anthropic_count_tokens",
+                include_chat_stream_usage=False,
+                probe_backend_ids=pool_member_backend_ids.get(binding.model.model_key, ()),
+            ) for binding in supported
+        )
+        unavailable = COUNT_TOKENS_REJECTIONS["unavailable"]
+        unpublished = COUNT_TOKENS_REJECTIONS["unpublished"]
+        return f"""<policies>
+  <inbound>
+    <set-variable name="dynamicCountModel" value="@{{
+      try
+      {{
+        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+        return ((string)body[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant();
+      }}
+      catch (Exception) {{ return &quot;&quot;; }}
+    }}" />
+        <set-variable name="selectedModelKnown" value="@({known_condition})" />
+        <set-variable name="selectedRoutingManaged" value="@(true)" />
+{self._pool_probe_variable()}
+{metadata_choose}\
+    <base />
+    <choose>
+            <when condition="@({unavailable_condition})">
+        <return-response>
+                    <set-status code="{unavailable.status_code}" reason="{unavailable.reason}" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+                    <set-body>{escape(json.dumps(unavailable.payload(), separators=(",", ":")))}</set-body>
+        </return-response>
+      </when>
+{routing_branches}
+            <otherwise>
+                <return-response>
+                    <set-status code="{unpublished.status_code}" reason="{unpublished.reason}" />
+                    <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+                    <set-body>{escape(json.dumps(unpublished.payload(), separators=(",", ":")))}</set-body>
+                </return-response>
+            </otherwise>
+    </choose>
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>"""
+
+    @classmethod
+    def _models_policy(cls, publication: GatewayPublication) -> str:
+        binding_by_alias = {
+            binding.model.model_key.casefold(): binding
+            for binding in publication.desired_spec.bindings
+        }
+        scoped_gateway_ids = sorted(
+            {
+                deployment.native_gateway_id
+                for binding in publication.desired_spec.bindings
+                if binding.deployment_scope.mode.value == "selected"
+                for deployment in binding.serving_deployments
+            },
+            key=str.casefold,
+        )
+        if not scoped_gateway_ids:
+            return cls._models_payload_policy(publication.desired_spec.discovery_models)
+        branches = "\n".join(
+            f"""      <when condition="@({cls._gateway_id_condition(native_id)})">
+{cls._models_return_response([
+    item
+    for item in publication.desired_spec.discovery_models
+    if (
+        (binding := binding_by_alias.get(item.id.casefold())) is None
+        or binding.deployment_scope.mode.value == "all"
+        or any(
+            deployment.native_gateway_id.casefold() == native_id.casefold()
+            for deployment in binding.serving_deployments
+        )
+    )
+], indent="        ")}
+      </when>"""
+            for native_id in scoped_gateway_ids
+        )
+        fallback = [
+            item
+            for item in publication.desired_spec.discovery_models
+            if (
+                (binding := binding_by_alias.get(item.id.casefold())) is None
+                or binding.deployment_scope.mode.value == "all"
+            )
+        ]
+        return f"""<policies>
+  <inbound>
+    <base />
+    <choose>
+{branches}
+      <otherwise>
+{cls._models_return_response(fallback, indent="        ")}
+      </otherwise>
+    </choose>
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>"""
+
+    @classmethod
+    def _models_payload_policy(cls, discovery_models: list[Any]) -> str:
+        return f"""<policies>
+  <inbound>
+    <base />
+{cls._models_return_response(discovery_models, indent="    ")}
+  </inbound>
+  <backend><base /></backend>
+  <outbound><base /></outbound>
+  <on-error><base /></on-error>
+</policies>"""
+
+    @staticmethod
+    def _models_return_response(discovery_models: list[Any], *, indent: str) -> str:
+        data = [
+            {
+                "type": "model",
+                "id": item.id,
+                "display_name": item.display_name,
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+            for item in discovery_models
+        ]
+        payload = json.dumps(
+            {
+                "data": data,
+                "has_more": False,
+                "first_id": data[0]["id"] if data else None,
+                "last_id": data[-1]["id"] if data else None,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        nested = indent + "  "
+        return f"""{indent}<return-response>
+{nested}<set-status code="200" reason="OK" />
+{nested}<set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+{nested}<set-body>{escape(payload)}</set-body>
+{indent}</return-response>"""
+
+    @classmethod
+    def _condition(
+        cls,
+        aliases: list[str],
+        variable: str,
+        bindings: Any = (),
+    ) -> str:
+        if not aliases:
+            return "false"
+        binding_by_alias = {
+            binding.model.model_key.casefold(): binding for binding in bindings
+        }
+        return " || ".join(
+            cls._model_condition(
+                binding_by_alias[alias.casefold()],
+                variable,
+                alias=alias.casefold(),
+            )
+            if alias.casefold() in binding_by_alias
+            else f"(string)context.Variables[&quot;{variable}&quot;] == &quot;{escape(alias.casefold())}&quot;"
+            for alias in aliases
+        )
+
+    @classmethod
+    def _model_condition(
+        cls,
+        binding: GatewayModelBinding,
+        variable: str,
+        *,
+        alias: str | None = None,
+    ) -> str:
+        alias_condition = (
+            f"(string)context.Variables[&quot;{variable}&quot;] == "
+            f"&quot;{escape(alias or binding.model.model_key)}&quot;"
+        )
+        if binding.deployment_scope.mode.value == "all":
+            return alias_condition
+        return f"({alias_condition} &amp;&amp; ({cls._gateway_scope_condition(binding)}))"
+
+    @classmethod
+    def _gateway_scope_condition(cls, binding: GatewayModelBinding) -> str:
+        if binding.deployment_scope.mode.value == "all":
+            return "true"
+        native_ids = [
+            deployment.native_gateway_id
+            for deployment in binding.serving_deployments
+        ]
+        if not native_ids:
+            raise PolicyCompilationError(
+                "A selected Gateway scope has no immutable native Gateway IDs"
+            )
+        return " || ".join(cls._gateway_id_condition(item) for item in native_ids)
+
+    @staticmethod
+    def _gateway_id_condition(native_gateway_id: str) -> str:
+        csharp_literal = json.dumps(native_gateway_id, ensure_ascii=True)[1:-1]
+        xml_literal = escape(csharp_literal, {'"': "&quot;"})
+        return (
+            "string.Equals(context.Deployment.Gateway.Id, "
+            f"&quot;{xml_literal}&quot;, "
+            "StringComparison.OrdinalIgnoreCase)"
+        )
+
+    @staticmethod
+    def _buffered_sse_body() -> str:
+        return r"""        <set-header name="Content-Type" exists-action="override"><value>text/event-stream</value></set-header>
+        <set-header name="Cache-Control" exists-action="override"><value>no-cache</value></set-header>
+        <set-body>@{
+          var message = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);
+          var frames = new List&lt;string&gt;();
+          var content = message[&quot;content&quot;] as JArray ?? new JArray();
+          var usage = message[&quot;usage&quot;] as JObject ?? new JObject();
+          var requestedModel = (string)context.Variables[&quot;dynamicRequestedModel&quot;];
+          var startMessage = new JObject(
+            new JProperty(&quot;id&quot;, message[&quot;id&quot;] ?? new JValue(&quot;msg_apim_buffered&quot;)),
+            new JProperty(&quot;type&quot;, &quot;message&quot;),
+            new JProperty(&quot;role&quot;, &quot;assistant&quot;),
+            new JProperty(&quot;model&quot;, requestedModel),
+            new JProperty(&quot;content&quot;, new JArray()),
+            new JProperty(&quot;stop_reason&quot;, JValue.CreateNull()),
+            new JProperty(&quot;stop_sequence&quot;, JValue.CreateNull()),
+            new JProperty(&quot;usage&quot;, new JObject(
+              new JProperty(&quot;input_tokens&quot;, usage[&quot;input_tokens&quot;] ?? new JValue(0)),
+              new JProperty(&quot;cache_creation_input_tokens&quot;, usage[&quot;cache_creation_input_tokens&quot;] ?? new JValue(0)),
+              new JProperty(&quot;cache_read_input_tokens&quot;, usage[&quot;cache_read_input_tokens&quot;] ?? new JValue(0)),
+              new JProperty(&quot;output_tokens&quot;, 0))));
+          frames.Add(&quot;event: message_start\ndata: &quot; + new JObject(
+            new JProperty(&quot;type&quot;, &quot;message_start&quot;),
+            new JProperty(&quot;message&quot;, startMessage)
+          ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
+          var index = 0;
+          foreach (var token in content)
+          {
+            var block = token as JObject;
+            if (block == null) { continue; }
+            var blockType = (string)block[&quot;type&quot;] ?? &quot;&quot;;
+            var startBlock = blockType == &quot;text&quot;
+              ? new JObject(new JProperty(&quot;type&quot;, &quot;text&quot;), new JProperty(&quot;text&quot;, &quot;&quot;))
+              : blockType == &quot;tool_use&quot;
+                ? new JObject(new JProperty(&quot;type&quot;, &quot;tool_use&quot;), new JProperty(&quot;id&quot;, block[&quot;id&quot;]), new JProperty(&quot;name&quot;, block[&quot;name&quot;]), new JProperty(&quot;input&quot;, new JObject()))
+                : (JObject)block.DeepClone();
+            frames.Add(&quot;event: content_block_start\ndata: &quot; + new JObject(
+              new JProperty(&quot;type&quot;, &quot;content_block_start&quot;),
+              new JProperty(&quot;index&quot;, index),
+              new JProperty(&quot;content_block&quot;, startBlock)
+            ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
+            if (blockType == &quot;text&quot;)
+            {
+              frames.Add(&quot;event: content_block_delta\ndata: &quot; + new JObject(
+                new JProperty(&quot;type&quot;, &quot;content_block_delta&quot;),
+                new JProperty(&quot;index&quot;, index),
+                new JProperty(&quot;delta&quot;, new JObject(new JProperty(&quot;type&quot;, &quot;text_delta&quot;), new JProperty(&quot;text&quot;, block[&quot;text&quot;] ?? new JValue(&quot;&quot;))))
+              ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
+            }
+            else if (blockType == &quot;tool_use&quot;)
+            {
+              var input = block[&quot;input&quot;] == null ? &quot;{}&quot; : block[&quot;input&quot;].ToString(Newtonsoft.Json.Formatting.None);
+              frames.Add(&quot;event: content_block_delta\ndata: &quot; + new JObject(
+                new JProperty(&quot;type&quot;, &quot;content_block_delta&quot;),
+                new JProperty(&quot;index&quot;, index),
+                new JProperty(&quot;delta&quot;, new JObject(new JProperty(&quot;type&quot;, &quot;input_json_delta&quot;), new JProperty(&quot;partial_json&quot;, input)))
+              ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
+            }
+            frames.Add(&quot;event: content_block_stop\ndata: &quot; + new JObject(
+              new JProperty(&quot;type&quot;, &quot;content_block_stop&quot;), new JProperty(&quot;index&quot;, index)
+            ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
+            index++;
+          }
+          frames.Add(&quot;event: message_delta\ndata: &quot; + new JObject(
+            new JProperty(&quot;type&quot;, &quot;message_delta&quot;),
+            new JProperty(&quot;delta&quot;, new JObject(
+              new JProperty(&quot;stop_reason&quot;, message[&quot;stop_reason&quot;] ?? new JValue(&quot;end_turn&quot;)),
+              new JProperty(&quot;stop_sequence&quot;, message[&quot;stop_sequence&quot;] ?? JValue.CreateNull()))),
+            new JProperty(&quot;usage&quot;, new JObject(new JProperty(&quot;output_tokens&quot;, usage[&quot;output_tokens&quot;] ?? new JValue(0))))
+          ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
+          frames.Add(&quot;event: message_stop\ndata: {\&quot;type\&quot;:\&quot;message_stop\&quot;}\n\n&quot;);
+          return string.Concat(frames);
+        }</set-body>"""
+
     def patch_parent_policy(self, source: str) -> str:
-        # TODO: 疑似废弃补丁，待确认：仅当所有保留的 live parent policy 都已包含当前
-        # Responses guard、managed-routing guard 与 provider header hygiene 后，才可连同
-        # `_patch_legacy_*` 及对应回归测试一起删除。
         source = source.replace("__LEGACY_PROVIDER_ROUTING__", "")
         source = source.replace("__USAGE_OBSERVER_HEADERS__", "")
         source = self._patch_legacy_provider_routing(source)
@@ -918,746 +2029,3 @@ class ApimPolicyCompiler:
                 section = section.replace(old, new)
             result = result[:start] + section + result[end:]
         return result
-
-    def _chat_completions_policy(
-        self,
-        publication: GatewayPublication,
-        backend_ids: dict[str, str],
-        pool_member_backend_ids: dict[str, tuple[str, ...]],
-    ) -> str:
-        metadata_branches = "\n".join(
-            self._metadata_branch(binding, "dynamicChatModel")
-            for binding in publication.desired_spec.bindings
-            if binding.api_format is ApiFormat.OPENAI_CHAT
-        )
-        metadata_choose = (
-            f"""    <choose>
-{metadata_branches}
-    </choose>
-"""
-            if metadata_branches
-            else ""
-        )
-        routing_branches = "\n".join(
-            self._routing_branch(
-                binding,
-                backend_ids[binding.model.model_key],
-                "dynamicChatModel",
-                probe_backend_ids=pool_member_backend_ids.get(
-                    binding.model.model_key,
-                    (),
-                ),
-            )
-            for binding in publication.desired_spec.bindings
-            if binding.api_format is ApiFormat.OPENAI_CHAT
-            and binding.routing_managed
-        )
-        known_condition = self._condition(
-            [
-                item.id
-                for item in publication.desired_spec.discovery_models
-                if item.api_format is ApiFormat.OPENAI_CHAT
-            ],
-            "dynamicChatModel",
-        )
-        return f"""<policies>
-  <inbound>
-    <set-variable name="dynamicChatModel" value="@{{
-      try
-      {{
-        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
-        return ((string)body[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant();
-      }}
-      catch (Exception) {{ return &quot;&quot;; }}
-    }}" />
-{self._pool_probe_variable()}
-    <set-variable name="selectedModelKnown" value="@({known_condition})" />
-{metadata_choose.rstrip()}
-    <base />
-    <choose>
-{routing_branches}
-      <when condition="@({known_condition})" />
-      <otherwise>
-        <return-response>
-          <set-status code="400" reason="Bad Request" />
-          <set-body>{{"error":{{"type":"invalid_request_error","message":"The requested model is not published by this gateway revision"}}}}</set-body>
-        </return-response>
-      </otherwise>
-    </choose>
-  </inbound>
-{self._backend_policy(publication.desired_spec.bindings, "dynamicChatModel", ApiFormat.OPENAI_CHAT)}
-  <outbound><base /></outbound>
-  <on-error><base /></on-error>
-</policies>"""
-
-    def _images_policy(self, publication: GatewayPublication, backend_ids: dict[str, str]) -> str:
-        bindings = [
-            binding
-            for binding in publication.desired_spec.bindings
-            if binding.api_format is ApiFormat.OPENAI_IMAGES and binding.routing_managed
-        ]
-        known = self._condition(
-            [binding.model.model_key for binding in bindings], "dynamicImageModel"
-        )
-        profiles = {
-            binding.model.model_key: validate_image_profile(binding.model.image_profile)
-            for binding in bindings
-        }
-        validation = (
-            "\n".join(
-                f'<when condition="@({self._condition([binding.model.model_key], "dynamicImageModel")})">'
-                + image_request_validation(profiles[binding.model.model_key])
-                + "</when>"
-                for binding in bindings
-            )
-            or '<when condition="@(false)" />'
-        )
-        metadata = "\n".join(
-            self._metadata_branch(binding, "dynamicImageModel") for binding in bindings
-        )
-        routing = (
-            "\n".join(
-                self._routing_branch(
-                    binding,
-                    backend_ids[binding.model.model_key],
-                    "dynamicImageModel",
-                    backend_path=profiles[binding.model.model_key].backend_path
-                    + "?api-version="
-                    + profiles[binding.model.model_key].api_version,
-                )
-                for binding in bindings
-            )
-            or '<when condition="@(false)" />'
-        )
-        metadata_choose = f"<choose>{metadata}</choose>" if metadata else ""
-        timeout = max((profile.timeout_seconds for profile in profiles.values()), default=1)
-        return f"""<policies>
-  <inbound>
-    <set-variable name="dynamicImageModel" value="@{{ try {{ return ((string)context.Request.Body.As&lt;JObject&gt;(preserveContent: true)[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant(); }} catch {{ return &quot;&quot;; }} }}" />
-    <choose>{validation}<otherwise><return-response><set-status code="400" reason="Bad Request" /><set-body>{{"error":"image_model_not_published"}}</set-body></return-response></otherwise></choose>
-    <set-variable name="selectedModelKnown" value="@({known})" />
-    {metadata_choose}
-    <base />
-    <choose><when condition="@(context.Variables.GetValueOrDefault&lt;int&gt;(&quot;imageGenerationPolicyVersion&quot;, 0) != {IMAGE_POLICY_VERSION})"><return-response><set-status code="503" reason="Service Unavailable" /><set-body>{{"error":"image_budget_policy_unavailable"}}</set-body></return-response></when></choose>
-    <choose>{routing}<otherwise><return-response><set-status code="400" reason="Bad Request" /><set-body>{{"error":"image_model_not_published"}}</set-body></return-response></otherwise></choose>
-  </inbound>
-  <backend><forward-request timeout="{timeout}" buffer-response="true" /></backend>
-  <outbound><base /><set-header name="Cache-Control" exists-action="override"><value>no-store</value></set-header></outbound>
-  <on-error><base /></on-error>
-</policies>"""
-
-    def _messages_policy(
-        self,
-        publication: GatewayPublication,
-        backend_ids: dict[str, str],
-        pool_member_backend_ids: dict[str, tuple[str, ...]],
-    ) -> str:
-        metadata_branches = "\n".join(
-            self._metadata_branch(binding, "dynamicRequestedModel")
-            for binding in publication.desired_spec.bindings
-            if binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
-        )
-        metadata_choose = (
-            f"""    <choose>
-{metadata_branches}
-    </choose>
-"""
-            if metadata_branches
-            else ""
-        )
-        routing_branches = "\n".join(
-            self._routing_branch(
-                binding,
-                backend_ids[binding.model.model_key],
-                "dynamicRequestedModel",
-                probe_backend_ids=pool_member_backend_ids.get(
-                    binding.model.model_key,
-                    (),
-                ),
-            )
-            for binding in publication.desired_spec.bindings
-            if binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
-            and binding.routing_managed
-        )
-        buffered_aliases = [
-            binding.model.model_key
-            for binding in publication.desired_spec.bindings
-            if binding.streaming_mode is StreamingMode.BUFFERED
-            and binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
-        ]
-        known_condition = self._condition(
-            [
-                item.id
-                for item in publication.desired_spec.discovery_models
-                if item.api_format is ApiFormat.ANTHROPIC_MESSAGES
-            ],
-            "dynamicRequestedModel",
-        )
-        buffered_condition = self._condition(buffered_aliases, "dynamicRequestedModel")
-        return f"""<policies>
-  <inbound>
-    <set-variable name="dynamicRequestedModel" value="@{{
-      try
-      {{
-        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
-        return ((string)body[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant();
-      }}
-      catch (Exception) {{ return &quot;&quot;; }}
-    }}" />
-    <set-variable name="dynamicRequestedStream" value="@{{
-      try
-      {{
-        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
-        return (bool?)body[&quot;stream&quot;] ?? false;
-      }}
-      catch (Exception) {{ return false; }}
-    }}" />
-{self._pool_probe_variable()}
-    <set-variable name="selectedModelKnown" value="@({known_condition})" />
-{metadata_choose.rstrip()}
-    <base />
-    <choose>
-{routing_branches}
-      <when condition="@({known_condition})" />
-            <otherwise>
-                <return-response>
-                    <set-status code="400" reason="Bad Request" />
-                    <set-body>{{"type":"error","error":{{"type":"invalid_request_error","message":"The requested model is not published by this gateway revision"}}}}</set-body>
-                </return-response>
-            </otherwise>
-    </choose>
-  </inbound>
-{self._backend_policy(publication.desired_spec.bindings, "dynamicRequestedModel", ApiFormat.ANTHROPIC_MESSAGES)}
-  <outbound>
-    <base />
-    <choose>
-      <when condition="@(({buffered_condition}) &amp;&amp; (bool)context.Variables[&quot;dynamicRequestedStream&quot;] &amp;&amp; context.Response.StatusCode &lt; 400)">
-{self._buffered_sse_body()}
-      </when>
-    </choose>
-  </outbound>
-  <on-error><base /></on-error>
-</policies>"""
-
-    def _responses_policy(
-        self,
-        publication: GatewayPublication,
-        backend_ids: dict[str, str],
-        pool_member_backend_ids: dict[str, tuple[str, ...]],
-        *,
-        compact: bool = False,
-    ) -> str:
-        bindings = [
-            (binding, responses_path)
-            for binding in publication.desired_spec.bindings
-            if (
-                responses_path := self._responses_backend_path(
-                    binding,
-                    compact=compact,
-                )
-            )
-            is not None
-        ]
-        metadata_branches = "\n".join(
-            self._metadata_branch(binding, "dynamicResponsesModel")
-            for binding, _ in bindings
-        )
-        metadata_choose = (
-            f"""    <choose>
-{metadata_branches}
-    </choose>
-"""
-            if metadata_branches
-            else ""
-        )
-        routing_branches = "\n".join(
-            self._routing_branch(
-                binding,
-                backend_ids[binding.model.model_key],
-                "dynamicResponsesModel",
-                backend_path=responses_path,
-                observer_api_format="openai_responses",
-                include_chat_stream_usage=False,
-                probe_backend_ids=pool_member_backend_ids.get(
-                    binding.model.model_key,
-                    (),
-                ),
-            )
-            for binding, responses_path in bindings
-        )
-        known_condition = self._condition(
-            [binding.model.model_key for binding, _ in bindings],
-            "dynamicResponsesModel",
-        )
-        return f"""<policies>
-  <inbound>
-    <set-variable name="dynamicResponsesModel" value="@{{
-      try
-      {{
-        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
-        return ((string)body[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant();
-      }}
-      catch (Exception) {{ return &quot;&quot;; }}
-    }}" />
-{self._pool_probe_variable()}
-    <set-variable name="selectedModelKnown" value="@({known_condition})" />
-{metadata_choose.rstrip()}
-    <base />
-    <choose>
-{routing_branches}
-        <when condition="@({known_condition})" />
-      <otherwise>
-        <return-response>
-          <set-status code="400" reason="Bad Request" />
-          <set-body>{{"error":{{"type":"invalid_request_error","message":"The requested model does not support the Responses API on this gateway revision"}}}}</set-body>
-        </return-response>
-      </otherwise>
-    </choose>
-  </inbound>
-{self._backend_policy([binding for binding, _ in bindings], "dynamicResponsesModel")}
-  <outbound><base /></outbound>
-  <on-error><base /></on-error>
-</policies>"""
-
-    def _metadata_branch(
-        self,
-        binding: GatewayModelBinding,
-        model_variable: str,
-    ) -> str:
-        alias = escape(binding.model.model_key)
-        provider = escape(binding.provider_brand_key.value)
-        runtime = escape(binding.runtime_name)
-        routing_managed = "true" if binding.routing_managed else "false"
-        requires_assignment = "false"
-        if binding.model.assignment_required:
-            requires_assignment = (
-                "!(context.Api.IsCurrentRevision == false &amp;&amp; context.Subscription != null "
-                f"&amp;&amp; context.Subscription.Id == &quot;{escape(self._probe_subscription_id)}&quot; "
-                "&amp;&amp; context.Request.Headers.GetValueOrDefault(&quot;x-request-source&quot;, "
-                "&quot;&quot;) == &quot;gateway-publication-probe&quot;)"
-            )
-        force_buffered = ""
-        if binding.streaming_mode is StreamingMode.BUFFERED:
-            force_buffered = """
-        <set-body>@{
-          var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
-          body[&quot;stream&quot;] = false;
-          return body.ToString(Newtonsoft.Json.Formatting.None);
-        }</set-body>"""
-        return f"""      <when condition="@((string)context.Variables[&quot;{model_variable}&quot;] == &quot;{alias}&quot;)">
-        <set-header name="x-hive-runtime" exists-action="override"><value>{runtime}</value></set-header>
-        <set-variable name="selectedProviderName" value="{provider}" />
-        <set-variable name="selectedRuntimeName" value="{runtime}" />
-        <set-variable name="selectedContextWindow" value="@((long){binding.model.context_window or 0})" />
-        <set-variable name="selectedRoutingManaged" value="@({routing_managed})" />
-            <set-variable name="selectedRequiresAssignment" value="@({requires_assignment})" />{force_buffered}
-      </when>"""
-
-    def _routing_branch(
-        self,
-        binding: GatewayModelBinding,
-        backend_id: str,
-        model_variable: str,
-        *,
-        backend_path: str | None = None,
-        observer_api_format: str | None = None,
-        include_chat_stream_usage: bool = True,
-        probe_backend_ids: tuple[str, ...] = (),
-    ) -> str:
-        alias = escape(binding.model.model_key)
-        upstream = escape(binding.model.upstream_model_id)
-        path = escape(
-            (backend_path or binding.backend_path).replace("{upstream_model_id}", upstream)
-        )
-        auth = self._auth_policy(binding)
-        provider_headers = ""
-        if (
-            binding.provider_brand_key.value in {"microsoft_foundry", "azure_databricks"}
-            and binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
-        ):
-            provider_headers = """
-        <set-header name="anthropic-version" exists-action="override"><value>2023-06-01</value></set-header>"""
-        transform = ""
-        if binding.provider_brand_key.value == "amazon_bedrock":
-            transform = """
-        <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
-        <set-body>@{
-          var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
-          body.Remove(&quot;model&quot;);
-          body.Remove(&quot;stream&quot;);
-          body.Remove(&quot;context_management&quot;);
-          body[&quot;anthropic_version&quot;] = &quot;bedrock-2023-05-31&quot;;
-          return body.ToString(Newtonsoft.Json.Formatting.None);
-        }</set-body>"""
-        elif (
-            binding.api_format is ApiFormat.OPENAI_CHAT
-            or binding.provider_brand_key.value in {"microsoft_foundry", "azure_databricks"}
-        ):
-                        stream_usage = ""
-                        if binding.api_format is ApiFormat.OPENAI_CHAT and include_chat_stream_usage:
-                                stream_usage = """
-                    if ((bool?)body[&quot;stream&quot;] ?? false)
-                    {
-                        var streamOptions = body[&quot;stream_options&quot;] as JObject ?? new JObject();
-                        streamOptions[&quot;include_usage&quot;] = true;
-                        body[&quot;stream_options&quot;] = streamOptions;
-                    }"""
-                        transform = f"""
-        <set-body>@{{
-          var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
-                    body[&quot;model&quot;] = &quot;{upstream}&quot;;{stream_usage}
-          return body.ToString(Newtonsoft.Json.Formatting.None);
-        }}</set-body>"""
-        response_encoding = ""
-        if observer_api_format == "openai_responses":
-            response_encoding = """
-        <set-header name="Accept-Encoding" exists-action="override"><value>identity</value></set-header>"""
-        observer_headers = self._observer_headers(binding, observer_api_format)
-        backend_selection = self._backend_selection(backend_id, probe_backend_ids)
-        return f"""      <when condition="@((string)context.Variables[&quot;{model_variable}&quot;] == &quot;{alias}&quot;)">
-    {backend_selection}
-        <rewrite-uri template="{path}" copy-unmatched-params="false" />
-    {auth}{provider_headers}{response_encoding}{observer_headers}{transform}
-      </when>"""
-
-    def _pool_probe_variable(self) -> str:
-        return f"""    <set-variable name="selectedPoolProbeBackend" value="@(
-      context.Subscription != null
-      &amp;&amp; context.Subscription.Id == &quot;{escape(self._probe_subscription_id)}&quot;
-      &amp;&amp; context.Request.Headers.GetValueOrDefault(&quot;x-request-source&quot;, &quot;&quot;) == &quot;gateway-publication-probe&quot;
-        ? context.Request.Headers.GetValueOrDefault(&quot;x-turnstile-pool-member&quot;, &quot;&quot;)
-        : &quot;&quot;)" />"""
-
-    @staticmethod
-    def _backend_selection(
-        backend_id: str,
-        probe_backend_ids: tuple[str, ...],
-    ) -> str:
-        if not probe_backend_ids:
-            return f'        <set-backend-service backend-id="{escape(backend_id)}" />'
-        branches = "\n".join(
-            "        <when condition=\"@((string)context.Variables[&quot;"
-            f"selectedPoolProbeBackend&quot;] == &quot;{escape(probe_id)}&quot;)\">\n"
-            f'          <set-backend-service backend-id="{escape(probe_id)}" />\n'
-            "        </when>"
-            for probe_id in probe_backend_ids
-        )
-        return f"""        <choose>
-{branches}
-          <otherwise>
-            <set-backend-service backend-id="{escape(backend_id)}" />
-          </otherwise>
-        </choose>"""
-
-    @staticmethod
-    def _backend_policy(
-        bindings: Any,
-        model_variable: str,
-        api_format: ApiFormat | None = None,
-    ) -> str:
-        pooled: list[tuple[GatewayModelBinding, GatewayBackendPoolConfig]] = []
-        for binding in bindings:
-            if api_format is not None and binding.api_format is not api_format:
-                continue
-            pool = binding.backend_pool
-            if pool is not None:
-                pooled.append((binding, pool))
-        if not pooled:
-            return "  <backend><base /></backend>"
-        branches = "\n".join(
-            f"""      <when condition="@((string)context.Variables[&quot;{model_variable}&quot;] == &quot;{escape(binding.model.model_key)}&quot;)">
-        <retry condition="@(context.Response != null &amp;&amp; context.Response.StatusCode == 429)"
-          count="{pool.rate_limit.max_attempts_per_request - 1}"
-          interval="{pool.rate_limit.retry_interval_seconds}"
-          first-fast-retry="{str(pool.rate_limit.first_fast_retry).lower()}">
-                    <forward-request timeout="{pool.rate_limit.backend_timeout_seconds}" buffer-request-body="true" buffer-response="false" />
-        </retry>
-      </when>"""
-            for binding, pool in pooled
-        )
-        return f"""  <backend>
-    <choose>
-{branches}
-      <otherwise>
-        <forward-request buffer-response="false" />
-      </otherwise>
-    </choose>
-  </backend>"""
-
-    def _observer_headers(
-        self,
-        binding: GatewayModelBinding,
-        api_format: str | None = None,
-    ) -> str:
-        if self._usage_observer_url is None or binding.api_format is ApiFormat.OPENAI_IMAGES:
-            return ""
-        literal_headers = {
-            "x-provider-name": binding.provider_brand_key.value,
-            "x-hive-runtime": binding.runtime_name,
-            "x-turnstile-api-format": api_format or binding.api_format.value,
-        }
-        variable_headers = {
-            "x-request-id": "callerRequestId",
-            "x-org-name": "telemetryOrganization",
-            "x-org-id": "telemetryOrganizationId",
-            "x-department-name": "telemetryDepartment",
-            "x-department-id": "telemetryDepartmentId",
-            "x-project-name": "telemetryProject",
-            "x-project-id": "telemetryProjectId",
-            "x-agent-name": "telemetryAgent",
-            "x-agent-id": "telemetryAgentId",
-            "x-user-name": "telemetryUser",
-            "x-user-id": "telemetryUserId",
-            "x-hive-workflow": "telemetryWorkflow",
-            "x-hive-run-id": "telemetryRunId",
-            "x-hive-turn-index": "telemetryTurnIndex",
-            "x-hive-model": "telemetryModel",
-            "x-model-id": "telemetryModelId",
-            "x-request-source": "telemetryRequestSource",
-        }
-        lines = [
-            '        <set-header name="x-turnstile-correlation-id" exists-action="override">'
-            '<value>@(context.RequestId.ToString())</value></set-header>'
-        ]
-        lines.extend(
-            f'        <set-header name="{name}" exists-action="override">'
-            f'<value>{escape(value)}</value></set-header>'
-            for name, value in literal_headers.items()
-        )
-        lines.extend(
-            f'        <set-header name="{name}" exists-action="override">'
-            f'<value>@((string)context.Variables[&quot;{variable}&quot;])</value></set-header>'
-            for name, variable in variable_headers.items()
-        )
-        return "\n".join(lines) + "\n"
-
-    @staticmethod
-    def _responses_backend_path(
-        binding: GatewayModelBinding,
-        *,
-        compact: bool = False,
-    ) -> str | None:
-        if (
-            binding.api_format is ApiFormat.OPENAI_CHAT
-            and binding.routing_managed
-            and binding.backend_path.rstrip("/") == "/openai/v1/chat/completions"
-        ):
-            return (
-                "/openai/v1/responses/compact"
-                if compact
-                else "/openai/v1/responses"
-            )
-        return None
-
-    @staticmethod
-    def _auth_policy(binding: GatewayModelBinding) -> str:
-        oauth = binding.oauth
-        if oauth is not None:
-            return (
-                f'        <get-authorization-context provider-id="{escape(oauth.provider_id)}" '
-                f'authorization-id="{escape(oauth.authorization_id)}" '
-                'context-variable-name="turnstileProviderAuthorization" '
-                'identity-type="managed" ignore-error="false" />\n'
-                '        <set-header name="Authorization" exists-action="override">\n'
-                '          <value>@("Bearer " + ((Authorization)context.Variables['
-                '"turnstileProviderAuthorization"]).AccessToken)</value>\n'
-                '        </set-header>\n'
-            )
-        if binding.auth_strategy is AuthStrategy.NAMED_VALUE_BEARER:
-            # Bedrock API keys use this bearer shape. Named Values keep the actual key out
-            # of PostgreSQL, generated policy, Function logs and browser responses.
-            return f"""        <set-header name="Authorization" exists-action="override">
-          <value>Bearer {{{{{escape(binding.named_value_name or "")}}}}}</value>
-        </set-header>
-"""
-        if binding.auth_strategy is AuthStrategy.MANAGED_IDENTITY:
-                        return f"""        <authentication-managed-identity resource="{escape(binding.managed_identity_resource or "")}" output-token-variable-name="turnstileProviderAccessToken" ignore-error="false" />
-                <set-header name="Authorization" exists-action="override">
-                    <value>@("Bearer " + (string)context.Variables["turnstileProviderAccessToken"])</value>
-                </set-header>
-"""
-        if binding.auth_strategy is AuthStrategy.NAMED_VALUE_API_KEY:
-            header = (
-                "x-api-key"
-                if binding.provider_brand_key.value == "microsoft_foundry"
-                and binding.api_format is ApiFormat.ANTHROPIC_MESSAGES
-                else "api-key"
-            )
-            return f"""        <set-header name="{header}" exists-action="override">
-          <value>{{{{{escape(binding.named_value_name or "")}}}}}</value>
-        </set-header>
-"""
-        if binding.auth_strategy is AuthStrategy.NONE:
-            return ""
-        raise PolicyCompilationError("The selected authentication strategy is unsupported")
-
-    def _count_tokens_policy(self, publication: GatewayPublication) -> str:
-        buffered = [
-            binding.model.model_key
-            for binding in publication.desired_spec.bindings
-            if binding.streaming_mode is StreamingMode.BUFFERED
-            or (
-                binding.routing_managed
-                and binding.provider_brand_key.value == "azure_databricks"
-            )
-        ]
-        known = [
-            item.id
-            for item in publication.desired_spec.discovery_models
-            if item.api_format is ApiFormat.ANTHROPIC_MESSAGES
-        ]
-        buffered_condition = self._condition(buffered, "dynamicCountModel")
-        known_condition = self._condition(known, "dynamicCountModel")
-        return f"""<policies>
-  <inbound>
-    <set-variable name="dynamicCountModel" value="@{{
-      try
-      {{
-        var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
-        return ((string)body[&quot;model&quot;] ?? &quot;&quot;).Trim().ToLowerInvariant();
-      }}
-      catch (Exception) {{ return &quot;&quot;; }}
-    }}" />
-        <set-variable name="selectedModelKnown" value="@({known_condition})" />
-    <base />
-    <choose>
-      <when condition="@({buffered_condition})">
-        <return-response>
-          <set-status code="404" reason="Not Found" />
-          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
-          <set-body>{{"type":"error","error":{{"type":"not_found_error","message":"Token counting is unavailable for this model"}}}}</set-body>
-        </return-response>
-      </when>
-      <when condition="@({known_condition})" />
-            <otherwise>
-                <return-response>
-                    <set-status code="400" reason="Bad Request" />
-                    <set-body>{{"type":"error","error":{{"type":"invalid_request_error","message":"The requested model is not published by this gateway revision"}}}}</set-body>
-                </return-response>
-            </otherwise>
-    </choose>
-  </inbound>
-  <backend><base /></backend>
-  <outbound><base /></outbound>
-  <on-error><base /></on-error>
-</policies>"""
-
-    @staticmethod
-    def _models_policy(publication: GatewayPublication) -> str:
-        data = [
-            {
-                "type": "model",
-                "id": item.id,
-                "display_name": item.display_name,
-                "created_at": "2026-01-01T00:00:00Z",
-            }
-            for item in publication.desired_spec.discovery_models
-        ]
-        payload = json.dumps(
-            {
-                "data": data,
-                "has_more": False,
-                "first_id": data[0]["id"] if data else None,
-                "last_id": data[-1]["id"] if data else None,
-            },
-            ensure_ascii=True,
-            separators=(",", ":"),
-        )
-        return f"""<policies>
-  <inbound>
-    <base />
-    <return-response>
-      <set-status code="200" reason="OK" />
-      <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
-      <set-body>{escape(payload)}</set-body>
-    </return-response>
-  </inbound>
-  <backend><base /></backend>
-  <outbound><base /></outbound>
-  <on-error><base /></on-error>
-</policies>"""
-
-    @staticmethod
-    def _condition(aliases: list[str], variable: str) -> str:
-        if not aliases:
-            return "false"
-        return " || ".join(
-            f"(string)context.Variables[&quot;{variable}&quot;] == &quot;{escape(alias.casefold())}&quot;"
-            for alias in aliases
-        )
-
-    @staticmethod
-    def _buffered_sse_body() -> str:
-        return r"""        <set-header name="Content-Type" exists-action="override"><value>text/event-stream</value></set-header>
-        <set-header name="Cache-Control" exists-action="override"><value>no-cache</value></set-header>
-        <set-body>@{
-          var message = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);
-          var frames = new List&lt;string&gt;();
-          var content = message[&quot;content&quot;] as JArray ?? new JArray();
-          var usage = message[&quot;usage&quot;] as JObject ?? new JObject();
-          var requestedModel = (string)context.Variables[&quot;dynamicRequestedModel&quot;];
-          var startMessage = new JObject(
-            new JProperty(&quot;id&quot;, message[&quot;id&quot;] ?? new JValue(&quot;msg_apim_buffered&quot;)),
-            new JProperty(&quot;type&quot;, &quot;message&quot;),
-            new JProperty(&quot;role&quot;, &quot;assistant&quot;),
-            new JProperty(&quot;model&quot;, requestedModel),
-            new JProperty(&quot;content&quot;, new JArray()),
-            new JProperty(&quot;stop_reason&quot;, JValue.CreateNull()),
-            new JProperty(&quot;stop_sequence&quot;, JValue.CreateNull()),
-            new JProperty(&quot;usage&quot;, new JObject(
-              new JProperty(&quot;input_tokens&quot;, usage[&quot;input_tokens&quot;] ?? new JValue(0)),
-              new JProperty(&quot;cache_creation_input_tokens&quot;, usage[&quot;cache_creation_input_tokens&quot;] ?? new JValue(0)),
-              new JProperty(&quot;cache_read_input_tokens&quot;, usage[&quot;cache_read_input_tokens&quot;] ?? new JValue(0)),
-              new JProperty(&quot;output_tokens&quot;, 0))));
-          frames.Add(&quot;event: message_start\ndata: &quot; + new JObject(
-            new JProperty(&quot;type&quot;, &quot;message_start&quot;),
-            new JProperty(&quot;message&quot;, startMessage)
-          ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
-          var index = 0;
-          foreach (var token in content)
-          {
-            var block = token as JObject;
-            if (block == null) { continue; }
-            var blockType = (string)block[&quot;type&quot;] ?? &quot;&quot;;
-            var startBlock = blockType == &quot;text&quot;
-              ? new JObject(new JProperty(&quot;type&quot;, &quot;text&quot;), new JProperty(&quot;text&quot;, &quot;&quot;))
-              : blockType == &quot;tool_use&quot;
-                ? new JObject(new JProperty(&quot;type&quot;, &quot;tool_use&quot;), new JProperty(&quot;id&quot;, block[&quot;id&quot;]), new JProperty(&quot;name&quot;, block[&quot;name&quot;]), new JProperty(&quot;input&quot;, new JObject()))
-                : (JObject)block.DeepClone();
-            frames.Add(&quot;event: content_block_start\ndata: &quot; + new JObject(
-              new JProperty(&quot;type&quot;, &quot;content_block_start&quot;),
-              new JProperty(&quot;index&quot;, index),
-              new JProperty(&quot;content_block&quot;, startBlock)
-            ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
-            if (blockType == &quot;text&quot;)
-            {
-              frames.Add(&quot;event: content_block_delta\ndata: &quot; + new JObject(
-                new JProperty(&quot;type&quot;, &quot;content_block_delta&quot;),
-                new JProperty(&quot;index&quot;, index),
-                new JProperty(&quot;delta&quot;, new JObject(new JProperty(&quot;type&quot;, &quot;text_delta&quot;), new JProperty(&quot;text&quot;, block[&quot;text&quot;] ?? new JValue(&quot;&quot;))))
-              ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
-            }
-            else if (blockType == &quot;tool_use&quot;)
-            {
-              var input = block[&quot;input&quot;] == null ? &quot;{}&quot; : block[&quot;input&quot;].ToString(Newtonsoft.Json.Formatting.None);
-              frames.Add(&quot;event: content_block_delta\ndata: &quot; + new JObject(
-                new JProperty(&quot;type&quot;, &quot;content_block_delta&quot;),
-                new JProperty(&quot;index&quot;, index),
-                new JProperty(&quot;delta&quot;, new JObject(new JProperty(&quot;type&quot;, &quot;input_json_delta&quot;), new JProperty(&quot;partial_json&quot;, input)))
-              ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
-            }
-            frames.Add(&quot;event: content_block_stop\ndata: &quot; + new JObject(
-              new JProperty(&quot;type&quot;, &quot;content_block_stop&quot;), new JProperty(&quot;index&quot;, index)
-            ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
-            index++;
-          }
-          frames.Add(&quot;event: message_delta\ndata: &quot; + new JObject(
-            new JProperty(&quot;type&quot;, &quot;message_delta&quot;),
-            new JProperty(&quot;delta&quot;, new JObject(
-              new JProperty(&quot;stop_reason&quot;, message[&quot;stop_reason&quot;] ?? new JValue(&quot;end_turn&quot;)),
-              new JProperty(&quot;stop_sequence&quot;, message[&quot;stop_sequence&quot;] ?? JValue.CreateNull()))),
-            new JProperty(&quot;usage&quot;, new JObject(new JProperty(&quot;output_tokens&quot;, usage[&quot;output_tokens&quot;] ?? new JValue(0))))
-          ).ToString(Newtonsoft.Json.Formatting.None) + &quot;\n\n&quot;);
-          frames.Add(&quot;event: message_stop\ndata: {\&quot;type\&quot;:\&quot;message_stop\&quot;}\n\n&quot;);
-          return string.Concat(frames);
-        }</set-body>"""

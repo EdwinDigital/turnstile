@@ -334,6 +334,13 @@ module apimIntegration 'modules/apim-integration.bicep' = if (deployApimBootstra
     employeeTokensPerMinute: employeeTokensPerMinute
     ledgerTableEndpoint: dataPlane.outputs.ledgerTableEndpoint
     ledgerTableName: ledgerTableName
+    ledgerTableResourceId: dataPlane.outputs.ledgerTableResourceId
+    routeTableResourceId: dataPlane.outputs.routeTableResourceId
+    credentialVaultResourceId: dataPlane.outputs.credentialVaultResourceId
+    platformGovernanceReaderPrincipalIds: concat(
+      [dataPlane.outputs.apiPrincipalId],
+      provisionControlPlane ? [controlPlane!.outputs.principalId] : []
+    )
     employeeOrgId: employeeOrgId
     employeeOrgName: employeeOrgName
     employeeDepartmentMap: employeeDepartmentMap
@@ -355,6 +362,7 @@ module controlPlane 'modules/control-plane-function.bicep' = if (provisionContro
     virtualNetworkName: 'vnet-${resourcePrefix}-${suffix}'
     functionSubnetName: 'snet-flex-control'
     keyVaultName: dataPlane.outputs.keyVaultName
+    credentialVaultName: dataPlane.outputs.credentialVaultName
     databaseUrlSecretUri: dataPlane.outputs.databaseUrlSecretUri
     apimProbeSubscriptionKeySecretUri: dataPlane.outputs.apimProbeSubscriptionKeySecretUri
     credentialEncryptionKeySecretUri: dataPlane.outputs.credentialEncryptionKeySecretUri
@@ -376,6 +384,8 @@ module controlPlane 'modules/control-plane-function.bicep' = if (provisionContro
     databricksOAuthEnabled: databricksOAuthEnabled
     applicationDefaultMonthlyTokenLimit: gatewayApplicationDefaultMonthlyTokenLimit
     applicationDefaultTokensPerMinute: gatewayApplicationDefaultTokensPerMinute
+    eventHubNamespaceName: dataPlane.outputs.eventHubNamespaceName
+    eventHubName: dataPlane.outputs.eventHubName
     ledgerStorageName: dataPlane.outputs.ledgerStorageName
     ledgerTableName: ledgerTableName
     ledgerTableEndpoint: dataPlane.outputs.ledgerTableEndpoint
@@ -402,6 +412,26 @@ module applicationKeyManagementRbac 'modules/application-key-management-rbac.bic
     apiPrincipalIds: [
       dataPlane.outputs.apiPrincipalId
     ]
+  }
+}
+
+var apimServiceContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '312a565d-c81f-4fd8-895a-4e21e48d571c')
+
+resource apiSubscriptionApimContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(subscription().id, resourceGroupName, 'api-apim-service-contributor')
+  properties: {
+    principalId: dataPlane.outputs.apiPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: apimServiceContributorRoleDefinitionId
+  }
+}
+
+resource controlPlaneSubscriptionApimContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (provisionControlPlane) {
+  name: guid(subscription().id, resourceGroupName, 'control-plane-apim-service-contributor')
+  properties: {
+    principalId: controlPlane!.outputs.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: apimServiceContributorRoleDefinitionId
   }
 }
 

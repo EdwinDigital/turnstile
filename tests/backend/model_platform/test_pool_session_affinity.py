@@ -15,6 +15,7 @@ from tests.backend.model_platform.control_plane_support import (
     publisher_settings,
 )
 from turnstile_core.domain.control_plane import (
+    COUNT_TOKENS_REJECTIONS,
     ApiFormat,
     AuthStrategy,
     GatewayBackendPoolConfig,
@@ -172,7 +173,8 @@ def test_pool_affinity_toggle_is_visible_as_a_release_change() -> None:
         update={"desired_spec": old.desired_spec.model_copy(update={"bindings": [new_binding]})}
     )
     changes = GatewayControlPlaneService._release_changes(changed, old)
-    assert changes.changed_backend_pools == [binding.model.model_key]
+    assert changes.changed_models == [binding.model.model_key]
+    assert changes.changed_backend_pools == []
     assert changes.added_backend_pools == []
     assert changes.removed_backend_pools == []
 
@@ -193,7 +195,7 @@ def test_pool_affinity_arm_configuration_and_readback(affinity: bool) -> None:
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     backend = BackendPoolResource(
@@ -231,7 +233,7 @@ def test_pool_affinity_readback_mismatch_never_reports_success() -> None:
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(RetryablePublicationError, match="readback differs"):
@@ -268,7 +270,7 @@ def test_pool_integrity_classifies_members_by_resource_type() -> None:
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     dependencies = client.inspect_revision_dependencies(publication)
@@ -307,7 +309,7 @@ def test_pool_baseline_selectors_are_read_from_raw_revision_policy() -> None:
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     assert client._pool_baseline_backend_ids("previous", ApiFormat.OPENAI_CHAT) == {"old-member"}
@@ -375,12 +377,18 @@ def test_pool_probe_baseline_uses_only_verified_previous_member_ids(
             )
         if request.method == "GET" and request.url.path.endswith("/policies/policy"):
             ids = sorted(old_member_ids) if known_member else ["unrelated-member"]
-            policy = (
-                "<policies><inbound>"
-                + "".join(f'<set-backend-service backend-id="{member_id}" />' for member_id in ids)
-                + "</inbound></policies>"
-            )
+            selection = compiler._backend_selection("unit-old-pool", tuple(ids))
+            policy = f"<policies><inbound>{selection}</inbound></policies>"
             return httpx.Response(200, headers={"content-type": "application/xml"}, text=policy)
+        body = json.loads(request.content)
+        if request.url.path.endswith("/count_tokens"):
+            rejection = COUNT_TOKENS_REJECTIONS[
+                "unavailable" if body["model"] == binding.model.model_key else "unpublished"
+            ]
+            return httpx.Response(rejection.status_code, json=rejection.payload())
+        if body.get("model") != binding.model.model_key:
+            rejection = COUNT_TOKENS_REJECTIONS["unpublished"]
+            return httpx.Response(rejection.status_code, json=rejection.payload())
         if "x-turnstile-pool-member" not in request.headers:
             return httpx.Response(200, json={"content": []})
         if ";rev=previous" in request.url.path:
@@ -399,14 +407,14 @@ def test_pool_probe_baseline_uses_only_verified_previous_member_ids(
     )
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     if known_member:
-        client.probe_revision("candidate", candidate)
+        client.probe_revision("candidate", candidate, baseline_publication=previous)
         assert len(baseline_requests) == 2
         assert len(candidate_requests) == 2
     else:
         with pytest.raises(httpx.HTTPStatusError):
-            client.probe_revision("candidate", candidate)
+            client.probe_revision("candidate", candidate, baseline_publication=previous)
         assert baseline_requests == []

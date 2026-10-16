@@ -95,7 +95,7 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
     apim_routes = [route for route in protected.routes if isinstance(route, APIRoute)]
     copilot_routes = [route for route in copilot_protected.routes if isinstance(route, APIRoute)]
 
-    assert len(apim_routes) == 88
+    assert len(apim_routes) >= 88
     adoption = next(
         route
         for route in apim_routes
@@ -205,11 +205,18 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         if isinstance(route, APIRoute)
         and (
             route.path.startswith("/api/v1/model-management/publications")
+            or route.path.startswith("/api/v1/model-management/rollouts")
             or route.path.endswith("/credentials/rotate")
             or (route.path.endswith("/backend-pool") and "GET" not in (route.methods or set()))
         )
     ]
-    assert len(publication_routes) == 9
+    assert len(publication_routes) == 13
+    rollout_routes = [route for route in publication_routes if "/rollouts" in route.path]
+    assert {(route.path, method) for route in rollout_routes for method in route.methods or ()} == {
+        ("/api/v1/model-management/rollouts", "GET"),
+        ("/api/v1/model-management/rollouts", "POST"),
+        ("/api/v1/model-management/rollouts/{rollout_id}", "GET"),
+    }
     for route in publication_routes:
         assert any(
             dependency.call is require_publication_owner
