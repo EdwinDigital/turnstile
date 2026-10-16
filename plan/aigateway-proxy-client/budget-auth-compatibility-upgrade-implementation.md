@@ -115,6 +115,10 @@ service origin 不能替代调用所需的完整 API URL：managed deployment en
 
 ### 必须继续完成的金融安装
 
+最后只读核对：Test Org-USD 的有效人员数为 0，执行 rollout 和执行 scope 记录也均为 0。
+正式 USD 测试用户、部门及个人额度尚未指定；按已批准设计，不自动创建生产业务账号，
+也不能把截图中的金额或原 Token 组织的 Edwin 当作可任意切换的测试配置。
+
 1. 交付并测试受控安装/金融回退执行器。当前离线策略规划器不是该执行器，不能手工填 active
    记录、伪造准备结果或把 private 候选文件直接上传当作发布。
 2. 重新配置并验证真实服务器委托 audience、MI claims 和最小 Table 权限；本次未使用的准备
