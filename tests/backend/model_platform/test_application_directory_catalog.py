@@ -48,7 +48,7 @@ def custom_catalog(monkeypatch: pytest.MonkeyPatch) -> EnterpriseEntityCatalog:
     for module in (
         "turnstile_core.services.application_access",
         "turnstile_core.services.application_provisioning_ledger",
-        "turnstile_core.services.directory_catalog",
+        "turnstile_core.persistence.directory_catalog",
     ):
         monkeypatch.setattr(module + ".catalog_for", lambda *args, **kwargs: catalog)
     return catalog
