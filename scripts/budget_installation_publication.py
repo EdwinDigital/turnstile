@@ -512,6 +512,17 @@ class InstallationPublicationBundle:
         }
 
     @property
+    def policy_contracts(self) -> dict[str, str]:
+        # Keep source digests immutable; APIM readbacks use the native upload contract.
+        return {
+            "parent": component_digest(
+                parse_policy(self.parent_policy), normalize_text_defaults=False,
+            ),
+            **{key: component_digest(parse_policy(value[1]), normalize_text_defaults=False)
+               for key, value in self.operations.items()},
+        }
+
+    @property
     def dependency_digest(self) -> str:
         return _digest({
             "backends": [asdict(value) for value in self.compiled.backends],
@@ -715,14 +726,18 @@ class InstallationPublicationReadback(StrictModel):
             hashlib.sha256(self.parent_policy.encode()).hexdigest()
         ):
             raise ValueError("Candidate parent is not the policy pinned in maintenance evidence")
-        if policy_document_digest(self.parent_policy) != bundle.policy_digests["parent"]:
+        contracts_by_policy = bundle.policy_contracts
+        if component_digest(parse_policy(self.parent_policy), normalize_text_defaults=False) != (
+            contracts_by_policy["parent"]
+        ):
             raise ValueError("Candidate parent differs from the reviewed installation")
         if self.operations.keys() != bundle.operations.keys():
             raise ValueError("Candidate must have the exact complete operation inventory")
         for key, (method, path, source) in self.operations.items():
             operation, _ = bundle.operations[key]
             if (method != operation.method or path != operation.path
-                or policy_document_digest(source) != bundle.policy_digests[key]):
+                or component_digest(parse_policy(source), normalize_text_defaults=False)
+                != contracts_by_policy[key]):
                 raise ValueError("Candidate operation contract differs: " + key)
         dependencies = self.dependencies
         if (not dependencies.recorded_complete or dependencies.live_status != "healthy"
@@ -896,6 +911,7 @@ def record_promoted_installation(
             "epoch": str(plan.epoch), "plan_sha256": plan.digest,
             "bundle_sha256": bundle.digest, "dependency_sha256": bundle.dependency_digest,
             "policy_sha256": bundle.policy_digests,
+            "policy_contract_sha256": bundle.policy_contracts,
             "observed_current_revision": actual.current_revision,
             "sql_source_revision": bundle.previous.apim_revision,
             "serving_source_revision": bundle.serving_revision,

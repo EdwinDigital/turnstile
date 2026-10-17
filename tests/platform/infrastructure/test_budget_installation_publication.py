@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Any, cast
 from unittest.mock import MagicMock, Mock
 from uuid import UUID, uuid5
+from xml.etree import ElementTree
 
 import httpx
 import pytest
@@ -50,7 +51,11 @@ from turnstile_core.integrations.apim_control_plane_contract import (
 )
 from turnstile_core.integrations.apim_directory_policy import compose_directory_identity_policy
 from turnstile_core.integrations.apim_policy_compiler import ApimPolicyCompiler
-from turnstile_core.integrations.apim_policy_components import parse_policy
+from turnstile_core.integrations.apim_policy_components import (
+    component_digest,
+    parse_policy,
+    policy_document_digest,
+)
 from turnstile_core.integrations.apim_publisher_client import AzureApimPublisherClient
 from turnstile_core.integrations.model_availability_verifier import ModelAvailabilityGatewayVerifier
 from turnstile_core.persistence.in_memory import InMemoryRepository
@@ -632,6 +637,72 @@ def test_unverified_or_drifted_cloud_state_never_authorizes_promotion(
         actual.require_candidate(installation_plan, bundle, promoted=False, now=NOW)
 
 
+@pytest.mark.parametrize("policy", ["parent", "responses", "anthropic-models"])
+def test_native_xml_reindent_preserves_contract_without_replacing_source_or_raw_plan(
+    prepared: tuple[InstallationPublicationBundle, BudgetInstallationPlan, dict[str, Any]],
+    policy: str,
+) -> None:
+    bundle, installation_plan, _ = prepared
+    actual = observed(bundle, installation_plan)
+    source = bundle.parent_policy if policy == "parent" else bundle.operations[policy][1]
+    root = parse_policy(source)
+    ElementTree.indent(root, space="    ")
+    reserialized = ElementTree.tostring(root, encoding="unicode")
+    assert policy_document_digest(reserialized) != bundle.policy_digests[policy]
+    assert component_digest(parse_policy(reserialized), normalize_text_defaults=False) == (
+        bundle.policy_contracts[policy]
+    )
+    original_digest, original_sources = bundle.digest, bundle.policy_digests
+    if policy == "parent":
+        actual.parent_policy = reserialized
+        with pytest.raises(ValueError, match="pinned in maintenance"):
+            actual.require_candidate(installation_plan, bundle, promoted=False, now=NOW)
+        actual_hash = hashlib.sha256(reserialized.encode()).hexdigest()
+        installation_plan.policy_sha256["candidate"] = actual_hash
+        actual.maintenance.revision_policy_sha256["candidate"] = actual_hash
+    else:
+        method, path, _ = actual.operations[policy]
+        actual.operations[policy] = method, path, reserialized
+    actual.require_candidate(installation_plan, bundle, promoted=False, now=NOW)
+    assert bundle.digest == original_digest
+    assert bundle.policy_digests == original_sources
+
+
+@pytest.mark.parametrize("defect", ["parent_logger", "parent_default", "operation_identity"])
+def test_native_readback_contract_rejects_behavior_changes_even_with_reapproved_raw_hash(
+    prepared: tuple[InstallationPublicationBundle, BudgetInstallationPlan, dict[str, Any]],
+    defect: str,
+) -> None:
+    bundle, installation_plan, _ = prepared
+    actual = observed(bundle, installation_plan)
+    if defect.startswith("parent"):
+        source = actual.parent_policy
+        if defect == "parent_logger":
+            changed = source.replace("unit-logger", "other-logger")
+        else:
+            changed = re.sub(
+                r"long fallback = ([0-9]+);",
+                lambda match: f"long fallback = {int(match[1]) + 1};",
+                source, count=1,
+            )
+        assert changed != source
+        actual.parent_policy = changed
+        raw_hash = hashlib.sha256(changed.encode()).hexdigest()
+        installation_plan.policy_sha256["candidate"] = raw_hash
+        actual.maintenance.revision_policy_sha256["candidate"] = raw_hash
+    else:
+        method, path, source = actual.operations["responses"]
+        root = parse_policy(source)
+        marker = root.find("inbound/set-variable[@name='availabilityTargetId']")
+        assert marker is not None
+        marker.set("value", str(UUID(int=99)))
+        actual.operations["responses"] = (
+            method, path, ElementTree.tostring(root, encoding="unicode"),
+        )
+    with pytest.raises(ValueError, match="differs"):
+        actual.require_candidate(installation_plan, bundle, promoted=False, now=NOW)
+
+
 @pytest.mark.parametrize("defect", ["bundle", "failed", "identity", "outage", "native", "stale"])
 def test_real_protocol_diagnostics_are_not_replaceable_by_success_flags(
     prepared: tuple[InstallationPublicationBundle, BudgetInstallationPlan, dict[str, Any]],
@@ -749,6 +820,7 @@ def test_sql_handoff_records_only_real_promotion_and_keeps_financial_admission_p
     assert detail["financial_activation"] is False
     assert detail["observed_current_revision"] == "candidate"
     assert detail["bundle_sha256"] == bundle.digest
+    assert detail["policy_contract_sha256"] == bundle.policy_contracts
     sync.assert_called_once()
     activate.assert_called_once()
     queries = [call.args[0] for call in connection.execute.call_args_list]
