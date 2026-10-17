@@ -1867,7 +1867,7 @@ def check_gateway_budget_readiness(
     response: Response,
 ) -> BudgetDelegationReadiness:
     response.headers["Cache-Control"] = "no-store"
-    return service.check_budget_delegation(gateway_profile_id, identity.email)
+    return service.check_budget_delegation(gateway_profile_id, identity.effective_user_id)
 
 
 @protected_router.post(
@@ -1885,7 +1885,7 @@ def verify_gateway_budget_execution(
     response.headers["Cache-Control"] = "no-store"
     try:
         return service.check_budget_execution(
-            gateway_profile_id, write, identity.email, applications,
+            gateway_profile_id, write, identity.effective_user_id, applications,
         )
     except ControlPlaneNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from None

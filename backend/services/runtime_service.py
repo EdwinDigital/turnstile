@@ -1453,6 +1453,7 @@ class ModelRuntimeService:
             raise HTTPException(status_code=503, detail="Budget delegation origin is not trusted")
         service_hash = hashlib.sha256(str(target["service_name"]).lower().encode()).hexdigest()
         partition = f"budget-protocol|{service_hash}|{target['api_id']}"
+        stage = "ledger_fence_read"
         try:
             with AtomicTableLedger(
                 self._settings.ledger_table_endpoint,
@@ -1460,6 +1461,7 @@ class ModelRuntimeService:
                 timeout=2,
             ) as store:
                 entity = store.read_entity(partition, "F")
+            stage = "ledger_fence_validate"
             fence = json.loads(entity["Document"]) if entity is not None else {}
             mode = fence.get("mode")
             native = str(route.get("native_gateway_id") or "managed")
@@ -1474,30 +1476,46 @@ class ModelRuntimeService:
                 or fence.get("api_id") != target["api_id"]
                 or str(fence.get("apim_service_id", "")).lower()
                 != str(target["service_name"]).lower()
+                or not isinstance(revisions, list)
                 or not isinstance(revision, str)
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", revision)
                 or revision not in revisions
             ):
                 raise ValueError("An exact registered protocol revision is required")
-            decrypted = self._decrypt_route(route)
+            stage = "subscription_credential"
+            decrypted = with_platform_gateway_credential(
+                self._decrypt_route(route), self._settings,
+            )
             with httpx.Client(timeout=8, follow_redirects=False) as client:
                 headers = OpenAICompatibleGatewayAdapter(GatewayKind.APIM, client)._auth_headers(
                     decrypted,
                 )
-                if not any(name.lower() == "ocp-apim-subscription-key" for name in headers) or any(
-                    name.lower() == "authorization" for name in headers
+                if (
+                    not decrypted.get("gateway_credential")
+                    or not any(name.lower() == "ocp-apim-subscription-key" for name in headers)
+                    or any(name.lower() == "authorization" for name in headers)
                 ):
                     raise ValueError("A configured APIM subscription credential is required")
+                stage = "managed_identity_token"
                 provider = ManagedIdentityTokenProvider()
                 valid_token = provider.token(configuration.audience)
                 destinations = [(native, destination.geturl().rstrip("/"))]
                 cases: tuple[tuple[str, int, str, bool, bool], ...]
                 if mode == "paused":
+                    stage = "gateway_destinations"
                     destinations = []
                     for deployment in self._repository.list_gateway_deployments(gateway_id):
                         gateway_native = str(deployment["native_gateway_id"])
                         if gateway_native not in fence["gateways"]:
                             continue
+                        registered_revisions = fence["gateways"][gateway_native]
+                        if (
+                            not isinstance(registered_revisions, list)
+                            or revision not in registered_revisions
+                        ):
+                            raise ValueError(
+                                "Every fenced Gateway must include the diagnostic Revision"
+                            )
                         endpoint = urlsplit(str(deployment["endpoint_url"]))
                         api_path = "/" + str(target["api_path"]).strip("/")
                         if (
@@ -1533,6 +1551,7 @@ class ModelRuntimeService:
                         ("wrong_audience", 401, wrong_token, True, True),
                         ("missing_person", 403, valid_token, False, True),
                     )
+                stage = "gateway_probes"
                 checks: list[BudgetDelegationCheck] = []
                 for gateway_native, base in destinations:
                     for case, expected, token, include_person, explicit_revision in cases:
@@ -1580,12 +1599,13 @@ class ModelRuntimeService:
                         )
         except Exception as error:
             logger.warning(
-                "Budget delegation readiness unavailable error_type=%s",
-                type(error).__name__,
+                "Budget delegation readiness unavailable stage=%s error_type=%s",
+                stage, type(error).__name__,
             )
             raise HTTPException(
                 status_code=503,
                 detail="Budget delegation readiness could not be verified",
+                headers={"X-Turnstile-Budget-Readiness-Stage": stage},
             ) from None
         ready = bool(checks) and all(
             check.actual_status == check.expected_status

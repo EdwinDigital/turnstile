@@ -85,13 +85,19 @@ def test_unconfigured_budget_checks_stop_before_any_resource_access() -> None:
     tokens.token.assert_not_called()
 
 
+@pytest.mark.parametrize("governance_user_id", [None, "stable-directory-person-id"])
 def test_budget_owner_endpoints_bind_session_identity_and_disable_caching(
-    publication_api: InMemoryRepository,
+    publication_api: InMemoryRepository, governance_user_id: str | None,
 ) -> None:
-    owner = app.dependency_overrides[require_authenticated_session]()
+    owner = replace(
+        app.dependency_overrides[require_authenticated_session](),
+        governance_user_id=governance_user_id,
+    )
     base = f"/api/v1/model-management/gateways/{TARGET}"
     service = MagicMock()
-    with patch.dict(app.dependency_overrides, {runtime_service: lambda: service}):
+    with patch.dict(app.dependency_overrides, {
+        runtime_service: lambda: service, require_authenticated_session: lambda: owner,
+    }):
         service.check_budget_delegation.return_value = BudgetDelegationReadiness(
             gateway_profile_id=TARGET,
             native_gateway_id="managed",
@@ -114,7 +120,7 @@ def test_budget_owner_endpoints_bind_session_identity_and_disable_caching(
         client = TestClient(app)
         result = client.post(base + "/budget-readiness", json={})
         assert result.status_code == 200 and result.headers["cache-control"] == "no-store"
-        service.check_budget_delegation.assert_called_once_with(TARGET, owner.email)
+        service.check_budget_delegation.assert_called_once_with(TARGET, owner.effective_user_id)
         assert client.post(base + "/budget-execution-verification", json={}).status_code == 422
         result = client.post(
             base + "/budget-execution-verification",
@@ -124,7 +130,7 @@ def test_budget_owner_endpoints_bind_session_identity_and_disable_caching(
             },
         )
         assert result.status_code == 200 and result.headers["cache-control"] == "no-store"
-        assert service.check_budget_execution.call_args.args[2] == owner.email
+        assert service.check_budget_execution.call_args.args[2] == owner.effective_user_id
         with patch.dict(
             app.dependency_overrides,
             {
