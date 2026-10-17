@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import re
 from datetime import timedelta
 from typing import Any, cast
 from unittest.mock import MagicMock, Mock
@@ -11,6 +12,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from backend.services.client_user_policy import strip_verified_client_user_policy
 from scripts.budget_execution_upgrade import plan_budget_parent_upgrade
 from scripts.budget_installation_publication import (
     InstallationProtocolVerification,
@@ -19,6 +21,7 @@ from scripts.budget_installation_publication import (
     build_historical_availability,
     build_installation_publication,
     capture_installation_contracts,
+    capture_serving_baseline_lineage,
     promote_installation_publication,
     record_promoted_installation,
     recover_installation_promotion,
@@ -45,6 +48,7 @@ from turnstile_core.integrations.apim_control_plane_contract import (
     OperationResource,
     ResolvedApimPublisherClient,
 )
+from turnstile_core.integrations.apim_directory_policy import compose_directory_identity_policy
 from turnstile_core.integrations.apim_policy_compiler import ApimPolicyCompiler
 from turnstile_core.integrations.apim_policy_components import parse_policy
 from turnstile_core.integrations.apim_publisher_client import AzureApimPublisherClient
@@ -240,6 +244,129 @@ def test_normal_publication_worker_can_queue_after_installation(
     client.verify_publication_permissions.assert_called_once()
 
 
+def with_serving_lineage(
+    prepared: tuple[InstallationPublicationBundle, BudgetInstallationPlan, dict[str, Any]],
+) -> tuple[InstallationPublicationBundle, BudgetInstallationPlan, dict[str, Any]]:
+    bundle, installation_plan, registry = copy.deepcopy(prepared)
+    previous = bundle.previous
+    compiled = ApimPolicyCompiler().compile(previous)
+    previous.resource_manifest = {
+        "backends": [item.id for item in compiled.backends],
+        "named_values": [item.id for item in compiled.named_values],
+    }
+    raw = {
+        "chat-completions": compiled.chat_completions_policy,
+        "responses": compiled.responses_policy,
+        "responses-compact": compiled.responses_compact_policy,
+        "anthropic-messages": compiled.messages_policy,
+        "anthropic-count-tokens": compiled.count_tokens_policy,
+        "anthropic-models": compiled.models_policy,
+    }
+    operations = {key: (bundle.operations[key][0], source, '"original-policy"')
+                  for key, source in raw.items()}
+    _, original_parent = legacy_parent()
+    actual_parent = original_parent.replace("unit-logger", "manual-parent-logger")
+    dependencies: dict[str, dict[str, Any]] = {
+        "backends/" + item.id: {"url": item.url} for item in compiled.backends
+    }
+    dependencies.update({"namedValues/" + item.id: {"secret": True}
+                         for item in compiled.named_values})
+    dependencies.update({"namedValues/" + name: {"secret": True}
+                         for document in (original_parent, actual_parent, *raw.values())
+                         for name in re.findall(
+                             r"\{\{([A-Za-z0-9][A-Za-z0-9._-]{0,126})\}\}", document,
+                         )})
+    lineage = capture_serving_baseline_lineage(
+        previous, serving_revision="manual-parent-revision",
+        sql_parent=(original_parent, '"sql-revision-parent"'),
+        serving_parent=(actual_parent, '"actual-serving-parent"'),
+        sql_operations=operations, serving_operations=operations,
+        shared_dependencies=dependencies, source_evidence_sha256="1" * 64,
+        observed_at=NOW - timedelta(minutes=2), reviewed_at=NOW - timedelta(minutes=1),
+        reviewed_by="unit-operator",
+    )
+    assert installation_plan.expected_fence.delegation is not None
+    upgrade = plan_budget_parent_upgrade(
+        actual_parent,
+        legacy_template=(ROOT / "infra/policies/foundry-finops-policy.schema1.xml").read_text(),
+        canonical_parent=(ROOT / "infra/policies/foundry-finops-policy.xml").read_text(),
+        delegation=installation_plan.expected_fence.delegation, gateway_profile_id=TARGET,
+    )
+    rebuilt = build_installation_publication(
+        previous, registry=registry, fence=installation_plan.expected_fence,
+        parent_policy=upgrade.candidate_parent, bindings=upgrade.adopted_bindings,
+        compiler=ApimPolicyCompiler(),
+        revision="candidate", generation=10, actor="unit", created_at=NOW,
+        serving_lineage=lineage, source_parent_policy=actual_parent,
+    )
+    installation_plan.policy_sha256["candidate"] = hashlib.sha256(
+        rebuilt.parent_policy.encode(),
+    ).hexdigest()
+    return rebuilt, installation_plan, registry
+
+
+def test_manual_parent_lineage_preserves_the_original_sql_record(
+    prepared: tuple[InstallationPublicationBundle, BudgetInstallationPlan, dict[str, Any]],
+) -> None:
+    bundle, installation_plan, _ = with_serving_lineage(prepared)
+    assert bundle.previous.apim_revision == "old"
+    assert bundle.serving_revision == "manual-parent-revision"
+    assert bundle.serving_lineage is not None
+    assert bundle.serving_lineage.sql_policy_digest_comparison == "not_asserted"
+    assert bundle.serving_lineage.sql_recorded_policy_sha256 == bundle.previous.policy_sha256
+    actual = observed(bundle, installation_plan)
+    actual.current_revision = "manual-parent-revision"
+    actual.require_candidate(installation_plan, bundle, promoted=False, now=NOW)
+    actual.current_revision = "old"
+    with pytest.raises(ValueError, match="current revision"):
+        actual.require_candidate(installation_plan, bundle, promoted=False, now=NOW)
+
+
+def test_unproven_manual_revision_is_still_rejected(
+    prepared: tuple[InstallationPublicationBundle, BudgetInstallationPlan, dict[str, Any]],
+) -> None:
+    bundle, installation_plan, _ = prepared
+    actual = observed(bundle, installation_plan)
+    actual.current_revision = "manual-parent-revision"
+    with pytest.raises(ValueError, match="current revision"):
+        actual.require_candidate(installation_plan, bundle, promoted=False, now=NOW)
+
+
+@pytest.mark.parametrize("defect", [
+    "sql_revision", "sql_spec", "sql_digest", "manifest", "missing_operation", "operation",
+    "missing_dependency", "wildcard_parent", "wildcard_operation", "stale",
+])
+def test_lineage_cannot_bless_operation_changes_or_replace_sql_history(
+    prepared: tuple[InstallationPublicationBundle, BudgetInstallationPlan, dict[str, Any]],
+    defect: str,
+) -> None:
+    bundle, _, _ = with_serving_lineage(prepared)
+    proof = bundle.serving_lineage
+    assert proof is not None
+    if defect == "sql_revision":
+        proof.sql_revision = "not-sql-record"
+    elif defect == "sql_spec":
+        proof.desired_spec_sha256 = "f" * 64
+    elif defect == "sql_digest":
+        proof.sql_recorded_policy_sha256 = "f" * 64
+    elif defect == "manifest":
+        proof.sql_manifest_sha256 = "f" * 64
+    elif defect == "missing_operation":
+        del proof.sql_operations["responses"]
+    elif defect == "operation":
+        proof.serving_operations["responses"].path = "/changed-route"
+    elif defect == "missing_dependency":
+        proof.shared_dependency_sha256 = {}
+    elif defect == "wildcard_parent":
+        proof.serving_parent.etag = "*"
+    elif defect == "wildcard_operation":
+        proof.sql_operations["responses"].policy.etag = "*"
+    else:
+        proof.observed_at = NOW - timedelta(days=2)
+    with pytest.raises(ValueError):
+        proof.require_previous(bundle.previous, NOW)
+
+
 def test_image_bundle_has_a_complete_manifest_for_the_real_dependency_inspector(
     prepared: tuple[InstallationPublicationBundle, BudgetInstallationPlan, dict[str, Any]],
 ) -> None:
@@ -318,10 +445,16 @@ def test_image_bundle_has_a_complete_manifest_for_the_real_dependency_inspector(
 
 
 @pytest.mark.parametrize("defect", [None, "old_parent", "old_head"])
+@pytest.mark.parametrize("overlay", ["client", "directory"])
 def test_historical_artifacts_pass_the_full_revision_verifier_only_with_complete_coverage(
-    defect: str | None,
+    defect: str | None, overlay: str,
 ) -> None:
     _, raw_parent = legacy_parent()
+    if overlay == "directory":
+        raw_parent = compose_directory_identity_policy(
+            strip_verified_client_user_policy(raw_parent), cloud="public",
+            endpoint="https://unit.table.core.windows.net", table="UnitLedger",
+        )
     raw_inference = (
         '<policies><inbound><base/><set-backend-service backend-id="unit"/></inbound>'
         '<backend><base/></backend><outbound><base/></outbound><on-error><base/></on-error>'
@@ -361,6 +494,7 @@ def test_historical_artifacts_pass_the_full_revision_verifier_only_with_complete
                 "__LEDGER_TABLE_ENDPOINT__": "https://unit.table.core.windows.net",
                 "__LEDGER_TABLE_NAME__": "UnitLedger",
             }, allow_verified_client_overlay_removal=True,
+            allow_verified_directory_overlay_removal=True,
         )
         prefix = f"/apis/unit-api;rev={revision}"
         resources[prefix + "/operations"] = [
@@ -377,7 +511,8 @@ def test_historical_artifacts_pass_the_full_revision_verifier_only_with_complete
                 })
         assert len(historical.desired_policy_sha256) == 5
         assert len(historical.changes) == 7
-        assert historical.removed_client_overlay
+        assert historical.removed_client_overlay == (overlay == "client")
+        assert historical.removed_directory_overlay == (overlay == "directory")
         assert "budgetExecutionVersion" not in policies[prefix + "/policies/policy"]
     if defect == "old_parent":
         policies["/apis/unit-api;rev=old2/policies/policy"] = raw_parent

@@ -22,6 +22,7 @@ from psycopg.types.json import Jsonb
 from pydantic import AwareDatetime, Field
 
 from backend.services.client_user_policy import strip_verified_client_user_policy
+from scripts.budget_execution_upgrade import plan_budget_parent_upgrade
 from scripts.install_budget_execution import (
     BudgetInstallationPlan,
     InstallationJournal,
@@ -50,6 +51,9 @@ from turnstile_core.integrations.apim_control_plane_contract import (
     CompiledGatewayRelease,
     OperationResource,
 )
+from turnstile_core.integrations.apim_directory_policy import (
+    strip_validated_directory_identity_policy,
+)
 from turnstile_core.integrations.apim_image_policy import IMAGE_OPERATION_ID
 from turnstile_core.integrations.apim_model_availability import (
     AVAILABILITY_PROBE_PREFIX,
@@ -75,6 +79,17 @@ from turnstile_core.persistence.repository_publications import PostgreSqlPublica
 
 _SLOTS = re.compile(r"__[A-Z][A-Z0-9_]*__")
 _FIXED_MANIFESTS = {"fixed_route_program", "route_configuration", "fixed_route_migration"}
+
+
+def _recorded_dependency_names(publication: GatewayPublication) -> set[str]:
+    result: set[str] = set()
+    for field, prefix in (("backends", "backends/"), ("named_values", "namedValues/"),
+                          ("oauth_credentials", "authorizationProviders/")):
+        values = publication.resource_manifest.get(field, [])
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise ValueError("Serving lineage requires the original dependency manifest")
+        result.update(prefix + value for value in values)
+    return result
 
 
 def _digest(value: object) -> str:
@@ -165,6 +180,7 @@ class HistoricalAvailabilityBundle:
     changes: tuple[InstallationChange, ...]
     normalized_legacy_choice: bool
     removed_client_overlay: bool
+    removed_directory_overlay: bool
 
     @property
     def desired_policy_sha256(self) -> dict[str, str]:
@@ -175,6 +191,7 @@ class HistoricalAvailabilityBundle:
     def digest(self) -> str:
         return _digest({"adoption": self.adoption.model_dump(mode="json"),
                         "removed_client_overlay": self.removed_client_overlay,
+                        "removed_directory_overlay": self.removed_directory_overlay,
                         "normalized_legacy_choice": self.normalized_legacy_choice,
                         "changes": [change.summary() for change in self.changes]})
 
@@ -184,6 +201,7 @@ def build_historical_availability(
     parent: tuple[str, str],
     operations: Mapping[str, tuple[OperationResource, str | None, str | None]],
     *, bindings: Mapping[str, str], allow_verified_client_overlay_removal: bool = False,
+    allow_verified_directory_overlay_removal: bool = False,
 ) -> HistoricalAvailabilityBundle:
     """Retain old routing/TPM behind a permanent, verifiable parent denial.
 
@@ -191,7 +209,7 @@ def build_historical_availability(
     operation policies must be explicitly listed in the adoption. Extra HEAD
     routes are create-only. The normal full-revision verifier must run afterward;
     this artifact never creates coverage or treats an old revision as active.
-    Only explicitly approved, verified client overlays can be removed, and only
+    Only explicitly approved, verified client/directory overlays can be removed, and only
     in the SAME final parent PUT that installs the first unconditional denial.
     Recovery restores the backed-up original bytes, including that overlay.
     """
@@ -218,6 +236,13 @@ def build_historical_availability(
         strip_verified_client_user_policy(normalized_original)
         if client_overlay else normalized_original
     )
+    directory_overlay = parse_policy(normalized).find(
+        ".//set-variable[@name='directoryIdentityPolicyVersion']",
+    ) is not None
+    if directory_overlay and not allow_verified_directory_overlay_removal:
+        raise ValueError("Directory overlay removal needs explicit installation approval")
+    if directory_overlay:
+        normalized = strip_validated_directory_identity_policy(normalized)
     available = _bind_policy(compose_availability_parent(normalized), bindings)
     candidate = compile_protocol_fenced_availability_operation(available)
     candidate_root = parse_policy(candidate)
@@ -287,8 +312,154 @@ def build_historical_availability(
     if not catalogs:
         raise ValueError("Historical availability requires its original model catalog")
     return HistoricalAvailabilityBundle(
-        adoption, tuple(changes), normalized_original != source, client_overlay,
+        adoption, tuple(changes), normalized_original != source, client_overlay, directory_overlay,
     )
+
+
+class ServingPolicyReadback(StrictModel):
+    raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    document_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    etag: str = Field(min_length=1)
+
+    @classmethod
+    def capture(cls, source: str, etag: str) -> ServingPolicyReadback:
+        if etag == "*" or any(character in etag for character in ("\r", "\n")):
+            raise ValueError("Serving lineage requires concrete source policy ETags")
+        return cls(raw_sha256=hashlib.sha256(source.encode()).hexdigest(),
+                   document_sha256=policy_document_digest(source), etag=etag)
+
+
+class ServingOperationReadback(StrictModel):
+    method: Literal["GET", "POST", "HEAD"]
+    path: str = Field(min_length=1)
+    policy: ServingPolicyReadback
+
+
+class ServingBaselineLineage(StrictModel):
+    """Reviewed manual-parent lineage, NOT a claim of old compiler hash equality."""
+
+    version: Literal[1] = 1
+    publication_id: UUID
+    gateway_profile_id: UUID
+    sql_revision: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    serving_revision: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    desired_spec_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sql_recorded_policy_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sql_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sql_parent: ServingPolicyReadback
+    serving_parent: ServingPolicyReadback
+    sql_operations: dict[str, ServingOperationReadback] = Field(min_length=1)
+    serving_operations: dict[str, ServingOperationReadback] = Field(min_length=1)
+    shared_dependency_sha256: dict[str, str] = Field(min_length=1)
+    source_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observed_at: AwareDatetime
+    reviewed_at: AwareDatetime
+    reviewed_by: str = Field(min_length=1, max_length=255)
+    review_kind: Literal["manual_parent_only_upgrade"] = "manual_parent_only_upgrade"
+    sql_policy_digest_comparison: Literal["not_asserted"] = "not_asserted"
+
+    @property
+    def digest(self) -> str:
+        return _digest(self.model_dump(mode="json"))
+
+    def require_previous(self, previous: GatewayPublication, now: datetime) -> None:
+        if (self.publication_id != previous.id
+            or self.gateway_profile_id != previous.gateway_profile_id
+            or self.sql_revision != previous.apim_revision
+            or self.serving_revision == self.sql_revision
+            or self.desired_spec_sha256 != previous.desired_spec_sha256
+            or self.sql_recorded_policy_sha256 != previous.policy_sha256
+            or self.sql_manifest_sha256 != _digest(previous.resource_manifest)):
+            raise ValueError("Serving lineage does not bind the unchanged SQL publication")
+        if not self.observed_at <= self.reviewed_at <= now or not (
+            0 <= (now - self.observed_at).total_seconds() <= 86400
+        ):
+            raise ValueError("Serving lineage requires a current reviewed observation")
+        if self.sql_operations.keys() != self.serving_operations.keys():
+            raise ValueError("Serving lineage must include every operation on both revisions")
+        expected_operations = {
+            "chat-completions", "responses", "responses-compact", "anthropic-messages",
+            "anthropic-count-tokens", "anthropic-models",
+        }
+        if previous.resource_manifest.get("images_generations_operation"):
+            expected_operations.add(IMAGE_OPERATION_ID)
+        if self.sql_operations.keys() != expected_operations:
+            raise ValueError("Serving lineage is missing the legacy publication operation set")
+        if not _recorded_dependency_names(previous) <= set(self.shared_dependency_sha256):
+            raise ValueError("Serving lineage dependency scope changed")
+        for parent in (self.sql_parent, self.serving_parent):
+            if parent.etag == "*" or any(c in parent.etag for c in ("\r", "\n")):
+                raise ValueError("Serving lineage parent ETag is not concrete")
+        for identity, original in self.sql_operations.items():
+            current = self.serving_operations[identity]
+            if (current.method != original.method or current.path != original.path
+                or current.policy.document_sha256 != original.policy.document_sha256):
+                raise ValueError("Manual serving lineage changed an operation contract")
+            for policy in (original.policy, current.policy):
+                if policy.etag == "*" or any(c in policy.etag for c in ("\r", "\n")):
+                    raise ValueError("Serving lineage operation ETag is not concrete")
+        for key, digest in self.shared_dependency_sha256.items():
+            if (not key.startswith(("backends/", "namedValues/", "authorizationProviders/"))
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                raise ValueError("Serving lineage needs exact shared dependency readback digests")
+
+
+def capture_serving_baseline_lineage(
+    previous: GatewayPublication, *, serving_revision: str,
+    sql_parent: tuple[str, str], serving_parent: tuple[str, str],
+    sql_operations: Mapping[str, tuple[OperationResource, str, str]],
+    serving_operations: Mapping[str, tuple[OperationResource, str, str]],
+    shared_dependencies: Mapping[str, Mapping[str, Any]], source_evidence_sha256: str,
+    observed_at: datetime, reviewed_at: datetime, reviewed_by: str,
+) -> ServingBaselineLineage:
+    """Capture read-only baseline evidence before the old revisions are fenced.
+
+    Both revisions use the same APIM-global dependency resources. Their actual
+    resource documents are fingerprinted, not declared healthy. The new candidate
+    must still pass the existing complete dependency inspector independently.
+    """
+    def operations(
+        values: Mapping[str, tuple[OperationResource, str, str]],
+    ) -> dict[str, ServingOperationReadback]:
+        result = {}
+        for identity, (resource, source, etag) in values.items():
+            if identity != resource.id:
+                raise ValueError("Serving lineage operation identity is inconsistent")
+            result[identity] = ServingOperationReadback(
+                method=resource.method, path=resource.path,
+                policy=ServingPolicyReadback.capture(source, etag),
+            )
+        return result
+
+    manifest = previous.resource_manifest
+    dependencies = _recorded_dependency_names(previous)
+    source_documents = [sql_parent[0], serving_parent[0], *(
+        source for values in (sql_operations, serving_operations)
+        for _, source, _ in values.values()
+    ), json.dumps(shared_dependencies, default=str)]
+    dependencies.update(
+        "namedValues/" + name for document in source_documents
+        for name in re.findall(r"\{\{([A-Za-z0-9][A-Za-z0-9._-]{0,126})\}\}", document)
+    )
+    if not dependencies or dependencies != set(shared_dependencies):
+        raise ValueError("Serving lineage must bind every recorded shared dependency")
+    lineage = ServingBaselineLineage(
+        publication_id=previous.id, gateway_profile_id=previous.gateway_profile_id,
+        sql_revision=str(previous.apim_revision), serving_revision=serving_revision,
+        desired_spec_sha256=previous.desired_spec_sha256,
+        sql_recorded_policy_sha256=str(previous.policy_sha256),
+        sql_manifest_sha256=_digest(manifest),
+        sql_parent=ServingPolicyReadback.capture(*sql_parent),
+        serving_parent=ServingPolicyReadback.capture(*serving_parent),
+        sql_operations=operations(sql_operations),
+        serving_operations=operations(serving_operations),
+        shared_dependency_sha256={key: _digest(value)
+                                  for key, value in shared_dependencies.items()},
+        source_evidence_sha256=source_evidence_sha256, observed_at=observed_at,
+        reviewed_at=reviewed_at, reviewed_by=reviewed_by,
+    )
+    lineage.require_previous(previous, reviewed_at)
+    return lineage
 
 
 @dataclass(frozen=True)
@@ -297,6 +468,13 @@ class InstallationPublicationBundle:
     publication: GatewayPublication
     parent_policy: str
     compiled: CompiledGatewayRelease
+    serving_lineage: ServingBaselineLineage | None = None
+
+    @property
+    def serving_revision(self) -> str | None:
+        return self.serving_lineage.serving_revision if self.serving_lineage else (
+            self.previous.apim_revision
+        )
 
     @property
     def operations(self) -> dict[str, tuple[OperationResource, str]]:
@@ -361,6 +539,8 @@ def build_installation_publication(
     generation: int,
     actor: str,
     created_at: datetime,
+    serving_lineage: ServingBaselineLineage | None = None,
+    source_parent_policy: str | None = None,
 ) -> InstallationPublicationBundle:
     if previous.status != PublicationStatus.ACTIVE or not previous.apim_revision:
         raise ValueError("Installation requires the actual effective legacy publication")
@@ -370,6 +550,10 @@ def build_installation_publication(
         raise ValueError("An installed budget publication must be recovered, not reinstalled")
     if generation <= previous.generation or previous.gateway_profile_id != fence.gateway_profile_id:
         raise ValueError("Installation generation or Gateway identity is invalid")
+    if serving_lineage is not None:
+        serving_lineage.require_previous(previous, created_at)
+        if revision == serving_lineage.serving_revision:
+            raise ValueError("Installation cannot overwrite the actual serving revision")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", revision) or (
         revision == previous.apim_revision or any(
             revision not in revisions for revisions in fence.gateways.values()
@@ -391,6 +575,8 @@ def build_installation_publication(
     publication.resource_manifest.update({
         "budget_contracts": contracts.model_dump(mode="json"),
         "model_availability": availability.model_dump(mode="json"),
+        **({"installation_serving_lineage": serving_lineage.model_dump(mode="json")}
+           if serving_lineage is not None else {}),
     })
     if parse_policy(parent_policy).find(
         "inbound/set-variable[@name='budgetExecutionVersion'][@value='@(2)']",
@@ -400,6 +586,23 @@ def build_installation_publication(
     canonical = (
         Path(__file__).resolve().parents[1] / "infra/policies/foundry-finops-policy.xml"
     ).read_text()
+    if serving_lineage is not None:
+        if source_parent_policy is None or policy_document_digest(source_parent_policy) != (
+            serving_lineage.serving_parent.document_sha256
+        ) or fence.delegation is None:
+            raise ValueError("Candidate adoption requires the actual reviewed serving parent")
+        legacy = (
+            Path(__file__).resolve().parents[1] / "infra/policies/foundry-finops-policy.schema1.xml"
+        ).read_text()
+        upgraded = plan_budget_parent_upgrade(
+            source_parent_policy, legacy_template=legacy, canonical_parent=canonical,
+            delegation=fence.delegation, gateway_profile_id=fence.gateway_profile_id,
+        )
+        expected_parent = _bind_policy(
+            compose_availability_parent(upgraded.candidate_parent), upgraded.adopted_bindings,
+        )
+        if policy_document_digest(parent) != policy_document_digest(expected_parent):
+            raise ValueError("Candidate parent discarded changes from the actual serving baseline")
     validate_parent_policy(parent, compose_availability_parent(compose_budget_execution_parent(
         canonical, canonical, enabled=True, delegation=fence.delegation,
     )))
@@ -417,7 +620,7 @@ def build_installation_publication(
            if compiled.images_generations_policy is not None else {}),
     })
     bundle = InstallationPublicationBundle(previous.model_copy(deep=True), publication,
-                                           parent, compiled)
+                                           parent, compiled, serving_lineage)
     if any(_SLOTS.search(source) for _, source in bundle.operations.values()):
         raise ValueError("Compiled operations contain unresolved parameters")
     return bundle
@@ -497,8 +700,14 @@ class InstallationPublicationReadback(StrictModel):
         if (contracts.epoch != plan.epoch
             or contracts.model_contracts != plan.expected_fence.model_contracts):
             raise ValueError("Publication contracts differ from the reviewed paused fence")
+        if bundle.serving_lineage is not None:
+            bundle.serving_lineage.require_previous(previous, now)
+            if candidate.resource_manifest.get("installation_serving_lineage") != (
+                bundle.serving_lineage.model_dump(mode="json")
+            ):
+                raise ValueError("Installation serving lineage changed after compilation")
         expected_current = (
-            bundle.publication.apim_revision if promoted else bundle.previous.apim_revision
+            bundle.publication.apim_revision if promoted else bundle.serving_revision
         )
         if self.current_revision != expected_current:
             raise ValueError("APIM current revision does not match the installation phase")
@@ -566,7 +775,9 @@ def promote_installation_publication(
     before.require_candidate(plan, bundle, promoted=False, now=now())
     verification.require_verified(bundle, plan.expected_fence, now())
     intent = {"publication_id": str(bundle.publication.id), "bundle_sha256": bundle.digest,
-              "current_revision": bundle.publication.apim_revision, "mode": "paused"}
+              "current_revision": bundle.publication.apim_revision, "mode": "paused",
+              "sql_source_revision": bundle.previous.apim_revision,
+              "serving_source_revision": bundle.serving_revision}
 
     def readback() -> dict[str, Any]:
         actual = observe()
@@ -594,7 +805,9 @@ def recover_installation_promotion(
         actual = observe()
         actual.require_candidate(plan, bundle, promoted=True, now=now())
         return {"publication_id": str(bundle.publication.id), "bundle_sha256": bundle.digest,
-                "current_revision": bundle.publication.apim_revision, "mode": "paused"}
+                "current_revision": bundle.publication.apim_revision, "mode": "paused",
+                "sql_source_revision": bundle.previous.apim_revision,
+                "serving_source_revision": bundle.serving_revision}
 
     journal.recover("promote-budget-installation", readback)
 
@@ -684,6 +897,8 @@ def record_promoted_installation(
             "bundle_sha256": bundle.digest, "dependency_sha256": bundle.dependency_digest,
             "policy_sha256": bundle.policy_digests,
             "observed_current_revision": actual.current_revision,
+            "sql_source_revision": bundle.previous.apim_revision,
+            "serving_source_revision": bundle.serving_revision,
             "observed_at": actual.observed_at.isoformat(),
             "readback_sha256": _digest(actual.model_dump(mode="json")),
             "verification": verification.model_dump(mode="json"),
