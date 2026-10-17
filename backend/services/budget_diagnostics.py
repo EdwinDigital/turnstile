@@ -31,7 +31,7 @@ from turnstile_core.services.application_access import ApplicationAccessService
 from turnstile_core.services.budget_settlement import BudgetStatusRepository
 
 from .gateway_credentials import with_platform_gateway_credential
-from .runtime_service import ModelRuntimeService
+from .runtime_service import ModelRuntimeService, budget_readiness_failure_headers
 
 logger = logging.getLogger(__name__)
 
@@ -373,7 +373,7 @@ class BudgetDiagnostics:
             )
         except HTTPException as error:
             error.headers = {
-                **(error.headers or {}), "X-Turnstile-Budget-Readiness-Stage": stage,
+                **(error.headers or {}), **budget_readiness_failure_headers(stage, error),
             }
             raise
         except Exception as error:
@@ -383,7 +383,7 @@ class BudgetDiagnostics:
             )
             raise HTTPException(
                 status_code=503, detail="Budget readiness could not be verified",
-                headers={"X-Turnstile-Budget-Readiness-Stage": stage},
+                headers=budget_readiness_failure_headers(stage, error),
             ) from None
 
     def execute(

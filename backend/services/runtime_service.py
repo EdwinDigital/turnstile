@@ -126,6 +126,30 @@ from .runtime_diagnostics import RuntimeDiagnostics
 logger = logging.getLogger(__name__)
 
 
+def budget_readiness_failure_headers(stage: str, error: Exception) -> dict[str, str]:
+    """Expose fixed dependency categories, never exception text or remote response data."""
+    headers = {"X-Turnstile-Budget-Readiness-Stage": stage}
+    if isinstance(error, (httpx.TimeoutException, TimeoutError)):
+        category = "timeout"
+    elif isinstance(error, httpx.HTTPStatusError):
+        category = "http_error"
+        status = error.response.status_code
+        if type(status) is int and 100 <= status <= 599:
+            headers["X-Turnstile-Budget-Readiness-Dependency-Status"] = str(status)
+    elif isinstance(error, (httpx.TransportError, ConnectionError)):
+        category = "transport_error"
+    elif isinstance(error, (ValueError, TypeError, KeyError)):
+        category = "invalid_data"
+    elif isinstance(error, HTTPException):
+        category = "unavailable" if error.status_code >= 500 else "invalid_data"
+    elif isinstance(error, (RuntimeError, OSError)):
+        category = "unavailable"
+    else:
+        category = "unexpected"
+    headers["X-Turnstile-Budget-Readiness-Error"] = category
+    return headers
+
+
 class ModelRuntimeService:
     _MODEL_ROUTING_FIELDS = ("provider_id", "runtime_id", "model_key", "upstream_model_id")
 
@@ -1605,7 +1629,7 @@ class ModelRuntimeService:
             raise HTTPException(
                 status_code=503,
                 detail="Budget delegation readiness could not be verified",
-                headers={"X-Turnstile-Budget-Readiness-Stage": stage},
+                headers=budget_readiness_failure_headers(stage, error),
             ) from None
         ready = bool(checks) and all(
             check.actual_status == check.expected_status

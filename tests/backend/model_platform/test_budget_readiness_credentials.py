@@ -126,6 +126,7 @@ def test_budget_readiness_never_substitutes_untrusted_or_upstream_credentials(
     assert failure.value.status_code == (503 if implementation == "runtime" else 409)
     assert failure.value.headers == {
         "X-Turnstile-Budget-Readiness-Stage": "subscription_credential",
+        "X-Turnstile-Budget-Readiness-Error": "invalid_data",
     }
     assert not requests and not repository.invocation_attempts
 
@@ -154,9 +155,81 @@ def test_budget_readiness_diagnostic_stage_does_not_disclose_exception_details(
     with pytest.raises(HTTPException) as result:
         check()
     assert result.value.status_code == 503
-    assert result.value.headers == {"X-Turnstile-Budget-Readiness-Stage": stage}
+    assert result.value.headers == {
+        "X-Turnstile-Budget-Readiness-Stage": stage,
+        "X-Turnstile-Budget-Readiness-Error": "unavailable",
+    }
     assert "unit-private" not in str(result.value.detail) + caplog.text
     assert f"stage={stage} error_type=RuntimeError" in caplog.text
+    assert not requests
+
+
+@pytest.mark.parametrize("implementation", ["runtime", "diagnostics"])
+@pytest.mark.parametrize("stage", ["ledger_fence_read", "managed_identity_token"])
+@pytest.mark.parametrize(("failure_type", "category", "dependency_status"), [
+    ("http_403", "http_error", "403"), ("http_429", "http_error", "429"),
+    ("http_503", "http_error", "503"), ("http_invalid_status", "http_error", None),
+    ("read_timeout", "timeout", None), ("connect_timeout", "timeout", None),
+    ("builtin_timeout", "timeout", None), ("transport", "transport_error", None),
+    ("invalid_data", "invalid_data", None), ("missing_data", "invalid_data", None),
+    ("runtime", "unavailable", None), ("unexpected", "unexpected", None),
+])
+def test_readiness_failure_headers_are_safe_fixed_categories(
+    configured: tuple[Any, ...], implementation: str, stage: str,
+    failure_type: str, category: str, dependency_status: str | None,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    service, _fence, requests, _write, _applications, _repository, store = configured
+    _platform_settings(service)
+    check = _readiness(service, implementation, monkeypatch)
+    sensitive = "unit-private-token\r\nX-Leaked: private-response-body"
+    request = httpx.Request(
+        "GET", "https://unit-private.example.test/path?secret=unit-private-token",
+        headers={"Authorization": "Bearer unit-private-token"},
+    )
+    error: Exception
+    if failure_type.startswith("http_"):
+        status = int(dependency_status) if dependency_status is not None else 700
+        error = httpx.HTTPStatusError(
+            sensitive, request=request,
+            response=httpx.Response(status, request=request, text=sensitive),
+        )
+    elif failure_type == "read_timeout":
+        error = httpx.ReadTimeout(sensitive, request=request)
+    elif failure_type == "connect_timeout":
+        error = httpx.ConnectTimeout(sensitive, request=request)
+    elif failure_type == "builtin_timeout":
+        error = TimeoutError(sensitive)
+    elif failure_type == "transport":
+        error = httpx.ConnectError(sensitive, request=request)
+    elif failure_type == "invalid_data":
+        error = ValueError(sensitive)
+    elif failure_type == "missing_data":
+        error = KeyError(sensitive)
+    elif failure_type == "runtime":
+        error = RuntimeError(sensitive)
+    else:
+        error = Exception(sensitive)
+    if stage == "ledger_fence_read":
+        store.read_entity.side_effect = error
+    else:
+        service.tokens.token.side_effect = error
+    with pytest.raises(HTTPException) as result:
+        check()
+    assert result.value.status_code == 503
+    assert result.value.detail == (
+        "Budget delegation readiness could not be verified"
+        if implementation == "runtime" else "Budget readiness could not be verified"
+    )
+    expected = {
+        "X-Turnstile-Budget-Readiness-Stage": stage,
+        "X-Turnstile-Budget-Readiness-Error": category,
+    }
+    if dependency_status is not None:
+        expected["X-Turnstile-Budget-Readiness-Dependency-Status"] = dependency_status
+    assert result.value.headers == expected
+    assert "unit-private" not in str(result.value.detail) + str(result.value.headers) + caplog.text
+    assert "private-response-body" not in str(result.value.headers) + caplog.text
     assert not requests
 
 
