@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from cryptography.fernet import Fernet
 
 from tests.backend.model_platform.control_plane_support import APIM_ID
 from tests.backend.model_platform.test_application_access import _discovery
@@ -14,6 +15,7 @@ from tests.backend.model_platform.test_application_provisioning import UnitLedge
 from turnstile_core.domain.application_access import (
     GatewayApplicationBudgetUpdate,
     GatewayApplicationOrganizationUpdate,
+    GatewayApplicationSubscriptionCreate,
     application_id_for,
 )
 from turnstile_core.domain.enterprise import enterprise_catalog
@@ -27,8 +29,14 @@ from turnstile_core.integrations.ledger import (
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository_applications import PostgreSqlApplicationRepositoryMixin
+from turnstile_core.security import CredentialCipher
 from turnstile_core.services.application_access import ApplicationAccessService
 from turnstile_core.services.application_provisioning_ledger import prepare_application_ledger
+from turnstile_core.services.budget_settlement import BudgetScopeRepository, BudgetScopeService
+from turnstile_core.services.control_plane import (
+    ControlPlaneConflictError,
+    GatewayControlPlaneService,
+)
 
 
 @pytest.fixture
@@ -49,9 +57,52 @@ def custom_catalog(monkeypatch: pytest.MonkeyPatch) -> EnterpriseEntityCatalog:
         "turnstile_core.services.application_access",
         "turnstile_core.services.application_provisioning_ledger",
         "turnstile_core.persistence.directory_catalog",
+        "turnstile_core.services.budget_settlement",
+        "turnstile_core.services.control_plane",
     ):
         monkeypatch.setattr(module + ".catalog_for", lambda *args, **kwargs: catalog)
     return catalog
+
+
+@pytest.mark.parametrize("organization_id", ["custom-org", "unknown-org", ""])
+def test_subscription_creation_validates_organization_tags_against_the_authoritative_directory(
+    custom_catalog: EnterpriseEntityCatalog, organization_id: str,
+) -> None:
+    repository = InMemoryRepository()
+    service = GatewayControlPlaneService(repository, CredentialCipher(Fernet.generate_key()))
+    request = GatewayApplicationSubscriptionCreate(
+        subscription_id="custom-organization", display_name="Custom organization",
+        tags={"organization_id": organization_id},
+    )
+    if organization_id != "custom-org":
+        with pytest.raises(ControlPlaneConflictError, match="Unknown application organization"):
+            service.request_application_subscription_provision(
+                APIM_ID, request, "owner@example.test",
+            )
+        assert repository.list_gateway_release_operations(APIM_ID) == []
+        return
+    accepted = service.request_application_subscription_provision(
+        APIM_ID, request, "owner@example.test",
+    )
+    assert accepted.operation.semantic_preview["tags"] == {"organization_id": "custom-org"}
+
+
+def test_budget_period_preparation_reads_people_from_the_authoritative_directory(
+    custom_catalog: EnterpriseEntityCatalog,
+) -> None:
+    repository, ledger = MagicMock(), MagicMock()
+    epoch = uuid4()
+    now = datetime(2026, 10, 18, tzinfo=UTC)
+    repository.active_budget_execution_rollout.return_value = {
+        "epoch": epoch, "gateway_profile_ids": [], "prepared_period": None,
+    }
+    repository.budget_scope_seed_candidates.return_value = []
+    assert BudgetScopeService(cast(BudgetScopeRepository, repository), ledger).prepare(now=now) == 0
+    repository.prepare_budget_execution_period.assert_called_once_with(
+        epoch, now.date().replace(day=1), [person.id for person in custom_catalog.users],
+    )
+    assert "custom@example.test" in repository.prepare_budget_execution_period.call_args.args[2]
+    assert ledger.mock_calls == []
 
 
 def assigned_application() -> tuple[InMemoryRepository, ApplicationAccessService]:
