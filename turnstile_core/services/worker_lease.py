@@ -42,10 +42,8 @@ class WorkerLease:
         return self
 
     def __exit__(
-        self,
-        error_type: type[BaseException] | None,
-        error: BaseException | None,
-        traceback: TracebackType | None,
+        self, error_type: type[BaseException] | None,
+        error: BaseException | None, traceback: TracebackType | None,
     ) -> None:
         self._stopped.set()
         self._thread.join(timeout=1)

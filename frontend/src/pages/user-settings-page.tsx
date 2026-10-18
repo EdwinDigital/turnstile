@@ -16,7 +16,7 @@ import { getIntlLocale } from "../locales/index"
 import { useAuth } from "../providers/auth-provider"
 import { useTimezone } from "../providers/timezone-provider"
 
-const labels = { healthy: "正常", warning: "预警", exceeded: "已超额", unallocated: "未分配" }
+const labels = { healthy: "正常", warning: "预警", exceeded: "已超额", unallocated: "未分配", unverified: "未核实" }
 const membershipSources = { catalog: "目录配置", observed_usage: "用量归属", owner_default: "平台默认归属", unlinked: "未关联" }
 const tokens = (value: number | null) => value == null ? "--" : new Intl.NumberFormat(getIntlLocale()).format(value)
 const compact = (value: number | null) => value == null ? "--" : new Intl.NumberFormat(getIntlLocale(), { notation: "compact", maximumFractionDigits: 1 }).format(value)
@@ -41,19 +41,25 @@ function DataState({ loading, error, onRetry, children, updatedAt }: {
 }
 
 function BudgetSummary({ budget }: { budget: PersonalBudget }) {
+  const usd = budget.budget_mode === "usd"
+  const unit = usd ? "USD" : "Token"
+  const money = (value: string | number | null) => cost(value == null ? null : Number(value))
+  const limit = usd ? budget.usd_limit : budget.token_limit
+  const used = usd ? (budget.usd_cost_available ? money(budget.used_usd) : "--") : compact(budget.used_tokens)
   const kpis = [
-    ["月度预算", budget.token_limit == null ? "未分配" : compact(budget.token_limit)],
-    ["已使用", compact(budget.used_tokens)],
-    ["剩余额度", compact(budget.remaining_tokens)],
-    ["月底预测", compact(budget.forecast_tokens)],
+    ["月度预算", limit == null ? "未分配" : usd ? money(budget.usd_limit) : compact(budget.token_limit)],
+    ["已使用", used],
+    ["剩余额度", usd ? money(budget.remaining_usd) : compact(budget.remaining_tokens)],
+    ["月底预测", usd ? money(budget.forecast_usd) : compact(budget.forecast_tokens)],
     ["使用率", budget.usage_percent == null ? "--" : `${budget.usage_percent}%`],
   ]
   return <>
-    <div className="user-settings-kpis">{kpis.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong><small>{label === "使用率" ? "" : "Token"}</small></div>)}</div>
+    <div className="user-settings-kpis">{kpis.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong><small>{label === "使用率" ? "" : unit}</small></div>)}</div>
+    {usd && !budget.usd_cost_available && <p className="user-settings-meta">部分用量尚未计价</p>}
     <div className="user-settings-budget-status">
-      <div><WalletCards size={16} /><strong>{tokens(budget.used_tokens)}</strong><span>已使用</span><span className="user-settings-status" data-status={budget.status}>{labels[budget.status]}</span></div>
-      {budget.token_limit != null && <div className="budget-progress-track" data-status={budget.status} role="progressbar" aria-label="预算使用率" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.max(0, Math.min(100, budget.usage_percent ?? 0))}><i style={{ width: `${Math.max(0, Math.min(100, budget.usage_percent ?? 0))}%` }} /></div>}
-      <div className="user-settings-budget-foot"><span>{tokens(budget.token_limit)}</span><span>Token</span><span title={budget.enforcement_department_id ?? undefined}>{budget.enforcement_mode === "block" ? "超额拦截" : budget.enforcement_mode === "audit" ? "仅告警" : "未关联"}</span></div>
+      <div><WalletCards size={16} /><strong>{usd ? used : tokens(budget.used_tokens)}</strong><span>已使用</span><span className="user-settings-status" data-status={budget.status}>{labels[budget.status]}</span></div>
+      {limit != null && budget.usage_percent != null && <div className="budget-progress-track" data-status={budget.status} role="progressbar" aria-label="预算使用率" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.max(0, Math.min(100, budget.usage_percent))}><i style={{ width: `${Math.max(0, Math.min(100, budget.usage_percent))}%` }} /></div>}
+      <div className="user-settings-budget-foot"><span>{usd ? money(budget.usd_limit) : tokens(budget.token_limit)}</span><span>{unit}</span><span title={budget.enforcement_department_id ?? undefined}>{budget.enforcement_mode === "block" ? "超额拦截" : budget.enforcement_mode === "audit" ? "仅告警" : "未关联"}</span></div>
     </div>
   </>
 }

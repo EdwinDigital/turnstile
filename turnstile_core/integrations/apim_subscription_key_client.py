@@ -5,8 +5,7 @@ from urllib.parse import quote
 
 import httpx
 
-from ..config import Settings
-from .apim_control_plane_contract import PolicyCompilationError
+from .apim_control_plane_contract import ApimClientSettings, PolicyCompilationError
 from .reconciliation import ManagedIdentityTokenProvider
 
 
@@ -17,7 +16,7 @@ class AzureApimSubscriptionKeyClient:
 
     def __init__(
         self,
-        settings: Settings,
+        settings: ApimClientSettings,
         token_provider: ManagedIdentityTokenProvider | None = None,
         client: httpx.Client | None = None,
     ) -> None:

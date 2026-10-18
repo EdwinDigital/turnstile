@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unicodedata
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
@@ -79,6 +80,7 @@ class PersonalBudget(StrictModel):
     period_end: date
     min_period: str
     max_period: str
+    budget_mode: Literal["tokens", "usd"] = "tokens"
     token_limit: int | None
     used_tokens: int
     remaining_tokens: int | None
@@ -86,7 +88,13 @@ class PersonalBudget(StrictModel):
     usage_percent: float | None
     forecast_tokens: int
     forecast_percent: float | None
-    status: Literal["unallocated", "healthy", "warning", "exceeded"]
+    usd_limit: Decimal | None = None
+    used_usd: Decimal | None = None
+    remaining_usd: Decimal | None = None
+    forecast_usd: Decimal | None = None
+    usd_cost_available: bool = True
+    unpriced_usage_count: int = 0
+    status: Literal["unallocated", "unverified", "healthy", "warning", "exceeded"]
     enforcement_mode: Literal["audit", "block"] | None
     enforcement_department_id: str | None
     basis: Literal["budget_evidence"] = "budget_evidence"

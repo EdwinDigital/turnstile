@@ -106,7 +106,62 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         route for route in copilot_protected.routes if isinstance(route, APIRoute)
     ]
 
-    assert len(apim_routes) == 86
+    assert len(apim_routes) == 120
+    availability_routes = [route for route in apim_routes if "availability" in route.path]
+    assert len(availability_routes) == 5
+    for route in availability_routes:
+        assert any(dependency.call is require_owner_session
+                   for dependency in route.dependant.dependencies)
+    budget_diagnostic_routes = [
+        route for route in apim_routes
+        if route.path.endswith(("/budget-readiness", "/budget-execution-verification"))
+    ]
+    assert len(budget_diagnostic_routes) == 2
+    for route in budget_diagnostic_routes:
+        assert any(dependency.call is require_owner_session
+                   for dependency in route.dependant.dependencies)
+    diagnostic_routes = [route for route in apim_routes
+                         if route.path == "/api/v1/model-management/runtimes/{runtime_id}/check"]
+    assert len(diagnostic_routes) == 2
+    for route in diagnostic_routes:
+        assert any(dependency.call is require_owner_session
+                   for dependency in route.dependant.dependencies)
+    lifecycle_routes = [route for route in apim_routes if "self-hosted-gateway" in route.path]
+    assert len(lifecycle_routes) == 11
+    for route in lifecycle_routes:
+        assert any(dependency.call is require_owner_session
+                   for dependency in route.dependant.dependencies)
+    onboarding_routes = [route for route in apim_routes
+                         if route.path.startswith("/api/v1/model-management/apim-onboarding")]
+    assert len(onboarding_routes) == 4
+    for route in onboarding_routes:
+        assert any(dependency.call is require_owner_session
+                   for dependency in route.dependant.dependencies)
+    target_operations = {
+        (route.path, method) for route in apim_routes
+        if route.path.startswith("/api/v1/model-management/apim-targets")
+        for method in (route.methods or set())
+    }
+    assert target_operations == {
+        ("/api/v1/model-management/apim-targets", "GET"),
+        ("/api/v1/model-management/apim-targets", "POST"),
+        ("/api/v1/model-management/apim-targets/{gateway_profile_id}", "GET"),
+        ("/api/v1/model-management/apim-targets/{gateway_profile_id}", "DELETE"),
+        ("/api/v1/model-management/apim-targets/{gateway_profile_id}/removal-preview", "GET"),
+        ("/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-syncs", "POST"),
+        ("/api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways", "POST"),
+        ("/api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions",
+         "POST"),
+    }
+    for route in apim_routes:
+        target_write = route.path.startswith("/api/v1/model-management/apim-targets")
+        target_preview = target_write and route.path.endswith("/removal-preview")
+        name_write = route.path == "/api/v1/model-management/gateways/{item_id}/name"
+        if target_preview or (
+            (target_write or name_write) and (route.methods or set()) & {"POST", "PATCH", "DELETE"}
+        ):
+            assert any(dependency.call is require_owner_session
+                       for dependency in route.dependant.dependencies)
     adoption = next(
         route for route in apim_routes
         if route.path == "/api/v1/model-management/connections/{runtime_id}/adopt"
@@ -198,6 +253,7 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
         if isinstance(route, APIRoute)
         and (
             route.path.startswith("/api/v1/model-management/publications")
+            or route.path.startswith("/api/v1/model-management/rollouts")
             or route.path.endswith("/credentials/rotate")
             or (
                 route.path.endswith("/backend-pool")
@@ -205,7 +261,13 @@ def test_every_business_api_route_requires_the_shared_session_dependency() -> No
             )
         )
     ]
-    assert len(publication_routes) == 9
+    assert len(publication_routes) == 13
+    rollout_routes = [route for route in publication_routes if "/rollouts" in route.path]
+    assert {(route.path, method) for route in rollout_routes for method in route.methods or ()} == {
+        ("/api/v1/model-management/rollouts", "GET"),
+        ("/api/v1/model-management/rollouts", "POST"),
+        ("/api/v1/model-management/rollouts/{rollout_id}", "GET"),
+    }
     for route in publication_routes:
         assert any(
             dependency.call is require_publication_owner

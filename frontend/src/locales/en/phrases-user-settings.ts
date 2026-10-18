@@ -38,6 +38,7 @@ export const USER_SETTINGS_PHRASES: Record<string, string> = {
   "头像必须是边长不超过 192 像素的静态正方形图片。": "Use a static square image no larger than 192 pixels.",
   "未设置头像或头像已更新。": "No avatar is set, or the avatar has changed.",
   "预算使用情况": "Budget usage",
+  "未核实": "Unverified",
   "预算使用率": "Budget utilization",
   "月度预算": "Monthly budget",
   "剩余额度": "Remaining allowance",

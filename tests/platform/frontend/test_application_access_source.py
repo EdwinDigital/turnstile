@@ -1,4 +1,18 @@
+import re
+
 from tests.support.paths import FRONTEND_SOURCE
+
+
+def test_application_creation_commands_use_complete_localization_phrases() -> None:
+    page = (FRONTEND_SOURCE / "pages/applications-page.tsx").read_text(encoding="utf-8")
+    creation = (
+        FRONTEND_SOURCE / "components/applications/application-create-dialog.tsx"
+    ).read_text(encoding="utf-8")
+    assert 'aria-label="添加订阅" title="添加订阅"' in page
+    assert '<Plus size={14} />添加订阅</Button>' in page
+    assert '<DialogTitle>{accepted ? "订阅创建进度" : "添加订阅"}</DialogTitle>' in creation
+    assert "添加${consumer}" not in page
+    assert "添加{consumer}" not in page
 
 
 def test_ledger_display_uses_api_balances_and_preserves_unknown_values() -> None:
@@ -11,23 +25,33 @@ def test_ledger_display_uses_api_balances_and_preserves_unknown_values() -> None
         "available_tokens",
         "pending_reservation_count",
     ):
-        assert f"{field}?: number | null" in types
+        assert f"{field}: number | null" in types
+    for field in (
+        "finalized_upper_bound_tokens",
+        "available_tokens",
+        "pending_reservation_count",
+    ):
         assert f'budget.{field} == null ? "—" : formatFullCount(budget.{field})' in page
-    assert 'budget?.ledger_snapshot_at ? "已投影"' in page
-    assert "dateTime={budget.ledger_snapshot_at ?? undefined}" in page
+    assert 'pendingTokens == null ? "—" : formatFullCount(pendingTokens)' in page
+    assert "formatTimestamp(budget.ledger_snapshot_at, timezone)" in page
+    assert '"等待账本快照"' in page
+    assert 'budget.ledger_status === "unavailable"' in page
+    assert 'budget.ledger_status === "prepared"' in page
     assert ".application-budget-stats > div:nth-child(2n)" in styles
     for language in ("en", "ja", "ko"):
         phrases = (FRONTEND_SOURCE / f"locales/{language}/phrases-core.ts").read_text(
             encoding="utf-8"
         )
         for phrase in (
-            "预留占用",
-            "上限占用",
-            "可用额度",
-            "待处理请求",
+            "已确认用量",
+            "待结算预留",
+            "保守终态上界",
+            "APIM 可用余额",
+            "预留数量",
             "账本快照",
-            "未同步",
-            "延迟结算",
+            "执行账本暂不可用，余额未知",
+            "执行账本尚未启用",
+            "等待账本快照",
         ):
             assert f'"{phrase}":' in phrases
 
@@ -38,9 +62,9 @@ def test_subscriptions_are_a_model_platform_domain() -> None:
     page = (FRONTEND_SOURCE / "pages/applications-page.tsx").read_text(encoding="utf-8")
     assert '| "applications"' in app
     assert 'label: "模型平台"' in app
-    assert '{ label: "订阅", icon: KeyRound, page: "applications" }' in app
+    assert '{ label: "订阅管理", icon: KeyRound, page: "applications" }' in app
     assert app.index('label: "模型平台"') < app.index(
-        '{ label: "订阅", icon: KeyRound, page: "applications" }'
+        '{ label: "订阅管理", icon: KeyRound, page: "applications" }'
     )
     assert 'page === "applications" && <ApplicationsPage' in app
     assert 'page === "applications" && <ApplicationsPage />' in app
@@ -100,6 +124,16 @@ def test_applications_use_only_typed_read_inventory_and_async_sync() -> None:
         FRONTEND_SOURCE / "components/applications/application-create-dialog.tsx"
     ).read_text(encoding="utf-8")
     assert "navigator.clipboard.writeText(primaryKey.current)" in creation
+    assert "useMutation" not in creation
+    assert "primaryKey = useRef<string | null>(null)" in creation
+    assert "onAccepted(safeAccepted)" in creation
+    assert "{accepted.primary_key}" not in creation
+    assert "{response.primary_key}" not in creation
+    assert "localStorage" not in creation
+    assert "submittingRef.current || accepted" in creation
+    assert "applicationProvisionBlocker(inventory)" in creation
+    assert "applicationOperationIdFromUrl(window.location.href)" in page
+    assert "setQueryData(finopsKeys.gatewayReleaseOperation" in page
     assert "secondary_key" not in page.lower()
     assert "listsecrets" not in page.lower()
     assert "ApplicationSubscriptionCard" in page
@@ -128,13 +162,15 @@ def test_applications_use_two_level_inventory_and_detail_routes() -> None:
     assert "FINOPS_NAVIGATE_EVENT" in page
     assert 'className="model-list-row application-inventory-row"' in page
     assert 'className="model-table application-model-table"' in page
-    assert "APPLICATION_TABLE_COLUMN_MIN_WIDTHS = [180, 130, 180, 80]" in page
+    assert "APPLICATION_TABLE_COLUMN_MIN_WIDTHS = [180, 130, 180, 100]" in page
     assert "application-row-action" not in page
     assert "subscriptions-category-chevron" not in page
     assert 'className="application-detail-workspace"' in page
-    assert 'className="application-detail-breadcrumb"' in page
-    assert page.count("onClick={openApplicationRoute(null, detailCategory)}") >= 3
-    assert '<span>{detailCategory === "agents" ? "Agents" : "Applications"}</span>' not in page
+    assert 'className="smh-page-header application-detail-breadcrumb"' in page
+    assert 'className="application-breadcrumb-trail"' in page
+    assert 'aria-current="page"' in page
+    assert page.count("onClick={openApplicationRoute(null)}") >= 2
+    assert "detailCategory" not in page
     assert "if (applicationId) {" in page
     assert "useResizablePane" in page
     assert 'storageKey: "turnstile_subscriptions_navigation_width"' in page
@@ -157,7 +193,7 @@ def test_applications_use_two_level_inventory_and_detail_routes() -> None:
     assert "application.user_count" in page
     assert "application-timeline" in page
     assert ".application-inventory-row" in styles
-    assert "--model-table-min-width: 638px" in styles
+    assert "--model-table-min-width: 658px" in styles
     assert ".application-avatar-editor" in styles
     assert "container: subscription-content / inline-size" in styles
     assert "grid-template-columns: var(--subscriptions-nav-width, 276px) minmax(0, 1fr)" in styles
@@ -176,3 +212,66 @@ def test_applications_use_two_level_inventory_and_detail_routes() -> None:
     assert ":focus-visible" in styles
     assert "var(--border)" in styles
     assert "var(--muted)" in styles
+
+
+def test_application_sync_exposes_every_enabled_apim_target() -> None:
+    page = (FRONTEND_SOURCE / "pages/applications-page.tsx").read_text(encoding="utf-8")
+    assert 'gateway.enabled && gateway.implementation === "apim"' in page
+    assert '<DropdownMenuTrigger render={button}' in page
+    assert 'targets.map(target =>' in page
+    assert 'onClick={() => onSync(target.id)}' in page
+    assert 'targets.length < 2' in page
+    assert page.count('<ApplicationSyncButton targets={syncTargets}') == 2
+    assert 'onSync={targetId => syncMutation.mutate(targetId)}' in page
+
+
+def test_subscription_navigation_filters_by_apim_without_merging_detail_pages() -> None:
+    page = (FRONTEND_SOURCE / "pages/applications-page.tsx").read_text(encoding="utf-8")
+    assert "SubscriptionCategory" not in page
+    assert "subscriptionCategoryFromUrl" not in page
+    assert 'aria-label="类型"' not in page
+    assert 'url.searchParams.set("consumer", "all")' in page
+    assert 'searchParams.get("apim")' in page
+    assert 'url.searchParams.set("apim", apimId)' in page
+    assert 'url.searchParams.delete("apim")' in page
+    assert 'setSelectedApimId(subscriptionApimFromUrl())' in page
+    assert '!selectedApimId || item.gateway_profile_id === selectedApimId' in page
+    assert 'gateway.implementation === "apim"' in page
+    assert 'aria-label="APIM 实例"' in page
+    assert 'href={applicationRouteHref(null, card.id)}' in page
+    assert 'onClick={openApplicationRoute(null, card.id)}' in page
+    assert 'if (applicationId) {' in page
+    assert "categoryItems" not in page
+    assert 'applicationType="service"' in page
+    assert 'application.system_managed && <em>系统</em>' in page
+    assert 'aria-label="订阅状态筛选"' in page
+    assert 'data-application-id={application.id}' in page
+
+
+def test_application_detail_breadcrumb_reuses_inventory_header_geometry() -> None:
+    page = (FRONTEND_SOURCE / "pages/applications-page.tsx").read_text(encoding="utf-8")
+    styles = (FRONTEND_SOURCE / "styles/applications.css").read_text(encoding="utf-8")
+    header = page.split(
+        '<header className="smh-page-header application-detail-breadcrumb">', 1
+    )[1].split("</header>", 1)[0]
+    assert 'className="smh-header-icon"' in header
+    assert '<KeyRound size={17}' in header
+    assert '<nav className="application-breadcrumb-trail"' in header
+    assert 'aria-current="page"' in header
+    assert '>订阅</a>' in header
+    assert header.count("<ChevronRight") == 1
+    assert 'className="smh-page-header applications-header"' in page
+    header_styles = styles.split(".application-detail-breadcrumb {", 1)[1].split("}", 1)[0]
+    assert "font-size: 14px;" in header_styles
+    assert "line-height: 20px;" in header_styles
+    assert re.search(
+        r"(?:^|;)\s*(?:height|min-height|max-height|flex|padding(?:-inline)?|border-bottom)\s*:",
+        header_styles,
+    ) is None
+    assert styles.count(".application-detail-breadcrumb {") == 1
+    assert (
+        ".application-breadcrumb-trail { min-width: 0; display: flex; "
+        "align-items: center; gap: 6px; padding: 0; }" in styles
+    )
+    assert ".application-breadcrumb-trail > svg { flex-shrink: 0; }" in styles
+    assert ".application-breadcrumb-trail > a:first-child { min-width: 0; flex-shrink: 1;" in styles

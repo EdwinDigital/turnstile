@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Respons
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -69,7 +70,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="Token Observability API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Turnstile API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(UserSettingsBodyLimit)
 
 
@@ -134,7 +135,11 @@ web_dist = get_settings().web_dist_dir
 if web_dist.is_dir():
     assets_dir = web_dist / "assets"
     if assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="web-assets")
+        app.mount(
+            "/assets",
+            GZipMiddleware(StaticFiles(directory=assets_dir), minimum_size=1024, compresslevel=6),
+            name="web-assets",
+        )
 
     @app.get("/{client_path:path}", include_in_schema=False)
     def web_application(client_path: str) -> FileResponse:

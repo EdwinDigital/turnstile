@@ -14,9 +14,11 @@ protects against.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
-from tests.support.paths import FRONTEND_SOURCE
+from tests.support.paths import FRONTEND_SOURCE, REPOSITORY_ROOT
 
 FRONTEND_SRC = FRONTEND_SOURCE
 LOCALES = FRONTEND_SRC / "locales"
@@ -76,6 +78,73 @@ def test_every_source_phrase_is_covered_by_each_catalog() -> None:
             f"{locale}.ts is missing {len(missing)} source phrase(s); "
             f"they will render as mixed text. First few: {missing[:5]}"
         )
+
+
+def test_locale_context_survives_phrase_catalog_hot_updates() -> None:
+        node = shutil.which("node")
+        assert node is not None, "Node.js is required for locale hot-update tests"
+        result = subprocess.run(
+                [
+                        node, "--input-type=module", "-e", """
+import assert from "node:assert/strict"
+import { createRequire } from "node:module"
+import { resolve } from "node:path"
+import { runInNewContext } from "node:vm"
+
+const frontendRequire = createRequire(resolve("frontend/package.json"))
+const React = frontendRequire("react")
+const { rolldown } = await import(frontendRequire.resolve("rolldown"))
+const entry = resolve("frontend/src/locales/provider.tsx")
+const bundle = await rolldown({
+    input: entry,
+    external: name => name !== entry,
+    transform: {
+        jsx: { runtime: "automatic" },
+        define: { "import.meta.hot": "__testHot" },
+    },
+    treeshake: false,
+})
+let code
+try { code = (await bundle.generate({ format: "cjs" })).output[0].code }
+finally { await bundle.close() }
+
+const value = { locale: "en", setLocale() {} }
+let providerContext
+const imports = {
+    react: {
+        ...React,
+        useState: () => [value.locale, value.setLocale],
+        useEffect() {},
+        useContext: context => context === providerContext ? value : null,
+    },
+    "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
+}
+function load(hot) {
+    const exports = {}
+    runInNewContext(code, { exports, require: name => imports[name], __testHot: hot })
+    return exports
+}
+
+const hot = { data: {} }
+const before = load(hot)
+providerContext = before.LocaleProvider({ children: null }).type
+assert.equal(before.useLocale(), value)
+const after = load(hot)
+assert.equal(after.LocaleProvider({ children: null }).type, providerContext)
+assert.equal(after.useLocale(), value)
+assert.equal(before.useLocale(), value)
+assert.notEqual(load({ data: {} }).LocaleProvider({ children: null }).type, providerContext)
+assert.notEqual(load(undefined).LocaleProvider({ children: null }).type, providerContext)
+console.log("Locale context survives hot updates; production initialization stays independent")
+""",
+                ],
+                cwd=REPOSITORY_ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_assistant_starter_prompts_enter_the_composer_in_the_active_locale() -> None:

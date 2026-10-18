@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
@@ -21,7 +22,13 @@ from pydantic import SecretStr
 
 from backend import migrate as migration_runner
 from backend.bootstrap import bootstrap_initial_owner
-from backend.services.auth_service import hash_password, hash_session_token, verify_password
+from backend.services.auth_service import (
+    SessionIdentity,
+    hash_password,
+    hash_session_token,
+    verify_password,
+)
+from backend.services.user_settings_service import UserSettingsService
 from tests.platform.api.api_support import _usage_record
 from tests.support.paths import REPOSITORY_ROOT
 from turnstile_core.config import Settings
@@ -94,7 +101,7 @@ def candidate(
     directory = tmp_path / "migrations"
     directory.mkdir()
     for path in migration_runner.migration_files(MIGRATIONS):
-        if path.name < TARGET:
+        if path.name != TARGET:
             shutil.copy2(path, directory / path.name)
     settings = Settings(database_url=local_postgres, migrations_dir=directory, production=False)
     monkeypatch.setattr(migration_runner, "get_settings", lambda: settings)
@@ -155,7 +162,8 @@ def test_existing_installation_upgrade_preserves_history_and_skips_rerun(
     assert migration_runner.migrate() == [VERSION]
     assert historical_data(info) == before
     after = ledger(info)
-    assert after[:-1] == old_ledger and after[-1][0] == VERSION
+    assert [row for row in after if row[0] != VERSION] == old_ledger
+    assert sum(row[0] == VERSION for row in after) == 1
     assert migration_runner.migrate() == []
     assert ledger(info) == after and historical_data(info) == before
 
@@ -191,7 +199,7 @@ def test_fresh_installation_bootstraps_owner_and_preserves_changed_password_on_r
 ) -> None:
     info, directory = candidate
     shutil.copy2(MIGRATIONS / TARGET, directory / TARGET)
-    assert migration_runner.migrate()[-1] == VERSION
+    assert VERSION in migration_runner.migrate()
     original_hash = hash_password("original-owner-password")
     settings = Settings(
         database_url=info, production=False, bootstrap_owner_email="OWNER@EXAMPLE.COM",
@@ -250,3 +258,42 @@ def test_failed_pending_upgrade_rolls_back_schema_and_migration_ledger(
         assert connection.execute(
             "SELECT to_regclass('app_user_avatar'), to_regclass('account_security_event')"
         ).fetchone() == (None, None)
+
+
+def test_v12_personal_budget_and_usage_queries_are_scoped_and_use_component_prices(
+    candidate: tuple[str, Path],
+) -> None:
+    info, directory = candidate
+    shutil.copy2(MIGRATIONS / TARGET, directory / TARGET)
+    assert VERSION in migration_runner.migrate()
+    now = datetime.now(UTC)
+    person = "test.user01@contoso.com"
+    with psycopg.connect(info) as connection:
+        connection.execute(
+            """INSERT INTO token_budget(period_start, scope_type, scope_id, parent_scope_id,
+                   budget_mode, token_limit, usd_limit, updated_by)
+               VALUES (%s, 'user', %s, 'department-platform', 'usd', NULL,
+                       1000, 'migration-test')""",
+            (now.date().replace(day=1), person),
+        )
+    repository = PostgreSqlOpsDbProxy(info)
+    try:
+        for name, user_id, price in (("mine", person, 12.5), ("other", "other@example.com", 999)):
+            record = _usage_record(name, "Migration test", 1_000_000).model_copy(
+                update={"ts": now, "user_id": user_id, "input_price_per_million": price},
+            )
+            repository.write_token_usage(record)
+        identity = SessionIdentity(
+            id=str(uuid4()), email=person, name=None, role="member", method="password",
+            session_expires_at=now + timedelta(hours=1),
+        )
+        service = UserSettingsService(repository, Settings(database_url=info))
+        budget = service.budget(identity, now.strftime("%Y-%m"))
+        assert budget.budget_mode == "usd" and budget.used_tokens == 1_000_000
+        assert budget.used_usd == Decimal("12.5")
+        assert budget.remaining_usd == Decimal("987.5") and budget.status == "healthy"
+        usage = service.usage(identity, now.strftime("%Y-%m"), "day", "UTC")
+        assert usage.totals.requests == 1 and usage.totals.estimated_cost_usd == 12.5
+        assert usage.totals.cost_state == "priced"
+    finally:
+        repository.close()

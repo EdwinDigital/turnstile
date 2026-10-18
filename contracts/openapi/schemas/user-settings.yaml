@@ -187,6 +187,13 @@ schemas:
       max_period:
         type: string
         title: Max Period
+      budget_mode:
+        type: string
+        enum:
+        - tokens
+        - usd
+        title: Budget Mode
+        default: tokens
       token_limit:
         anyOf:
         - type: integer
@@ -218,10 +225,43 @@ schemas:
         - type: number
         - type: 'null'
         title: Forecast Percent
+      usd_limit:
+        anyOf:
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
+        - type: 'null'
+        title: Usd Limit
+      used_usd:
+        anyOf:
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
+        - type: 'null'
+        title: Used Usd
+      remaining_usd:
+        anyOf:
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
+        - type: 'null'
+        title: Remaining Usd
+      forecast_usd:
+        anyOf:
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
+        - type: 'null'
+        title: Forecast Usd
+      usd_cost_available:
+        type: boolean
+        title: Usd Cost Available
+        default: true
+      unpriced_usage_count:
+        type: integer
+        title: Unpriced Usage Count
+        default: 0
       status:
         type: string
         enum:
         - unallocated
+        - unverified
         - healthy
         - warning
         - exceeded

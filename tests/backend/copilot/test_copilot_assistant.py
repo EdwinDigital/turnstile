@@ -164,6 +164,7 @@ def answer() -> dict[str, Any]:
 
 def test_copilot_assistant_uses_only_read_tools_and_an_isolated_namespace() -> None:
     repository = InMemoryRepository()
+    repository.gateways[0]["base_url"] = "https://gateway.example.test/turnstile/llm"
     sent: list[dict[str, Any]] = []
     responses = [
         tool_call("query_copilot_overview", "call-1"),

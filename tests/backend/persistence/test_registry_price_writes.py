@@ -61,6 +61,10 @@ class Recorder:
     def transaction(self) -> Any:
         yield self
 
+    @contextmanager
+    def pipeline(self) -> Any:
+        yield self
+
     def writes_to(self, table: str) -> list[str]:
         pattern = re.compile(rf"^(INSERT INTO|UPDATE)\s+{re.escape(table)}\b", re.IGNORECASE)
         return [item for item in self.statements if pattern.match(item)]
@@ -153,7 +157,7 @@ def test_creating_a_connection_keeps_the_discount_off_model_runtime() -> None:
 
 def test_updating_a_price_does_not_update_managed_model() -> None:
     model_id = uuid4()
-    proxy, recorder = proxy_with([None, model_row(model_id), None])
+    proxy, recorder = proxy_with([{"enabled": False}, None, model_row(model_id), None])
 
     proxy.update_registry_item("model", model_id, {
         "price_source": "azure_retail",
@@ -167,7 +171,7 @@ def test_updating_a_price_does_not_update_managed_model() -> None:
 def test_a_price_edit_arriving_alone_is_still_applied() -> None:
     """Pricing a model is the one edit that always arrives on its own: no other field moves."""
     model_id = uuid4()
-    proxy, recorder = proxy_with([None, model_row(model_id), None])
+    proxy, recorder = proxy_with([{"enabled": False}, None, model_row(model_id), None])
 
     result = proxy.update_registry_item("model", model_id,
                                         {"price_discount_percent": 66})
@@ -180,6 +184,7 @@ def test_going_back_to_manual_drops_the_catalog_reference() -> None:
     """Otherwise the model reads as "following gpt 4.1 mini" while charging a typed number."""
     model_id = uuid4()
     proxy, recorder = proxy_with([
+        {"enabled": False},
         None,
         model_row(model_id),
         {"price_source": "azure_retail", "price_reference": "azure_retail:x:y:Global:*",
@@ -194,11 +199,35 @@ def test_going_back_to_manual_drops_the_catalog_reference() -> None:
 
 def test_an_edit_that_names_no_price_field_writes_no_price_row() -> None:
     model_id = uuid4()
-    proxy, recorder = proxy_with([None, model_row(model_id)])
+    proxy, recorder = proxy_with([{"enabled": False}, None, model_row(model_id)])
 
-    proxy.update_registry_item("model", model_id, {"display_name": "renamed"})
+    result = proxy.update_registry_item("model", model_id, {"display_name": "renamed"})
 
+    assert result is not None
+    assert recorder.writes_to("managed_model")
     assert recorder.writes_to("managed_model_price") == []
+
+
+def test_catalog_save_persists_the_accepted_baseline_and_preserves_metadata_edits() -> None:
+    model_id = uuid4()
+    baseline = {
+        "price_source": "azure_retail", "price_reference": "azure_retail:Unit:Model:Global:*",
+        "price_discount_percent": 80, "context_price_tiers": [],
+        "list_input_cost_per_million": 3.0, "list_output_cost_per_million": 8.0,
+        "list_cached_cost_per_million": 0.5, "list_cache_write_cost_per_million": None,
+        "pending_list_price": None, "pending_context_price_tiers": None,
+        "price_sync_status": "ok", "price_sync_message": None,
+    }
+    proxy, recorder = proxy_with([{"enabled": False}, None, model_row(model_id), None])
+    result = proxy.update_registry_item("model", model_id, baseline)
+    assert result is not None
+    for field, value in baseline.items():
+        assert result[field] == value
+    statement = recorder.writes_to("managed_model_price")[0]
+    assert "list_input_cost_per_million = EXCLUDED.list_input_cost_per_million" in statement
+    proxy, _recorder = proxy_with([{"enabled": False}, None, model_row(model_id), baseline])
+    result = proxy.update_registry_item("model", model_id, {"price_discount_percent": 90})
+    assert result is not None and result["list_input_cost_per_million"] == 3
 
 
 # ------------------------------------------------------------------------------------------
@@ -250,7 +279,7 @@ def test_a_sync_writes_the_charged_rates_to_managed_model_and_nothing_else() -> 
     assert len(updated) == 1
     assert "input_cost_per_million" in updated[0]
     for field in ("list_input_cost_per_million", "price_sync_status", "price_synced_at"):
-        assert field not in updated[0]
+        assert field not in updated[0].split(" WHERE ", 1)[0]
     assert recorder.writes_to("managed_model_price")
 
 
@@ -285,7 +314,7 @@ def test_a_guarded_write_that_matched_nothing_is_recorded_as_superseded() -> Non
 def test_a_price_held_for_review_does_not_move_the_accepted_baseline() -> None:
     """The whole point of the threshold: the figure it stopped must not become the figure it
     compares against, or the next run finds no drift and charges it."""
-    proxy, recorder = proxy_with([])
+    proxy, recorder = proxy_with([{"id": uuid4()}])
 
     proxy.apply_model_price_sync([sync_result(
         writes=False, status="review_needed", message="变动 900%",

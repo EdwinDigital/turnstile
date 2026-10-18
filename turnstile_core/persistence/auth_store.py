@@ -134,7 +134,6 @@ class AuthStore:
         return dict(row) if row else {}
 
     def create_initial_owner(self, email: str, password_hash: str) -> dict[str, Any] | None:
-        """Create the first account only while the user table is empty."""
         with self._connection() as connection, connection.transaction():
             connection.execute("LOCK TABLE app_user IN SHARE ROW EXCLUSIVE MODE")
             if connection.execute("SELECT EXISTS (SELECT 1 FROM app_user)").fetchone()["exists"]:

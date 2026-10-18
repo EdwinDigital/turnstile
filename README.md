@@ -13,7 +13,7 @@
 <p align="center"><strong>Governed AI access, spend, and operations through one self-hosted control plane.</strong></p>
 
 <p align="center">
-   <a href="https://github.com/xuleihive/turnstile/releases/tag/v1.1"><img alt="Turnstile release v1.1" src="https://img.shields.io/badge/release-v1.1-2f6fdd.svg"></a>
+   <a href="https://github.com/xuleihive/turnstile/releases/tag/v1.2"><img alt="Turnstile release v1.2" src="https://img.shields.io/badge/release-v1.2-2f6fdd.svg"></a>
    <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-2f6fdd.svg"></a>
    <a href="#prerequisites"><img alt="Python 3.11 or newer" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&amp;logoColor=white"></a>
    <a href="#prerequisites"><img alt="Node.js 20.19.x or 22.12 and newer" src="https://img.shields.io/badge/Node.js-20.19.x%20%7C%2022.12%2B-339933?logo=node.js&amp;logoColor=white"></a>
@@ -32,7 +32,7 @@
 Turnstile is a self-hosted control plane for governed AI model access. It combines an Azure API Management gateway, token and cost telemetry, budgets, application access, model onboarding, release controls, and an operational web console.
 
 > [!NOTE]
-> **Turnstile v1.1** is the current public release. The project is evolving rapidly, so APIs, configuration, and deployment workflows may change as it matures. Review changes carefully before upgrading production deployments.
+> **Turnstile v1.2** is the current public release. The project is evolving rapidly, so APIs, configuration, and deployment workflows may change as it matures. Review changes carefully before upgrading production deployments.
 
 > [!IMPORTANT]
 > The included infrastructure templates deploy only the Turnstile platform. They do not create an Azure AI Foundry project, deploy provider models, or preload customer connections and models. Operators connect their own Foundry or compatible provider resources after the platform is running.
@@ -62,6 +62,31 @@ Turnstile is a self-hosted control plane for governed AI model access. It combin
 > The GitHub data source and GitHub Copilot integration are still under active development and are not production-ready. Enable them with care, and independently verify usage, cost, and governance data before relying on it for operational or financial decisions. If you only need FinOps for GitHub Copilot, see [OctoFinance](https://github.com/satomic/OctoFinance).
 
 Model Intelligent Router is intentionally not part of this release. It may return as an optional extension in a future version.
+
+## What's New in v1.2
+
+- **Model pricing:** provider catalog or manual prices, connection and model discounts, regional
+   references, explicit short/long-context tiers, reviewed price synchronization, and historical
+   request costs that retain the applicable price snapshot.
+- **Gateway management:** separate Models, Connections, Self-hosted Gateways, and APIM workspaces;
+   gateway registration, initialization, creation/bootstrap, diagnostics, and per-model serving scope.
+- **Publication and request diagnostics:** explicit target Gateways, verified API Revisions,
+   credential recovery, and invocation-attempt records that distinguish failures and unknown usage
+   from confirmed provider telemetry.
+- **Model operations:** inventory filters, dedicated editors, connection diagnostics, and an
+   independently versioned model-availability command across Managed and Self-hosted Gateways.
+- **Atomic USD and Token budget execution:** real-time admission reservations, USD and Token
+   monthly limits, and automated settlement reconciliation.
+
+An unavailable model switch means the deployment has not established the required Gateway
+coverage; it does not mean the model has been stopped. Do not bypass this check. The availability
+protocol requires compatible workers, migration 016, retained-Revision policies, primary Table
+access, self-hosted node enrollment, and verified admission/recovery before use.
+
+Start with the [documentation index](docs/README.md), [configuration reference](docs/configuration.md),
+and [availability installation requirements](docs/deployment.md#model-availability-installation).
+Existing installations must review the matching migrations and infrastructure steps; an application
+ZIP upload is not a complete protocol upgrade.
 
 ## Architecture
 
@@ -163,9 +188,9 @@ In-memory repositories are used only for isolated unit tests. Integration and en
 
 The Bicep templates create Turnstile platform resources such as PostgreSQL, Event Hubs, Storage, Key Vault, Application Insights, Web App, Functions, and APIM integration. The deployment does not create an Azure AI Foundry project or provider model deployment.
 
-For **Turnstile v1.1**, choose the matching deployment path:
+For **Turnstile v1.2**, choose the matching deployment path:
 
-- **Already running v1.0:** follow the [upgrade guide](docs/deployment.md#upgrade-v10-to-v11). Keep the original state, database, ledger, APIM, identities and history; apply the required infrastructure changes as well as the application packages.
+- **Upgrading an existing installation:** follow the [upgrade guide](docs/deployment.md#prepare-for-v12). Keep the original state, database, ledger, APIM, identities and history; apply the required infrastructure changes as well as the application packages.
 - **Installing from zero:** follow the [fresh-install guide](docs/deployment.md#deploy-v11-from-zero). Use a unique prefix and new state; a new StandardV2 APIM is the default. Provider models and credentials must already be available separately.
 
 The quick start below is for a new installation. Do not replace an existing installation's state with a newly generated file.
@@ -199,13 +224,14 @@ Use `scripts.deploy plan` for a preview without creating resources. See [Deploym
 
 ## Post-deployment model onboarding
 
-A fresh Turnstile deployment has no provider connection, runtime, or business model.
+A fresh Turnstile deployment automatically registers its platform-provisioned APIM instance during initial bootstrap, while starting with no customer provider connection, runtime, or business model.
 
 1. Sign in with the password Owner created by the deployment command.
-2. In Model Management, add a connection to an existing Foundry project or supported provider, then choose Add Model for an existing provider deployment.
-3. Optionally configure an APIM native backend pool for failover, balanced, or weighted routing.
-4. Publish the gateway change and wait for candidate verification. For same-tenant Foundry managed identity, an authorization pause displays the exact APIM principal, `Cognitive Services User` role, and Foundry resource scope. Grant that role in Azure IAM, then resume verification in the dialog.
-5. Run a small attributed invocation and confirm its telemetry record.
+2. Verify the initial APIM instance in **Model Management → APIM instances** (or add additional APIM instances via **Add APIM instance**; same-subscription APIMs are authorized automatically, and Turnstile automatically grants the APIM's managed identity access to the platform's Ledger Table, Route Table, Event Hub, and Credential Key Vault).
+3. In Model Management, add a connection to an existing Foundry project or supported provider, then choose Add Model for an existing provider deployment.
+4. Optionally configure an APIM native backend pool for failover, balanced, or weighted routing.
+5. Publish the gateway change and wait for candidate verification. For same-tenant Foundry managed identity, an authorization pause displays the exact APIM principal, `Cognitive Services User` role, and Foundry resource scope. Grant that role in Azure IAM, then resume verification in the dialog.
+6. Run a small attributed invocation and confirm its telemetry record.
 
 Turnstile never creates or modifies the customer Foundry project. The Azure user performing the IAM grant must already be authorized on that resource.
 

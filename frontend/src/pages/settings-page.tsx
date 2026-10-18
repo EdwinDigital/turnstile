@@ -78,11 +78,7 @@ function AssistantSection() {
         <p>FinOps 助手回答问题时调用的模型。仅列出已启用且支持工具调用的模型。</p>
       </div>
       <Select
-        // A pin the server can no longer honour is shown as automatic, because automatic
-        // is what is actually running. Leaving the dangling id as the value would make
-        // the control claim a selection that matches none of its options, and would put
-        // a dead model id back on the wire the next time the switch below is toggled.
-        value={value && value.model_available ? value.model_id ?? AUTOMATIC : AUTOMATIC}
+        value={value?.model_id ?? AUTOMATIC}
         disabled={!value || save.isPending}
         onValueChange={(next) => next && value && save.mutate({
           model_id: next === AUTOMATIC ? null : String(next),
@@ -93,11 +89,12 @@ function AssistantSection() {
           <SelectValue>
             {!value && settings.isPending
               ? <span className="settings-inline-loading"><RefreshCw className="spin" size={13} />正在加载模型</span>
-              : chosen ? chosen.display_name : automaticLabel}
+              : chosen ? chosen.display_name : value?.model_id ? "指定模型不可用" : automaticLabel}
           </SelectValue>
         </SelectTrigger>
         <SelectContent align="start" alignItemWithTrigger={false}>
           <SelectItem value={AUTOMATIC}>{automaticLabel}</SelectItem>
+          {value?.model_id && !chosen && <SelectItem value={value.model_id} disabled>指定模型不可用</SelectItem>}
           {(value?.available_models ?? []).map((model) => <SelectItem key={model.id} value={model.id}>
             <span className="settings-model-option">
               <b>{model.display_name}</b>
@@ -128,7 +125,7 @@ function AssistantSection() {
           this line permanent furniture and train the reader to skip it. */}
       {value && !value.model_available && <p className="settings-warning">
         <AlertTriangle size={13} />
-        指定的模型已停用或其运行时不支持工具调用，助手已回退到自动选择。
+        指定或默认模型不可用，原配置已保留。
       </p>}
       {value && value.available_models.length === 0 && <p className="settings-warning">
         <AlertTriangle size={13} />
@@ -151,9 +148,7 @@ function AssistantSection() {
           checked={value?.auto_title ?? false}
           disabled={!value || save.isPending}
           onCheckedChange={(checked) => value && save.mutate({
-            // Same reason as the Select above: never write back a pin the server has
-            // already refused to honour.
-            model_id: value.model_available ? value.model_id : null,
+            model_id: value.model_id,
             auto_title: checked === true,
           })}
         />

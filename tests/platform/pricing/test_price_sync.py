@@ -12,11 +12,18 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import Mock, patch
 from uuid import UUID, uuid4
 
 import pytest
 
-from turnstile_core.domain.runtime_models import ManagedModel, PriceSource, PriceSyncStatus
+from turnstile_core.domain.runtime_models import (
+    ManagedModel,
+    PendingListPrice,
+    PriceSource,
+    PriceSyncStatus,
+    StoredContextPriceTier,
+)
 from turnstile_core.persistence.in_memory_registry import InMemoryRegistryRepositoryMixin
 from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
 from turnstile_core.pricing.sync import plan_price_sync
@@ -82,6 +89,62 @@ def only(summary: Any) -> Any:
 # ------------------------------------------------------------------------------------------
 # The arithmetic
 # ------------------------------------------------------------------------------------------
+
+
+def context_model() -> ManagedModel:
+    return model(context_price_tiers=[StoredContextPriceTier(
+        key=f"tier-{index}", label=f"Tier {index}",
+        reference=f"azure_retail:Unit:meter-{index}:Global:*",
+        min_input_tokens=0 if index == 0 else 1001,
+        max_input_tokens=1000 if index == 0 else None,
+        input_price_per_million=2 + index, output_price_per_million=10 + index,
+        cached_price_per_million=0.2, cache_write_price_per_million=1.0,
+        list_prices=PendingListPrice(input=2 + index, output=10 + index, cached=0.2, cache_write=1),
+    ) for index in range(2)])
+
+
+def test_context_sync_updates_every_tier_without_flattening_the_prices() -> None:
+    current = context_model()
+    updated = [tier.model_copy(deep=True) for tier in current.context_price_tiers]
+    for tier in updated:
+        assert tier.list_prices.input is not None
+        tier.list_prices.input *= 1.05
+        tier.input_price_per_million *= 1.05
+    with patch("turnstile_core.pricing.sync.resolve_context_prices", return_value=updated):
+        change = only(plan_price_sync([current], Mock(spec=CompositeCatalog)))
+    assert change.writes
+    assert change.context_price_tiers == [tier.model_dump(mode="json") for tier in updated]
+    assert change.input_cost_per_million is None
+    assert change.expected_context_price_tiers == [
+        tier.model_dump(mode="json") for tier in current.context_price_tiers
+    ]
+
+
+@pytest.mark.parametrize("kind", ["price", "threshold", "unavailable"])
+def test_context_sync_holds_the_whole_schedule_on_price_or_rule_changes(kind: str) -> None:
+    current = context_model()
+    updated = [tier.model_copy(deep=True) for tier in current.context_price_tiers]
+    if kind == "price":
+        updated[1].list_prices.output = 100
+    if kind == "threshold":
+        updated[0].max_input_tokens = 900
+        updated[1].min_input_tokens = 901
+    with patch(
+        "turnstile_core.pricing.sync.resolve_context_prices", return_value=updated,
+    ) as resolve:
+        if kind == "unavailable":
+            resolve.side_effect = TimeoutError("offline")
+        first = only(plan_price_sync([current], Mock(spec=CompositeCatalog)))
+        second = only(plan_price_sync([current], Mock(spec=CompositeCatalog)))
+    assert not first.writes and not second.writes
+    expected = PriceSyncStatus.STALE if kind == "unavailable" else PriceSyncStatus.REVIEW_NEEDED
+    assert first.status is expected
+    if kind != "unavailable":
+        assert first.pending_context_price_tiers == [
+            tier.model_dump(mode="json") for tier in updated
+        ]
+    assert current.context_price_tiers[0].max_input_tokens == 1000
+    assert current.context_price_tiers[1].list_prices.output == 11
 
 
 def test_the_charged_rate_is_the_list_price_times_the_discount() -> None:
@@ -245,6 +308,24 @@ def test_an_ordinary_repricing_passes_unattended() -> None:
     assert update.input_cost_per_million == pytest.approx(0.396)
 
 
+@pytest.mark.parametrize("previous,current", [(None, 0.1), (0.1, None), (0.0, 0.1)])
+def test_sync_reviews_added_removed_and_previously_free_buckets(
+    previous: float | None, current: float | None,
+) -> None:
+    update = only(plan_price_sync([
+        model(list_input_cost_per_million=0.4, list_output_cost_per_million=1.6,
+              list_cached_cost_per_million=previous),
+    ], StubCatalog(entry(cached_per_million=current))))
+    assert update.status is PriceSyncStatus.REVIEW_NEEDED and not update.writes
+
+
+def test_flat_sync_cannot_replace_a_price_with_only_one_context_tier() -> None:
+    update = only(plan_price_sync([model()], StubCatalog(replace(
+        entry(), label="Future model ShortCo Std",
+    ))))
+    assert update.status is PriceSyncStatus.REVIEW_NEEDED and not update.writes
+
+
 def test_drift_is_measured_against_the_list_price_not_the_charged_rate() -> None:
     """Otherwise changing a discount would read as a suspicious price move and block itself."""
     update = only(
@@ -377,6 +458,22 @@ def test_an_unchanged_configuration_still_lets_the_write_through() -> None:
     assert written == 1
 
 
+@pytest.mark.parametrize("writes", [False, True])
+def test_sync_result_cannot_overwrite_a_newly_accepted_baseline(writes: bool) -> None:
+    registry = registry_with(None, 90)
+    current = registry.models[0]
+    planned = sync_result(
+        current["id"], writes=writes, status="ok" if writes else "review_needed",
+        pending_list_price={"input": 99},
+    )
+    current["list_input_cost_per_million"] = 0.7
+    current["pending_list_price"] = {"input": 0.8}
+    assert registry.apply_model_price_sync([planned]) == 0
+    assert current["list_input_cost_per_million"] == 0.7
+    assert current["pending_list_price"] == {"input": 0.8}
+    assert current["price_sync_status"] == "superseded"
+
+
 def test_accepting_a_price_clears_the_proposal_waiting_on_it() -> None:
     registry = registry_with(None, 90)
     model = registry.models[0]
@@ -405,10 +502,7 @@ def test_a_skipped_sync_records_the_reason_without_moving_the_rates() -> None:
     registry = registry_with(None, 90)
     registry.models[0]["input_cost_per_million"] = 1.2345
     registry.apply_model_price_sync([
-        {"model_id": registry.models[0]["id"], "writes": False,
-         "status": "unmapped", "message": "找不到",
-         "list_input_cost_per_million": None, "list_output_cost_per_million": None,
-         "list_cached_cost_per_million": None, "list_cache_write_cost_per_million": None},
+        sync_result(registry.models[0]["id"], writes=False, status="unmapped", message="找不到"),
     ])
     stored = registry.registry()["models"][0]
     assert stored["input_cost_per_million"] == pytest.approx(1.2345)

@@ -3,13 +3,18 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..domain.models import TokenUsageRecord
 from .repository_support import UsageFilters
 
-_PRICED = "(input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL)"
+_COST_SQL = """budget_usage_usd_cost(
+    usd_cost, estimated, input_tokens, cached_tokens, cache_write_tokens, output_tokens,
+    input_price_per_million, cached_price_per_million, cache_write_price_per_million,
+    output_price_per_million)"""
+_PRICED = f"({_COST_SQL} IS NOT NULL)"
 _TOTALS_SQL = f"""
     count(*) AS requests,
     COALESCE(sum(input_tokens), 0) AS input_tokens,
@@ -20,8 +25,27 @@ _TOTALS_SQL = f"""
     100.0 * count(*) FILTER (WHERE status_code >= 400) / NULLIF(count(*), 0) AS error_rate,
     avg(latency_ms) AS average_latency_ms,
     count(*) FILTER (WHERE {_PRICED}) AS priced_count,
-    COALESCE(sum(estimated_cost) FILTER (WHERE {_PRICED}), 0) AS estimated_cost_usd
+    COALESCE(sum({_COST_SQL}), 0) AS estimated_cost_usd
 """
+
+
+def personal_usage_cost(record: TokenUsageRecord) -> Decimal | None:
+    if record.estimated:
+        return None
+    if record.usd_cost is not None:
+        return record.usd_cost
+    buckets = (
+        (record.input_tokens, record.input_price_per_million),
+        (max(record.cached_tokens - record.cache_write_tokens, 0), record.cached_price_per_million),
+        (record.cache_write_tokens, record.cache_write_price_per_million),
+        (record.output_tokens, record.output_price_per_million),
+    )
+    if any(tokens and price is None for tokens, price in buckets):
+        return None
+    total = sum(
+        (Decimal(tokens) * Decimal(str(price or 0)) for tokens, price in buckets), Decimal(0)
+    )
+    return (total / 1_000_000).quantize(Decimal("0.00000000000001"), rounding=ROUND_HALF_UP)
 
 
 def _totals(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -98,12 +122,8 @@ class InMemoryPersonalUsageRepositoryMixin:
 
     @staticmethod
     def _personal_totals(records: Sequence[TokenUsageRecord]) -> dict[str, Any]:
-        priced = [
-            record
-            for record in records
-            if record.input_price_per_million is not None
-            and record.output_price_per_million is not None
-        ]
+        costs = [personal_usage_cost(record) for record in records]
+        priced = [value for value in costs if value is not None]
         return _totals(
             {
                 "requests": len(records),
@@ -124,7 +144,7 @@ class InMemoryPersonalUsageRepositoryMixin:
                 "average_latency_ms": (
                     sum(row.latency_ms for row in records) / len(records) if records else None
                 ),
-                "estimated_cost_usd": sum(row.estimated_cost or 0 for row in priced),
+                "estimated_cost_usd": sum(priced, Decimal(0)),
                 "priced_count": len(priced),
             }
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, date, datetime, time
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -110,13 +111,54 @@ class UserSettingsService:
             for row in usage
             if row["scope_type"] == "user" and row["scope_id"] == person
         )
-        limit = int(allocation["token_limit"]) if allocation else None
+        mode: Literal["tokens", "usd"] = (
+            "usd" if allocation and allocation.get("budget_mode") == "usd" else "tokens"
+        )
+        limit = (
+            int(allocation["token_limit"])
+            if allocation and mode == "tokens" and allocation["token_limit"] is not None else None
+        )
+        usd_limit = (
+            Decimal(str(allocation["usd_limit"]))
+            if allocation and mode == "usd" and allocation.get("usd_limit") is not None else None
+        )
+        personal_usage = [
+            row for row in usage if row["scope_type"] == "user" and row["scope_id"] == person
+        ]
+        used_usd = sum(
+            (Decimal(str(row.get("used_usd") or 0)) for row in personal_usage), Decimal(0)
+        )
+        unpriced_count = sum(int(row.get("unpriced_usage_count") or 0) for row in personal_usage)
+        costs_known = unpriced_count == 0 and all(
+            row.get("used_usd") is not None or int(row["used_tokens"]) == 0
+            for row in personal_usage
+        )
         threshold = int(allocation["warning_threshold_percent"]) if allocation else None
         forecast = TokenBudgetService._forecast_tokens(used, start, end, datetime.now(UTC))
+        forecast_usd = (
+            TokenBudgetService._forecast_usd(used_usd, start, end, datetime.now(UTC))
+            if costs_known else None
+        )
         percent = round(used / limit * 100, 1) if limit else None
         forecast_percent = round(forecast / limit * 100, 1) if limit else None
-        status: Literal["unallocated", "healthy", "warning", "exceeded"] = "unallocated"
-        if limit is not None:
+        if mode == "usd" and usd_limit and costs_known:
+            percent = round(float(used_usd / usd_limit * 100), 1)
+            forecast_percent = round(float((forecast_usd or 0) / usd_limit * 100), 1)
+        status: Literal["unallocated", "unverified", "healthy", "warning", "exceeded"]
+        status = "unallocated"
+        if allocation is not None and mode == "usd":
+            if usd_limit is None:
+                status = "unverified"
+            elif used_usd >= usd_limit:
+                status = "exceeded"
+            elif not costs_known:
+                status = "unverified"
+            else:
+                status = (
+                    "warning"
+                    if max(percent or 0, forecast_percent or 0) >= (threshold or 80) else "healthy"
+                )
+        elif limit is not None:
             status = (
                 "exceeded"
                 if used >= limit
@@ -142,6 +184,7 @@ class UserSettingsService:
             period_end=end,
             min_period=minimum,
             max_period=maximum,
+            budget_mode=mode,
             token_limit=limit,
             used_tokens=used,
             remaining_tokens=limit - used if limit is not None else None,
@@ -149,6 +192,12 @@ class UserSettingsService:
             usage_percent=percent,
             forecast_tokens=forecast,
             forecast_percent=forecast_percent,
+            usd_limit=usd_limit,
+            used_usd=used_usd,
+            remaining_usd=usd_limit - used_usd if usd_limit is not None and costs_known else None,
+            forecast_usd=forecast_usd,
+            usd_cost_available=costs_known,
+            unpriced_usage_count=unpriced_count,
             status=status,
             enforcement_mode=enforcement["mode"]
             if enforcement
@@ -195,11 +244,6 @@ class UserSettingsService:
             if gateway and not gateway["enabled"]:
                 continue
             if self.settings.production and (not gateway or gateway["implementation"] != "apim"):
-                continue
-            if (
-                "image_generation" in model["capabilities"]
-                and not self.settings.image_generation_enabled
-            ):
                 continue
             if (
                 self.repository.invocation_route(UUID(str(runtime["id"])), UUID(str(model["id"])))

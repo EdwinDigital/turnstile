@@ -1,23 +1,14 @@
 paths:
   /api/v1/assistant/ask:
     post:
-      tags:
-      - Assistant
-      operationId: askAssistant
       summary: Ask a question about usage and get charts back
-      description: 'The model chooses which tool to call and writes the prose; it never emits chart
-
-        rows. Every chart is authored by the tool that fetched its data, so a figure in
-
-        the reply equals the figure the corresponding dashboard page shows.
-
-        '
+      operationId: askAssistant
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/AssistantAskRequest
+        required: true
       responses:
         '200':
           description: Answer, the charts behind it, and the tool calls that produced them
@@ -25,25 +16,31 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/AssistantReply
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/conversations:
-    get:
-      tags:
-      - Assistant
-      operationId: listConversations
-      summary: List the caller's recent conversations, most recent first
-      description: 'Titles only. The transcripts, and therefore the charts inside them, are fetched
+      security:
+      - sessionCookie: []
+      description: 'The model chooses which tool to call and writes the prose; it never emits chart
 
-        one conversation at a time so opening the history dropdown does not download
+        rows. Every chart is authored by the tool that fetched its data, so a figure in
 
-        every chart the caller has ever been shown.
+        the reply equals the figure the corresponding dashboard page shows.
 
         '
+      tags:
+      - Assistant
+  /api/v1/assistant/conversations:
+    get:
+      summary: List the caller's recent conversations, most recent first
+      operationId: listConversations
       responses:
         '200':
           description: Conversation summaries
@@ -55,12 +52,48 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/conversations/{conversation_id}:
-    get:
+      security:
+      - sessionCookie: []
+      description: 'Titles only. The transcripts, and therefore the charts inside them, are fetched
+
+        one conversation at a time so opening the history dropdown does not download
+
+        every chart the caller has ever been shown.
+
+        '
       tags:
       - Assistant
-      operationId: getConversation
+  /api/v1/assistant/conversations/{conversation_id}:
+    get:
       summary: Read one conversation with its full transcript
+      operationId: getConversation
+      parameters:
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Conversation Id
+      responses:
+        '200':
+          description: The conversation and its exchanges
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/Conversation
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
       description: 'Each exchange carries the reply exactly as it was shown, charts included. Replies
 
         are not re-derived on read: re-running the tools would spend tokens to redraw a
@@ -70,33 +103,19 @@ paths:
         does not cite.
 
         '
-      parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/ConversationId
-      responses:
-        '200':
-          description: The conversation and its exchanges
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/Conversation
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    patch:
       tags:
       - Assistant
-      operationId: renameConversation
+    patch:
       summary: Rename a conversation
-      description: 'A conversation is named after its first question. Renaming replaces that; later
-
-        turns never rewrite a name the caller has chosen.
-
-        '
+      operationId: renameConversation
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/ConversationId
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Conversation Id
       requestBody:
         required: true
         content:
@@ -110,55 +129,546 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/Conversation
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
+      security:
+      - sessionCookie: []
+      description: 'A conversation is named after its first question. Renaming replaces that; later
+
+        turns never rewrite a name the caller has chosen.
+
+        '
       tags:
       - Assistant
-      operationId: deleteConversation
+    delete:
       summary: Delete a conversation and its turns
+      operationId: deleteConversation
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/ConversationId
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Conversation Id
       responses:
         '204':
           description: Deleted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Assistant
+  /api/v1/assistant/settings:
+    get:
+      summary: Read how the assistant is configured to run
+      operationId: getAssistantSettings
+      responses:
+        '200':
+          description: The configuration and the model currently in effect
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/AssistantSettings
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'Workspace-level, not per reader: the model decides what every question costs, so
+
+        two administrators disagreeing about it in separate browsers would be a budget
+
+        variance nobody could explain. Theme, language and timezone remain cookies.
+
+
+        The response carries both the configuration and what it resolves to now. A pinned
+
+        model that is later disabled, or moved to a runtime that cannot carry tool calls,
+
+        stops qualifying and the assistant falls back to automatic selection rather than
+
+        refusing to answer; `model_available` is false in exactly that case.
+
+        '
+      tags:
+      - Assistant
+    put:
+      summary: Change how the assistant runs
+      operationId: saveAssistantSettings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/AssistantSettingsWrite
+        required: true
+      responses:
+        '200':
+          description: The stored configuration and the model now in effect
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/AssistantSettings
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'Owner role only. This is budget administration rather than registry
+
+        administration -- it changes what the workspace spends, not a credential -- so it
+
+        does not require the management bearer token.
+
+
+        A null `model_id` means automatic selection, which is a deliberate value rather
+
+        than a missing one. A model that does not qualify is rejected with 409 rather
+
+        than stored: read-time fallback exists for a model that stopped qualifying later,
+
+        not as a licence to save one that never did.
+
+        '
+      tags:
+      - Assistant
+  /api/v1/assistant/pinned-charts:
+    get:
+      summary: List the caller's pinned reports in display order
+      operationId: listPinnedReports
+      responses:
+        '200':
+          description: Pinned reports, each with its charts
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PinnedReportList
         '422':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/conversations/{conversation_id}/title:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Assistant
-      operationId: titleConversation
-      summary: Name a conversation from its first exchange
-      description: 'A conversation starts out labelled with its first question, truncated. This asks
+    post:
+      summary: Pin a chart, starting a report or adding to one
+      description: '`report_id` decides between the two cases: absent starts a new report and requires
 
-        the model for a real title instead, in one small tool-free call.
+        a title, present adds to that report. A relative time range is frozen onto the
 
+        dates the chart covered, so a kept report answers the question it was pinned for
 
-        It is a separate call rather than a step inside `ask` because the answer is the
-
-        product: naming the thread inside the ask would delay every first question by a
-
-        round trip. Callers make it once, after the first answer is on screen.
-
-
-        Safe to repeat. The server replaces a `question` title only, so a title the model
-
-        already wrote is never re-summarised and a title a person typed is never lost.
-
-        Both cases return the current state unchanged and cost nothing.
+        rather than re-resolving its preset on every refresh.
 
         '
+      operationId: pinChart
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/PinnedChartWrite
+        required: true
+      responses:
+        '201':
+          description: The report the chart now belongs to
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Assistant
+  /api/v1/assistant/pinned-charts/{report_id}:
+    get:
+      summary: Get one pinned report
+      operationId: getPinnedReport
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/ConversationId
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Report Id
+      responses:
+        '200':
+          description: Pinned report with its charts
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Assistant
+    patch:
+      summary: Rename a pinned report
+      operationId: renamePinnedReport
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Report Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/PinnedChartRename
+      responses:
+        '200':
+          description: Renamed report
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Assistant
+    delete:
+      summary: Delete a pinned report and every chart in it
+      operationId: unpinReport
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Report Id
+      responses:
+        '204':
+          description: Report deleted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Assistant
+  /api/v1/assistant/pinned-charts/{report_id}/visibility:
+    put:
+      summary: Make a report private or visible to every signed-in user
+      operationId: setPinnedReportVisibility
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Report Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/PinnedReportVisibilityWrite
+      responses:
+        '200':
+          description: Report with updated visibility
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Only the authenticated report creator may change visibility.
+      tags:
+      - Assistant
+  /api/v1/assistant/pinned-charts/{report_id}/layout:
+    put:
+      summary: Replace the canonical desktop layout of a pinned report
+      operationId: setPinnedReportLayout
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Report Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/PinnedReportLayout
+      responses:
+        '200':
+          description: Report with its saved canonical layout
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'Only the authenticated report creator may save a layout. Widths use the report''s
+
+        twelve-column grid and heights belong to row positions, so every viewer receives
+
+        the same arrangement without persisting device-specific viewport dimensions.
+
+        '
+      tags:
+      - Assistant
+  /api/v1/assistant/pinned-charts/{report_id}/refresh:
+    post:
+      summary: Re-run every chart in the report against its own stored query
+      operationId: refreshPinnedReport
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Report Id
+      - name: timezone
+        in: query
+        required: false
+        schema:
+          type: string
+          default: UTC
+          title: Timezone
+      - name: locale
+        in: query
+        required: false
+        schema:
+          type: string
+          default: en
+          title: Locale
+      responses:
+        '200':
+          description: Report with freshly fetched chart data
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'Each stored `ChartQuery` is replayed through the same validation the assistant
+
+        used, so a pinned report can never read more than the question that created it.
+
+        A chart whose tool no longer exists is skipped rather than failing the report;
+
+        the refresh only fails when nothing at all could be rebuilt.
+
+        '
+      tags:
+      - Assistant
+  /api/v1/assistant/pinned-charts/{report_id}/charts/order:
+    put:
+      summary: Set the display order of a report's charts
+      operationId: reorderPinnedCharts
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Report Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/PinnedChartOrder
+      responses:
+        '200':
+          description: Report with its charts in the requested order
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'The request must name every chart in the report exactly once. A partial list is
+
+        rejected rather than partially applied: the omitted charts would keep their old
+
+        positions, and because the read breaks ties on `created_at` the result would be
+
+        an order the caller never asked for.
+
+        '
+      tags:
+      - Assistant
+  /api/v1/assistant/pinned-charts/{report_id}/charts/{chart_id}:
+    delete:
+      summary: Remove one chart from a pinned report
+      operationId: removeChartFromPinnedReport
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Report Id
+      - name: chart_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Chart Id
+      responses:
+        '200':
+          description: Report without the removed chart
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '409':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'Removing the last chart is refused with 409. A report with no charts is a nav item
+
+        that opens an empty page, so deleting the report is the operation being asked for.
+
+        '
+      tags:
+      - Assistant
+  /api/v1/assistant/conversations/{conversation_id}/title:
+    post:
+      summary: Name a conversation from its first exchange
+      operationId: titleConversation
+      parameters:
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Conversation Id
       requestBody:
         required: true
         content:
@@ -178,352 +688,38 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/ConversationSummary
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/settings:
-    get:
-      tags:
-      - Assistant
-      operationId: getAssistantSettings
-      summary: Read how the assistant is configured to run
-      description: 'Workspace-level, not per reader: the model decides what every question costs, so
-
-        two administrators disagreeing about it in separate browsers would be a budget
-
-        variance nobody could explain. Theme, language and timezone remain cookies.
-
-
-        The response carries both the configuration and what it resolves to now. A pinned
-
-        model that is later disabled, or moved to a runtime that cannot carry tool calls,
-
-        stops qualifying and the assistant falls back to automatic selection rather than
-
-        refusing to answer; `model_available` is false in exactly that case.
-
-        '
-      responses:
-        '200':
-          description: The configuration and the model currently in effect
+          description: Validation Error
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/AssistantSettings
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    put:
-      tags:
-      - Assistant
-      operationId: saveAssistantSettings
-      summary: Change how the assistant runs
-      description: 'Owner role only. This is budget administration rather than registry
-
-        administration -- it changes what the workspace spends, not a credential -- so it
-
-        does not require the management bearer token.
-
-
-        A null `model_id` means automatic selection, which is a deliberate value rather
-
-        than a missing one. A model that does not qualify is rejected with 409 rather
-
-        than stored: read-time fallback exists for a model that stopped qualifying later,
-
-        not as a licence to save one that never did.
-
-        '
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/AssistantSettingsWrite
-      responses:
-        '200':
-          description: The stored configuration and the model now in effect
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/AssistantSettings
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/pinned-charts:
-    get:
-      tags:
-      - Assistant
-      operationId: listPinnedReports
-      summary: List the caller's pinned reports in display order
-      responses:
-        '200':
-          description: Pinned reports, each with its charts
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/PinnedReportList
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    post:
-      tags:
-      - Assistant
-      operationId: pinChart
-      summary: Pin a chart, starting a report or adding to one
-      description: '`report_id` decides between the two cases: absent starts a new report and requires
-
-        a title, present adds to that report. A relative time range is frozen onto the
-
-        dates the chart covered, so a kept report answers the question it was pinned for
-
-        rather than re-resolving its preset on every refresh.
-
-        '
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/PinnedChartWrite
-      responses:
-        '201':
-          description: The report the chart now belongs to
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/pinned-charts/{report_id}:
-    get:
-      tags:
-      - Assistant
-      operationId: getPinnedReport
-      summary: Get one pinned report
-      parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/PinnedReportId
-      responses:
-        '200':
-          description: Pinned report with its charts
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    patch:
-      tags:
-      - Assistant
-      operationId: renamePinnedReport
-      summary: Rename a pinned report
-      parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/PinnedReportId
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/PinnedChartRename
-      responses:
-        '200':
-          description: Renamed report
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
-      tags:
-      - Assistant
-      operationId: unpinReport
-      summary: Delete a pinned report and every chart in it
-      parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/PinnedReportId
-      responses:
-        '204':
-          description: Report deleted
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/pinned-charts/{report_id}/refresh:
-    post:
-      tags:
-      - Assistant
-      operationId: refreshPinnedReport
-      summary: Re-run every chart in the report against its own stored query
-      description: 'Each stored `ChartQuery` is replayed through the same validation the assistant
-
-        used, so a pinned report can never read more than the question that created it.
-
-        A chart whose tool no longer exists is skipped rather than failing the report;
-
-        the refresh only fails when nothing at all could be rebuilt.
-
-        '
-      parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/PinnedReportId
-      - $ref: ../../openapi.yaml#/components/parameters/AssistantTimezone
-      - $ref: ../../openapi.yaml#/components/parameters/AssistantLocale
-      responses:
-        '200':
-          description: Report with freshly fetched chart data
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/pinned-charts/{report_id}/visibility:
-    put:
-      tags:
-      - Assistant
-      operationId: setPinnedReportVisibility
-      summary: Make a report private or visible to every signed-in user
-      description: Only the authenticated report creator may change visibility.
-      parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/PinnedReportId
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/PinnedReportVisibilityWrite
-      responses:
-        '200':
-          description: Report with updated visibility
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/pinned-charts/{report_id}/layout:
-    put:
-      tags:
-      - Assistant
-      operationId: setPinnedReportLayout
-      summary: Replace the canonical desktop layout of a pinned report
-      description: 'Only the authenticated report creator may save a layout. Widths use the report''s
+      security:
+      - sessionCookie: []
+      description: 'A conversation starts out labelled with its first question, truncated. This asks
 
-        twelve-column grid and heights belong to row positions, so every viewer receives
+        the model for a real title instead, in one small tool-free call.
 
-        the same arrangement without persisting device-specific viewport dimensions.
+
+        It is a separate call rather than a step inside `ask` because the answer is the
+
+        product: naming the thread inside the ask would delay every first question by a
+
+        round trip. Callers make it once, after the first answer is on screen.
+
+
+        Safe to repeat. The server replaces a `question` title only, so a title the model
+
+        already wrote is never re-summarised and a title a person typed is never lost.
+
+        Both cases return the current state unchanged and cost nothing.
 
         '
-      parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/PinnedReportId
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/PinnedReportLayout
-      responses:
-        '200':
-          description: Report with its saved canonical layout
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/pinned-charts/{report_id}/charts/order:
-    put:
       tags:
       - Assistant
-      operationId: reorderPinnedCharts
-      summary: Set the display order of a report's charts
-      description: 'The request must name every chart in the report exactly once. A partial list is
-
-        rejected rather than partially applied: the omitted charts would keep their old
-
-        positions, and because the read breaks ties on `created_at` the result would be
-
-        an order the caller never asked for.
-
-        '
-      parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/PinnedReportId
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/PinnedChartOrder
-      responses:
-        '200':
-          description: Report with its charts in the requested order
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/assistant/pinned-charts/{report_id}/charts/{chart_id}:
-    delete:
-      tags:
-      - Assistant
-      operationId: removeChartFromPinnedReport
-      summary: Remove one chart from a pinned report
-      description: 'Removing the last chart is refused with 409. A report with no charts is a nav item
-
-        that opens an empty page, so deleting the report is the operation being asked for.
-
-        '
-      parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/PinnedReportId
-      - $ref: ../../openapi.yaml#/components/parameters/PinnedChartId
-      responses:
-        '200':
-          description: Report without the removed chart
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/PinnedReport
-        '404':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse

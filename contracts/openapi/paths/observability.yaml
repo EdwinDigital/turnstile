@@ -1,10 +1,8 @@
 paths:
   /api/v1/anomaly-rules:
     get:
-      tags:
-      - Anomaly Rules
-      operationId: listAnomalyRules
       summary: List configurable anomaly rules
+      operationId: listAnomalyRules
       responses:
         '200':
           description: Ordered anomaly rule catalog
@@ -16,17 +14,19 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Anomaly Rules
-      operationId: createAnomalyRule
+    post:
       summary: Create an anomaly rule
+      operationId: createAnomalyRule
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/AnomalyRuleWrite
+        required: true
       responses:
         '201':
           description: Created anomaly rule
@@ -34,20 +34,34 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/AnomalyRule
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/anomaly-rules/{rule_id}:
-    put:
+      security:
+      - sessionCookie: []
       tags:
       - Anomaly Rules
-      operationId: updateAnomalyRule
+  /api/v1/anomaly-rules/{rule_id}:
+    put:
       summary: Replace an anomaly rule
+      operationId: updateAnomalyRule
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/AnomalyRuleId
+      - name: rule_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Rule Id
       requestBody:
         required: true
         content:
@@ -61,6 +75,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/AnomalyRule
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -69,34 +89,642 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
+      security:
+      - sessionCookie: []
       tags:
       - Anomaly Rules
-      operationId: deleteAnomalyRule
+    delete:
       summary: Delete an anomaly rule
+      operationId: deleteAnomalyRule
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/AnomalyRuleId
+      - name: rule_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Rule Id
       responses:
         '204':
           description: Anomaly rule deleted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Anomaly Rules
+  /api/v1/traffic/plan:
+    post:
+      summary: Plan Enterprise Traffic
+      operationId: plan_enterprise_traffic_api_v1_traffic_plan_post
+      parameters:
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/TrafficGenerationRequest
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/TrafficGenerationPlan
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/traffic/execute:
+    post:
+      summary: Execute Enterprise Traffic
+      operationId: execute_enterprise_traffic_api_v1_traffic_execute_post
+      parameters:
+      - name: authorization
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Authorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/TrafficGenerationRequest
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/TrafficGenerationResult
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/enterprise/entities:
+    get:
+      summary: Get Enterprise Entities
+      operationId: get_enterprise_entities_api_v1_enterprise_entities_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/EnterpriseEntityCatalog
+      security:
+      - sessionCookie: []
+  /api/v1/observability/executive-overview:
+    get:
+      summary: Get Executive Overview
+      operationId: get_executive_overview_api_v1_observability_executive_overview_get
+      parameters:
+      - name: from
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: From
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: To
+      - name: organization_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Organization Id
+      - name: department_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department Id
+      - name: project_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Project Id
+      - name: agent_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+      - name: model_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Id
+      - name: user_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: User Id
+      - name: runtime
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: array
+            items:
+              type: string
+          - type: 'null'
+          title: Runtime
+      - name: status_code
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 599
+            minimum: 100
+          - type: 'null'
+          title: Status Code
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/ExecutiveOverviewResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/observability/distribution:
+    get:
+      summary: Get Distribution
+      operationId: get_distribution_api_v1_observability_distribution_get
+      parameters:
+      - name: from
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: From
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: To
+      - name: dimension
+        in: query
+        required: true
+        schema:
+          enum:
+          - organization
+          - department
+          - project
+          - agent
+          - model
+          - user
+          - runtime
+          type: string
+          title: Dimension
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          minimum: 1
+          default: 20
+          title: Limit
+      - name: split_by
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - enum:
+            - organization
+            - department
+            - project
+            - agent
+            - model
+            - user
+            - runtime
+            type: string
+          - type: 'null'
+          title: Split By
+      - name: organization_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Organization Id
+      - name: department_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department Id
+      - name: project_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Project Id
+      - name: agent_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+      - name: model_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Id
+      - name: user_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: User Id
+      - name: runtime
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: array
+            items:
+              type: string
+          - type: 'null'
+          title: Runtime
+      - name: status_code
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 599
+            minimum: 100
+          - type: 'null'
+          title: Status Code
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/DistributionResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/observability/requests:
+    get:
+      summary: List formal usage and nonbilling platform request traces
+      operationId: listUsageRequests
+      parameters:
+      - name: from
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: From
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: To
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+      - name: organization_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Organization Id
+      - name: department_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department Id
+      - name: project_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Project Id
+      - name: agent_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+      - name: model_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Id
+      - name: user_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: User Id
+      - name: runtime
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: array
+            items:
+              type: string
+          - type: 'null'
+          title: Runtime
+      - name: status_code
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 599
+            minimum: 100
+          - type: 'null'
+          title: Status Code
+      responses:
+        '200':
+          description: Request trace page
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/UsageRequestListResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Platform-only rows have usage_available and cost_available false until uniquely matched
+        formal telemetry arrives. Trace results do not feed billing or budget totals.
+  /api/v1/observability/requests/{request_id}:
+    get:
+      summary: Read a platform trace or formal request
+      operationId: getUsageRequest
+      parameters:
+      - name: request_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Request Id
+      responses:
+        '200':
+          description: Request detail with separate platform and Gateway outcomes
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/UsageRequestDetail
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '401':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '404':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Accepts a stable platform trace ID, recorded row ID, actual Gateway correlation ID
+        or caller request ID. Legacy caller IDs resolve the latest matching request.
+  /api/v1/observability/anomalies:
+    get:
+      summary: List Usage Anomalies
+      operationId: list_usage_anomalies_api_v1_observability_anomalies_get
+      parameters:
+      - name: from
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: From
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: To
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      - name: organization_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Organization Id
+      - name: department_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department Id
+      - name: project_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Project Id
+      - name: agent_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+      - name: model_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Id
+      - name: user_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: User Id
+      - name: runtime
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: array
+            items:
+              type: string
+          - type: 'null'
+          title: Runtime
+      - name: status_code
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 599
+            minimum: 100
+          - type: 'null'
+          title: Status Code
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/UsageAnomalyListResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
   /api/v1/observability/overview:
     get:
-      tags:
-      - Overview
-      operationId: getOverview
       summary: Get current-day and current-month headline metrics
+      operationId: getOverview
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/Timezone
-      - $ref: ../../openapi.yaml#/components/parameters/Team
-      - $ref: ../../openapi.yaml#/components/parameters/Agent
-      - $ref: ../../openapi.yaml#/components/parameters/Workflow
-      - $ref: ../../openapi.yaml#/components/parameters/Model
+      - name: timezone
+        in: query
+        required: false
+        schema:
+          type: string
+          default: UTC
+          title: Timezone
       responses:
         '200':
           description: Overview metrics and top workflows
@@ -104,32 +732,139 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/OverviewResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Overview
   /api/v1/observability/trends:
     get:
-      tags:
-      - Trends
-      operationId: getTrends
       summary: Get ET and token time series grouped by one attribution dimension
+      operationId: getTrends
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/From
-      - $ref: ../../openapi.yaml#/components/parameters/To
-      - $ref: ../../openapi.yaml#/components/parameters/Timezone
+      - name: from
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: From
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: To
       - name: interval
         in: query
         required: true
         schema:
-          $ref: ../../openapi.yaml#/components/schemas/TimeInterval
+          enum:
+          - hour
+          - day
+          - week
+          type: string
+          title: Interval
       - name: group_by
         in: query
         required: true
         schema:
-          $ref: ../../openapi.yaml#/components/schemas/TrendDimension
-      - $ref: ../../openapi.yaml#/components/parameters/Team
-      - $ref: ../../openapi.yaml#/components/parameters/Agent
-      - $ref: ../../openapi.yaml#/components/parameters/Workflow
-      - $ref: ../../openapi.yaml#/components/parameters/Model
+          enum:
+          - organization
+          - department
+          - project
+          - agent
+          - user
+          - model
+          - runtime
+          - workflow
+          - team
+          - none
+          type: string
+          title: Group By
+      - name: timezone
+        in: query
+        required: false
+        schema:
+          type: string
+          default: UTC
+          title: Timezone
+      - name: organization_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Organization Id
+      - name: department_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department Id
+      - name: project_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Project Id
+      - name: agent_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Id
+      - name: model_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Id
+      - name: user_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: User Id
+      - name: runtime
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: array
+            items:
+              type: string
+          - type: 'null'
+          title: Runtime
+      - name: status_code
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            maximum: 599
+            minimum: 100
+          - type: 'null'
+          title: Status Code
       responses:
         '200':
           description: Stacked time-series data
@@ -137,27 +872,46 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/TrendResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Trends
   /api/v1/observability/runs:
     get:
-      tags:
-      - Runs
-      operationId: listRuns
       summary: List runs for the waterfall view selector
+      operationId: listRuns
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/From
-      - $ref: ../../openapi.yaml#/components/parameters/To
-      - $ref: ../../openapi.yaml#/components/parameters/Team
-      - $ref: ../../openapi.yaml#/components/parameters/Agent
-      - $ref: ../../openapi.yaml#/components/parameters/Workflow
-      - name: min_turns
+      - name: from
         in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: From
+      - name: to
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: To
+      - name: limit
+        in: query
+        required: false
         schema:
           type: integer
+          maximum: 200
           minimum: 1
-      - $ref: ../../openapi.yaml#/components/parameters/Cursor
-      - $ref: ../../openapi.yaml#/components/parameters/Limit
+          default: 50
+          title: Limit
       responses:
         '200':
           description: Cursor-paginated run summaries
@@ -165,16 +919,29 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/RunListResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/observability/runs/{run_id}:
-    get:
+      security:
+      - sessionCookie: []
       tags:
       - Runs
-      operationId: getRun
+  /api/v1/observability/runs/{run_id}:
+    get:
       summary: Get one run and its ordered turn waterfall
+      operationId: getRun
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/RunId
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
       responses:
         '200':
           description: Run detail
@@ -182,30 +949,48 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/RunDetail
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Runs
   /api/v1/observability/audit-findings:
     get:
-      tags:
-      - Audit
-      operationId: listAuditFindings
       summary: List auditor findings; Phase 1 may return seeded or empty data
+      operationId: listAuditFindings
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/From
-      - $ref: ../../openapi.yaml#/components/parameters/To
-      - name: status
+      - name: from
         in: query
+        required: true
         schema:
-          $ref: ../../openapi.yaml#/components/schemas/AuditStatus
-      - name: severity
+          type: string
+          format: date-time
+          title: From
+      - name: to
         in: query
+        required: true
         schema:
-          $ref: ../../openapi.yaml#/components/schemas/AuditSeverity
-      - $ref: ../../openapi.yaml#/components/parameters/Workflow
-      - $ref: ../../openapi.yaml#/components/parameters/Cursor
-      - $ref: ../../openapi.yaml#/components/parameters/Limit
+          type: string
+          format: date-time
+          title: To
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
       responses:
         '200':
           description: Cursor-paginated findings
@@ -213,16 +998,30 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/AuditFindingListResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/observability/audit-findings/{finding_id}:
-    patch:
+      security:
+      - sessionCookie: []
       tags:
       - Audit
-      operationId: updateAuditFinding
+  /api/v1/observability/audit-findings/{finding_id}:
+    patch:
       summary: Update finding workflow state; no rule evaluation is performed
+      operationId: updateAuditFinding
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/FindingId
+      - name: finding_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Finding Id
       requestBody:
         required: true
         content:
@@ -236,20 +1035,34 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/AuditFinding
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Audit
   /api/v1/observability/optimization-events:
     get:
-      tags:
-      - Optimization
-      operationId: listOptimizationEvents
       summary: List optimization markers and their before/after comparisons
+      operationId: listOptimizationEvents
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/Workflow
-      - $ref: ../../openapi.yaml#/components/parameters/Cursor
-      - $ref: ../../openapi.yaml#/components/parameters/Limit
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
       responses:
         '200':
           description: Optimization comparisons
@@ -257,13 +1070,21 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/OptimizationEventListResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - Optimization
-      operationId: createOptimizationEvent
+    post:
       summary: Mark an optimization event for a workflow
+      operationId: createOptimizationEvent
       requestBody:
         required: true
         content:
@@ -277,5 +1098,15 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/OptimizationEvent
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - Optimization

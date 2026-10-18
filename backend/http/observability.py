@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
@@ -145,13 +148,37 @@ def list_usage_requests(
     from_: Annotated[datetime, Query(alias="from")],
     to: datetime,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    cursor: str | None = None,
 ) -> UsageRequestListResponse:
+    after: tuple[datetime, str] | None = None
+    if cursor:
+        try:
+            payload = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+            after = (datetime.fromisoformat(payload["timestamp"]), str(payload["trace_id"]))
+        except (binascii.Error, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise HTTPException(status_code=400, detail="Invalid request cursor") from error
+    rows = repository.list_usage_requests(from_, to, filters, limit + 1, after)
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    next_cursor = None
+    if has_more and items:
+        last = items[-1]
+        next_cursor = (
+            base64.urlsafe_b64encode(
+                json.dumps(
+                    {"timestamp": last["timestamp"].isoformat(), "trace_id": last["trace_id"]},
+                    separators=(",", ":"),
+                ).encode()
+            )
+            .decode()
+            .rstrip("=")
+        )
     return UsageRequestListResponse(
         items=[
             UsageRequestSummary.model_validate(row)
-            for row in repository.list_usage_requests(from_, to, filters, limit)
+            for row in items
         ],
-        page=PageInfo(next_cursor=None),
+        page=PageInfo(next_cursor=next_cursor),
     )
 
 
