@@ -117,12 +117,13 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
   // Reopening the dialog on a model that already follows a list price should show what it
   // follows, not an empty picker.
   useEffect(() => {
-    if (!following || chosenModel || !storedModelKey || details) return
+    if (!following || chosenModel || !storedModelKey || details
+      || !storedModelKey.startsWith(`${draft.priceSource}:`)) return
     let cancelled = false
     setLoadingOptions(true)
     dataSource.priceCatalogOptions(storedModelKey)
       .then((response) => {
-        if (cancelled) return
+        if (cancelled || response.model_entry.source !== draft.priceSource) return
         setChosenModel(response.model_entry)
         setQuery(response.model_entry.label)
         setDetails(response)
@@ -130,7 +131,7 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
       .catch(() => undefined)
       .finally(() => { if (!cancelled) setLoadingOptions(false) })
     return () => { cancelled = true }
-  }, [following, storedModelKey, chosenModel, details])
+  }, [following, draft.priceSource, storedModelKey, chosenModel, details])
 
   // A stored reference names one region, while an option covers every region charging alike, so
   // matching on the option's own reference alone would fail to recognise a saved choice that is
@@ -158,7 +159,8 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
     const changed = lastDiscount.current.own !== draft.discountPercent || lastDiscount.current.connection !== connectionDiscount
     lastDiscount.current = { own: draft.discountPercent, connection: connectionDiscount }
     if (!changed) return
-    if (!following || !selectedOption || !chosenModel || !details?.complete) return
+    if (!following || !selectedOption || !chosenModel || !details?.complete
+      || chosenModel.source !== draft.priceSource) return
     if (selectedOption.contextPricing) {
       setDraft(current => ({ ...current, contextPriceRefresh: true }))
       return
@@ -178,7 +180,8 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
     setSearching(false)
     setError(null)
     setPreviewReference("")
-    setDraft(current => ({ ...resetContextPriceRule(current), priceReference: "", contextPricingPreview: false,
+    setDraft(current => ({ ...resetContextPriceRule(current), priceReference: "", priceEntryDigest: "",
+      allowUnpriced: false, contextPricingPreview: false,
       contextPriceReferences: [], contextPriceTiers: [], contextPriceRefresh: false }))
   }
 
@@ -298,7 +301,9 @@ export function ModelPriceSourceFields<Draft extends ModelPriceDraft>({ model, m
 
     {draft.priceSource === "models_dev" && <>
       <PublicModelPricing
-        request={publicRequest ?? { model_id: model?.id, operation: imageGeneration ? "image_generation" : "chat" }}
+        key={JSON.stringify(publicRequest ?? { model_id: model?.id })}
+        request={publicRequest ?? { model_id: model?.id,
+          operation: imageGeneration ? "image_generation" : model?.capabilities.includes("decision") ? "decision" : "chat" }}
         draft={{ ...draft, contextWindow: draft.contextWindow ?? "" }}
         onChange={updater => setDraft(current => ({
           ...current, ...updater({ ...current, contextWindow: current.contextWindow ?? "" }),

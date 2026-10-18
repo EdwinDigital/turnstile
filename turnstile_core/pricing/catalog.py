@@ -32,6 +32,7 @@ of hiding it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -246,6 +247,18 @@ class CatalogEntry:
     operation: Literal["chat", "image_generation"] = "chat"
 
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.text_to_image:
+            object.__setattr__(self, "operation", "image_generation")
+
+    @property
+    def digest(self) -> str:
+        return str(self.metadata.get("entry_digest") or hashlib.sha256(json.dumps(
+            [self.reference, self.input_per_million, self.output_per_million,
+             self.cached_per_million, self.cache_write_per_million, self.context_window],
+            separators=(",", ":"),
+        ).encode()).hexdigest())
 
 
 @dataclass(frozen=True)
@@ -603,6 +616,7 @@ class AzureRetailCatalog:
                             ),
                             complete=fetched.complete,
                             text_to_image=text_to_image,
+                            operation="image_generation" if text_to_image else "chat",
                         ),
                         regions=regions_sorted,
                         region_required=region_required,

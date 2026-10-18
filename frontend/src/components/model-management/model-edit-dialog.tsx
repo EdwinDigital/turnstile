@@ -88,7 +88,9 @@ export function ModelEditDialog({ registry, model, availability, availabilityLoa
   const imagePriceMissing = imageGeneration && [draft.inputPrice, draft.cacheReadPrice, draft.outputPrice].some(value => !value.trim())
   const validationMessage = (dirty || submitted) ? imagePriceMissing ? "请填写文字输入、缓存文字和图像输出单价。" : validation && validation !== "context_pricing_preview" ? VALIDATION_MESSAGES[validation] : null : null
   const update = <K extends keyof ModelEditDraft>(key: K, value: ModelEditDraft[K]) => {
-    setDraft((current) => ({ ...current, [key]: value }))
+    setDraft((current) => ({ ...current, [key]: value,
+      ...(key === "contextWindow" ? { contextOrigin: "user" as const } : {}),
+    }))
   }
   const close = () => { if (!busy) onClose() }
   const submit = (event: FormEvent<HTMLFormElement>) => {

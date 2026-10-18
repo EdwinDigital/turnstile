@@ -729,8 +729,21 @@ class ManagedModelWrite(StrictModel):
 
     @model_validator(mode="after")
     def validate_price_source(self) -> ManagedModelWrite:
-        if self.price_source in {PriceSource.AZURE_RETAIL, PriceSource.ANTHROPIC} \
-                and not self.price_reference and not self.context_price_references:
+        if self.context_price_rule is not None and len(self.context_price_references) != 2:
+            raise ValueError("A custom context rule requires both short and long catalog tiers")
+        if self.context_price_refresh and not self.context_price_references:
+            raise ValueError("Refreshing context prices requires the complete tier selection")
+        if self.context_price_references:
+            if self.price_source is PriceSource.MANUAL:
+                raise ValueError("Context-tier references require a catalog price source")
+            if (len(self.context_price_references) < 2
+                or len(set(self.context_price_references)) != len(self.context_price_references)):
+                raise ValueError("Context pricing requires distinct tier references")
+            if any(not reference.startswith(f"{self.price_source.value}:")
+                   for reference in self.context_price_references):
+                raise ValueError("Context references must use the selected price source")
+        elif self.price_source in {PriceSource.AZURE_RETAIL, PriceSource.ANTHROPIC} \
+                and not self.price_reference:
             raise ValueError("Following a list price requires the catalog entry to follow")
         return self
 
@@ -807,7 +820,7 @@ class PricePreviewRequest(StrictModel):
     upstream_model_id: str | None = Field(default=None, max_length=500)
     display_name: str | None = Field(default=None, max_length=255)
     model_key: str | None = Field(default=None, max_length=255)
-    operation: Literal["chat", "image_generation"] = "chat"
+    operation: Literal["chat", "image_generation", "decision"] = "chat"
     price_reference: str | None = Field(default=None, max_length=1500)
     price_discount_percent: float | None = Field(default=None, gt=0, le=100)
     refresh: bool = False

@@ -2157,11 +2157,14 @@ class InMemoryPublicationRepositoryMixin:
                         "list_cache_write_cost_per_million"
                     ),
                     "price_synced_at": publication["created_at"]
-                    if model_spec.get("price_source", "manual") != "manual" else None,
+                    if model_spec.get("price_source", "manual") != "manual"
+                    and model_spec.get("price_reference") else None,
                     "price_sync_status": "ok"
-                    if model_spec.get("price_source", "manual") != "manual" else None,
+                    if model_spec.get("price_source", "manual") != "manual"
+                    and model_spec.get("price_reference") else None,
                     "allowed_roles": model_spec["allowed_roles"],
                     "publication_id": publication_id,
+                    **(model_spec.get("price_configuration") or {}),
                 },
             )
             model["publication_id"] = publication_id

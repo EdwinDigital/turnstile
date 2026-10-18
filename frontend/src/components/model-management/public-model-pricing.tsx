@@ -40,6 +40,14 @@ export function PublicModelPricing({ request, draft, onChange, busy }: {
     price_discount_percent: draft.discountPercent.trim() ? Number(draft.discountPercent) : null,
     refresh: action.refresh, rematch: action.rematch && !action.reference,
   })
+  const rates = preview?.status === "matched" ? preview.effective_prices : null
+  const image = request.operation === "image_generation"
+  const rows: Array<[string, string, number | null]> = rates ? [
+    ["input", image ? "文字输入单价" : "输入", rates.input],
+    ["output", image ? "图像输出单价" : "输出", rates.output],
+    ["cached", image ? "缓存文字单价" : "缓存读取", rates.cached],
+    ...(!image ? [["cache_write", "缓存写入", rates.cache_write] as [string, string, number | null]] : []),
+  ] : []
 
   useEffect(() => {
     const token = ++generation.current
@@ -117,6 +125,16 @@ export function PublicModelPricing({ request, draft, onChange, busy }: {
       <small data-no-localize>{preview.match.provider_id} / {preview.match.model_id}</small>
       <small>{preview.match.method === "ai" ? "默认模型辅助匹配" : "目录匹配"}</small>
     </div>}
+    {rates && !request.model_id && <div className="public-price-readout">
+      <span className="model-editor-unit" data-no-localize>USD / 1M Tokens</span>
+      <dl className="public-price-rates" aria-label="实际单价">
+      {rows.map(([bucket, label, value]) => <div key={bucket} data-price-bucket={bucket}>
+        <dt>{label}</dt>
+        <dd data-no-localize data-value={value ?? ""}>{value === null ? "\u2014"
+          : value.toLocaleString("en-US", { maximumFractionDigits: 8 })}</dd>
+      </div>)}
+      </dl>
+    </div>}
     {pendingContext !== null && pendingContext.toString() !== draft.contextWindow && (
       <div className="public-price-context">
         <span>目录上下文 <b data-no-localize>{pendingContext.toLocaleString()}</b></span>
@@ -137,7 +155,7 @@ export function PublicModelPricing({ request, draft, onChange, busy }: {
       {error && <p className="publication-form-note" role="alert">{error}</p>}
       {preview?.warnings.map((warning, index) => <p className="publication-form-note" key={index}>{warning}</p>)}
     </div>
-    {!draft.priceReference && request.operation !== "image_generation" && <label className="model-editor-checkbox">
+    {!draft.priceReference && (!request.operation || request.operation === "chat") && <label className="model-editor-checkbox">
       <Checkbox checked={draft.allowUnpriced} disabled={busy || loading}
         onCheckedChange={checked => onChange(current => ({ ...current, allowUnpriced: checked === true }))} />
       <span>暂不计价</span>

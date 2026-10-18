@@ -360,6 +360,13 @@ export function ModelPublicationDialog({
   const contextWindow = pricing.contextWindow ?? ""
   const setContextWindow = (value: string) => setPricing(current => ({ ...current, contextWindow: value, contextOrigin: "user" }))
   const { inputPrice, outputPrice, cacheReadPrice, cacheWritePrice } = pricing
+  useEffect(() => {
+    setPricing(current => current.priceSource === "models_dev" ? {
+      ...current, priceReference: "", priceEntryDigest: "", allowUnpriced: false,
+      inputPrice: "", outputPrice: "", cacheReadPrice: "", cacheWritePrice: "",
+      contextWindow: current.contextOrigin === "catalog" ? "" : current.contextWindow,
+    } : current)
+  }, [runtimeId, foundryDeployment, upstreamModelId, modelKey, modelOperation])
   const [formError, setFormError] = useState<string | null>(null)
   const [publishError, setPublishError] = useState<string | null>(null)
   const [publishing, setPublishing] = useState(false)
@@ -384,7 +391,9 @@ export function ModelPublicationDialog({
     connection: "由连接管理",
   }[selectedRuntime ? publicationConnectionAuth(selectedRuntime, selectedProvider) : "connection"]
   const priceValues = decision ? [inputPrice, outputPrice] : imageGeneration ? [inputPrice, outputPrice, cacheReadPrice] : [inputPrice, outputPrice, cacheReadPrice, cacheWritePrice]
-  const pricingStatus = pricing.contextPricingPreview ? pricing.contextPricingSupported ? "分档价格" : "分档价格预览" : pricing.priceSource !== "manual"
+  const pricingStatus = pricing.contextPricingPreview ? pricing.contextPricingSupported ? "分档价格" : "分档价格预览"
+    : pricing.priceSource === "models_dev" ? pricing.priceReference ? "价格已填写" : "价格未填写"
+    : pricing.priceSource !== "manual"
     ? pricing.priceReference ? "官方价已选择" : "请选择官方价"
     : priceValues.every((value) => value.trim())
     ? "价格已填写"
@@ -542,7 +551,7 @@ export function ModelPublicationDialog({
         } : {}),
         ...(pricing.priceSource !== "manual" || pricing.discountPercent.trim() ? {
           price_source: pricing.priceSource,
-          price_reference: pricing.priceSource === "manual" || pricing.contextPricingPreview ? null : pricing.priceReference.trim(),
+          price_reference: pricing.priceSource === "manual" || pricing.contextPricingPreview ? null : pricing.priceReference.trim() || null,
           price_discount_percent: numberOrNull(pricing.discountPercent),
         } : {}),
       },
@@ -813,7 +822,7 @@ export function ModelPublicationDialog({
                 draft={pricing} setDraft={setPricing} busy={publishing}
                 showAnthropic={!decision && !imageGeneration}
                 imageGeneration={imageGeneration}
-                publicRequest={{ runtime_id: selectedRuntime.id, operation: imageGeneration ? "image_generation" : "chat",
+                publicRequest={{ runtime_id: selectedRuntime.id, operation: imageGeneration ? "image_generation" : decision ? "decision" : "chat",
                   deployment_name: foundry ? foundryDeployment : undefined,
                   upstream_model_id: foundry ? undefined : upstreamModelId,
                   model_key: foundry ? undefined : effectiveModelKey,

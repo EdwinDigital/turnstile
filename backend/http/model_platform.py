@@ -680,7 +680,7 @@ def create_gateway_publication(
 ) -> GatewayPublicationRequestAccepted:
     pricing_values = None
     model = write.model
-    if model.price_source is not None:
+    if model.price_source is not None and not model.context_price_references:
         pricing_values = {
             "price_source": model.price_source.value,
             "price_reference": model.price_reference,
@@ -696,9 +696,7 @@ def create_gateway_publication(
                     upstream_model_id=model.upstream_model_id,
                     display_name=model.display_name,
                     model_key=model.model_key,
-                    operation=(
-                        "image_generation" if model.operation == "image_generation" else "chat"
-                    ),
+                    operation=model.operation,
                     price_discount_percent=model.price_discount_percent,
                 ),
                 user_id=owner_email,

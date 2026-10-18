@@ -507,7 +507,7 @@ export function modelEditPayload(model: ManagedModel, draft: ModelEditDraft) {
     allowed_roles: [...draft.allowedRoles],
     is_default: draft.isDefault,
     price_source: draft.priceSource,
-    price_reference: draft.priceSource === "manual" || draft.contextPricingPreview ? null : draft.priceReference.trim(),
+    price_reference: draft.priceSource === "manual" || draft.contextPricingPreview ? null : draft.priceReference.trim() || null,
     price_discount_percent: optionalNumber(draft.discountPercent),
     ...(draft.priceSource === "models_dev" ? {
       price_entry_digest: draft.priceEntryDigest || null,

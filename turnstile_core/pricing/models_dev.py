@@ -198,6 +198,7 @@ class ModelsDevCatalog:
                         if isinstance(model.get("canonical_model_id"), str) else None,
                         unsupported=unsupported,
                         operation="image_generation" if image_tokens else "chat",
+                        text_to_image=image_tokens,
                         metadata={
                             "version": 1,
                             "snapshot_id": snapshot,
@@ -227,6 +228,7 @@ class ModelsDevCatalog:
                 label=entry.label,
                 product=entry.detail or "",
                 source=self.source,
+                text_to_image=entry.text_to_image,
             )
             for entry in self.entries()
             if entry.priced and not entry.unsupported

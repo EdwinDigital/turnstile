@@ -25,6 +25,9 @@ def export() -> dict[str, Any]:
             result = {key: visit(item) for key, item in value.items()}
             if ref := result.get("$ref"):
                 name = ref.removeprefix("#/components/schemas/")
+                if name == "RegistryResponse":
+                    result["$ref"] = "../../openapi.yaml#/components/schemas/RegistryResponse"
+                    return result
                 include(name)
                 result["$ref"] = f"#/schemas/{name}"
             return result

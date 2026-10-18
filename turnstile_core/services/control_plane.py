@@ -3331,10 +3331,27 @@ class GatewayControlPlaneService:
                         model = model.model_copy(update={
                             "context_price_tiers": previous_model.context_price_tiers,
                         })
-        if pricing_values is not None:
-            model = model.model_copy(update={"price_configuration": pricing_values})
+        if pricing_values is not None and not reused:
+            # A retry of the same quote must retain the same publication digest.
+            configuration = {
+                key: value for key, value in pricing_values.items() if key != "price_synced_at"
+            }
+            model = ModelTarget.model_validate({
+                **model.model_dump(mode="python"),
+                **{key: value for key, value in pricing_values.items()
+                   if key in ModelTarget.model_fields},
+                "price_configuration": configuration,
+            })
         elif not reused:
-            model = self._price_model(model, runtime)
+            if model.price_source is PriceSource.MODELS_DEV and not model.price_reference:
+                if not write.model.allow_unpriced:
+                    raise ControlPlaneConflictError(
+                        "Synchronize pricing or explicitly confirm an unpriced model"
+                    )
+            else:
+                model = self._price_model(
+                    model, runtime, expected_digest=write.model.price_entry_digest,
+                )
         binding_runtime = self._model_binding_runtime(provider, runtime, model)
 
         previous_row = self._repository.effective_gateway_publication(
@@ -5035,8 +5052,11 @@ class GatewayControlPlaneService:
         return ApiFormat.OPENAI_CHAT
 
 
-    def _price_model(self, model: ModelTarget, runtime: Mapping[str, Any]) -> ModelTarget:
-        if model.price_source in {PriceSource.MANUAL, PriceSource.MODELS_DEV}:
+    def _price_model(
+        self, model: ModelTarget, runtime: Mapping[str, Any],
+        *, expected_digest: str | None = None,
+    ) -> ModelTarget:
+        if model.price_source is PriceSource.MANUAL:
             return model
         percent = model.price_discount_percent
         if percent is None and runtime.get("price_discount_percent") is not None:
@@ -5070,8 +5090,12 @@ class GatewayControlPlaneService:
                 "The selected price source is unavailable"
             ) from error
         if (
-            entry is None or not entry.complete or not entry.priced
+            entry is None or not entry.complete or not entry.priced or entry.unsupported
             or entry.source != model.price_source
+            or entry.operation != (
+                "image_generation" if "image_generation" in model.capabilities else "chat"
+            )
+            or model.price_source is PriceSource.MODELS_DEV and "decision" in model.capabilities
             or model.image_profile is not None
             and (not entry.text_to_image or entry.cached_per_million is None)
         ):
@@ -5082,8 +5106,10 @@ class GatewayControlPlaneService:
             raise ControlPlaneConflictError(
                 "Select the complete context price schedule, not one tier"
             )
+        if expected_digest is not None and expected_digest != entry.digest:
+            raise ControlPlaneConflictError("Catalog prices changed; synchronize and confirm again")
         charged = entry.discounted(percent)
-        return model.model_copy(update={
+        values: dict[str, Any] = {
             "input_cost_per_million": charged.input_per_million,
             "output_cost_per_million": charged.output_per_million,
             "cached_cost_per_million": charged.cached_per_million,
@@ -5092,4 +5118,18 @@ class GatewayControlPlaneService:
             "list_output_cost_per_million": entry.output_per_million,
             "list_cached_cost_per_million": entry.cached_per_million,
             "list_cache_write_cost_per_million": entry.cache_write_per_million,
-        })
+        }
+        if model.price_source is PriceSource.MODELS_DEV:
+            values["price_configuration"] = {
+                **values,
+                "price_source": model.price_source.value,
+                "price_reference": entry.reference,
+                "match_metadata": {
+                    "reference": entry.reference, "provider_id": entry.provider_id,
+                    "model_id": entry.model_id, "name": entry.label,
+                    "canonical_model_id": entry.canonical_model_id,
+                    "method": "manual",
+                },
+                "source_snapshot": {**entry.metadata, "version": 1, "entry_digest": entry.digest},
+            }
+        return model.model_copy(update=values)

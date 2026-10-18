@@ -301,10 +301,11 @@ class ModelTarget(StrictModel):
             self.price_source is PriceSource.MANUAL or len(self.context_price_references) != 2
         ):
             raise ValueError("A custom context rule requires both short and long catalog tiers")
-        if self.price_source not in {PriceSource.MANUAL, PriceSource.MODELS_DEV}:
+        if self.price_source is not PriceSource.MANUAL:
             reference = (self.price_reference or "").strip()
             if not self.context_price_references and (
-                not reference or not reference.startswith(f"{self.price_source.value}:")
+                (not reference and self.price_source is not PriceSource.MODELS_DEV)
+                or (reference and not reference.startswith(f"{self.price_source.value}:"))
             ):
                 raise ValueError("Catalog pricing requires a reference from its selected source")
             self.price_reference = reference or None
@@ -314,7 +315,7 @@ class ModelTarget(StrictModel):
             if self.price_source not in {
                 PriceSource.MANUAL, PriceSource.MODELS_DEV, PriceSource.AZURE_RETAIL,
             }:
-                raise ValueError("Image generation requires manual or Azure retail prices")
+                raise ValueError("Image generation requires manual or a compatible catalog price")
             validate_image_profile(self.image_profile)
         return self
 
@@ -323,7 +324,7 @@ class ModelTarget(StrictModel):
     )
 
     price_reference: str | None = Field(
-        default=None, max_length=1000, exclude_if=lambda value: value is None,
+        default=None, max_length=1500, exclude_if=lambda value: value is None,
     )
 
     price_discount_percent: float | None = Field(
@@ -394,17 +395,17 @@ class ModelCreateTarget(StrictModel):
                 raise ValueError("Context references must use the selected source")
         if self.price_source is PriceSource.MANUAL:
             self.price_reference = None
-        elif (self.price_source not in {None, PriceSource.MODELS_DEV}
-              and not self.context_price_references):
+        elif self.price_source is not None and not self.context_price_references:
             reference = (self.price_reference or "").strip()
-            if not reference or not reference.startswith(f"{self.price_source.value}:"):
+            if (not reference and self.price_source is not PriceSource.MODELS_DEV) \
+                    or (reference and not reference.startswith(f"{self.price_source.value}:")):
                 raise ValueError("Catalog pricing requires a reference from its selected source")
-            self.price_reference = reference
+            self.price_reference = reference or None
         if self.operation == "image_generation":
             if self.price_source not in {
                 None, PriceSource.MODELS_DEV, PriceSource.MANUAL, PriceSource.AZURE_RETAIL,
             }:
-                raise ValueError("Image generation requires manual or Azure retail prices")
+                raise ValueError("Image generation requires manual or a compatible catalog price")
             if self.deployment_name is None:
                 raise ValueError("Image generation requires an existing Foundry deployment")
             if self.context_window is not None or self.cache_write_cost_per_million is not None:
@@ -415,7 +416,7 @@ class ModelCreateTarget(StrictModel):
             if self.deployment_name is None:
                 raise ValueError("Decision requires an existing Foundry deployment")
             if self.price_source not in {
-                None, PriceSource.MODELS_DEV, PriceSource.MANUAL, PriceSource.AZURE_RETAIL,
+                None, PriceSource.MANUAL, PriceSource.AZURE_RETAIL,
             }:
                 raise ValueError("Decision requires manual or Azure retail prices")
         explicit = (self.model_key, self.display_name, self.upstream_model_id)

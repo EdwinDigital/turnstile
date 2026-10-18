@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal, cast
@@ -36,22 +34,7 @@ MATCH_SYSTEM_PROMPT = (
 
 
 def entry_digest(entry: CatalogEntry) -> str:
-    return str(
-        entry.metadata.get("entry_digest")
-        or hashlib.sha256(
-            json.dumps(
-                [
-                    entry.reference,
-                    entry.input_per_million,
-                    entry.output_per_million,
-                    entry.cached_per_million,
-                    entry.cache_write_per_million,
-                    entry.context_window,
-                ],
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
-    )
+    return entry.digest
 
 
 def entry_prices(entry: CatalogEntry) -> PendingListPrice:
@@ -235,6 +218,12 @@ class ModelPricingService:
         )
         if request.price_source is PriceSource.MANUAL:
             return PricePreviewResponse(status="unsupported", warnings=["手动定价不执行同步"])
+        if request.price_source is PriceSource.MODELS_DEV and (
+            request.operation == "decision" or model and "decision" in model.capabilities
+        ):
+            return PricePreviewResponse(
+                status="unsupported", warnings=["Decision 模型请使用 Azure 零售价或手工填写"],
+            )
         if request.refresh:
             failures = self.catalog.refresh({request.price_source})
             if failures:

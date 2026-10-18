@@ -23,6 +23,13 @@ import * as modelVendor from "../../../frontend/src/components/model-management/
 
 const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
 const { rolldown } = await import(frontendRequire.resolve("rolldown"))
+const vendorEntry = fileURLToPath(new URL("../../../frontend/src/components/model-management/model-vendor-select.tsx", import.meta.url))
+const vendorBundle = await rolldown({ input: vendorEntry, external: id => id !== vendorEntry, transform: { jsx: { runtime: "automatic" } }, treeshake: false })
+const vendorExports = {}
+try {
+  const code = (await vendorBundle.generate({ format: "cjs" })).output[0].code
+  runInNewContext(code, { exports: vendorExports, require: name => name === "react/jsx-runtime" ? frontendRequire(name) : new Proxy({}, { get: (_target, key) => key }) })
+} finally { await vendorBundle.close() }
 async function compile(relative) {
   const entry = fileURLToPath(new URL(relative, import.meta.url))
   const bundle = await rolldown({ input: entry, external: path => path !== entry,
@@ -44,7 +51,7 @@ function editorHarness(model, providerKind = "microsoft_foundry") {
     } },
     "react/jsx-runtime": frontendRequire("react/jsx-runtime"),
     "./model-edit-form": modelEditForm,
-    "./model-vendor-select": { ...modelVendor, ModelVendorLogo: "ModelVendorLogo" },
+    "./model-vendor-select": { ...vendorExports, ModelVendorLogo: "ModelVendorLogo" },
     "./model-availability": { useModelAvailabilityCommand: () => ({ submitting: false }),
       ModelAvailabilityStatus: "ModelAvailabilityStatus", ModelAvailabilitySwitch: "ModelAvailabilitySwitch" },
     "../brand-logos": { GatewayBrandLogo: "GatewayBrandLogo", ProviderBrandLogo: "ProviderBrandLogo", gatewayBrandFromIdentity: value => value, providerBrandFromMetadata: value => value },
@@ -253,7 +260,7 @@ test("model editor retains source validation wording and one vendor identity row
 })
 
 test("model editor density and responsive rules retain the source composition", () => {
-  const stylesheet = frontendRequire("postcss").parse(readFileSync(new URL("../../../frontend/src/styles/model-platform.css", import.meta.url), "utf8"))
+  const stylesheet = frontendRequire("postcss").parse(readFileSync(new URL("../../../frontend/src/styles/finops.css", import.meta.url), "utf8"))
   const declarations = (selector, media = null) => {
     const matches = []
     stylesheet.walkRules(rule => {
@@ -351,6 +358,13 @@ test("a stored reference points back at the model it was chosen from", () => {
     "anthropic:Anthropic:Claude Opus 5")
   // Anything that is not a reference has no model to point at, and saying so beats guessing.
   assert.equal(modelKeyFromReference("nonsense"), null)
+})
+
+test("an explicitly unpriced edit serializes the optional catalog reference as null", () => {
+  const model = savedModel({ price_source: "models_dev", price_reference: null })
+  const draft = { ...createModelEditDraft(model), allowUnpriced: true }
+  assert.equal(validateModelEdit(draft), null)
+  assert.equal(modelEditPayload(model, draft).price_reference, null)
 })
 
 function catalogResponse(overrides = {}) {

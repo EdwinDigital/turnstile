@@ -1884,7 +1884,7 @@ export type PricePreviewRequest = {
   upstream_model_id?: string
   display_name?: string
   model_key?: string
-  operation?: "chat" | "image_generation"
+  operation?: "chat" | "image_generation" | "decision"
   price_reference?: string | null
   price_discount_percent?: number | null
   refresh?: boolean

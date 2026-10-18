@@ -79,9 +79,8 @@ class PostgreSqlRegistryRepositoryMixin:
                                         AS assignment_required,
                                     metadata.publication_id,
                                     binding.value->'model'->'image_profile' AS image_profile,
-                                    -- A model with no price row was priced by hand, which is
-                                    -- what 'manual' means, so the COALESCE is the whole
-                                    -- backfill.
+                                    -- Explicit manual rows stay manual; an unconfigured
+                                    -- model follows the public synchronization default.
                                     COALESCE(price.price_source, 'models_dev') AS price_source,
                                     (price.model_id IS NOT NULL) AS price_source_configured,
                                     price.updated_at AS price_config_updated_at,
@@ -273,8 +272,8 @@ class PostgreSqlRegistryRepositoryMixin:
 
                 # The outcome is recorded either way. On a skip the rates stay exactly as they
                 # are and only the record changes, so the registry can say why a model was
-                # passed over instead of going quiet. An UPDATE is enough: a model without a
-                # price row is manual, and the planner never selects one.
+                # passed over instead of going quiet. Successful first-time matches insert
+                # their price row above; unmatched unconfigured models remain unconfigured.
                 #
                 # list_* moves only when the sync accepted the price. A figure held back for
                 # review goes to pending_list_price, because a baseline that follows the price

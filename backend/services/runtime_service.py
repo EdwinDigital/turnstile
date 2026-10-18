@@ -1420,6 +1420,11 @@ class ModelRuntimeService:
             "fetched_at": preview.fetched_at.isoformat() if preview.fetched_at else None,
             "source_updated_at": preview.source_updated_at,
         }
+        values.update(
+            pending_list_price=None, pending_context_price_tiers=None,
+            price_sync_status="ok", price_sync_message=None,
+            price_synced_at=datetime.now(UTC),
+        )
         return values
 
     def check_runtime(
