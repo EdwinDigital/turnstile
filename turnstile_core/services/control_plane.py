@@ -18,6 +18,7 @@ from ..domain.application_access import (
     GatewayApplicationSubscriptionCreate,
     GatewayApplicationSubscriptionProvisionSpec,
     application_id_for,
+    application_organization,
     application_subscription_id_for,
 )
 from ..domain.control_plane import (
@@ -156,6 +157,7 @@ from ..persistence.repository import QueryRepository
 from ..pricing.catalog import CompositeCatalog, build_default_catalog, parse_context_tier
 from ..pricing.context import context_price_reference, resolve_context_prices
 from ..security import CredentialCipher
+from .directory_catalog import catalog_for
 
 
 class ControlPlaneConflictError(ValueError):
@@ -1368,6 +1370,10 @@ class GatewayControlPlaneService:
             )
         ):
             raise ControlPlaneConflictError("APIM subscription ID already exists")
+        try:
+            application_organization(request.tags, catalog=catalog_for(self._repository))
+        except ValueError as error:
+            raise ControlPlaneConflictError(str(error)) from error
         spec = GatewayApplicationSubscriptionProvisionSpec(
             provisioning_version=2,
             gateway_profile_id=gateway_profile_id,

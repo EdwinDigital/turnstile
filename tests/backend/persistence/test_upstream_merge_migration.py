@@ -24,6 +24,9 @@ from turnstile_core.config import Settings
 from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
 
 MIGRATIONS = REPOSITORY_ROOT / "migrations"
+CLIENT_EXTENSIONS = {
+    "019_client_user_authorization.up.sql", "020_plugin_download_permissions.up.sql",
+}
 FORK_EXTENSIONS = {
     "009_assistant_api_format.up.sql", "010_models_dev_pricing.up.sql",
     "011_user_settings_profile.up.sql", "012_organization_directory.up.sql",
@@ -41,17 +44,21 @@ BUSINESS_TABLES = (
 
 def snapshot(info: str) -> dict[str, list[dict[str, Any]]]:
     with psycopg.connect(info) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname='public'"
+        ).fetchall()}
         return {
             table: [row[0] for row in connection.execute(
                 sql.SQL("SELECT to_jsonb(record) FROM {} record").format(sql.Identifier(table))
             ).fetchall()]
             for table in BUSINESS_TABLES
+            if table in tables
         }
 
 
-@pytest.mark.parametrize("upgrade_fork", [False, True], ids=["fresh", "existing-fork"])
+@pytest.mark.parametrize("installation", ["fresh", "fork", "legacy-fork", "upstream", "pr34"])
 def test_combined_migrations_preserve_fork_history_and_are_repeatable(
-    local_postgres: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upgrade_fork: bool,
+    local_postgres: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installation: str,
 ) -> None:
     directory = tmp_path / "migrations"
     directory.mkdir()
@@ -59,34 +66,33 @@ def test_combined_migrations_preserve_fork_history_and_are_repeatable(
     monkeypatch.setattr(runner, "get_settings", lambda: settings)
     before: dict[str, list[dict[str, Any]]] = {}
     old_ledger: dict[str, tuple[Any, ...]] = {}
-    if upgrade_fork:
+    if installation != "fresh":
         for path in runner.migration_files(MIGRATIONS):
-            if path.name < "009_" or path.name in FORK_EXTENSIONS:
+            if installation == "upstream":
+                included = path.name not in FORK_EXTENSIONS
+            elif installation == "pr34":
+                included = path.name not in CLIENT_EXTENSIONS
+            else:
+                included = path.name < "009_" or path.name in FORK_EXTENSIONS
+                if installation == "legacy-fork" and path.name in CLIENT_EXTENSIONS:
+                    included = False
+            if included:
                 shutil.copy2(path, directory / path.name)
-        assert len(runner.migrate()) == 20
+        assert len(runner.migrate()) == {
+            "fork": 20, "legacy-fork": 18, "upstream": 28, "pr34": 38,
+        }[installation]
         seed_history(local_postgres)
-        with psycopg.connect(local_postgres) as connection:
-            connection.execute(
-                """INSERT INTO directory_organization(id,code,name,updated_by)
-                   VALUES ('preserved-org','preserved','Preserved organization','merge-test')"""
-            )
-            person = connection.execute(
-                """INSERT INTO directory_person(governance_user_id,display_name,updated_by)
-                   VALUES ('preserved@example.com','Preserved Person','merge-test') RETURNING id"""
-            ).fetchone()
-            assert person is not None
-            connection.execute(
-                """INSERT INTO directory_account_link(person_id,app_user_id,verified_by)
-                   SELECT %s,id,'merge-test' FROM app_user WHERE email='preserved@example.com'""",
-                (person[0],),
-            )
+        if installation != "upstream":
+            seed_directory_history(local_postgres)
         before = snapshot(local_postgres)
         old_ledger = {row[0]: row for row in ledger(local_postgres)}
 
     for path in runner.migration_files(MIGRATIONS):
         shutil.copy2(path, directory / path.name)
     applied = runner.migrate()
-    assert len(applied) == (20 if upgrade_fork else 40)
+    assert len(applied) == {
+        "fresh": 40, "fork": 20, "legacy-fork": 22, "upstream": 12, "pr34": 2,
+    }[installation]
     complete = ledger(local_postgres)
     assert len(complete) == 40
     for row in complete:
@@ -106,3 +112,21 @@ def test_combined_migrations_preserve_fork_history_and_are_repeatable(
         ModelRuntimeService(repository, settings).registry()
     finally:
         repository.close()
+
+
+def seed_directory_history(local_postgres: str) -> None:
+    with psycopg.connect(local_postgres) as connection:
+        connection.execute(
+            """INSERT INTO directory_organization(id,code,name,updated_by)
+               VALUES ('preserved-org','preserved','Preserved organization','merge-test')"""
+        )
+        person = connection.execute(
+            """INSERT INTO directory_person(governance_user_id,display_name,updated_by)
+               VALUES ('preserved@example.com','Preserved Person','merge-test') RETURNING id"""
+        ).fetchone()
+        assert person is not None
+        connection.execute(
+            """INSERT INTO directory_account_link(person_id,app_user_id,verified_by)
+               SELECT %s,id,'merge-test' FROM app_user WHERE email='preserved@example.com'""",
+            (person[0],),
+        )
