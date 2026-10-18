@@ -1,7 +1,9 @@
 # Budget Operations
 
-This is the maintained operations contract for this branch. `docs/` stays byte-for-byte aligned
-with the reviewed upstream baseline; branch-specific changes are maintained under `plan/`.
+This is the maintained operations contract for this branch. Original upstream files in `docs/`
+stay byte-for-byte aligned with the reviewed baseline; branch operations remain under `plan/`.
+The separately requested [enterprise plugin guides](../../docs/enterprise-plugin/README.md)
+are end-user/admin documentation, not installation journals or live environment settings.
 For the completed installation and ordinary-user USD test, see the dated
 [USD acceptance record](usd-installation.md), not a live health guarantee.
 Do not repeat initialization because an old plan or status file says it is incomplete.

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import re
 
+from PIL import Image
+
 from backend.migrate import migration_files
 from tests.support.paths import REPOSITORY_ROOT
 
@@ -46,6 +48,20 @@ UPSTREAM_DOCS_SHA256 = {
         '9fee23d8f71bf850c45656efdd8caa55a4ea29b98751ae57644897a9e22b67d3',
 }
 
+ENTERPRISE_GUIDES = {
+    "README.md", "user-guide.md", "admin-guide.md", "architecture.md",
+}
+ENTERPRISE_SCREENSHOTS = {
+    "magpie-installed.png", "magpie-provider.png", "magpie-usage.png",
+    "magpie-workbuddy.png", "workbuddy-model.png", "platform-downloads.png",
+    "platform-budgets.png", "platform-permissions.png", "platform-request-trace.png",
+    "platform-request-detail.png",
+}
+ENTERPRISE_DOC_FILES = {
+    *(f"docs/enterprise-plugin/{name}" for name in ENTERPRISE_GUIDES),
+    *(f"docs/enterprise-plugin/assets/{name}" for name in ENTERPRISE_SCREENSHOTS),
+}
+
 
 def branch_deployment_guidance() -> str:
     return "\n".join(path.read_text() for path in (
@@ -56,9 +72,32 @@ def branch_deployment_guidance() -> str:
 def test_docs_match_the_reviewed_upstream_main_baseline() -> None:
     paths = {path.relative_to(REPOSITORY_ROOT).as_posix(): path
              for path in (REPOSITORY_ROOT / "docs").rglob("*") if path.is_file()}
-    assert paths.keys() == UPSTREAM_DOCS_SHA256.keys()
+    assert paths.keys() == UPSTREAM_DOCS_SHA256.keys() | ENTERPRISE_DOC_FILES
     assert {name: hashlib.sha256(path.read_bytes()).hexdigest()
-            for name, path in paths.items()} == UPSTREAM_DOCS_SHA256, UPSTREAM_DOCS_REVISION
+            for name, path in paths.items() if name in UPSTREAM_DOCS_SHA256} == (
+                UPSTREAM_DOCS_SHA256
+            ), UPSTREAM_DOCS_REVISION
+
+
+def test_enterprise_plugin_guides_link_real_screenshots_without_capture_metadata() -> None:
+    root = REPOSITORY_ROOT / "docs/enterprise-plugin"
+    documents = {name: (root / name).read_text() for name in ENTERPRISE_GUIDES}
+    source = "\n".join(documents.values())
+    images = set(re.findall(r"!\[[^\]]+\]\(assets/([^/)]+\.png)\)", source))
+    assert images == ENTERPRISE_SCREENSHOTS
+    assert "终端用户" in documents["README.md"] and "企业管理员" in documents["README.md"]
+    for title in ("下载", "安装", "WorkBuddy", "个人预算", "常见问题"):
+        assert title in documents["user-guide.md"]
+    for title in ("权限管理", "预算管理", "请求追踪", "订阅密钥"):
+        assert title in documents["admin-guide.md"]
+    assert "flowchart LR" in documents["architecture.md"]
+    assert not re.search(r"https?://|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}|/Users/", source)
+    assert "没有新增模型调用" in documents["README.md"]
+    for name in ENTERPRISE_SCREENSHOTS:
+        with Image.open(root / "assets" / name) as image:
+            assert image.format == "PNG" and image.mode == "RGB"
+            assert image.width >= 500 and image.height >= 300
+            assert not image.info, f"Remove original capture metadata: {name}"
 
 
 def test_documentation_is_delivery_focused() -> None:

@@ -31,6 +31,8 @@
 
 Turnstile is a self-hosted control plane for governed AI model access. It combines an Azure API Management gateway, token and cost telemetry, budgets, application access, model onboarding, release controls, and an operational web console.
 
+For employee setup and administrator workflows, see the [enterprise plugin guides](docs/enterprise-plugin/README.md) (Simplified Chinese, with redacted screenshots).
+
 > [!NOTE]
 > **Turnstile v1.2** is the current public release. The project is evolving rapidly, so APIs, configuration, and deployment workflows may change as it matures. Review changes carefully before upgrading production deployments.
 

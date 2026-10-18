@@ -59,7 +59,9 @@ Current branch installation and regression guidance follows under the 2026-10-18
 
 ## 当前分支配置与验证补充（2026-10-18）
 
-`docs/` 已逐文件恢复到上游 `main` 的 `e59177d61c27d3641fff86caed8fe476bacf858e`；以下是本分支必须另外遵循的配置与升级要求。
+`docs/` 原有上游文件保持 `main` 的 `e59177d61c27d3641fff86caed8fe476bacf858e`；
+另按用户要求增加[企业插件使用专区](../docs/enterprise-plugin/README.md)，不改变原有文件字节。
+以下是本分支必须另外遵循的配置与升级要求。
 文档迁移没有修改任何已应用 SQL，也没有重新安装、部署或变更线上预算。
 
 以下内容从本分支修改的 `docs/` 文档迁移，描述分支实现和操作要求，不代表本次重新部署或完成所有验证。

@@ -14,7 +14,7 @@ DOCUMENTS = tuple(sorted({
     ROOT / "README.md",
     ROOT / "README.zh-CN.md",
     *(ROOT / "plan").rglob("*.md"),
-    *(ROOT / "docs").glob("*.md"),
+    *(ROOT / "docs").rglob("*.md"),
 }))
 
 
