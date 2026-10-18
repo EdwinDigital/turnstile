@@ -13,10 +13,13 @@ export type AccountInformation = {
 }
 export type PersonalBudget = {
   period: string; period_start: string; period_end: string; min_period: string; max_period: string
+  budget_mode?: "tokens" | "usd"
+  usd_limit?: string | null; used_usd?: string | null
+  remaining_usd?: string | null; forecast_usd?: string | null
   token_limit: number | null; used_tokens: number; remaining_tokens: number | null
   warning_threshold_percent: number | null; usage_percent: number | null
   forecast_tokens: number; forecast_percent: number | null
-  status: "unallocated" | "healthy" | "warning" | "exceeded"
+  status: "unallocated" | "healthy" | "warning" | "exceeded" | "unverified"
   enforcement_mode: "audit" | "block" | null
   enforcement_department_id: string | null
   basis: "budget_evidence"; generated_at: string

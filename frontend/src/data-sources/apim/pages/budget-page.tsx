@@ -180,8 +180,8 @@ function BudgetKpis({ data }: { data: TokenBudgetResponse }) {
   const kpis = [
     {
       label: data.coverage === "department" ? "可见部门预算" : "组织总预算",
-      value: allocatedBudget ? formatTokens(allocatedBudget) : "未分配",
-      detail: `${organizations.filter((item) => item.token_limit != null).length} 个组织已配置`,
+      value: allocatedBudget || usdOrganizations.length ? amount(allocatedBudget, "usd_limit") : "未分配",
+      detail: `${organizations.filter((item) => budgetLimit(item) != null).length} 个组织已配置`,
       icon: WalletCards,
     },
     {
@@ -669,7 +669,7 @@ function BudgetTable({
     </div>
     <section className="finops-panel budget-allocation-panel">
       <div className="budget-table-scroll">
-        <ResizableGridTable className="budget-table" role="table" aria-label="Token 预算层级" headerSelector=".budget-table-head" minWidths={[180, 100, 140, 160, 160, 94, 88, 52]}>
+        <ResizableGridTable className="budget-table" role="table" aria-label="预算层级" headerSelector=".budget-table-head" minWidths={[180, 100, 140, 160, 160, 94, 88, 52]}>
           <div className="budget-table-head" role="row"><span><span>范围</span></span><span><span>预算</span></span><span><span>已使用</span></span><span><span>剩余</span></span><span><span>月底预测</span></span><span><span>状态</span></span><span title="开启后额度用尽的人员会被网关拒绝"><span>拦截</span></span><span /></div>
           {rows.map(({ item, directoryStatus, depth, hasChildren, parentAllocated }) => <BudgetRow
             key={`${item.scope_type}:${item.scope_id}`}
@@ -948,7 +948,7 @@ function PeopleBudgetWorkspace({
   const loading = people.isLoading || Boolean(teamId && teamMembers.isPending)
   const peopleError = people.error || teamMembers.error
   const counts = {
-    assigned: filteredItems.filter(row => row.token_limit != null).length,
+    assigned: filteredItems.filter(row => budgetLimit(row) != null).length,
     models: filteredItems.filter(row => row.model_policy_configured).length,
     risk: filteredItems.filter(row => row.status === "warning" || row.status === "exceeded").length,
   }
@@ -975,7 +975,7 @@ function PeopleBudgetWorkspace({
   const pageEnd = Math.min(offset + limit, total)
   return <section className="finops-panel people-budget-panel">
     <div className="people-budget-heading">
-      <div><h2>人员预算与模型</h2><p>月度 Token 额度与长期模型访问分开管理；列表按需加载。</p></div>
+      <div><h2>人员预算与模型</h2><p>月度预算与长期模型访问分开管理；列表按需加载。</p></div>
       <div className="people-budget-summary">{people.data && !loading && !peopleError && <><span>{`${counts.assigned.toLocaleString(getIntlLocale())} 预算已配置`}</span><i /><span>{`${counts.models.toLocaleString(getIntlLocale())} 模型已配置`}</span>{counts.risk > 0 && <><i /><span className="risk">{`${counts.risk.toLocaleString(getIntlLocale())} 风险`}</span></>}</>}</div>
     </div>
     <div className="people-budget-scope"><span>{scope.type === "organization" ? "组织" : "部门"}</span><strong data-no-localize>{scopeName}</strong></div>
@@ -1010,10 +1010,10 @@ function PeopleBudgetWorkspace({
             ? <><strong title={item.allowed_model_ids.map((id) => models.find((model) => model.id === id)?.display_name ?? id).join("、")}>{models.find((model) => model.id === item.allowed_model_ids[0])?.display_name ?? "已分配模型"}</strong><small>{item.allowed_model_ids.length > 1 ? `另有 ${item.allowed_model_ids.length - 1} 个` : "长期有效"}</small></>
             : <><strong>禁止全部</strong><small>已配置策略</small></>
           : <><strong>未配置</strong><small>兼容现有权限</small></>}</div>
-        <div><strong>{item.token_limit == null ? "--" : formatFullTokens(item.token_limit)}</strong><small>{item.token_limit == null ? "未分配" : `预警 ${item.warning_threshold_percent}%`}</small></div>
-        <div><strong>{formatFullTokens(item.used_tokens)}</strong><small>{item.usage_percent == null ? "--" : `${item.usage_percent}%`}</small></div>
-        <div><strong>{item.remaining_tokens == null ? "--" : formatFullTokens(item.remaining_tokens)}</strong><small>Token</small></div>
-        <div className="budget-status-cell"><span data-status={item.status}>{statusLabels[item.status]}</span></div>
+        <div><strong>{item.budget_mode === "usd" ? formatBudgetUsd(item.usd_limit) : item.token_limit == null ? "--" : formatFullTokens(item.token_limit)}</strong><small>{budgetLimit(item) == null ? "未分配" : `预警 ${item.warning_threshold_percent}%`}</small></div>
+        <BudgetProgress item={item} />
+        <div><strong>{item.budget_mode === "usd" ? budgetUsdMetric(item, "remaining_usd") : item.remaining_tokens == null ? "--" : formatFullTokens(item.remaining_tokens)}</strong><small>{item.budget_mode === "usd" ? "USD" : "Token"}</small></div>
+        <div className="budget-status-cell"><span data-status={item.status}>{budgetStatusLabel(item)}</span></div>
         {canManage ? <Button type="button" variant="ghost" size="icon-sm" className="people-budget-edit-button" title="设置人员预算与模型" onClick={() => { setSelectedIds(new Set([item.scope_id])); bulk.reset(); setBulkOpen(true) }}><Pencil size={14} /></Button> : <span />}
       </div>)}
     </ResizableGridTable></div>}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 import pytest
@@ -118,6 +119,33 @@ def test_no_budget_still_has_personal_evidence_usage() -> None:
     assert budget.token_limit is None and budget.usage_percent is None
     assert budget.remaining_tokens is None and budget.status == "unallocated"
     assert budget.used_tokens == 42
+
+
+@pytest.mark.parametrize("unpriced", [False, True])
+def test_personal_usd_budget_preserves_amounts_and_unknown_cost(
+    monkeypatch: pytest.MonkeyPatch, unpriced: bool,
+) -> None:
+    repository = InMemoryRepository()
+    now = datetime.now(UTC)
+    monkeypatch.setattr(repository, "list_token_budgets", lambda *args, **kwargs: [{
+        "scope_type": "user", "scope_id": "test.user01@contoso.com",
+        "parent_scope_id": "department-platform", "budget_mode": "usd",
+        "token_limit": None, "usd_limit": Decimal("10"), "warning_threshold_percent": 80,
+    }])
+    monkeypatch.setattr(repository, "token_usage_by_budget_scope", lambda *args, **kwargs: [{
+        "scope_type": "user", "scope_id": "test.user01@contoso.com", "used_tokens": 43,
+        "used_usd": Decimal("0.000226"), "unpriced_usage_count": int(unpriced),
+    }])
+    budget = UserSettingsService(repository, Settings()).budget(reader(), now.strftime("%Y-%m"))
+    assert budget.budget_mode == "usd" and budget.usd_limit == Decimal("10")
+    assert budget.token_limit is None and budget.remaining_tokens is None
+    assert budget.used_tokens == 43
+    if unpriced:
+        assert budget.status == "unverified" and budget.used_usd is None
+        assert budget.remaining_usd is None and budget.usage_percent is None
+    else:
+        assert budget.status == "healthy" and budget.used_usd == Decimal("0.000226")
+        assert budget.remaining_usd == Decimal("9.999774")
 
 
 @pytest.mark.parametrize("period", ["2026-13", "invalid", "9999-12", "0000-01"])

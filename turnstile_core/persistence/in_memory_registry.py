@@ -298,6 +298,10 @@ class InMemoryRegistryRepositoryMixin:
         row = self._find(target, item_id)
         if row is None:
             return None
+        if kind == "gateway" and set(values) == {"name"} and any(
+            item["id"] != item_id and item["name"] == values["name"] for item in target
+        ):
+            raise ValueError("Gateway display name is already in use")
         if kind == "model" and "enabled" in values and values["enabled"] != row["enabled"]:
             raise ModelAvailabilityConflict(
                 "Change model availability through the versioned availability command"

@@ -432,6 +432,25 @@ def test_gateway_name_missing_record_returns_404_without_management_key(
     assert publication_api.gateways == original
 
 
+@pytest.mark.parametrize("minimal", [False, True])
+def test_gateway_name_rejects_duplicate_display_names_without_writing(
+    publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
+    minimal: bool,
+) -> None:
+    del management_runtime_service
+    gateway = publication_api.gateways[0]
+    publication_api.gateways.append({**gateway, "id": UUID(int=901), "name": "Existing gateway"})
+    original = deepcopy(publication_api.gateways)
+    response = client.patch(
+        f"/api/v1/model-management/gateways/{gateway['id']}/name",
+        json={"name": "Existing gateway"},
+        headers={"Prefer": "return=minimal"} if minimal else {},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Gateway display name is already in use"
+    assert publication_api.gateways == original
+
+
 def test_default_backend_advertises_and_accepts_image_models(
     publication_api: InMemoryRepository, management_runtime_service: ModelRuntimeService,
 ) -> None:

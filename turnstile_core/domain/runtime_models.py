@@ -1167,6 +1167,8 @@ class ModelInvocationResponse(StrictModel):
     latency_ms: int = Field(ge=0)
     usage: InvocationUsage | None
     estimated_cost: float | None = Field(default=None, ge=0)
+    selected_model_id: UUID | None = None
+    selected_model_name: str | None = None
     _responses_output: list[dict[str, Any]] | None = PrivateAttr(default=None)
     _anthropic_content: list[dict[str, Any]] | None = PrivateAttr(default=None)
 

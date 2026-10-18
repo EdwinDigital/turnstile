@@ -1,6 +1,9 @@
 import assert from "node:assert/strict"
-import { registerHooks } from "node:module"
+import { readFileSync } from "node:fs"
+import { createRequire, registerHooks, stripTypeScriptTypes } from "node:module"
 import test from "node:test"
+import { fileURLToPath, pathToFileURL } from "node:url"
+import vm from "node:vm"
 
 // Node's type-stripping runner does not resolve Vite's extensionless TS imports.
 registerHooks({
@@ -12,6 +15,47 @@ const {
   budgetDirectoryItems, budgetScopeDepartments, budgetScopeTeams, filterBudgetPeople,
   readDepartmentBudgetPeople, readTeamBudgetMembers, selectedBudgetDepartment,
 } = await import("../../../frontend/src/lib/budget-directory.ts")
+
+const frontendRequire = createRequire(new URL("../../../frontend/package.json", import.meta.url))
+const { rolldown } = await import(pathToFileURL(frontendRequire.resolve("rolldown")).href)
+const pageEntry = fileURLToPath(new URL("../../../frontend/src/data-sources/apim/pages/budget-page.tsx", import.meta.url))
+const pageBundle = await rolldown({ input: pageEntry, external: id => id !== pageEntry,
+  treeshake: false, transform: { jsx: { runtime: "automatic" } } })
+let pageCode
+try { pageCode = (await pageBundle.generate({ format: "cjs" })).output[0].code }
+finally { await pageBundle.close() }
+
+function budgetComponents(people = []) {
+  const module = { exports: {} }
+  const components = new Proxy({}, { get: (_target, name) => `unit-${String(name).toLowerCase()}` })
+  vm.runInNewContext(`${pageCode}\nmodule.exports.BudgetKpis = BudgetKpis; module.exports.PeopleBudgetWorkspace = PeopleBudgetWorkspace`, {
+    module, exports: module.exports, Intl, Date, Set, Map,
+    require: name => {
+      if (["react", "react/jsx-runtime"].includes(name)) return frontendRequire(name)
+      if (name === "@tanstack/react-query") return {
+        useQueryClient: () => ({}),
+        useMutation: () => ({ reset() {}, isPending: false }),
+        useQuery: options => ({ data: options.queryKey[0] === "finops"
+          ? { items: people, departments: [] } : undefined }),
+      }
+      if (name === "../../../locales/index") return {
+        getIntlLocale: () => "en-US", useLocale: () => ({ locale: "en" }),
+      }
+      if (name === "../../../lib/budget-directory") return {
+        filterBudgetPeople, selectedBudgetDepartment,
+      }
+      if (name === "lucide-react") return new Proxy({}, { get: () => () => null })
+      return components
+    },
+  })
+  return module.exports
+}
+
+function renderBudget(component, props) {
+  return frontendRequire("react-dom/server").renderToStaticMarkup(
+    frontendRequire("react").createElement(component, props),
+  )
+}
 
 const directory = {
   organizations: [
@@ -31,6 +75,7 @@ const directory = {
 const scope = (type, id, name, parent = null) => ({
   scope_type: type, scope_id: id, scope_name: name, parent_scope_id: parent,
   status: "exceeded", token_limit: 100, used_tokens: 123, remaining_tokens: -23,
+  forecast_tokens: 123, unpriced_usage_count: 0,
 })
 const items = [
   scope("organization", "archived", "A archived"),
@@ -44,6 +89,82 @@ const people = [
   { ...scope("user", "b@example.com", "Bob", "dept-a"), token_limit: null, status: "unallocated" },
   { ...scope("user", "c@example.com", "Carol", "dept-b"), status: "exceeded" },
 ]
+
+test("department editing recognizes Token and USD parent budgets, including zero limits", () => {
+  const source = readFileSync(new URL("../../../frontend/src/data-sources/apim/pages/budget-page.tsx", import.meta.url), "utf8")
+  const helper = source.slice(source.indexOf("function budgetLimit("), source.indexOf("function budgetUsdMetric("))
+  const budgetLimit = new Function(`${stripTypeScriptTypes(helper)}; return budgetLimit`)()
+  const parentCheck = source.match(/parentAllocated: ([^}\n]+) \}\)/g)
+    .find(row => row.includes("organization"))
+    .replace(/^parentAllocated: /, "").replace(/ \}\)$/, "")
+  const parentAllocated = new Function("budgetLimit", "organization", `return ${parentCheck}`)
+  for (const [parent, expected] of [
+    [{ budget_mode: "tokens", token_limit: 100, usd_limit: null }, true],
+    [{ budget_mode: "usd", token_limit: null, usd_limit: "100.00" }, true],
+    [{ budget_mode: "tokens", token_limit: 0, usd_limit: null }, true],
+    [{ budget_mode: "usd", token_limit: null, usd_limit: "0.00" }, true],
+    [{ budget_mode: "tokens", token_limit: null, usd_limit: null }, false],
+    [{ budget_mode: "usd", token_limit: null, usd_limit: null }, false],
+    [{ token_limit: 100 }, true],
+  ]) assert.equal(parentAllocated(budgetLimit, parent), expected, JSON.stringify(parent))
+})
+
+for (const [name, organizations, amount, assigned] of [
+  ["USD only", [{ budget_mode: "usd", token_limit: null, usd_limit: "100.00" }], "$100.00", 1],
+  ["USD zero", [{ budget_mode: "usd", token_limit: null, usd_limit: "0.00" }], "$0.00", 1],
+  ["mixed units", [{ token_limit: 1000 }, { budget_mode: "usd", token_limit: null, usd_limit: "100.00" }], "1,000 Token / $100.00", 2],
+  ["legacy Token", [{ token_limit: 1000 }], "1,000", 1],
+  ["unallocated", [{ token_limit: null }], "未分配", 0],
+]) {
+  test(`organization budget KPI preserves upstream ${name} semantics`, () => {
+    const { BudgetKpis } = budgetComponents()
+    const markup = renderBudget(BudgetKpis, { data: {
+      coverage: "department", risk_count: 0,
+      items: organizations.map((row, i) => ({ ...scope("organization", `org-${i}`, "Org"), ...row })),
+    } })
+    assert.ok(markup.includes("可见部门预算"))
+    assert.ok(markup.includes(amount), markup)
+    assert.ok(markup.includes(`${assigned} 个组织已配置`), markup)
+  })
+}
+
+test("directory people preserve USD allocation, spent and remaining display", () => {
+  const person = { ...people[0], budget_mode: "usd", token_limit: null, usd_limit: "20.00",
+    used_tokens: 0, used_usd: "3.00", remaining_tokens: null, remaining_usd: "17.00",
+    usage_percent: 15, warning_threshold_percent: 80, allowed_model_ids: [] }
+  const { PeopleBudgetWorkspace } = budgetComponents([person])
+  const markup = renderBudget(PeopleBudgetWorkspace, { period: "2026-10", canManage: false,
+    departments: [], models: [], scope: { type: "department", id: "dept-b" },
+    scopeName: "Department", teams: [], teamId: "", onTeamChange() {} })
+  for (const text of ["1 预算已配置", "$20.00", "$3.000", "$17.00", "USD", "预警 80%"])
+    assert.ok(markup.includes(text), `${text}: ${markup}`)
+  assert.ok(!markup.includes("月度 Token 额度"))
+})
+
+test("directory people retain legacy Token allocation display", () => {
+  const person = { ...people[0], token_limit: 1000, used_tokens: 100, remaining_tokens: 900,
+    usage_percent: 10, warning_threshold_percent: 80, allowed_model_ids: [] }
+  const { PeopleBudgetWorkspace } = budgetComponents([person])
+  const markup = renderBudget(PeopleBudgetWorkspace, { period: "2026-10", canManage: false,
+    departments: [], models: [], scope: { type: "department", id: "dept-b" },
+    scopeName: "Department", teams: [], teamId: "", onTeamChange() {} })
+  for (const text of ["1 预算已配置", "1,000", "900", "Token", "预警 80%"])
+    assert.ok(markup.includes(text), `${text}: ${markup}`)
+})
+
+test("directory people do not render unknown USD usage as zero", () => {
+  const person = { ...people[0], budget_mode: "usd", token_limit: null, usd_limit: "20.00",
+    used_tokens: 0, used_usd: null, remaining_tokens: null, remaining_usd: null,
+    usage_percent: null, status: "unverified", warning_threshold_percent: 80, allowed_model_ids: [] }
+  const { PeopleBudgetWorkspace } = budgetComponents([person])
+  const markup = renderBudget(PeopleBudgetWorkspace, { period: "2026-10", canManage: false,
+    departments: [], models: [], scope: { type: "department", id: "dept-b" },
+    scopeName: "Department", teams: [], teamId: "", onTeamChange() {} })
+  assert.ok(markup.includes("1 预算已配置"))
+  assert.ok(markup.includes("等待金额数据"))
+  assert.ok(markup.includes("用量未验证"))
+  assert.ok(!markup.includes("$0.000"))
+})
 
 test("archive display and sorting do not change any budget status, limit or attribution", () => {
   const frozen = Object.freeze(items.map(row => Object.freeze(row)))
@@ -80,6 +201,18 @@ test("team intersection, name/email search and budget filters do not change user
   assert.deepEqual(filterBudgetPeople(people, "ALICE", "healthy", null, "en"), [people[0]])
   assert.deepEqual(filterBudgetPeople(people, "", "assigned", null, "en"), [people[0], people[2]])
   assert.deepEqual(filterBudgetPeople(people, "", "all", new Set(), "en"), [])
+})
+
+test("assigned people filtering recognizes USD budgets without changing directory scope", () => {
+  const usd = { ...people[0], scope_id: "usd", budget_mode: "usd", token_limit: null, usd_limit: "20.00" }
+  const zero = { ...usd, scope_id: "zero", usd_limit: "0.00" }
+  const absent = { ...usd, scope_id: "absent", usd_limit: null, status: "unallocated" }
+  const all = [...people, usd, zero, absent]
+  assert.deepEqual(new Set(filterBudgetPeople(all, "", "assigned", null, "en").map(row => row.scope_id)),
+    new Set([people[0].scope_id, people[2].scope_id, "usd", "zero"]))
+  assert.deepEqual(filterBudgetPeople(all, "", "assigned", new Set(["usd"]), "en"), [usd])
+  assert.deepEqual(new Set(filterBudgetPeople(all, "", "unallocated", null, "en").map(row => row.scope_id)),
+    new Set([people[1].scope_id, "absent"]))
 })
 
 test("bulk editing resolves only one unchanged primary department", () => {

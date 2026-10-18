@@ -170,32 +170,68 @@ schemas:
     - updated_at
     title: PersonalAvatar
   PersonalBudget:
+    additionalProperties: false
     properties:
       period:
-        type: string
         title: Period
-      period_start:
         type: string
+      period_start:
         format: date
         title: Period Start
-      period_end:
         type: string
+      period_end:
         format: date
         title: Period End
+        type: string
       min_period:
-        type: string
         title: Min Period
-      max_period:
         type: string
+      max_period:
         title: Max Period
+        type: string
+      budget_mode:
+        default: tokens
+        enum:
+        - tokens
+        - usd
+        title: Budget Mode
+        type: string
+      usd_limit:
+        anyOf:
+        - pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
+          type: string
+        - type: 'null'
+        default: null
+        title: Usd Limit
+      used_usd:
+        anyOf:
+        - pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
+          type: string
+        - type: 'null'
+        default: null
+        title: Used Usd
+      remaining_usd:
+        anyOf:
+        - pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
+          type: string
+        - type: 'null'
+        default: null
+        title: Remaining Usd
+      forecast_usd:
+        anyOf:
+        - pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
+          type: string
+        - type: 'null'
+        default: null
+        title: Forecast Usd
       token_limit:
         anyOf:
         - type: integer
         - type: 'null'
         title: Token Limit
       used_tokens:
-        type: integer
         title: Used Tokens
+        type: integer
       remaining_tokens:
         anyOf:
         - type: integer
@@ -212,27 +248,28 @@ schemas:
         - type: 'null'
         title: Usage Percent
       forecast_tokens:
-        type: integer
         title: Forecast Tokens
+        type: integer
       forecast_percent:
         anyOf:
         - type: number
         - type: 'null'
         title: Forecast Percent
       status:
-        type: string
         enum:
         - unallocated
         - healthy
         - warning
         - exceeded
+        - unverified
         title: Status
+        type: string
       enforcement_mode:
         anyOf:
-        - type: string
-          enum:
-          - audit
+        - enum:
           - block
+          - audit
+          type: string
         - type: 'null'
         title: Enforcement Mode
       enforcement_department_id:
@@ -241,16 +278,14 @@ schemas:
         - type: 'null'
         title: Enforcement Department Id
       basis:
-        type: string
         const: budget_evidence
-        title: Basis
         default: budget_evidence
-      generated_at:
+        title: Basis
         type: string
+      generated_at:
         format: date-time
         title: Generated At
-    additionalProperties: false
-    type: object
+        type: string
     required:
     - period
     - period_start
@@ -269,6 +304,7 @@ schemas:
     - enforcement_department_id
     - generated_at
     title: PersonalBudget
+    type: object
   PersonalModel:
     properties:
       id:

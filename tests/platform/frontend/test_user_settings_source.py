@@ -51,3 +51,13 @@ def test_personal_tables_and_charts_use_shared_components_without_portal_conflic
     assert "<th key={label}><span>{label}</span></th>" in page
     assert "showHeatmap" not in page
     assert "finopsQueries" not in page
+
+
+def test_personal_budget_renders_usd_and_preserves_unknown_cost() -> None:
+    page = source("pages/user-settings-page.tsx")
+    assert 'budget.budget_mode === "usd"' in page
+    for field in ("usd_limit", "used_usd", "remaining_usd", "forecast_usd"):
+        assert f"amount(budget.{field})" in page
+    assert 'value == null ? "--" : cost(Number(value))' in page
+    assert 'unverified: "金额待核实"' in page
+    assert 'limit != null && budget.usage_percent != null' in page
