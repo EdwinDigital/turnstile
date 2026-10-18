@@ -17,6 +17,7 @@
 | --- | --- |
 | 组织目录、兼容三包发布、身份同步 | [组织运维](organization-management/operations.md) |
 | USD 安装、结算、恢复与运行开关 | [预算运维](aigateway-proxy-client/operations.md) |
+| 插件后续能力：TPM/RPM 感知与请求调度 | [插件 Roadmap](aigateway-proxy-client/roadmap.md)，规划未实现 |
 | 用户设置、登录与个人配置升级 | [用户设置设计](user-settings/design.md#当前分支配置与验证补充2026-10-18) |
 | 角色、菜单及安全边界 | [权限实施说明](permission-management/implementation.md#当前分支配置与验证补充2026-10-18) |
 | FinOps 助手协议与验证 | [FinOps 设计](ai-finops/design.md#当前分支配置与验证补充2026-10-18) |
