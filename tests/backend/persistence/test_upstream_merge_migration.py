@@ -40,17 +40,21 @@ BUSINESS_TABLES = (
 
 def snapshot(info: str) -> dict[str, list[dict[str, Any]]]:
     with psycopg.connect(info) as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname='public'"
+        ).fetchall()}
         return {
             table: [row[0] for row in connection.execute(
                 sql.SQL("SELECT to_jsonb(record) FROM {} record").format(sql.Identifier(table))
             ).fetchall()]
             for table in BUSINESS_TABLES
+            if table in tables
         }
 
 
-@pytest.mark.parametrize("upgrade_fork", [False, True], ids=["fresh", "existing-fork"])
+@pytest.mark.parametrize("installation", ["fresh", "fork", "upstream"])
 def test_combined_migrations_preserve_fork_history_and_are_repeatable(
-    local_postgres: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, upgrade_fork: bool,
+    local_postgres: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installation: str,
 ) -> None:
     directory = tmp_path / "migrations"
     directory.mkdir()
@@ -58,34 +62,25 @@ def test_combined_migrations_preserve_fork_history_and_are_repeatable(
     monkeypatch.setattr(runner, "get_settings", lambda: settings)
     before: dict[str, list[dict[str, Any]]] = {}
     old_ledger: dict[str, tuple[Any, ...]] = {}
-    if upgrade_fork:
+    if installation != "fresh":
         for path in runner.migration_files(MIGRATIONS):
-            if path.name < "009_" or path.name in FORK_EXTENSIONS:
+            included = (
+                path.name < "009_" or path.name in FORK_EXTENSIONS
+                if installation == "fork" else path.name not in FORK_EXTENSIONS
+            )
+            if included:
                 shutil.copy2(path, directory / path.name)
-        assert len(runner.migrate()) == 18
+        assert len(runner.migrate()) == (18 if installation == "fork" else 28)
         seed_history(local_postgres)
-        with psycopg.connect(local_postgres) as connection:
-            connection.execute(
-                """INSERT INTO directory_organization(id,code,name,updated_by)
-                   VALUES ('preserved-org','preserved','Preserved organization','merge-test')"""
-            )
-            person = connection.execute(
-                """INSERT INTO directory_person(governance_user_id,display_name,updated_by)
-                   VALUES ('preserved@example.com','Preserved Person','merge-test') RETURNING id"""
-            ).fetchone()
-            assert person is not None
-            connection.execute(
-                """INSERT INTO directory_account_link(person_id,app_user_id,verified_by)
-                   SELECT %s,id,'merge-test' FROM app_user WHERE email='preserved@example.com'""",
-                (person[0],),
-            )
+        if installation == "fork":
+            seed_directory_history(local_postgres)
         before = snapshot(local_postgres)
         old_ledger = {row[0]: row for row in ledger(local_postgres)}
 
     for path in runner.migration_files(MIGRATIONS):
         shutil.copy2(path, directory / path.name)
     applied = runner.migrate()
-    assert len(applied) == (20 if upgrade_fork else 38)
+    assert len(applied) == {"fresh": 38, "fork": 20, "upstream": 10}[installation]
     complete = ledger(local_postgres)
     assert len(complete) == 38
     for row in complete:
@@ -105,3 +100,21 @@ def test_combined_migrations_preserve_fork_history_and_are_repeatable(
         ModelRuntimeService(repository, settings).registry()
     finally:
         repository.close()
+
+
+def seed_directory_history(local_postgres: str) -> None:
+    with psycopg.connect(local_postgres) as connection:
+        connection.execute(
+            """INSERT INTO directory_organization(id,code,name,updated_by)
+               VALUES ('preserved-org','preserved','Preserved organization','merge-test')"""
+        )
+        person = connection.execute(
+            """INSERT INTO directory_person(governance_user_id,display_name,updated_by)
+               VALUES ('preserved@example.com','Preserved Person','merge-test') RETURNING id"""
+        ).fetchone()
+        assert person is not None
+        connection.execute(
+            """INSERT INTO directory_account_link(person_id,app_user_id,verified_by)
+               SELECT %s,id,'merge-test' FROM app_user WHERE email='preserved@example.com'""",
+            (person[0],),
+        )
