@@ -96,6 +96,32 @@ def test_direct_public_quote_is_operation_checked_and_snapshot_guarded() -> None
             publisher._price_model(model, {})
 
 
+def test_repeated_accepted_public_quote_reuses_publication() -> None:
+    runtime, _, row = service()
+    preview = runtime.price_preview(PricePreviewRequest(model_id=row["id"]), user_id="owner")
+    assert preview.match is not None
+    reference = preview.match.reference
+    repository = InMemoryRepository()
+    publisher = GatewayControlPlaneService(repository, apim_principal_id="unit")
+    write = foundry_publication("repeat-public-quote")
+    write.provider = ProviderTarget(existing_id=next(
+        item["id"] for item in repository.providers if item["brand_key"] == "microsoft_foundry"
+    ))
+    write.model.price_source = PriceSource.MODELS_DEV
+    write.model.price_reference = reference
+
+    def accepted() -> dict[str, Any]:
+        return {
+            **runtime._accepted_price_values(preview),
+            "price_source": "models_dev", "price_reference": reference,
+        }
+
+    first = publisher.publish(write, "owner", pricing_values=accepted())
+    repeated = publisher.publish(write, "owner", pricing_values=accepted())
+    assert repeated.id == first.id
+    assert repeated.desired_spec_sha256 == first.desired_spec_sha256
+
+
 def test_catalog_metadata_edit_cannot_change_model_availability() -> None:
     runtime, _, row = service()
     before = dict(row)

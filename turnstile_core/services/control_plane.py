@@ -3320,11 +3320,15 @@ class GatewayControlPlaneService:
                             "context_price_tiers": previous_model.context_price_tiers,
                         })
         if pricing_values is not None and not reused:
+            # A retry of the same quote must retain the same publication digest.
+            configuration = {
+                key: value for key, value in pricing_values.items() if key != "price_synced_at"
+            }
             model = ModelTarget.model_validate({
                 **model.model_dump(mode="python"),
                 **{key: value for key, value in pricing_values.items()
                    if key in ModelTarget.model_fields},
-                "price_configuration": pricing_values,
+                "price_configuration": configuration,
             })
         elif not reused:
             if model.price_source is PriceSource.MODELS_DEV and not model.price_reference:
