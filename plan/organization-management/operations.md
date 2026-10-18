@@ -1,5 +1,9 @@
 # Organization Management
 
+本文件从 docs/organization-management.md 迁移而来，维护当前分支的运维契约。
+`docs/` 保持上游基线；当前分支的实际配置、完整迁移链和验收以 `plan/` 对应说明为准。
+
+
 ## Runtime Boundaries
 
 The APIM workspace maintains organizations, departments, teams and personnel in PostgreSQL.
@@ -21,7 +25,7 @@ Readiness requires the complete pending candidate chain through `backend.migrate
 directory authority and compatible packages. Directory migrations include
 `012_organization_directory`, `013_menu_permission_groups`, `014_multiple_menu_permission_groups`,
 `015_scoped_menu_administrators`, `016_organization_members`, `017_department_memberships` and
-`018_permission_management`. Use the [full inventory](testing.md#migration-inventory), not numeric
+`018_permission_management`. Use the [full inventory](../upstream-main-merge-2026-10-16.md#migration-inventory), not numeric
 prefix ranges that can refer to unrelated migrations from the other history.
 An HTTP health response alone does not prove directory, Graph or gateway readiness.
 
@@ -258,7 +262,7 @@ existing `directory_scope` column; restricted viewers cannot read old global sna
 Shared usage APIs are authorized by their actual consuming pages. Granting Usage Breakdown
 alone must authorize its summary and distribution reads without also granting Overview.
 Scope enforcement still applies to every query, including malicious or multi-value filters.
-See [requirements and review](../plan/permission-management/review.md).
+See [requirements and review](../permission-management/review.md).
 
 Migration 018 adds the default role policy/audit and updates effective appointments without
 rewriting budgets, telemetry or primary billing membership. Previously global Member reads
@@ -534,3 +538,76 @@ normal package rollback.
 Static employee APIM attribution does not automatically follow directory edits or disables.
 Treat it as pending alignment until the separately gated dynamic identity policy and projection
 have been deployed and verified. Never infer gateway revocation from a successful directory save.
+
+## 当前分支配置与验证补充（2026-10-18）
+
+以下内容从本分支修改的 `docs/` 文档迁移，描述分支实现和操作要求，不代表本次重新部署或完成所有验证。
+
+<!-- Migrated from docs/e2e-validation.md; section: Organization Directory Candidates -->
+
+## Organization Directory Candidates
+
+Record empty installation, existing-instance upgrade and Entra identity candidates separately.
+The implementation-specific results are in
+[Organization Management Implementation](implementation.md);
+this historical platform result record is not an organization-release result.
+
+- [ ] Empty PostgreSQL initialization, real Owner login, first hierarchy and explicit account
+  association; restart without reinserting examples or resetting credentials
+- [ ] Existing-instance actual three-package/settings/database backup and isolated restore
+- [ ] Additive migration rerun, unchanged checksums, concurrent runners and staged recovery
+- [ ] Approved backfill, preserved billing baseline and three-package readback before CAS activation
+- [ ] Real Owner and department Member workflows, cross-scope denials and query-only history
+- [ ] Desktop/mobile directory plus Copilot source normalization, hidden menu and no polling
+- [ ] Compatible runtime update, rollback and republish with retained directory/disable state,
+  complete settings readback, Function indexing and unchanged billing/model/ledger evidence
+- [ ] Selected real Graph tenant/Groups, minimal application permissions and administrator consent
+- [ ] Full/delta synchronization, reviewed preview, source lifecycle, paging failure and recovery
+- [ ] Real signed employee-token candidate probes, Table projection readback, spoofing denial,
+  disabled/expired mapping, propagation deadline, promotion and safe policy rollback
+
+Package upload, Azure policy compilation, a successful health check and unit mocks satisfy
+none of the signed-token or real Graph checks on their own. Keep sync/projection disabled
+when their separately approved configuration and evidence are absent. Directory synchronization
+does not configure or verify console SSO.
+
+<!-- Migrated from docs/configuration.md; section: Organization Directory -->
+
+## Organization Directory
+
+Apply `012_organization_directory` before enabling the persistent directory. Schema migration,
+business import and authority activation are separate operations. Organizations, departments,
+teams, stable personnel identities, account links, explicit department grants and sync configuration
+are stored in PostgreSQL, not environment variables. The menu is APIM-only; GitHub Copilot's
+enterprise teams remain independent.
+
+| Variable | Purpose |
+| --- | --- |
+| `DIRECTORY_SOURCE` | `legacy` by default; `database` requires activated or explicitly empty-ready control state. No automatic seed fallback. |
+| `ORGANIZATION_MANAGEMENT_ENABLED` | Management capability/menu flag, false by default. Requires database mode. |
+| `DIRECTORY_EMPTY_INITIALIZATION_ALLOWED` | One-time empty-business-database opt-in; false by default and rejected for existing governance data. |
+| `DIRECTORY_EXPECTED_CORE_DIGEST` | Exact SHA-256 of the mounted core from each package's manifest; required in production database mode. |
+| `DIRECTORY_SYNC_ENABLED` | Independently enables the Control-plane sync timer; false by default. Does not grant Graph consent. |
+| `DIRECTORY_IDENTITY_PROJECTION_ENABLED` | Independently gated gateway identity projection; false during schema, package and directory upgrades. |
+| `DIRECTORY_MANAGED_IDENTITY_TENANT_ID` | Deployment tenant UUID for same-tenant managed-identity Graph connections. |
+| `DIRECTORY_DEPLOYMENT_CLOUD` | Credential-hosting cloud: `public`, `usgov`, or `china`. |
+
+Changing `DIRECTORY_SOURCE` is not a migration or rollback. Follow the
+[directory upgrade procedure](operations.md). All three runtime packages must
+contain matching core digests and protocol version 1. API packaging includes the public
+`scripts.directory_upgrade` CLI without private operational files; Function packages contain
+core workers but no HTTP backend or migration runner.
+
+Graph connectors support a deployment managed identity or an application secret referenced
+in the hosting cloud's Key Vault. Select the source cloud, tenant and explicit Group mappings
+in the management UI. Groups do not automatically become an organization tree or login roles.
+Console Microsoft authentication currently uses the public-cloud authority; importing a
+sovereign directory does not configure sovereign-cloud login.
+
+Apply `011_user_settings_profile` through the [user-settings upgrade procedure](../user-settings/design.md#user-settings-database-upgrade)
+before the updated API. Local avatars are normalized
+static images, at most 64 KiB, stored privately in PostgreSQL; they do not require Blob
+Storage or new Graph permissions. Account changes are audited without storing image or
+credential contents. A password change revokes every Turnstile session for that account.
+
+Delegated invocation does not change the authenticated session. A Member remains the recorded actor, while the configured tester becomes the effective `x-user-id` used for model access, budget enforcement, and Request Trace. The tester must exist in the enterprise directory and belong to the selected department; arbitrary or cross-department identities are rejected by the API.

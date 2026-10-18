@@ -215,7 +215,8 @@ catalog_user = 当前合并目录中与 person_key 精确匹配的人员
 - 默认月份由服务端 UTC 时间决定，`period` 为真实 `YYYY-MM`，允许当前月及前 11 个月；月份上限/下限由响应提供给 MonthPicker。
 - 增加本人限定预算读取和证据聚合参数/方法，在仓储层限定 `scope_type=user`、`scope_id=person_key`。复用 `token_usage_by_budget_scope` 的既有证据/入账语义，不能只 SUM 原始 token_usage。
 - 对没有目录或没有预算的账号仍独立读取本人用量；缺归属不导致查询退化为所有用户。
-- 复用 `TokenBudgetService._forecast_tokens` 对所选月预测，并复用状态计算；必要时小范围提取纯函数，不复制一套不同阈值。
+- Token 复用 `TokenBudgetService._forecast_tokens`，USD 复用既有金额聚合与 `_forecast_usd`；金额以 Decimal 计算、十进制字符串返回，不将 USD 的 `token_limit=null` 转成整数。
+- 已上线的本人预算响应保留 Token 字段，新增可选 `budget_mode`、`usd_limit`、`used_usd`、`remaining_usd`、`forecast_usd`。页面按单位显示；有未定价消费时金额、余额和百分比保持 `null`，状态为 `unverified`，不显示为零消费。
 - 预算使用率 `used / limit * 100`；余额 `limit - used` 可负；预警取实际使用或月底预测达到已配置阈值。无额度时百分比和余额为 `null`。
 - 已使用是预算证据口径，实际趋势是原始遥测统计口径；返回 `basis` 与 `generated_at`。本期不将余额标为实时 APIM 可准入余额，不把待结算预留当作精确费用。
 - 部门模式优先按本人该月预算记录的 `parent_scope_id` 解析；没有预算时使用当前目录部门，缺部门则模式为 `null`；有已知部门但无配置沿用 `audit`。模式归属与当前目录不一致时保留来源，不默默替换。
@@ -414,7 +415,7 @@ PersonalUsage
 
 `app_user.display_name/password_hash/role` 与 `user_session` 已存在，名称/密码修改不需要新增这些列；头像修改需新增独立 `app_user_avatar` 表，由 AuthStore 管理，不在 app_user 行中混入图片大字段，也不新增组织或部门列。
 
-头像表及持久化审计/限流通过 `011_user_settings_profile.up.sql` 建立。上线前发现当前 repo 的定价功能已应用 `010_models_dev_pricing`，因此将未上线的个人设置迁移顺延为 `011`；不修改已应用文件。本迁移不依赖 `009/010`，可从上游 `001-008` 独立升级，也可在当前 repo 的完整链后应用。迁移带文件类型/字节长度和账号外键约束；不将默认头像图片或实际用户图片写入迁移。部署顺序、执行入口及应用回滚边界见[升级说明](../../docs/deployment.md#user-settings-database-upgrade)。
+头像表及持久化审计/限流通过 `011_user_settings_profile.up.sql` 建立。上线前发现当前 repo 的定价功能已应用 `010_models_dev_pricing`，因此将未上线的个人设置迁移顺延为 `011`；不修改已应用文件。本迁移不依赖 `009/010`，可从上游 `001-008` 独立升级，也可在当前 repo 的完整链后应用。迁移带文件类型/字节长度和账号外键约束；不将默认头像图片或实际用户图片写入迁移。部署顺序、执行入口及应用回滚边界见[升级说明](#user-settings-database-upgrade)。
 
 建议新增文件：
 
@@ -523,3 +524,168 @@ PersonalUsage
 2026-10-11的[权限管理](../permission-management/design.md)保留用户设置为不可取消的
 个人入口；本人资料、预算、模型和用量仍使用当前账号的自助读取逻辑。
 普通用户的其他目录/治理页面即使被勾选开放，也只读取本人数据。
+
+## 当前分支配置与验证补充（2026-10-18）
+
+以下内容从本分支修改的 `docs/` 文档迁移，描述分支实现和操作要求，不代表本次重新部署或完成所有验证。
+
+<!-- Migrated from docs/testing.md; section: Personal user settings -->
+
+### Personal user settings
+
+Apply `011_user_settings_profile` before deploying the updated authentication API, following
+the [upgrade procedure](#user-settings-database-upgrade). Personal avatars are
+private PostgreSQL records; Microsoft sessions continue to use Graph photos.
+Only password sessions can update the current account's name, avatar, or password. Successful
+password changes revoke all Turnstile sessions without changing Microsoft credentials.
+
+The reproducible migration suite starts and stops only its own local PostgreSQL 16+
+cluster, using a private Unix socket and rejecting TCP connections. It does not read
+`DATABASE_URL` or `TEST_USER_SETTINGS_DATABASE_URL` as a target. With `initdb` and
+`postgres` available on `PATH`, run:
+
+```bash
+uv run pytest -q tests/backend/persistence/test_user_settings_migration.py
+```
+
+It covers fresh installation through `011`, upgrade with historical account/session/budget/
+usage preservation, unchanged migration checksums and timestamps on rerun, rejection of
+applied-file changes, and schema/ledger rollback on failure. Missing or older PostgreSQL
+tools explicitly skip these tests; a skipped run is not migration evidence.
+The fresh-Owner case exercises migration followed by real bootstrap, session issuance
+with the new avatar schema, display-name/password updates and a restart-style rerun
+that must preserve the new name/password and the existing migration ledger.
+
+Run the self-service API and UI source checks with the ordinary suite. To exercise real
+transaction locking, rollback, avatar persistence, audit and password attempt limiting,
+explicitly set `TEST_USER_SETTINGS_DATABASE_URL` to an isolated, migrated PostgreSQL database
+and run `tests/backend/persistence/test_user_settings_store.py`. Never point this test
+variable at a shared or deployed database. Tests create temporary accounts and delete only
+those accounts during teardown.
+
+<!-- Migrated from docs/deployment.md; section: User settings database upgrade -->
+
+### User settings database upgrade
+
+The plugin-download permission update adds `020_plugin_download_permissions` to the
+existing permission policy. Run the standard migration entry point before starting
+the new API; preserve 001-019 checksums and existing business history. It also changes
+shared Core code, so stage matching API, Telemetry and Control-plane manifests and
+expected Core digests using the existing coordinated upgrade procedure. It is not
+an API-only or frontend-only hotfix. APIM policy and infrastructure do not change.
+Default downloads preserve the prior behavior: all role groups may download their
+user plugin, and only Owner may export subscription plugins until delegation is
+explicitly configured. Subscription delegation never grants another application's key.
+Do not roll new download-deny policies back to an API that cannot enforce them;
+retain a compatible secured runtime or keep the affected downloads in maintenance.
+
+For the permission-management upgrade, apply pending `018_permission_management` using
+the same `backend.migrate` entry point before the candidate API starts. Preserve 001-017
+checksums and business tables; 018 adds only policy/audit and the effective-appointment
+projection. Stage matching API/Telemetry/Control-plane core manifests. Record complete
+settings, package hashes and a restorable database backup; pause workers during deployment
+and restore their original states/settings after readback. Entra sync and gateway identity
+projection switches must retain their current values.
+
+Menu/row authorization is a security behavior change, including ordinary-user self scope.
+Do not expose Members through an older package that lacks this authorization after rollback.
+Retain additive 018 schema and audit, restore only a compatible secured runtime or hold
+the API in maintenance. Database restore is a separate recovery operation, not a package
+rollback. See [permission design](../permission-management/design.md).
+
+The user-settings API requires `migrations/011_user_settings_profile.up.sql`. It adds
+`app_user_avatar` for private normalized avatars and `account_security_event` for account
+change auditing and password-verification throttling. It does not rewrite existing accounts,
+sessions, budgets or usage, and needs no infrastructure changes or new Graph permissions.
+This migration's table definitions do not depend on `009_assistant_api_format` or
+`010_models_dev_pricing`, but deploying the current candidate still requires its complete
+pending chain. `011_gateway_targets` is a separate full version, not a substitute.
+
+For a fresh deployment, the existing API staging step includes all numbered migrations,
+including `011_user_settings_profile`. App Service runs migration, initial-Owner bootstrap and
+API startup in that order with `&&`; migration failure prevents bootstrap and API startup. No new Bicep
+parameter, Owner field, Graph scope, Blob Storage resource or deployment mode is required.
+The explicit pre-deployment migration procedure below is for an existing installation.
+
+No second SQL upgrade script is required: clean installs and existing installations use
+the same numbered migration through `backend.migrate`. If `011_user_settings_profile` is already
+recorded with the matching checksum, leave it unchanged and let the runner skip it. A later schema change
+needs a new numbered migration; do not add a second script that recreates these tables.
+
+Use the installation's actual backup capabilities. Azure PostgreSQL Burstable does not
+support customer on-demand backups; do not change its SKU or network rules just to run an
+upgrade. Verify existing automatic backups and recovery retention, and use a compatible
+`pg_dump --format=custom` in the authorized database environment when a fresh logical
+backup is needed. Encrypt the backup, restrict its permissions, and retain its recovery key
+outside Git. `pg_restore --list` validates the archive catalog, not a successful restore;
+test restoration separately against an explicitly authorized isolated database.
+Deployment-state secrets and installation-specific SCM/backup helpers remain private.
+
+1. Back up the existing database and record its `schema_migration` versions and checksums.
+   Use the installation's existing secret configuration and authorized migration environment;
+   do not put `DATABASE_URL` or credentials into Git or the command line.
+2. Before deploying the new API, apply pending migrations through the existing runner:
+
+   ```bash
+   uv run python -m backend.migrate
+   ```
+
+   The runner applies each pending file transactionally and verifies existing checksums.
+   Rerunning it skips applied files; do not run the SQL directly or edit an applied file.
+   The API startup migration check does not replace this pre-deployment step. Run it in
+   the existing authorized database environment without exposing credentials or temporarily
+   opening the database firewall.
+3. Confirm `011_user_settings_profile` appears once in `schema_migration`, both new tables
+   exist, and earlier checksums and account/budget/usage data are unchanged. Deploy the
+   matching API and frontend packages through the existing deployment process.
+4. Verify password-account display-name and avatar updates, wrong-password rejection,
+   password replacement followed by reauthentication, and read-only Microsoft profiles.
+   A successful password change revokes all existing Turnstile sessions for that account.
+
+For an application rollback, restore the previous API/frontend packages and retain the
+additive tables and migration ledger entry. Do not drop audit or avatar data or rewrite
+migration history. Rolling back packages does not restore changed passwords or revoked
+sessions; database restoration requires a separately reviewed recovery procedure.
+
+<!-- Migrated from docs/deployment.md; section: Initial Owner -->
+
+## Initial Owner
+
+The deployment command reads the password interactively and never sends plaintext to ARM. It deploys only the scrypt hash. API startup applies the schema and atomically creates the Owner only when `app_user` is empty; restarts and reruns do not reset the account. Enabled Owner accounts are immediately listed in People under the default AI Platform department so the bootstrap Owner can assign model access before generating gateway traffic. Member department placement still comes from attributed gateway usage.
+
+Password users can change their own password in User settings. Operators can also use
+the existing account command from an authorized application execution context:
+
+```bash
+python -m backend.accounts <owner-email> --role owner
+```
+
+After changing the Owner password, use the current password for deployment verification.
+Update any private `--owner-credentials` file used by automation, retaining mode `0600`.
+Do not replace the deployment state, platform keys or stored bootstrap hash: that hash
+creates an Owner only while the account table is empty. Existing accounts and their
+display names/passwords remain unchanged by restarts and repeated bootstrap attempts.
+
+<!-- Migrated from docs/configuration.md; section: Authentication -->
+
+## Authentication
+
+| Variable | Purpose |
+| --- | --- |
+| `ENTRA_CLIENT_ID` | Public client ID accepted by the backend token verifier. |
+| `VITE_ENTRA_CLIENT_ID` | Same public client ID compiled into the frontend. |
+| `ENTRA_ALLOWED_EMAIL_DOMAINS` | JSON array of exact email domains allowed to sign in. |
+| `ENTRA_ALLOWED_TENANT_IDS` | Optional JSON array of exact trusted tenant UUIDs; empty retains the existing multi-tenant domain gate. |
+| `MEMBER_SESSION_TTL_HOURS` | Fixed member session duration. |
+| `OWNER_SESSION_TTL_HOURS` | Fixed owner session duration. |
+| `SESSION_COOKIE_NAME` | Session cookie name; defaults to `turnstile_session`. |
+| `DELEGATED_INVOCATION_TESTER_IDS` | JSON array of enterprise-directory user IDs that Members may select as delegated invocation identities; defaults to `[]`. |
+| `BOOTSTRAP_OWNER_EMAIL` | Initial password Owner email; used only while `app_user` is empty. |
+| `BOOTSTRAP_OWNER_PASSWORD_HASH` | Matching scrypt hash generated by the deployment script; plaintext is never deployed. |
+
+The frontend uses the Microsoft `organizations` authority. Admission is enforced by exact
+email-domain matching and the configured tenant allow-list in the backend. The self-service
+deployment script creates the first password Owner only when the user table is empty.
+Password users can change their own display name, avatar, and password from User settings.
+Microsoft sessions show read-only profiles. Operators can still use `python -m backend.accounts`
+for account maintenance; application restarts never reset the bootstrap account.

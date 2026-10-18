@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 
 from backend.migrate import migration_files
@@ -9,13 +10,55 @@ EXPECTED_DOCUMENTS = {
     "README.md",
     "architecture.md",
     "configuration.md",
-    "organization-management.md",
     "deployment.md",
     "e2e-validation.md",
     "security.md",
     "testing.md",
     "troubleshooting.md",
 }
+
+
+FORK_UPGRADE = REPOSITORY_ROOT / "plan/upstream-main-merge-2026-10-16.md"
+DIRECTORY_OPERATIONS = REPOSITORY_ROOT / "plan/organization-management/operations.md"
+BUDGET_OPERATIONS = REPOSITORY_ROOT / "plan/aigateway-proxy-client/operations.md"
+USER_SETTINGS_DESIGN = REPOSITORY_ROOT / "plan/user-settings/design.md"
+
+# Pin the reviewed upstream documentation without requiring Git or network access in CI.
+UPSTREAM_DOCS_REVISION = 'e59177d61c27d3641fff86caed8fe476bacf858e'
+UPSTREAM_DOCS_SHA256 = {
+    'docs/README.md':
+        'd6a1bb1d500d7d2c775dc6cf4e9cc732f2981009becdfaf1a9c169c3350db2ff',
+    'docs/architecture.md':
+        '4e7dd447a268463ce16555612f92633b8cd9c0974cd407daa695ddb9e4a9c95d',
+    'docs/assets/product-overview.png':
+        'e8411697e7b553c3ed1aa76d2fcd7de286e0fe93b4c1558fd202b5bf1b0e05c6',
+    'docs/configuration.md':
+        'e493f6f4c4ac80beba3a2cab56196ab35eda8a7ba3278f00a258961a8d04c61a',
+    'docs/deployment.md':
+        'aab049f025e6da75d1a7463ad98113e0501cbf44021c5026c553d9e82d2298c8',
+    'docs/e2e-validation.md':
+        'b2918bdb55d949151111a6debd65abc2ee5b3480f9eca4a050f670b3c508e483',
+    'docs/security.md':
+        '568f707095a1f2f01f0f4333ffceebe01ecba53eb2a57c15e3c26e935ca4f017',
+    'docs/testing.md':
+        'c649957cb4fc703904b34e11ea93d9128f290f768049dbef0784a64e44bfcc74',
+    'docs/troubleshooting.md':
+        '9fee23d8f71bf850c45656efdd8caa55a4ea29b98751ae57644897a9e22b67d3',
+}
+
+
+def branch_deployment_guidance() -> str:
+    return "\n".join(path.read_text() for path in (
+        FORK_UPGRADE, BUDGET_OPERATIONS, USER_SETTINGS_DESIGN,
+    ))
+
+
+def test_docs_match_the_reviewed_upstream_main_baseline() -> None:
+    paths = {path.relative_to(REPOSITORY_ROOT).as_posix(): path
+             for path in (REPOSITORY_ROOT / "docs").rglob("*") if path.is_file()}
+    assert paths.keys() == UPSTREAM_DOCS_SHA256.keys()
+    assert {name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for name, path in paths.items()} == UPSTREAM_DOCS_SHA256, UPSTREAM_DOCS_REVISION
 
 
 def test_documentation_is_delivery_focused() -> None:
@@ -56,7 +99,7 @@ def test_repository_documents_one_database_entry_point() -> None:
     ]
 
     assert migrations[0].name == "001_initial_schema.up.sql"
-    testing = (REPOSITORY_ROOT / "docs/testing.md").read_text(encoding="utf-8")
+    testing = FORK_UPGRADE.read_text(encoding="utf-8")
     assert "uv run python -m backend.migrate" in testing
     for migration in migrations:
         assert migration.name.removesuffix(".up.sql") in testing
@@ -67,7 +110,7 @@ def test_repository_documents_one_database_entry_point() -> None:
 
 
 def test_documented_migration_inventory_matches_runner_order_and_count() -> None:
-    testing = (REPOSITORY_ROOT / "docs/testing.md").read_text(encoding="utf-8")
+    testing = FORK_UPGRADE.read_text(encoding="utf-8")
     inventory = testing.split("### Migration inventory", 1)[1].split("\n### ", 1)[0]
     documented = re.findall(r"^\| `([0-9]{3}_[^`]+\.up\.sql)` \|", inventory, re.MULTILINE)
     expected = [path.name for path in migration_files(REPOSITORY_ROOT / "migrations")]
@@ -80,12 +123,12 @@ def test_documented_migration_inventory_matches_runner_order_and_count() -> None
 
 
 def test_deployment_prerequisites_require_the_complete_candidate_chain() -> None:
-    deployment = (REPOSITORY_ROOT / "docs/deployment.md").read_text(encoding="utf-8")
+    deployment = branch_deployment_guidance()
     normalized = " ".join(deployment.split())
     cutover = deployment.split("## Budget execution cutover", 1)[1].split("\n## ", 1)[0]
 
     assert "all pending migrations shipped with the compatible candidate" in normalized
-    assert "testing.md#migration-inventory" in deployment
+    assert "#migration-inventory" in deployment
     assert "backend.migrate" in cutover
     for version in (
         "010_budget_execution_protocol",
@@ -103,7 +146,7 @@ def test_deployment_prerequisites_require_the_complete_candidate_chain() -> None
 
 
 def test_pricing_upgrade_distinguishes_sql_defaults_from_absent_row_reading() -> None:
-    testing = " ".join((REPOSITORY_ROOT / "docs/testing.md").read_text().split())
+    testing = " ".join(FORK_UPGRADE.read_text().split())
 
     assert "`007_model_price_source` creates the side tables" in testing
     assert "`model_runtime_price` and `managed_model_price`" in testing
@@ -116,13 +159,13 @@ def test_pricing_upgrade_distinguishes_sql_defaults_from_absent_row_reading() ->
 
 
 def test_bootstrap_and_directory_docs_use_candidate_migrations_not_old_counts() -> None:
-    e2e = " ".join((REPOSITORY_ROOT / "docs/e2e-validation.md").read_text().split())
-    directory = " ".join((REPOSITORY_ROOT / "docs/organization-management.md").read_text().split())
+    e2e = " ".join(FORK_UPGRADE.read_text().split())
+    directory = " ".join(DIRECTORY_OPERATIONS.read_text().split())
 
     assert "backend.migrate" in e2e
-    assert "testing.md#migration-inventory" in e2e
+    assert "#migration-inventory" in e2e
     assert "- [ ] Apply `001_initial_schema`" not in e2e
-    assert "testing.md#migration-inventory" in directory
+    assert "#migration-inventory" in directory
     assert "`018_permission_management`" in directory
     assert "every applied checksum" in directory
     assert "schemas 012-017" not in directory
@@ -153,7 +196,7 @@ def test_documentation_contains_no_original_environment_identifiers() -> None:
 
 
 def test_product_upgrade_docs_preserve_history_and_require_real_database_evidence() -> None:
-    testing = (REPOSITORY_ROOT / "docs/testing.md").read_text()
+    testing = FORK_UPGRADE.read_text()
     for version in (
         "017_budget_terminal_observation", "018_budget_reservation_resolution",
         "019_runtime_display_name", "020_failed_publication_spec", "022_subscription_tags",
@@ -165,10 +208,12 @@ def test_product_upgrade_docs_preserve_history_and_require_real_database_evidenc
 
 
 def test_image_upgrade_documents_independent_defaults_and_validation_limits() -> None:
-    configuration = (REPOSITORY_ROOT / "docs/configuration.md").read_text()
+    configuration = (
+        (REPOSITORY_ROOT / "docs/configuration.md").read_text() + FORK_UPGRADE.read_text()
+    )
     architecture = (REPOSITORY_ROOT / "docs/architecture.md").read_text()
-    testing = (REPOSITORY_ROOT / "docs/testing.md").read_text()
-    deployment = " ".join((REPOSITORY_ROOT / "docs/deployment.md").read_text().split())
+    testing = FORK_UPGRADE.read_text()
+    deployment = " ".join(branch_deployment_guidance().split())
     assert (
         "`IMAGE_GENERATION_ENABLED` defaults to false"
         in configuration
@@ -187,7 +232,7 @@ def test_image_upgrade_documents_independent_defaults_and_validation_limits() ->
 def test_model_availability_documents_installation_and_evidence_boundaries() -> None:
     configuration = (REPOSITORY_ROOT / "docs/configuration.md").read_text()
     deployment = " ".join((REPOSITORY_ROOT / "docs/deployment.md").read_text().split())
-    testing = (REPOSITORY_ROOT / "docs/testing.md").read_text()
+    testing = FORK_UPGRADE.read_text()
     assert "202` response" in configuration and "not effective" in configuration
     assert "Ordinary model updates cannot change `enabled`" in configuration
     assert "every retained Revision" in deployment

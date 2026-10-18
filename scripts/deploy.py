@@ -1631,7 +1631,7 @@ def validate_directory_runtime_release(settings: Mapping[str, Mapping[str, Any]]
         raise DeploymentError(
             "Active database directory requires a compatible three-package maintenance update. "
             "Do not publish a changed core against the old expected digest. "
-            "Follow docs/organization-management.md Compatible Runtime Updates."
+            "Follow plan/organization-management/operations.md Compatible Runtime Updates."
         )
 
 

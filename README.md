@@ -182,7 +182,7 @@ npx --yes @redocly/cli@2.38.0 lint contracts/openapi.yaml
 git diff --check
 ```
 
-In-memory repositories are used only for isolated unit tests. Integration and end-to-end claims must use a real Turnstile deployment and its configured Azure services. See [Testing](docs/testing.md) and [E2E Validation](docs/e2e-validation.md).
+In-memory repositories are used only for isolated unit tests. Integration and end-to-end claims must use a real Turnstile deployment and its configured Azure services. See [Testing](plan/upstream-main-merge-2026-10-16.md#required-checks) and [E2E Validation](docs/e2e-validation.md).
 
 ## Deployment
 
@@ -190,8 +190,8 @@ The Bicep templates create Turnstile platform resources such as PostgreSQL, Even
 
 For **Turnstile v1.2**, choose the matching deployment path:
 
-- **Upgrading an existing installation:** follow the [upgrade guide](docs/deployment.md#prepare-for-v12). Keep the original state, database, ledger, APIM, identities and history; apply the required infrastructure changes as well as the application packages.
-- **Installing from zero:** follow the [fresh-install guide](docs/deployment.md#deploy-v11-from-zero). Use a unique prefix and new state; a new StandardV2 APIM is the default. Provider models and credentials must already be available separately.
+- **Upgrading an existing installation:** follow the [upgrade guide](plan/upstream-main-merge-2026-10-16.md#prepare-for-v12). Keep the original state, database, ledger, APIM, identities and history; apply the required infrastructure changes as well as the application packages.
+- **Installing from zero:** follow the [fresh-install guide](plan/upstream-main-merge-2026-10-16.md#deploy-v11-from-zero). Use a unique prefix and new state; a new StandardV2 APIM is the default. Provider models and credentials must already be available separately.
 
 The quick start below is for a new installation. Do not replace an existing installation's state with a newly generated file.
 
@@ -260,14 +260,17 @@ See [Troubleshooting](docs/troubleshooting.md) for startup, authentication, data
 
 ## Documentation
 
+The `docs/` tree mirrors upstream `main`. For this branch's configuration, complete migration chain,
+operations and acceptance evidence, also read the [branch documentation index](plan/README.md).
+
 | Guide | What it covers |
 | --- | --- |
 | [Documentation index](docs/README.md) | Entry point for operators and maintainers |
 | [Architecture](docs/architecture.md) | Runtime boundaries, ownership, and data flow |
 | [Configuration](docs/configuration.md) | Environment variables, authentication, and feature gates |
-| [Organization Management](docs/organization-management.md) | Persistent directory, department delegation, reviewed Entra synchronization, initialization and upgrade |
+| [Organization Management](plan/organization-management/operations.md) | Persistent directory, department delegation, reviewed Entra synchronization, initialization and upgrade |
 | [Deployment](docs/deployment.md) | Azure provisioning, packaging, rollout, and verification |
-| [Testing](docs/testing.md) | Local, contract, infrastructure, and end-to-end validation |
+| [Testing](plan/upstream-main-merge-2026-10-16.md#required-checks) | Local, contract, infrastructure, and end-to-end validation |
 | [Security](docs/security.md) | Threat boundaries, secret handling, and deployment controls |
 | [Troubleshooting](docs/troubleshooting.md) | Database, authentication, APIM, telemetry, and startup checks |
 

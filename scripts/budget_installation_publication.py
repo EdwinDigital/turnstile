@@ -23,6 +23,7 @@ from pydantic import AwareDatetime, Field
 
 from backend.services.client_user_policy import strip_verified_client_user_policy
 from scripts.budget_execution_upgrade import plan_budget_parent_upgrade
+from scripts.budget_policy_bindings import bind_policy_parameters
 from scripts.install_budget_execution import (
     BudgetInstallationPlan,
     InstallationJournal,
@@ -99,27 +100,7 @@ def _digest(value: object) -> str:
 
 
 def _bind_policy(source: str, bindings: Mapping[str, str]) -> str:
-    root = parse_policy(source)
-
-    def bind(value: str) -> str:
-        missing = set(_SLOTS.findall(value)) - bindings.keys()
-        if missing:
-            raise ValueError("Installation parent has unbound parameters: " + ", ".join(
-                sorted(missing),
-            ))
-        result = _SLOTS.sub(lambda match: bindings[match.group()], value)
-        if _SLOTS.search(result):
-            raise ValueError("Installation binding contains another parameter")
-        return result
-
-    for node in root.iter():
-        for key, value in node.attrib.items():
-            node.set(key, bind(value))
-        if node.text:
-            node.text = bind(node.text)
-        if node.tail:
-            node.tail = bind(node.tail)
-    return serialize_policy(root)
+    return serialize_policy(bind_policy_parameters(parse_policy(source), bindings))
 
 
 def capture_installation_contracts(

@@ -651,7 +651,7 @@ phase 建议为 `schema_only -> importing -> verified -> active`；全新空目�
 `scripts/directory_upgrade.py` 已有候选实现，公共工具不包含具体部署目标/SCM 凭据，
 也不新增 `backend` 根入口；已完成P1生产plan/apply/verify/activate及兼容回滚验证。
 已激活实例例行更新不得重跑回填或activate；最新 `9cc17fa` 只验证两次空迁移。完整约定见
-[运维文档](../../docs/organization-management.md)：
+[运维文档](operations.md)：
 
 ```bash
 uv run python -m scripts.directory_upgrade plan --output <private-plan-path>

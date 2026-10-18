@@ -185,3 +185,47 @@ additional infrastructure require explicit authorization.
 2026-10-11的[权限管理](../permission-management/design.md)为助手工具查询增加服务端
 部门/人员范围；对话和保存报表复用directory_scope列记录scope:v2快照。
 旧全域快照不会暴露给受限Member。菜单矩阵只控制功能入口，不赋予模型调用或预算写权限。
+
+## 当前分支配置与验证补充（2026-10-18）
+
+以下内容从本分支修改的 `docs/` 文档迁移，描述分支实现和操作要求，不代表本次重新部署或完成所有验证。
+
+<!-- Migrated from docs/testing.md; section: Assistant API protocols -->
+
+### Assistant API protocols
+
+Apply `009_assistant_api_format` before deploying the updated API. Existing model and title
+settings remain unchanged and the new nullable protocol defaults to automatic selection.
+The initial migration and historical conversations must not be rewritten.
+
+Local gateway and assistant tests use mocked provider responses. They cover model-specific
+protocol selection, Claude tool definitions and parallel tool results, private reasoning
+continuity, optional protocol persistence, incompatible overrides, fallback visibility,
+usage, correlation IDs and API error propagation. Frontend tests cover protocol resets on
+model changes and preservation on title-toggle changes. None establishes live APIM routing.
+
+In an authorized deployed environment, verify the active APIM revision includes the selected
+model alias on its Messages or Responses operation, its backend path and provider credential.
+Test a real two-round analysis question, attribution and measured usage, then reopen its
+history. Ordinary text publication probes are not evidence of successful tool calling.
+
+<!-- Migrated from docs/configuration.md; section: FinOps Assistant API protocol -->
+
+### FinOps Assistant API protocol
+
+Apply migration `009_assistant_api_format` before deploying the updated API. The assistant
+setting `api_format` accepts `openai_chat`, `openai_responses`, `anthropic_messages`, or
+`null` for automatic selection. Settings advertise the compatible protocols per model and
+the effective public API path. Invalid overrides are rejected before provider dispatch;
+an override that later becomes unavailable visibly falls back to automatic selection.
+
+Foundry Claude uses the Messages route even when its shared Connection declares OpenAI
+Chat. GPT-6 tool calls use Responses. Claude content blocks, including signed thinking,
+and Responses reasoning items are retained only inside the current analysis loop and
+never returned to the browser or written into conversation history.
+
+Production requests still require APIM. Changing the protocol neither creates a gateway
+operation nor publishes a model or changes credentials. The active revision must contain
+the model alias on its matching operation. Managed Responses support follows the publisher's
+existing Foundry binding boundary (`/openai/v1/chat/completions`); arbitrary compatible
+Chat connections are not assumed to support Responses. Local mocks do not verify live routes.

@@ -2,7 +2,8 @@
 
 本文件只保留需要追溯的节点，不描述当前运行状态。一般发布日志已从工作目录移除，
 完整原文保留于清理前提交 `bbcefe3a9c11895180eacdf4ffe71985931604be` 的 Git 历史。
-最新 USD 安装待办统一见 [USD 安装与配置](usd-installation.md)。
+最近 USD 验收统一见 [USD 验收记录](usd-installation.md)，通用操作见
+[预算运维手册](operations.md)。
 
 ## 发布节点
 
@@ -16,12 +17,13 @@
 | 2026-10-16 | `1758939` | 合入 Windows 路径及原生图片登记，用户版 0.4.6；MCP 回退及所有权保护保留 |
 | 2026-10-16 | 同包恢复 | 控制平面 FDM 切换故障恢复，详见下文；不是插件版本升级 |
 | 2026-10-16 | `ec0ae64`、`6c61df7` | 平台页面用户可见措辞改为“客户端”，技术协议标识与官方链接保留 |
-| 2026-10-16 | [main 合并发布](release-main-merge-2026-10-16.md) | 20 项升级到 40 项迁移及真实隔离恢复；不自动激活 USD |
-| 2026-10-16 | `dd68660` | [预算鉴权兼容软件 0.5.0](budget-auth-compatibility-upgrade-implementation.md)；真实 Token 调用通过，不等于金额执行已开通 |
+| 2026-10-16 | `71a5145`、`8de4743` | main 合并：20 项升级到 40 项迁移；实际隔离还原及旧/新/旧 API 读取兼容通过，不自动激活 USD |
+| 2026-10-16 | `dd68660` | 预算鉴权兼容软件 0.5.0；真实 Token 调用通过，当次尚未开通金额执行 |
 | 2026-10-16 | `8625008` | 用户版下载要求配置本人当月预算；未配置返回提示和 403，订阅版权限独立 |
 | 2026-10-17 | `5515bfe` | 自定义组织归属/投影兼容修复，测试账号与订阅核对；无真实 USD 结算验收 |
 | 2026-10-17 | `c22973e` 至 `bbcefe3` | 安装保护、诊断、发布接管及契约读回代码；本地测试不代表金融激活 |
-| 2026-10-18 | [USD 核心链路验收](usd-installation.md) | 部门 USD 编辑、诊断超时及 Observer 用量兼容修复已上线；组织 100 USD / 部门 70 USD、真实结算和普通请求通过，未知费用不归零 |
+| 2026-10-18 | `9215807`、[核心链路验收](usd-installation.md) | 部门 USD 编辑、诊断超时及 Observer 用量兼容修复已上线并提交用户分支；组织 100 USD / 部门 70 USD、真实结算和普通请求通过，未知费用不归零 |
+| 2026-10-18 | `7a32b4a`、[普通用户 USD 复验](usd-installation.md#普通用户-usd-复验2026-10-18) | 合并兼容缺口与本人 USD 读取修复已上线并推送；普通用户个人 10 USD、真实插件 Responses 调用 27 Token / 0.000146 USD、两种单位结算及预留释放均核对通过；未做额度耗尽或并发压测 |
 
 日期为原记录的发布时间/归档时间；提交先后以 Git 为准。旧测试计数不累计为当前回归总数。
 
@@ -37,7 +39,7 @@
 | `budget-compat-release-20261016` | 0.5.0 兼容软件发布及回退材料；不代表金融消费后回退验证 |
 | `user-plugin-budget-gate-release-20261016` | 个人预算下载门槛发布的原包、设置和实际还原材料 |
 | `usd-activation-20261017` | 自定义组织/测试订阅兼容发布材料；旧程序回退前需处理其不识别的测试应用组织绑定 |
-| `usd-install-20261017` | 本轮金融安装的数据库、APIM、账本、运行包/镜像和加密操作证据；最新临时 journal 需按原流程持久化 |
+| `usd-install-20261017` | 金融安装和 06:10 基线保留；后续追加 `usd-user-acceptance-complete-20261018.zip.fernet`、`usd-user-release-source-commit-20261018.zip.fernet` 等普通用户验收与源码哈希证据。以实际 manifest 为准，不沿用早期 54 项快照判断当前清单 |
 
 不能用旧数据库、旧账本或过时检查点覆盖发布后消费。是否可恢复必须按执行阶段和最新证据重新判断；
 文档清理未删除、移动或修改任何上述工作集及 `/tmp/ts-usd-install-20261017/` 操作文件。
@@ -53,6 +55,13 @@
 原日志未提供平台内部失败的具体原因，不将同包恢复描述为已经修复 Azure 根因。
 当次私有证据路径为 `/tmp/ts-control-repair-20261016/`，其长期存在性须单独核对。
 
+## 未纳入本轮的历史问题
+
+2026-10-13 初始化审计曾报告两项通用入口缺口：新平台复用已有 APIM 的 VNet 创建条件，
+以及动态应用 TPM helper 未接入公共升级命令。本轮既有环境 USD 安装没有复验这两项，
+不能声称已修复，也不能用旧审计推断当前源码仍有同一缺陷。若开展通用新装/升级工作须重新检查。
+原始复现、范围和测试结果可从下述 Git 历史读取；不作为 USD 当前待办重复执行。
+
 ## 查询移除的旧文档
 
 在仓库根目录只读查看，例如：
@@ -65,3 +74,11 @@ git show bbcefe3a9c11895180eacdf4ffe71985931604be:plan/aigateway-proxy-client/re
 `release-*.md`、`merge-main-2026-10-16.md`、`recovery-control-plane-2026-10-16.md`，
 以及 `usd-online-configuration-status-2026-10-17.md`、`usd-installation-progress-2026-10-17.md`、
 `usd-readiness-audit-2026-10-17.md`。这些名称在本节只是历史定位，不是仍存在的工作目录文件。
+
+本轮移除的阶段性实施、合并发布及初始化审计，以及预算设计原始方案，保存在 `9215807`，例如：
+
+```sh
+git show 9215807:plan/aigateway-proxy-client/budget-auth-compatibility-upgrade-implementation.md
+git show 9215807:plan/aigateway-proxy-client/release-main-merge-2026-10-16.md
+git show 9215807:plan/aigateway-proxy-client/initialization-upgrade-audit.md
+```

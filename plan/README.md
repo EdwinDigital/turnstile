@@ -3,10 +3,27 @@
 本目录保存功能的需求分析和设计方案。各功能的实现状态见下表及对应文档；拟议接口、字段和组件不代表已经实现。
 
 客户端文档统一从 [AIGateway-Proxy 入口](aigateway-proxy-client/README.md) 阅读。
-[预算兼容方案](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)覆盖自主组织/密码账号、
-main 受信后端委托、双单位预算和恢复；兼容软件已有历史发布，金融安装与目标金额配置尚未完成。
-最新安装证据和待办只维护在 [USD 安装与配置](aigateway-proxy-client/usd-installation.md)，
-不将[2026-10-16 合并发布记录](aigateway-proxy-client/release-main-merge-2026-10-16.md)视为当前线上状态。
+[预算兼容设计](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)覆盖自主组织/密码账号、
+受信后端委托和双单位预算；通用安装与恢复入口见[预算运维手册](aigateway-proxy-client/operations.md)。
+2026-10-18 已验收核心链路、组织 100 USD / 部门 70 USD 及真实结算，
+观察时间和限制只维护在 [USD 验收记录](aigateway-proxy-client/usd-installation.md)，不是实时健康保证。
+
+## 文档职责与入口
+
+`docs/` 的文件清单和字节内容保持上游 `main` 基线 `e59177d` 一致；本分支的功能、配置、升级和验收说明只维护在对应 `plan/` 文档。
+上游通用手册不等于当前分支的实际开关或完整迁移链，操作当前分支时同时阅读以下补充：
+
+| 范围 | 当前分支入口 |
+| --- | --- |
+| 组织目录、兼容三包发布、身份同步 | [组织运维](organization-management/operations.md) |
+| USD 安装、结算、恢复与运行开关 | [预算运维](aigateway-proxy-client/operations.md) |
+| 用户设置、登录与个人配置升级 | [用户设置设计](user-settings/design.md#当前分支配置与验证补充2026-10-18) |
+| 角色、菜单及安全边界 | [权限实施说明](permission-management/implementation.md#当前分支配置与验证补充2026-10-18) |
+| FinOps 助手协议与验证 | [FinOps 设计](ai-finops/design.md#当前分支配置与验证补充2026-10-18) |
+| 完整 40 条迁移及跨功能升级验证 | [合并兼容说明](upstream-main-merge-2026-10-16.md#当前分支配置与验证补充2026-10-18) |
+| 本次真实 USD 用户验收 | [验收记录](aigateway-proxy-client/usd-installation.md) |
+
+文档契约测试同时校验上游文档基线和 `plan/` 分支说明。未来更新上游时，须审查并同步基线哈希，不能直接把分支说明重新写入 `docs/`。
 
 以下运行包与 PR 叙述是 2026-10-12 的历史状态快照，不代表上述新方案已交付：
 当时运行包来自 `92378f7`（兼容核心）和 `47595da`（请求追踪时区前端），监控修复已验收。
@@ -21,7 +38,7 @@ main本地与线上验收通过，结果见实施记录；上游CI待维护者�
 | 初始化私网与请求监控 | [需求与设计](gateway-network-monitoring/design.md) | [design.md](gateway-network-monitoring/design.md) | 已实现；监控已上线，1812项Python/157项前端通过，现网hotfix no-op及00:37记录/自动刷新/时区已验收，见[实施记录](gateway-network-monitoring/implementation.md) | 未提交 |
 | 应用 TPM 与额度同步 | [设计与需求](application-tpm-sync/design.md) | [design.md](application-tpm-sync/design.md) | 已上线；1805项本地通过，保存即时投影、正式低TPM 429/提高TPM 200已验证，见[实施记录](application-tpm-sync/implementation.md) | 未提交 |
 | AIGateway-Proxy 客户端 | [requirements.md](aigateway-proxy-client/requirements.md) | [design.md](aigateway-proxy-client/design.md) | 双版插件、下载权限和个人预算下载门槛已有实现；历史发布见[索引](aigateway-proxy-client/release-history.md)，当前行为不沿用早期 cc-switch/Owner-only 草案 | 未提交上游 PR |
-| 客户端鉴权与 Token/USD 兼容升级 | [目标与边界](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md#1-基线目标与范围) | [详细方案](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)、[历史实施记录](aigateway-proxy-client/budget-auth-compatibility-upgrade-implementation.md) | 0.5.0 兼容软件已有发布；金融安装和 USD 配置未完成，见[唯一待办入口](aigateway-proxy-client/usd-installation.md) | 用户仓库当前分支；发布事实与本地提交分开记录 |
+| 客户端鉴权与 Token/USD 兼容升级 | [身份与边界](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md#身份与兼容边界) | [现行设计](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)、[运维手册](aigateway-proxy-client/operations.md) | 核心链路、目标预算及普通用户 USD 单次调用/结算已验收；并发、流式及额度耗尽未全部覆盖，见[验收记录](aigateway-proxy-client/usd-installation.md) | 用户仓库当前分支；发布事实与本地提交分开记录 |
 | 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已实现、已上线；010不可变，后续共享包保留；原验收边界见验证记录 | [xuleihive/turnstile#31](https://github.com/xuleihive/turnstile/pull/31)，Open，待合并 |
 | 用户设置 | [requirements.md](user-settings/requirements.md) | [design.md](user-settings/design.md) | 已实现、已上线；当前目录集成及本人只读接口已随 `9cc17fa` 复验；真实 Microsoft OAuth/Graph 未重新验收 | [xuleihive/turnstile#32](https://github.com/xuleihive/turnstile/pull/32)，Open，待合并 |
 | 组织管理 | [requirements.md](organization-management/requirements.md) | [design.md](organization-management/design.md) | P1 已上线；001-018 已应用，成员/权限/预算与用量兼容已复验；P2 代码已部署，真实 Entra 与动态网关未验收且开关关闭 | [xuleihive/turnstile#34](https://github.com/xuleihive/turnstile/pull/34)，Open，待上游审查 |
@@ -60,8 +77,9 @@ main本地与线上验收通过，结果见实施记录；上游CI待维护者�
 | `1d82983` | 目录状态/排序、人员弹窗、预算层级/团队筛选及平台菜单多语言 | 当次1748 passed / 7 skipped；备份/隔离恢复、SCM失败恢复后重试通过 |
 | `9cc17fa` | 用量多选/归档分类、固定AI FinOps及报表中心 | 1758 passed / 7 skipped、三包/配置/备份及线上只读验证，见[发布记录](ai-finops/design.md#production-release-2026-10-11) |
 
-最新发布保持schema 001-017、预算控制/存储与APIM revision；历史用量未删除。
-所有真实备份、账号、资源与截图证据保留私有，生产验收未写业务数据或发起模型调用。
+以上三次历史发布当时保持 schema 001-017、预算控制/存储与 APIM revision，未写业务数据或发起模型调用。
+后续 main 合并及 USD 安装已扩展迁移链并进行获批的真实预算配置和推理验收，不能沿用这段旧快照判断现状。
+所有真实备份、账号、资源与原始证据继续保留私有。
 
 PR 列记录对应功能已提交的开发 PR；#31/#32 于 2026-10-11 只读核对仍为 Open，
 与当前仓库的实现和部署状态分别记录。本地 1758 passed / 7 skipped 为 `9cc17fa`

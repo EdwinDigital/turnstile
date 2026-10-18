@@ -6,13 +6,13 @@ import argparse
 import hashlib
 import json
 import re
-from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 from xml.etree import ElementTree as ET
 
 from backend.services.client_user_policy import strip_verified_client_user_policy
+from scripts.budget_policy_bindings import bind_policy_parameters
 from turnstile_core.domain.budget_delegation import BudgetDelegationTrust
 from turnstile_core.integrations.apim_budget_execution import compose_budget_execution_parent
 from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
@@ -85,24 +85,11 @@ def plan_budget_parent_upgrade(
             bindings.update(matches[0])
     if bindings.get("__GATEWAY_PROFILE_ID__") != str(gateway_profile_id):
         raise PolicyCompilationError("Legacy parent belongs to a different Gateway")
-    def bind(value: str) -> str:
-        missing = set(_SLOT.findall(value)) - bindings.keys()
-        if missing:
-            raise PolicyCompilationError("Legacy adoption is missing parameters: " + ", ".join(
-                sorted(missing),
-            ))
-        return _SLOT.sub(lambda match: bindings[match.group()], value)
-
     def materialize(template: ET.Element) -> ET.Element:
-        root = deepcopy(template)
-        for node in root.iter():
-            for name, value in node.attrib.items():
-                node.set(name, bind(value))
-            if node.text:
-                node.text = bind(node.text)
-            if node.tail:
-                node.tail = bind(node.tail)
-        return root
+        try:
+            return bind_policy_parameters(template, bindings)
+        except ValueError as error:
+            raise PolicyCompilationError(str(error)) from error
 
     if component_digest(actual, normalize_text_defaults=False) != component_digest(
         materialize(reference), normalize_text_defaults=False,

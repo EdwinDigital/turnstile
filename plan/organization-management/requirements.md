@@ -384,7 +384,7 @@ P1 的网关约束：不能把仅在控制台保存的归属宣传为已在员�
 | [README](../../README.md) / [CONTRIBUTING](../../CONTRIBUTING.md) | 启动/迁移入口、锁定依赖、验证命令、编号迁移、what-if 与环境授权 |
 | [架构](../../docs/architecture.md) / [安全](../../docs/security.md) | 核心包依赖与打包边界、控制/推理面分离、Owner 治理写权限 |
 | [部署](../../docs/deployment.md) / [配置](../../docs/configuration.md) | 新装/升级区分、Owner 幂等初始化、saved outputs 与功能开关 |
-| [测试](../../docs/testing.md) / [E2E](../../docs/e2e-validation.md) | 空业务库、真实数据库与浏览器证据、独立候选验收 |
+| [测试](../upstream-main-merge-2026-10-16.md#database-validation) / [E2E](../../docs/e2e-validation.md) | 空业务库、真实数据库与浏览器证据、独立候选验收 |
 | [migrate.py](../../backend/migrate.py) / [bootstrap.py](../../backend/bootstrap.py) | checksum 迁移 runner、尚无全局迁移锁、账号表空时创建 Owner |
 | [deploy.py](../../scripts/deploy.py) / [stage_deployment.py](../../scripts/stage_deployment.py) | 原 state 重跑、包构建、Function 索引清单、API/Functions 不同文件清单 |
 | [启动配置](../../infra/modules/data-plane.bicep) / [runtime-release](../../infra/runtime-release.bicep) | 固定启动链、保留既有 App Settings 的增量合并 |

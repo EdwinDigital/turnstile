@@ -11,7 +11,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import stat
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -23,34 +22,15 @@ from xml.etree import ElementTree as ET
 
 from pydantic import AwareDatetime, Field, model_validator
 
+from scripts.budget_policy_bindings import bind_policy_parameters
 from scripts.prepare_budget_execution import CutoverReadback, FenceConfiguration
 from turnstile_core.domain.models import StrictModel
 from turnstile_core.integrations.apim_budget_execution import budget_execution_fence
 
-_SLOT = re.compile(r"__[A-Z][A-Z0-9_]*__")
-
 
 def materialize_shared_fence(api_ids: Sequence[str], bindings: Mapping[str, str]) -> ET.Element:
     """Bind the shared deny event too, not just the Table request's URL."""
-    root = budget_execution_fence(api_ids)
-
-    def bind(value: str) -> str:
-        missing = set(_SLOT.findall(value)) - bindings.keys()
-        if missing:
-            raise ValueError("Shared fence is missing bindings: " + ", ".join(sorted(missing)))
-        result = _SLOT.sub(lambda match: bindings[match.group()], value)
-        if _SLOT.search(result):
-            raise ValueError("A shared fence binding contains unresolved parameters")
-        return result
-
-    for node in root.iter():
-        for key, value in node.attrib.items():
-            node.set(key, bind(value))
-        if node.text:
-            node.text = bind(node.text)
-        if node.tail:
-            node.tail = bind(node.tail)
-    return root
+    return bind_policy_parameters(budget_execution_fence(api_ids), bindings)
 
 
 class BudgetInstallationPlan(StrictModel):

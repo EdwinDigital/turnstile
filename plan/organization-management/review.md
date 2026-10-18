@@ -35,7 +35,7 @@
 | [Architecture](../../docs/architecture.md) | core不import backend，Functions排除backend；APIM推理路径不依赖Web | 设计2.1/10.5/11.6；AST分层与staging索引回归 |
 | [Configuration](../../docs/configuration.md) | env配置、Owner只在空账号表创建、feature gates独立、证据cutoff未来一次性 | 设计11.2/11.3；保留账号/镜像/ledger/cutoff，不把Group映射放环境常量 |
 | [Deployment](../../docs/deployment.md) | 新装/升级分开、原state/outputs保留、无Delete、APIM增量、backup/rollback有边界 | 设计11.4-11.7；不会以清空state或重跑bootstrap“修复升级” |
-| [Testing](../../docs/testing.md) | 无客户种子、真实数据库与浏览器验证、单元/源码检查不冒充E2E | 设计12与需求AC14-18；migration isolation、390px与候选结果记录 |
+| [Testing](../upstream-main-merge-2026-10-16.md#database-validation) | 无客户种子、真实数据库与浏览器验证、单元/源码检查不冒充E2E | 设计12与需求AC14-18；migration isolation、390px与候选结果记录 |
 | [E2E Validation](../../docs/e2e-validation.md) | 真实网页工作流，deployment IDs和证据私有 | 设计11.7/12；通用公共文档不写实例部署历史 |
 | [Security](../../docs/security.md) | Owner治理写、最小权限MI、敏感资料不日志化、公开提交不带秘密 | 设计5/8/10/11.6；scope授权、Graphconsent分离、截图脱敏与secret scan |
 | [Troubleshooting](../../docs/troubleshooting.md) | startup首个错误、Function indexing、mounted asset读回而非盲目restart | 设计11.1/11.7；ready诊断与原包/hash保留 |

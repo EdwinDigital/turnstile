@@ -44,7 +44,7 @@
 - Observer 可直接完成受条件写保护的结算；写入失败仍保留事件路径进行持久化恢复。
 - 新增美元预留、预留解析和终态观察；修改额度或权限不应重置已确认用量及既有预留。
 
-依据：[原子预算配置](../docs/configuration.md#atomic-budget-execution)、[账本集成](../turnstile_core/integrations/atomic_ledger.py)、[结算服务](../turnstile_core/services/budget_settlement.py)、[切换流程](../docs/deployment.md#budget-execution-cutover)。
+依据：[原子预算配置](../docs/configuration.md#atomic-budget-execution)、[账本集成](../turnstile_core/integrations/atomic_ledger.py)、[结算服务](../turnstile_core/services/budget_settlement.py)、[切换流程](aigateway-proxy-client/operations.md#budget-execution-cutover)。
 
 ### F03. 上下文分档定价及历史费用快照
 
@@ -118,7 +118,7 @@
 - 发布管理新增预算就绪检查与隔离执行验证，分别展示配置/授权就绪与结算是否确认。
 - 限制：连接诊断及预算执行验证在显式执行时可能产生模型费用；本次合并没有执行真实收费验证，也没有自动补授 Azure 权限。
 
-依据：[连接诊断](../docs/configuration.md#connection-diagnostics)、[预算验证](../docs/configuration.md#budget-verification)、[诊断服务](../backend/services/runtime_diagnostics.py)。
+依据：[连接诊断](../docs/configuration.md#connection-diagnostics)、[预算验证](aigateway-proxy-client/operations.md#budget-verification)、[诊断服务](../backend/services/runtime_diagnostics.py)。
 
 ### F10. 调用尝试追踪与网关归因
 
@@ -203,7 +203,7 @@ README 明确本次公共版本不包含该智能路由功能。
 版本化模型启停不能仅靠修改一个布尔配置启用，还需要迁移、所有保留 Revision 的兼容策略、Table 权限及覆盖证据。
 不能通过上传应用 ZIP 来替代网关协议安装、Azure RBAC、账本准备和受控切换。
 
-依据：[实际默认配置](../turnstile_core/config.py)、[v1.2 升级边界](../docs/deployment.md#prepare-for-v12)。
+依据：[实际默认配置](../turnstile_core/config.py)、[v1.2 升级边界](upstream-main-merge-2026-10-16.md#prepare-for-v12)。
 
 ## 5. 数据库迁移记录
 
@@ -235,7 +235,7 @@ README 明确本次公共版本不包含该智能路由功能。
 | `028_product_index_alignment.up.sql` | 新增预留终结 scope/period 索引和自托管 Gateway 创建请求唯一索引 |
 
 这些迁移只在本地隔离 PostgreSQL 中验证，未对生产数据库执行。
-完整 38 项有序清单及各项实际作用见 [迁移清单](../docs/testing.md#migration-inventory)。
+完整 38 项有序清单及各项实际作用见 [迁移清单](upstream-main-merge-2026-10-16.md#migration-inventory)。
 各功能说明中的首次引入迁移不是可选子集；当前候选版本应通过统一执行器应用全部待执行迁移，保留已应用版本及校验值。
 
 ## 6. 本次合并验证结果
@@ -268,7 +268,7 @@ README 明确本次公共版本不包含该智能路由功能。
 - 模拟接口和浏览器检查不构成真实 Azure、APIM、Provider、认证、生产并发或财务结算验收。
 - 需要上线时，应另行执行备份、迁移、协议安装、权限、实际链路和回滚验证。
 
-原始汇总：[本地合并与验证记录](./upstream-main-merge-2026-10-16.md)。
+原始汇总：[本地合并与验证记录](upstream-main-merge-2026-10-16.md)。
 
 ## 7. 复核方法
 
