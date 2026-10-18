@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, date, datetime, time
-from typing import Any, Literal
+from decimal import Decimal
+from typing import Any, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -125,18 +126,48 @@ class UserSettingsService:
             for row in usage
             if row["scope_type"] == "user" and row["scope_id"] == person
         )
-        limit = int(allocation["token_limit"]) if allocation else None
+        mode = cast(
+            Literal["tokens", "usd"],
+            allocation.get("budget_mode", "tokens") if allocation else "tokens",
+        )
+        limit = int(allocation["token_limit"]) if allocation and mode == "tokens" else None
+        usd_limit = Decimal(str(allocation["usd_limit"])) if allocation and mode == "usd" else None
+        personal_usage = [
+            row for row in usage if row["scope_type"] == "user" and row["scope_id"] == person
+        ]
+        priced = not any(row.get("unpriced_usage_count") for row in personal_usage)
+        used_usd = (
+            sum((Decimal(str(row.get("used_usd") or 0)) for row in personal_usage), Decimal(0))
+            if priced else None
+        )
+        forecast_usd = (
+            TokenBudgetService._forecast_usd(used_usd, start, end, datetime.now(UTC))
+            if used_usd is not None else None
+        )
         threshold = int(allocation["warning_threshold_percent"]) if allocation else None
         forecast = TokenBudgetService._forecast_tokens(used, start, end, datetime.now(UTC))
         percent = round(used / limit * 100, 1) if limit else None
         forecast_percent = round(forecast / limit * 100, 1) if limit else None
-        status: Literal["unallocated", "healthy", "warning", "exceeded"] = "unallocated"
+        status: Literal["unallocated", "healthy", "warning", "exceeded", "unverified"]
+        status = "unallocated"
         if limit is not None:
             status = (
                 "exceeded"
                 if used >= limit
                 else "warning"
                 if max(percent or 0, forecast_percent or 0) >= (threshold or 80)
+                else "healthy"
+            )
+        elif usd_limit is not None:
+            percent = round(float(used_usd / usd_limit * 100), 1) if used_usd is not None else None
+            forecast_percent = (
+                round(float(forecast_usd / usd_limit * 100), 1)
+                if forecast_usd is not None else None
+            )
+            status = (
+                "unverified" if used_usd is None
+                else "exceeded" if used_usd >= usd_limit
+                else "warning" if max(percent or 0, forecast_percent or 0) >= (threshold or 80)
                 else "healthy"
             )
         department_id = allocation["parent_scope_id"] if allocation else None
@@ -157,6 +188,13 @@ class UserSettingsService:
             period_end=end,
             min_period=minimum,
             max_period=maximum,
+            budget_mode=mode,
+            usd_limit=usd_limit,
+            used_usd=used_usd,
+            remaining_usd=(
+                usd_limit - used_usd if usd_limit is not None and used_usd is not None else None
+            ),
+            forecast_usd=forecast_usd,
             token_limit=limit,
             used_tokens=used,
             remaining_tokens=limit - used if limit is not None else None,

@@ -1917,9 +1917,13 @@ def _bind_invocation_identity(
     repository: Repository,
     settings: Config,
 ) -> InvocationRequest:
-    if request.metadata.user_id in {
+    diagnostic_user = request.metadata.user_id.casefold() in {
         "system-runtime-diagnostic", "system-runtime-health-check",
-    } or request.metadata.request_source in {"runtime-diagnostic", "runtime-health-check"}:
+    }
+    diagnostic_source = request.metadata.request_source.casefold() in {
+        "runtime-diagnostic", "runtime-health-check",
+    }
+    if diagnostic_user or diagnostic_source:
         raise HTTPException(status_code=403, detail="Reserved runtime diagnostic identity")
     if settings.directory_source == "database":
         catalog = catalog_for(repository, settings)

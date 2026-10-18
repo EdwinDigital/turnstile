@@ -41,7 +41,9 @@ export function filterBudgetPeople(
   const search = query.trim().toLocaleLowerCase(locale)
   const names = new Intl.Collator(locale, { numeric: true, sensitivity: "base" })
   return items.filter(row => (!search || `${row.scope_name} ${row.scope_id}`.toLocaleLowerCase(locale).includes(search))
-    && (status === "all" || (status === "assigned" ? row.token_limit != null : row.status === status))
+    && (status === "all" || (status === "assigned"
+      ? (row.budget_mode === "usd" ? row.usd_limit != null : row.token_limit != null)
+      : row.status === status))
     && (!teamMembers || teamMembers.has(row.scope_id)))
     .sort((a, b) => names.compare(a.scope_name, b.scope_name) || names.compare(a.scope_id, b.scope_id))
 }
