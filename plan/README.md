@@ -2,6 +2,10 @@
 
 本目录保存功能的需求分析和设计方案。各功能的实现状态见下表及对应文档；拟议接口、字段和组件不代表已经实现。
 
+2026-10-18 已补齐上游 PR 覆盖：纯定价幂等补丁更新 #31，main 的跨功能整合和发布记录更新
+#35；#30/#32/#34 保持各自范围。提交覆盖与验证边界见
+[PR 覆盖补齐记录](pr-coverage-followup-2026-10-18.md)。已提交不代表已合入上游或 CI 已通过。
+
 2026-10-18 已合并组织/权限分支至本地 main；PR 专用分支的上游同步与验证记录见
 [PR #34 同步记录](upstream-main-sync-2026-10-18.md)。该记录的 38 条迁移仅对应 PR 候选版本，
 当前 main 保留完整 40 条迁移及后续 Client/预算能力。本次合并不代表部署上线。
@@ -32,7 +36,8 @@
 文档契约测试同时校验原上游文件哈希、企业插件专区清单和 `plan/` 分支说明。
 未来更新上游时，须审查并同步基线哈希；不将阶段日志或内部运维配置混入使用指南。
 
-以下运行包与 PR 叙述是 2026-10-12 的历史状态快照，不代表上述新方案已交付：
+以下运行包与验证数字是 2026-10-12 的历史状态快照，不代表上述新方案已交付；
+表中 PR 列已更新至 2026-10-18，不能将历史验证数字视为当前 PR 的重新验收：
 当时运行包来自 `92378f7`（兼容核心）和 `47595da`（请求追踪时区前端），监控修复已验收。
 应用TPM修复此前从功能分支提交 `217fbd2` 构建并发布，真实限流回归完成。
 此前从用户仓库 `main` 提交 `22897a5` 构建并发布，
@@ -42,10 +47,10 @@ main本地与线上验收通过，结果见实施记录；上游CI待维护者�
 
 | 功能 | 需求分析 | 设计文档 | 状态 | 已提交 PR |
 | --- | --- | --- | --- | --- |
-| 初始化私网与请求监控 | [需求与设计](gateway-network-monitoring/design.md) | [design.md](gateway-network-monitoring/design.md) | 已实现；监控已上线，1812项Python/157项前端通过，现网hotfix no-op及00:37记录/自动刷新/时区已验收，见[实施记录](gateway-network-monitoring/implementation.md) | 未提交 |
-| 应用 TPM 与额度同步 | [设计与需求](application-tpm-sync/design.md) | [design.md](application-tpm-sync/design.md) | 已上线；1805项本地通过，保存即时投影、正式低TPM 429/提高TPM 200已验证，见[实施记录](application-tpm-sync/implementation.md) | 未提交 |
-| AIGateway-Proxy 客户端 | [requirements.md](aigateway-proxy-client/requirements.md) | [design.md](aigateway-proxy-client/design.md) | 双版插件、下载权限和个人预算下载门槛已有实现；历史发布见[索引](aigateway-proxy-client/release-history.md)，当前行为不沿用早期 cc-switch/Owner-only 草案 | 未提交上游 PR |
-| 客户端鉴权与 Token/USD 兼容升级 | [身份与边界](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md#身份与兼容边界) | [现行设计](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)、[运维手册](aigateway-proxy-client/operations.md) | 核心链路、目标预算及普通用户 USD 单次调用/结算已验收；并发、流式及额度耗尽未全部覆盖，见[验收记录](aigateway-proxy-client/usd-installation.md) | 用户仓库当前分支；发布事实与本地提交分开记录 |
+| 初始化私网与请求监控 | [需求与设计](gateway-network-monitoring/design.md) | [design.md](gateway-network-monitoring/design.md) | 已实现；监控已上线，1812项Python/157项前端通过，现网hotfix no-op及00:37记录/自动刷新/时区已验收，见[实施记录](gateway-network-monitoring/implementation.md) | [#35](https://github.com/xuleihive/turnstile/pull/35)，相关提交随集成 PR 提交 |
+| 应用 TPM 与额度同步 | [设计与需求](application-tpm-sync/design.md) | [design.md](application-tpm-sync/design.md) | 已上线；1805项本地通过，保存即时投影、正式低TPM 429/提高TPM 200已验证，见[实施记录](application-tpm-sync/implementation.md) | [#35](https://github.com/xuleihive/turnstile/pull/35)，相关提交随集成 PR 提交 |
+| AIGateway-Proxy 客户端 | [requirements.md](aigateway-proxy-client/requirements.md) | [design.md](aigateway-proxy-client/design.md) | 双版插件、下载权限和个人预算下载门槛已有实现；历史发布见[索引](aigateway-proxy-client/release-history.md)，当前行为不沿用早期 cc-switch/Owner-only 草案 | [#35](https://github.com/xuleihive/turnstile/pull/35)，Open，待上游审查 |
+| 客户端鉴权与 Token/USD 兼容升级 | [身份与边界](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md#身份与兼容边界) | [现行设计](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)、[运维手册](aigateway-proxy-client/operations.md) | 核心链路、目标预算及普通用户 USD 单次调用/结算已验收；并发、流式及额度耗尽未全部覆盖，见[验收记录](aigateway-proxy-client/usd-installation.md) | [#35](https://github.com/xuleihive/turnstile/pull/35)，发布事实与 PR 验证分开记录 |
 | 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已实现、已上线；010不可变，后续共享包保留；原验收边界见验证记录 | [xuleihive/turnstile#31](https://github.com/xuleihive/turnstile/pull/31)，Open，待合并 |
 | 用户设置 | [requirements.md](user-settings/requirements.md) | [design.md](user-settings/design.md) | 已实现、已上线；当前目录集成及本人只读接口已随 `9cc17fa` 复验；真实 Microsoft OAuth/Graph 未重新验收 | [xuleihive/turnstile#32](https://github.com/xuleihive/turnstile/pull/32)，Open，待合并 |
 | 组织管理 | [requirements.md](organization-management/requirements.md) | [design.md](organization-management/design.md) | P1 已上线；001-018 已应用，成员/权限/预算与用量兼容已复验；P2 代码已部署，真实 Entra 与动态网关未验收且开关关闭 | [xuleihive/turnstile#34](https://github.com/xuleihive/turnstile/pull/34)，Open，待上游审查 |
@@ -88,6 +93,6 @@ main本地与线上验收通过，结果见实施记录；上游CI待维护者�
 后续 main 合并及 USD 安装已扩展迁移链并进行获批的真实预算配置和推理验收，不能沿用这段旧快照判断现状。
 所有真实备份、账号、资源与原始证据继续保留私有。
 
-PR 列记录对应功能已提交的开发 PR；#31/#32 于 2026-10-11 只读核对仍为 Open，
+PR 列记录对应功能已提交的开发 PR；#30/#31/#32/#34/#35 于 2026-10-18 核对均为 Open、非 Draft，
 与当前仓库的实现和部署状态分别记录。本地 1758 passed / 7 skipped 为 `9cc17fa`
 发布前结果，本次仅更新文档，不冒称重新运行完整业务回归。
