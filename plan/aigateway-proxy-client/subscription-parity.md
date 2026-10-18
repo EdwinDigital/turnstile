@@ -1,6 +1,7 @@
 # Subscription plugin parity
 
-Status: implemented and locally validated; online release pending. Not installed.
+Status: implemented, deployed to the existing online test environment and validated
+on 2026-10-18. Existing installed plugins were not upgraded.
 
 ## Scope
 
@@ -47,7 +48,7 @@ they are not evidence that any current installed or deployed package contains th
   the explicit action refuse to guess (normal selected-account model refresh
   remains available). Logout or a changed key during discovery aborts auth completion.
 - Images use a loopback companion and random local nonce. APIM keys are read from
-  the current, exact saved account slot at invocation, not passed through CLI,
+  the current, exact saved account slot at invocation, not passed as CLI arguments or written to
   MCP descriptors, ready/runtime files or URLs. The descriptor binds the canonical
   installed plugin, configured HTTPS gateway, subscription and snapshot IDs.
 - No image capability or personal OAuth is created for subscription mode. Request
@@ -71,7 +72,8 @@ a temporary trusted loopback HTTPS upstream for subscriptions and no paid infere
 Its actual third CLI action verifies refresh without adding an unnamed account,
 and the image-only subscription case has no conversation model as a hidden prerequisite.
 Source lint/types and package
-checks are distinct from online/download/client acceptance, which is not performed.
+checks are distinct from online/download/client acceptance, recorded below for the
+separately authorized release.
 
 Fresh release preflight: 158 related Python tests and 107 Node tests pass; the Node
 run has no skips and includes the installed Magpie/Bun binaries against isolated
@@ -86,3 +88,40 @@ the private persistent directory
 No secret, runtime credential, private download or complete settings file belongs
 in the public commit. Submitting an upstream PR or merging main is not implied by a push
 to the existing `origin/codex/aigateway-proxy-client` branch.
+
+## Online release acceptance, 2026-10-18
+
+- Completed at 23:52:39 Asia/Shanghai on <https://aigateway.edwinai.in>.
+  Release source: `2bf8da81dd226b33f33c97ea1543568d817fe7f3`, exported from the clean
+  committed branch. API package SHA-256:
+  `0e086ec93aaec617671368858d0951442a54a630db7040942fdb56d79219d282`.
+- One API-only ZIP publication. The mounted ZIP matches the candidate; after
+  waiting for Azure warmup, authenticated API reads return subscription 0.2.0 and
+  user 0.5.1. No blind reupload or extra API restart was used.
+- The candidate changes exactly nine backend/plugin files plus frontend assets
+  compared with the previous actual API package. Shared core, Linux dependency
+  bytes, requirements, migrations, policies and the runtime manifest are unchanged;
+  Telemetry, Control Plane and Observer were not republished.
+- Six authenticated business reads pass. The actual subscription download contains
+  five conversation models and three authorized image models with registry-matched
+  prices. Both actual ZIPs' templates match committed source. The personal catalog
+  and explicit refresh retain correct image prices; its temporary download grant
+  is revoked and subsequent access returns 401. APIM keys are never revoked here.
+- The actual online subscription ZIP runs through the installed Magpie/Bun in
+  isolated HOME/XDG directories: native image registration, exact original IDs,
+  image-price imports, MCP tool discovery, real third-method CLI refresh and
+  logout cleanup pass. Refresh preserves the full account, including its slot,
+  current key and display metadata. Other providers and image preferences are
+  preserved; image descriptors contain no APIM key. No model generation is invoked.
+- Public HTML and its two directly referenced assets match the candidate bytes.
+  This is not a new live browser/mobile or native Windows-device acceptance.
+  The model registry, all three app-setting dictionaries and API-level APIM policy
+  match the baseline. Budgets, schema and historical consumption were not edited.
+- Fresh encrypted previous package/settings/APIM/business backups and final proof
+  are kept in `.turnstile/backups/subscription-parity-20261018/` in the primary
+  project checkout; recovery keys are separate. Temporary plaintext downloaded-key
+  copies and isolated native settings are removed only after their processes stop.
+
+Installed users must download/update their existing plugin files, reload and then
+refresh models. Publishing changes the server download, not an existing desktop
+installation. Native local repricing is not a rewrite of platform historical bills.
