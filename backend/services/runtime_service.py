@@ -1908,7 +1908,7 @@ class ModelRuntimeService:
             actual_status = 200
             correlation = None
             try:
-                invocation = self._invoke_resolved(request, route, request_id, timeout_ms=8_000)
+                invocation = self._invoke_resolved(request, route, request_id)
                 correlation = invocation.correlation_id
             except HTTPException as error:
                 actual_status = error.status_code

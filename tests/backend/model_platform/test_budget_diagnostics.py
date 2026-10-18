@@ -1,4 +1,7 @@
+import ast
+import inspect
 import json
+import textwrap
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -447,3 +450,14 @@ def test_delegation_never_reaches_untrusted_transports(
     route["budget_delegation_token"] = delegation
     with pytest.raises(GatewayInvocationError, match="trusted APIM"):
         OpenAICompatibleGatewayAdapter(implementation)._headers(request, route)
+
+
+def test_execution_verification_reuses_the_configured_inference_timeout() -> None:
+    source = ast.parse(textwrap.dedent(inspect.getsource(
+        ModelRuntimeService.check_budget_execution,
+    )))
+    invocations = [node for node in ast.walk(source) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Attribute)
+                   and node.func.attr == "_invoke_resolved"]
+    assert len(invocations) == 1
+    assert not any(value.arg == "timeout_ms" for value in invocations[0].keywords)

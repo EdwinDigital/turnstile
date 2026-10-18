@@ -1,5 +1,11 @@
 # Cross-platform image bridge lifecycle
 
+Historical implementation scope: 2026-10-14. The path and ownership contract
+remains relevant; the version, local-host availability and no-deploy restriction
+below apply to that original task only. Subsequent 0.4.6 delivery and native macOS
+verification are recorded in the [release index](release-history.md) and
+[image-registration design](native-image-registration-design.md).
+
 ## Approved scope
 
 Keep one user plugin for macOS and Windows. Replace the POSIX-only leading-slash

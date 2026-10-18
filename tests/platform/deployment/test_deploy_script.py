@@ -574,7 +574,37 @@ def test_observer_version_is_scoped_to_its_source_tree(
                          *(f"HEAD:{path}" for path in OBSERVER_SHARED_PATHS)]]
 
 
-def test_observer_context_contains_only_runtime_and_shared_stdlib_modules() -> None:
+@pytest.mark.parametrize("budget_mode", ["tokens", "usd"])
+def test_observer_context_contains_only_runtime_and_shared_stdlib_modules(
+    budget_mode: str,
+) -> None:
+    import base64
+    from decimal import Decimal
+    from uuid import UUID
+
+    from tests.platform.infrastructure.test_envoy_cache_adapter import (
+        EPOCH,
+        execution_row,
+        identity,
+    )
+    from turnstile_core.domain.ledger import BudgetPriceProjection, LedgerAdmissionReceipt
+    from turnstile_core.domain.models import ModelPrice
+
+    row = execution_row()
+    if budget_mode == "usd":
+        admitted = identity(model_id=str(UUID(int=4)))
+        row = execution_row(model_id=admitted.model_id)
+        projection = BudgetPriceProjection.create(
+            UUID(admitted.model_id), ModelPrice(input_price_per_million=2,
+                cached_price_per_million=0.5, cache_write_price_per_million=2,
+                output_price_per_million=6), admitted.admitted_at,
+        )
+        receipt = LedgerAdmissionReceipt(identity=admitted, epoch=EPOCH, reserved_tokens=2000,
+            budget_mode="usd", reserved_usd=Decimal("0.012"), price_snapshot=projection)
+        row["budget_execution"] = base64.b64encode(
+            json.dumps([receipt.model_dump(mode="json")]).encode(),
+        ).decode()
+
     with observer_build_context() as context:
         files = {
             path.relative_to(context).as_posix() for path in context.rglob("*") if path.is_file()
@@ -586,9 +616,13 @@ def test_observer_context_contains_only_runtime_and_shared_stdlib_modules() -> N
             sys.executable, "-I", "-S", "-c",
             "import sys; sys.path.insert(0, sys.argv[1]); import shipper; "
             "from turnstile_core.integrations.budget_completion import BudgetCompletionClient; "
-            "BudgetCompletionClient('https://ledger.example.test', 'TurnstileLedger', lambda: '')",
+            "BudgetCompletionClient('https://ledger.example.test', 'TurnstileLedger', lambda: ''); "
+            "import json; event = shipper.normalize_access_row(json.load(sys.stdin)); "
+            "assert event['usage_complete'] is True; "
+            "assert len(event['budget_execution']) == 1",
             str(context),
-        ], check=True, capture_output=True, text=True, timeout=10)
+        ], input=json.dumps(row), check=True, capture_output=True, text=True,
+           timeout=10)
     assert not context.exists()
 
 

@@ -1,5 +1,11 @@
 # Native image registration for the AIGateway user plugin
 
+This specification retains the image-registration contract and dated validation
+boundaries. Version numbers, host availability and work checklists below describe
+the original implementation, not the current installation. See the
+[release index](release-history.md) for subsequent delivery and the
+[plugin design](design.md) for the consolidated current contract.
+
 ## Objective
 
 Make the user's authorized image models appear automatically in Magpie's native
@@ -167,5 +173,6 @@ The user subsequently authorized merging `codex/plugin-windows-paths` into
 deployed; subscription version 0.1.4 is unchanged. The production ZIP passed
 isolated native macOS CLI/Bun registration and one simulated generation. No new
 Windows-device or paid WorkBuddy generation acceptance is claimed. See
-[the release record](release-plugin-windows-2026-10-16.md) for exact source,
-package checksums, business-health checks, activation caveats and remaining limits.
+[the release index](release-history.md) for the source and historical record
+retrieval; the original record contains package checksums, business-health checks,
+activation caveats and remaining limits.

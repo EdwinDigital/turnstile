@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
-import { registerHooks } from "node:module"
+import { readFileSync } from "node:fs"
+import { registerHooks, stripTypeScriptTypes } from "node:module"
 import test from "node:test"
 
 // Node's type-stripping runner does not resolve Vite's extensionless TS imports.
@@ -44,6 +45,25 @@ const people = [
   { ...scope("user", "b@example.com", "Bob", "dept-a"), token_limit: null, status: "unallocated" },
   { ...scope("user", "c@example.com", "Carol", "dept-b"), status: "exceeded" },
 ]
+
+test("department editing recognizes Token and USD parent budgets, including zero limits", () => {
+  const source = readFileSync(new URL("../../../frontend/src/data-sources/apim/pages/budget-page.tsx", import.meta.url), "utf8")
+  const helper = source.slice(source.indexOf("function budgetLimit("), source.indexOf("function budgetUsdMetric("))
+  const budgetLimit = new Function(`${stripTypeScriptTypes(helper)}; return budgetLimit`)()
+  const parentCheck = source.match(/parentAllocated: ([^}\n]+) \}\)/g)
+    .find(row => row.includes("organization"))
+    .replace(/^parentAllocated: /, "").replace(/ \}\)$/, "")
+  const parentAllocated = new Function("budgetLimit", "organization", `return ${parentCheck}`)
+  for (const [parent, expected] of [
+    [{ budget_mode: "tokens", token_limit: 100, usd_limit: null }, true],
+    [{ budget_mode: "usd", token_limit: null, usd_limit: "100.00" }, true],
+    [{ budget_mode: "tokens", token_limit: 0, usd_limit: null }, true],
+    [{ budget_mode: "usd", token_limit: null, usd_limit: "0.00" }, true],
+    [{ budget_mode: "tokens", token_limit: null, usd_limit: null }, false],
+    [{ budget_mode: "usd", token_limit: null, usd_limit: null }, false],
+    [{ token_limit: 100 }, true],
+  ]) assert.equal(parentAllocated(budgetLimit, parent), expected, JSON.stringify(parent))
+})
 
 test("archive display and sorting do not change any budget status, limit or attribution", () => {
   const frozen = Object.freeze(items.map(row => Object.freeze(row)))

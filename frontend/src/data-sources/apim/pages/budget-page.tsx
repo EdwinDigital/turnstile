@@ -660,7 +660,7 @@ function BudgetTable({
       result.push({ item: organization, directoryStatus: organization.directoryStatus, depth: 0, hasChildren: departments.length > 0, parentAllocated: true })
       if (!expanded.has(organization.scope_id)) continue
       for (const department of departments) {
-        result.push({ item: department, directoryStatus: department.directoryStatus, depth: 1, hasChildren: false, parentAllocated: organization.token_limit != null })
+        result.push({ item: department, directoryStatus: department.directoryStatus, depth: 1, hasChildren: false, parentAllocated: budgetLimit(organization) != null })
       }
     }
     return result

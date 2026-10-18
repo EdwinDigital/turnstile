@@ -1,70 +1,120 @@
-# AIGateway-Proxy 客户端设计
+# AIGateway-Proxy 插件设计
 
-2026-10-13 新下载包命名以 [模型列表可读命名空间](model-namespace-design.md) 为准；
-旧 0.1.1 安装保持兼容，不自动改名或迁移。
+整理日期：2026-10-17。按当前分支源码合并默认订阅、命名空间、可观测性和额度控制的有效契约，
+替代早期“未实现用户版”“手选默认订阅”“UUID 文件名”和“只支持独立曲线”等旧设计。
+源码版本常量目前为用户版 `0.5.0`、订阅版 `0.1.4`；这不是当前线上包的读回证明。
+产品范围见 [需求](requirements.md)，完整预算升级见 [兼容方案](budget-auth-compatibility-upgrade-design.md)。
 
-2026-10-14 用户版原生图片供应商自动登记方案见
-[原生图片模型接入设计](native-image-registration-design.md)；实现与验收进度以该文档为准。
+## 默认订阅与身份
 
-## 设计版本与边界
+用户版调用链为：个人可撤销授权 -> 平台身份/权限校验 -> 已绑定的真实应用订阅 -> APIM -> 模型。
+订阅版直接持有其获准导出的 APIM Key，不冒充用户个人登录。
 
-- 以下既有接口、安装包和发布章节是 0.1.1 指定订阅版的已交付设计，保留用于兼容与回滚，不直接复用于个人认证。
-- 2026-10-12 新增独立的用户登录版，详见 [用户登录版详细设计](user-mode-design.md)；其状态为 designed / not implemented / not deployed / not validated。
-- 新版涉及设备授权、用户令牌、受限订阅目录、导入事务、用户调用身份、动态模型和额度接口；因此旧版「无需数据库或 APIM 变更」不适用于新版。
-- 本轮仅文档更新。实际开发前需要核对当前服务端版本和 magpie 宿主能力，不修改 magpie 源码，不复用历史验证结论代替新版验证。
+1. `ClientUserService.default_subscription()` 优先验证显式用户绑定。
+2. 没有显式绑定时，复用平台实际调用网关和凭据优先级，以网关配置凭据为先，合法条件下才用 Dashboard 回退。
+3. 服务端将实际凭据与有效订阅主/备用 Key 比对，必须唯一匹配；缺失/歧义/无模型时拒绝。
+   不按应用名排序，不因为某个应用属于登录用户就选择它，不把部署中的某个订阅名称硬编码成规则。
+4. 默认匹配缓存使用凭据 HMAC 指纹隔离，300 秒有效；配置变化使匹配失效，指纹和 Key 不进入用户包。
+5. grant 保留 application/subscription/gateway 绑定。刷新模型保持绑定，重新登录才重解默认订阅。
 
-### 新版主要决策
+用户 UUID、治理用户标识、浏览器登录方式和 APIM 订阅身份分开。账号展示已验证的姓名，
+内部 uid 稳定；本插件仅在宿主锁下更新同 uid 自有槽位，不新增重复账号或恢复已退出账号。
+服务端覆盖模型正文中不可信的用户归因，Anthropic 使用适配后的模型侧标识；预算仍用真实治理身份。
+会话等追踪头由 `client_telemetry_headers()` 白名单处理，不能提升身份或伪造未提供的会话。
 
-| 事项 | 决策 |
+兼容软件的后端可信委托与旧 Token 上下文按已安装协议选择；安装 USD 的 APIM 变更是单独的
+预算协议升级，不是为了解决默认订阅而取消订阅鉴权。完整条件见兼容方案。
+
+## 接口与权限
+
+| 接口/入口 | 职责 |
 | --- | --- |
-| 双版本 | 「AIGateway-Proxy 订阅版」保留 `aigateway-proxy`；「AIGateway-Proxy 用户版」使用 `aigateway-proxy-user`，包名/供应商 ID/目录/状态均隔离 |
-| 登录 | RFC 8628 风格设备授权，浏览器沿用平台 Session，客户端取得可撤销的用户授权 |
-| 订阅选择 | 从 magpie「导入模型配置」打开平台选择页，平台实时读取本人可调用目录 |
-| 密钥 | 用户包和模型导入不暴露 APIM Key；密钥只在服务端受控代理链路使用 |
-| 导入 | 单选订阅 + 关联网关，版本化准备/激活，完整替换本插件拥有的目录 |
-| 身份 | 浏览器用户、目录人员、订阅调用身份分开绑定；未来调用通过可信上下文归因本人 |
-| 图片 | 通用插件的原生图片选择器存在源码限制；设兼容性门，必要时提供配套图片桥接 |
-| 额度 | `auth.usage` 对接个人/应用独立预算窗口，包含预留与新鲜度，audit 不触发客户端拦截 |
-| 别名 | 平台显式映射，仅验证匹配的返回名可转换，保留真实上游模型用于诊断 |
-| 变更边界 | 新后端/API/必要的追加迁移与 APIM 用户链路；不改旧包、旧凭据或历史调用数据 |
+| `GET /api/v1/client-downloads/options`、`POST /api/v1/client-downloads/magpie` | 订阅版目录与下载，校验下载动作、应用归属、订阅和网关；下载时才取 Key |
+| `GET /api/v1/client-downloads/user-options`、`POST /api/v1/client-downloads/magpie-user` | 用户版目录与下载；当月个人预算未配置则拒绝签发下载授权 |
+| `/api/v1/client-auth/device-authorizations`、`verification`、`decision`、`token`、`revoke` | 设备确认、重登录、令牌轮换和撤销；浏览器会话与客户端令牌不互相替代 |
+| `GET /api/v1/client-runtime/catalog`、`POST /api/v1/client-runtime/refresh-models` | 当前绑定的个人模型目录与显式刷新 |
+| `GET /api/v1/client-runtime/usage` | 个人额度；普通缓存 60 秒，显式控制操作用 `fresh=true` 重读 |
+| `/api/v1/client-runtime/image-capabilities`、原生协议代理 | 受限图片凭据与授权后的真实模型转发 |
 
-## 接口
+API 技术路径保留 `magpie` 以兼容旧客户端，用户可见文案统一为“客户端”。
+端点采用既有会话/Bearer 与跨站写保护；响应 no-store，错误不回显凭据。
+模型、Key、网关 URL 均由平台解析，不接受浏览器任意指定目标。未知或跨网关的密钥回退拒绝。
+下载矩阵及 CAS 更新详见 [下载权限](download-permissions-design.md)。
 
-- GET /api/v1/client-downloads/options：现有 OwnerSession 可导出的应用订阅、合法网关及对话模型；不返回密钥。应用/订阅状态及系统保留 ID 过滤保持不变；本人行权限延后。
-- POST /api/v1/client-downloads/magpie：严格 JSON {application_id, subscription_id, gateway_id, key_kind}，key_kind 为 primary/secondary。重做所有校验后，调用现有 ApplicationAccessService 读取 APIM 密钥，在内存生成 application/zip。
-- UUID 全由服务端匹配，网关地址、配置头和模型协议全部由平台确定。无客户端 URL/key/model 参数；请求体上限 8 KiB，校验错误不回显输入。
-- 认证沿用 sessionCookie 和现有 OwnerSession，暂不新增权限控制能力。跨站请求沿用 require_allowed_write_origin。所有接口 no-store，下载附 nosniff 和固定 UUID 文件名。
+## 安装包、命名与升级
 
-## 数据与授权
+- 用户版 ZIP 为 `aigateway-proxy-user-<用户名>.zip`；订阅版为 `aigateway-proxy-<订阅名>.zip`。
+  名称清洗、长度限制和空/UUID 名称回退共用 `download_filename.py`，根目录由同一文件名去除 `.zip` 得到。
+- providerId 分别为 `aigateway-user-<名称>-<12位摘要>` 和 `aigateway-subscription-<名称>-<12位摘要>`。
+  名称规范化，非 ASCII 技术名采用 Punycode；显示名保留原文。摘要区分平台、种类及稳定身份，不含秘密。
+- 模型完整标识使用 providerId 与平台模型 ID；请求到 APIM 时只发送平台模型 ID。
+  package.name 保留 ASCII 类型前缀及摘要，内部 UUID 保留于私有配置，不放在下载名称中。
+- 首次自动导入遵守宿主账号锁、备份及一次性标记；失败保留手动入口，不覆盖账号或其他供应商。
+- 旧包继续使用原 providerId。显式更新命名空间后需重新选择 Agent 模型；不能把新旧目录当作无冲突的双安装。
+- 用户 ZIP 包含 `index.mjs`、`helpers.mjs`、`images.mjs`、`native-images.mjs`、`quota.mjs`、
+  公共 `pricing.mjs`、配置、README、package.json 及预生成图标。订阅版使用独立模板和配置。
+- 文件权限为私密插件 ZIP 的 0600；平台部署 ZIP 的 0644/0755 是另一套规则，不可混淆。
 
-通过 QueryRepository 读取应用、关联订阅、注册模型和生效发布，不创建新表。用户在实现中明确要求先做核心链路，因此 owner_id/部门/人员委派设计延后；当前接口复用既有 OwnerSession。普通用户暂不能导出订阅密钥。
+用户版配置含个人 access/refresh 凭据，不含 APIM Key、密码或浏览器 Cookie；订阅版含获准导出的 Key。
+两者都不能公开。下载不触发安装脚本或秘密轮换；尚未实现的凭据加密不能写成安全承诺。
 
-网关必须与应用和订阅 gateway_profile_id 同时一致，启用、APIM 实现且 HTTPS 同源于部署 APIM_GATEWAY_URL，避免把单 APIM key client 的密钥发给其他网关。注册模型必须启用、所属 runtime 启用且归属所选网关，并且别名位于 effective publication 的 discovery_models。应用配置模型策略时再取 allowed_model_ids 交集；deny-all 输出零模型，不能回退 unrestricted。
+## 模型与价格
 
-元数据不调用远端模型或读取密钥。下载时才调用 APIM key client；保留其 unavailable/not-found/conflict 错误语义并避免输出 SDK 错误含凭据的文本。清单和下载均使用最新读取，不信任浏览器此前结果。
+- 以有效发布声明的协议选择 SDK/端点，保持原生流式、取消及工具正文；不按模型名猜协议。
+- 用户版可刷新已绑定范围的完整授权目录；订阅版发现更新限定于原快照交集，不通过 discovery 扩权。
+- 价格复用平台模型计价读取，USD/百万 Token，含输入、输出、缓存读/写；零价与未知价格区分。
+- 宿主通用适配器不能承载完整缓存价时，使用已有 `model price` CLI 导入本 provider/model。
+  保留人工单模型、供应商通配和全局模型通配价格，不直接重写宿主 settings.json。
+- 定价子进程不启动图片助手、创建账号或携带平台登录凭据；每批有界同步，未完成项通过后续刷新继续。
+  原生完整价格导入失败不把缓存当免费；平台真实账单与宿主本地估算不是同一数据源。
 
-## 安装包
+## 个人额度与曲线
 
-固定根文件夹 aigateway-proxy，文件 package.json、index.mjs、aigateway.config.json、README.md。不含依赖或安装脚本。后端模板放 backend/services/client_plugin 中，随 API 的 backend 目录整体打包。
+只返回本人月度窗口，不返回共享应用、部门或组织窗口；应用统计和硬限制照常执行。
+Token/USD 用量不能混算，历史采样按单位/周期分段。个人设置、额度接口和人员列表使用整月个人范围，
+按部门筛选的是人员，不重写历史请求归属来强行对齐统计。
 
-配置 version=1，包含 application/subscription/gateway 的 ID 与显示名、稳定 providerId、baseURL、subscriptionKey 和模型映射；JSON 序列化而非向 JavaScript 插值。UUID 文件名不包含用户输入。插件供应商 ID 包含订阅 UUID，避免不同订阅覆盖。
+有效本地阻断 = 平台强制 block OR 用户显式开启本地阻断。
 
-模块只导出一个 async 插件函数。config 钩子用 ??= 声明供应商和模型；auth 使用「导入配置」的本地 OAuth auto callback 返回 {type: success, key, accountId}，不启动外部 OAuth、不自动覆写已有登录。另提供「更新API Key」标准 API key 登录，便于密钥轮换后的手动更新。首次加载且没有该供应商任何账号时，在 magpie 提供的 directory 内用共享 plugin-auth.json.lock 锁读取最新账号文件，保留旧文件备份并原子写入权限 0600 的 plugin-auth.json。非敏感一次性标记存于 aigateway-proxy-imports/<providerId>.json，安装重载、密钥手动更新及主动退出后不覆盖或重新导入；读取/锁/写入失败时保留手动导入入口。OpenCode 不自动导入。
+| 平台模式 | 本地选择 | `aside` | 原生趋势 |
+| --- | --- | --- | --- |
+| audit | 默认关闭/明确关闭 | true | 不新增原生采样 |
+| audit | 明确开启 | false | 宿主真实采样；还需启用宿主走势设置 |
+| block | 不可关闭 | false | 宿主真实采样；本地偏好不能解除平台限制 |
 
-loader 从当前账号 getAuth 读取密钥，设置 APIM Ocp-Apim-Subscription-Key，移除 Agent 原来的 Authorization/x-api-key/x-goog-api-key，不加入员工身份头。请求只允许选定网关路径中的模型协议端点，重定向设 manual，不消费/缓存响应体，保留 init.signal。
+“额度控制”复用插件授权动作，一次点击捕获一次切换目标，重复 callback 不反向切回。
+保存前 fresh 读取策略；平台改为 block 则拒绝关闭。偏好按内部用户和 provider 私有保存，
+损坏/跨用户文件不覆盖。宿主按钮和布局不受插件控制，不能把它称为已实现的原生滑动开关。
 
-复用 gateway_protocol.invocation_api_paths 决定支持的协议；如支持 Responses 优先 Responses，不凭显示名猜测。模型逐项 npm 映射：openai_responses -> @ai-sdk/openai；anthropic_messages -> @ai-sdk/anthropic；其他受支持 chat -> @ai-sdk/openai-compatible。Anthropic SDK 的 /messages 重写为平台 /v1/messages；模型发现使用平台 /v1/models。不凭显示名推断协议。模型 context 取平台注册值；未知 context 使用保守客户端默认，output 使用客户端 8192 上限（不是厂商最大输出声明）。
+`aside=false` 本身不保证指定模型被宿主拒绝；文本 loader 和图片助手还执行本地提前检查。
+本地只是辅助，跨客户端并发仍靠平台准入。普通读数和进程缓存至多 60 秒，不增加后台查询循环。
 
-provider.models 调用配置网关 /v1/models，取线上与快照交集；401/403 标记登录需要重新验证，网络/其他失败保留快照。网关实时 admission 才是最终授权，不宣称快照等于持续权限。
+独立“查看额度趋势”保留为补充，复用真实个人快照、去重并限制历史量；不写宿主 quota-history.json，
+不补造安装前数据。关闭本地控制不删除宿主旧历史，所以旧曲线可能仍可见。
+USD 未初始化、价格未知或策略同步中应明确不可用，不能显示假零或把旧 Token 数当美元。
 
-## 页面
+## 图片、图标和界面
 
-下载客户端独立 route page=client-downloads，沿用既有 workspace 顶栏、卡片、字体、颜色与国际化。从用户菜单及命令搜索进入；跨数据源不重定向该页。查询 key 带账号/权限 revision，退出切换账号不混用列表。
+- 图片桥接仅监听 loopback，使用 image-only capability 和本机随机 Key；不向 Agent 下发 APIM Key 或 refresh token。
+- 原生图片登记通过宿主 CLI，仅管理有所有权证据的本插件供应商；无法安全定位配置目录则保留 MCP 回退。
+- 路径、禁用/卸载/注销、同名冲突和手工修改保护见 [图片登记](native-image-registration-design.md)
+  与 [跨平台生命周期](windows-image-paths.md)。
+- 图标生成与下载分离，默认资源随 API 打包。企业上传的服务接口、共享目录和版本激活见
+  [图标设计](plugin-icons-toggle-design.md)，不在下载时临时生成。
+- 下载页采用平台现有 UI，不另造风格；权限、独立勾选、加载和错误态详见下载布局设计。
+  客户端会话缺失或 Agent 图标关联缺失不能通过插件伪造修复。
 
-有标签的应用订阅下拉、对应网关下拉、密钥类型选择、模型概览与警告复选框。无权限/无订阅/无可调用模型时解释原因。提交中防重复点击，POST blob 成功后生成临时 Object URL，下载完成释放，不把配置保存在 localStorage 或 Query Cache。
+## 源码与验证入口
 
-## 发布与回滚
+| 范围 | 主要位置 |
+| --- | --- |
+| 用户版授权与目录 | `backend/services/client_user.py`、`client_user_store.py`、`backend/http/client_user.py` |
+| 订阅版下载 | `backend/services/client_downloads.py`、`backend/http/client_downloads.py` |
+| 名称与图标 | `backend/services/client_namespace.py`、`download_filename.py`、`client_icons.py` |
+| 插件运行时 | `backend/services/client_user_plugin/`、`backend/services/client_plugin/` |
+| 追踪与权限 | `backend/services/client_telemetry.py`、`client_download_permissions.py` |
+| 页面 | `frontend/src/pages/client-downloads-page.tsx`、`client-authorization-page.tsx` |
 
-只发布 API/frontend 包，core/schema/APIM 配置不改，不需新基础设施部署。保留生产已挂载的 ZIP 与 hash，从干净提交 git archive 构建 frontend 并用现有 Linux 依赖安装和确定性打包流程，通过 Microsoft Entra SCM 发布。部署内容不得回滚用户 main 的已有功能。
-
-发布后验证 /health、静态资源 hash、真实账号 options/download、无权限会话、下载包真实 magpie 加载及最小模型请求。不用健康检查代替数据库认证和模型调用。失败可恢复留存 API ZIP；不恢复/重写数据库与 APIM 配置。
+本地、模拟宿主、实际下载和真实付费调用分别验收，不复用旧版本测试作为当前通过证明。
+常规软件包发布与 USD 金融安装分别执行；不再沿用早期“所有改动只发布 API、不涉及迁移或 Core”的统一结论。
+恢复依据见 [历史与恢复索引](release-history.md)，未完成金融安装见 [USD 待办](usd-installation.md)。

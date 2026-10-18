@@ -44,3 +44,10 @@ def test_budget_directory_controls_preserve_budget_mutations_and_primary_departm
     assert "department_id: people.department_id" in editor
     assert 'allocation_mode: updateBudget ? mode : "preserve"' in editor
     assert 'user_ids: selection === "ids" ? selectedIds : []' in editor
+
+
+def test_department_budget_edit_uses_the_parent_budget_mode() -> None:
+    source = (FRONTEND_SOURCE / "data-sources/apim/pages/budget-page.tsx").read_text()
+    assert "parentAllocated: budgetLimit(organization) != null" in source
+    assert "parentAllocated: organization.token_limit != null" not in source
+    assert 'const editDisabled = item.scope_type !== "organization" && !parentAllocated' in source

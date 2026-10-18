@@ -2,9 +2,11 @@
 
 本目录保存功能的需求分析和设计方案。各功能的实现状态见下表及对应文档；拟议接口、字段和组件不代表已经实现。
 
-2026-10-16 新增：[客户端鉴权与 Token/USD 预算兼容升级方案](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)。
-方案覆盖自主组织/密码账号、main 受信后端委托、原生协议、双单位预算、性能、备份、切换与回退；尚未实现或激活。
-当前合并发布基线见[2026-10-16 发布记录](aigateway-proxy-client/release-main-merge-2026-10-16.md)。
+客户端文档统一从 [AIGateway-Proxy 入口](aigateway-proxy-client/README.md) 阅读。
+[预算兼容方案](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)覆盖自主组织/密码账号、
+main 受信后端委托、双单位预算和恢复；兼容软件已有历史发布，金融安装与目标金额配置尚未完成。
+最新安装证据和待办只维护在 [USD 安装与配置](aigateway-proxy-client/usd-installation.md)，
+不将[2026-10-16 合并发布记录](aigateway-proxy-client/release-main-merge-2026-10-16.md)视为当前线上状态。
 
 以下运行包与 PR 叙述是 2026-10-12 的历史状态快照，不代表上述新方案已交付：
 当时运行包来自 `92378f7`（兼容核心）和 `47595da`（请求追踪时区前端），监控修复已验收。
@@ -18,8 +20,8 @@ main本地与线上验收通过，结果见实施记录；上游CI待维护者�
 | --- | --- | --- | --- | --- |
 | 初始化私网与请求监控 | [需求与设计](gateway-network-monitoring/design.md) | [design.md](gateway-network-monitoring/design.md) | 已实现；监控已上线，1812项Python/157项前端通过，现网hotfix no-op及00:37记录/自动刷新/时区已验收，见[实施记录](gateway-network-monitoring/implementation.md) | 未提交 |
 | 应用 TPM 与额度同步 | [设计与需求](application-tpm-sync/design.md) | [design.md](application-tpm-sync/design.md) | 已上线；1805项本地通过，保存即时投影、正式低TPM 429/提高TPM 200已验证，见[实施记录](application-tpm-sync/implementation.md) | 未提交 |
-| AIGateway-Proxy 客户端 | [requirements.md](aigateway-proxy-client/requirements.md) | [design.md](aigateway-proxy-client/design.md) | 核心功能已上线；cc-switch 下载、magpie 导入及5模型连通验收通过，精细权限延期，见[实施记录](aigateway-proxy-client/implementation.md) | 未提交上游 PR |
-| 客户端鉴权与 Token/USD 兼容升级 | [目标与边界](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md#1-基线目标与范围) | [详细方案](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)、[实施记录](aigateway-proxy-client/budget-auth-compatibility-upgrade-implementation.md) | 0.5.0 兼容软件已上线；新备份、隔离还原及真实 Token 调用通过；USD 金融切换尚未完成 | `dd68660`，用户仓库当前分支 |
+| AIGateway-Proxy 客户端 | [requirements.md](aigateway-proxy-client/requirements.md) | [design.md](aigateway-proxy-client/design.md) | 双版插件、下载权限和个人预算下载门槛已有实现；历史发布见[索引](aigateway-proxy-client/release-history.md)，当前行为不沿用早期 cc-switch/Owner-only 草案 | 未提交上游 PR |
+| 客户端鉴权与 Token/USD 兼容升级 | [目标与边界](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md#1-基线目标与范围) | [详细方案](aigateway-proxy-client/budget-auth-compatibility-upgrade-design.md)、[历史实施记录](aigateway-proxy-client/budget-auth-compatibility-upgrade-implementation.md) | 0.5.0 兼容软件已有发布；金融安装和 USD 配置未完成，见[唯一待办入口](aigateway-proxy-client/usd-installation.md) | 用户仓库当前分支；发布事实与本地提交分开记录 |
 | 模型定价同步 | [requirements.md](model-pricing-sync/requirements.md) | [design.md](model-pricing-sync/design.md) | 已实现、已上线；010不可变，后续共享包保留；原验收边界见验证记录 | [xuleihive/turnstile#31](https://github.com/xuleihive/turnstile/pull/31)，Open，待合并 |
 | 用户设置 | [requirements.md](user-settings/requirements.md) | [design.md](user-settings/design.md) | 已实现、已上线；当前目录集成及本人只读接口已随 `9cc17fa` 复验；真实 Microsoft OAuth/Graph 未重新验收 | [xuleihive/turnstile#32](https://github.com/xuleihive/turnstile/pull/32)，Open，待合并 |
 | 组织管理 | [requirements.md](organization-management/requirements.md) | [design.md](organization-management/design.md) | P1 已上线；001-018 已应用，成员/权限/预算与用量兼容已复验；P2 代码已部署，真实 Entra 与动态网关未验收且开关关闭 | [xuleihive/turnstile#34](https://github.com/xuleihive/turnstile/pull/34)，Open，待上游审查 |
