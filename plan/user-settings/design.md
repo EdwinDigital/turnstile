@@ -690,7 +690,9 @@ Password users can change their own display name, avatar, and password from User
 Microsoft sessions show read-only profiles. Operators can still use `python -m backend.accounts`
 for account maintenance; application restarts never reset the bootstrap account.
 
-## 2026-10-18 上游 v1.2 兼容同步（2026-10-18）
+## 上游 v1.2 独立候选记录（2026-10-18）
+
+以下为独立上游 PR #32 候选的历史验证，不代替用户仓库 main 的集成验证。
 
 - 将上游 `main` 的 `e59177d` 合入 `codex/user-info-management`，保留现有用户设置功能和上游新增的模型、路由、预算、认证及开发代理行为。本次仅更新 PR #32，不推送用户 repo `main`，不部署云资源或应用包。
 - 个人预算适配 Token/USD 双模式，复用上游预测与组件计价语义，精确金额通过 Decimal 聚合；本人过滤覆盖原始用量、预算证据、恢复记录和 USD 查询，管理员不带过滤的既有查询保持原行为。
@@ -700,3 +702,11 @@ for account maintenance; application restarts never reset the bootstrap account.
 - Ruff、Mypy（236 文件）、前端生产构建、OpenAPI 校验、APIM XML 和 Bicep 本地编译通过。复用本机现有 .NET 8 SDK 后，策略执行与文档相关 158 项检查通过；最终完整 Python 回归为 3,873 passed、3 failed、11 warnings，无跳过或夹具启动错误。剩余失败均为下述纯上游已复现问题，详情记录在 PR 验证证据中。
 - 已知上游缺陷：纯 `e59177d` 临时副本同样出现 `test_publication_activation_persists_catalog_pricing_in_postgres` 的 manual/azure_retail/anthropic 三项失败。`019_runtime_display_name` 已移除名称唯一约束，激活 SQL 仍使用 `ON CONFLICT (name)`；首项异常导致后两项留下进行中发布冲突。本 PR 未改动该迁移或激活模块，不将此上游模型发布问题混入用户设置修复，也不把全量测试描述为全部通过。
 - 补充全部 Node 前端测试，当前候选与纯上游同为 276 passed、33 failed，失败用例列表逐项相同。涉及 3 个文件级 TypeScript 导入/旧导出问题、7 项缺少 `useAuth` mock 的可用性组件夹具及 23 项缺少 `gatewayProgramUpgradePreview` mock 的发布对话框夹具；沙箱外复验已排除代理端口权限问题。不通过修改无关模型模块或删减测试扩大本 PR 范围。
+
+## 用户仓库 main 集成（2026-10-18）
+
+- 根据后续授权，将 `codex/user-info-management` 的 `35c64c6` 集成到 `EdwinDigital/turnstile:main`，并纳入同时更新的 `376c452` 组织权限合并；不推送上游 main，不执行部署。
+- 保留用户仓库的数据库组织目录、稳定治理 ID、部门范围过滤、图片功能开关与上游文档校验约定。未知费用继续返回 `used_usd = null`，新增可用性与未计价计数；已知费用下界已达额度时仍显示超额。个人统计复用正式组件计价，不恢复旧的粗略费用判断。
+- 上游独立候选的 29 项迁移与用户仓库完整 40 项迁移分别验证；本次未修改任何 SQL 或已应用校验和，也不重做 Owner 初始化。完整链的新装、重跑、历史数据保留、改密持久化和目录身份兼容均在自有 PostgreSQL 临时集群验证。
+- 最终定向检查 245 passed；真实数据库检查 19 passed。Ruff、修改范围 7 文件的 Mypy、前端类型检查/生产构建和桌面/移动端四组浏览器夹具通过。组合契约比较忽略无语义差异的 enum 顺序，保留字段与响应结构完整比较。
+- 未将独立 PR 的全量测试数量当作集成 main 的验证。全量 Mypy 另有两个未修改部署测试的既有显式导出错误（`test_deploy_script.py` 导入 `EPOCH` / `identity`）；不为本次合并修改无关部署模块，不宣称所有检查全绿。没有重新执行云端迁移、真实 OAuth/Graph、推理或发布。

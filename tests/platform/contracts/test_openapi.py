@@ -194,8 +194,8 @@ def test_user_settings_contract_matches_served_self_service_routes() -> None:
     actual = app.openapi()["components"]["schemas"]
     for name in ("PersonalBudget", "AccountInformation", "PersonalUsage"):
         fields = cast(dict[str, object], schemas[name]["properties"])
-        for field, documented in fields.items():
-            assert _schema_contract(documented) == _schema_contract(
+        for field, field_schema in fields.items():
+            assert _schema_contract(field_schema) == _schema_contract(
                 actual[name]["properties"].get(field)
             ), (name, field)
         assert _schema_contract(schemas[name]) == _schema_contract(actual[name]), name

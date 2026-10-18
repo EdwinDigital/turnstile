@@ -1492,12 +1492,13 @@ def test_application_usd_dtos_tags_and_registered_organization() -> None:
     )
     assert request.tags == {"environment": "test"}
     assert application_organization({}).organization_id is None
+    unresolved = GatewayApplicationSubscriptionCreate(
+        subscription_id="unit",
+        display_name="Unit",
+        tags={"organization_id": "not-a-directory-id"},
+    )
     with pytest.raises(ValueError, match="Unknown application organization"):
-        GatewayApplicationSubscriptionCreate(
-            subscription_id="unit",
-            display_name="Unit",
-            tags={"organization_id": "not-a-directory-id"},
-        )
+        application_organization(unresolved.tags)
     for invalid in [{"": "value"}, {"key": "x" * 257}, {str(index): "v" for index in range(33)}]:
         with pytest.raises(ValueError):
             GatewayApplicationSubscriptionCreate(
