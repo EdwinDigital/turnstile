@@ -52,6 +52,22 @@ def test_current_profile_has_only_budget_and_transport_configuration() -> None:
     assert profile == create_image_profile(limits, "unit-image")
 
 
+def test_image_gateway_selection_is_complete_and_never_reaches_provider_payload() -> None:
+    identity = "10000000-0000-4000-8000-000000000001"
+    with pytest.raises(ValidationError):
+        _request(gateway_profile_id=identity)
+    with pytest.raises(ValidationError):
+        _request(gateway_deployment_id=identity)
+    selected = _request(gateway_profile_id=identity, gateway_deployment_id=identity)
+    profile = create_image_profile(_limits(), "unit-image")
+    payload = selected.provider_payload("unit-image", profile)
+    platform_fields = {"gateway_profile_id", "gateway_deployment_id", "model_id", "metadata"}
+    assert not platform_fields & payload.keys()
+    assert selected.reservation_tokens("unit-image", profile) == _request().reservation_tokens(
+        "unit-image", profile,
+    )
+
+
 @pytest.mark.parametrize("change", [
     {"provider_model": "different-model"}, {"max_request_bytes": 4000},
     {"backend_path": "/another-route"}, {"public_path": "/another-route"},

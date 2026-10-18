@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal, cast
@@ -22,7 +20,7 @@ from turnstile_core.domain.runtime_models import (
     PriceSource,
     RegistryResponse,
 )
-from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog
+from turnstile_core.pricing.catalog import CatalogEntry, CompositeCatalog, parse_context_tier
 from turnstile_core.pricing.matching import match_model, reference_price_basis
 
 MATCH_SYSTEM_PROMPT = (
@@ -35,22 +33,7 @@ MATCH_SYSTEM_PROMPT = (
 
 
 def entry_digest(entry: CatalogEntry) -> str:
-    return str(
-        entry.metadata.get("entry_digest")
-        or hashlib.sha256(
-            json.dumps(
-                [
-                    entry.reference,
-                    entry.input_per_million,
-                    entry.output_per_million,
-                    entry.cached_per_million,
-                    entry.cache_write_per_million,
-                    entry.context_window,
-                ],
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
-    )
+    return entry.digest
 
 
 def entry_prices(entry: CatalogEntry) -> PendingListPrice:
@@ -210,6 +193,12 @@ class ModelPricingService:
         )
         if request.price_source is PriceSource.MANUAL:
             return PricePreviewResponse(status="unsupported", warnings=["手动定价不执行同步"])
+        if request.price_source is PriceSource.MODELS_DEV and (
+            request.operation == "decision" or model and "decision" in model.capabilities
+        ):
+            return PricePreviewResponse(
+                status="unsupported", warnings=["Decision 模型请使用 Azure 零售价或手工填写"],
+            )
         if request.refresh:
             failures = self.catalog.refresh({request.price_source})
             if failures:
@@ -280,6 +269,10 @@ class ModelPricingService:
             return PricePreviewResponse(status="stale", warnings=["价格来源读取失败"])
         if entry is None:
             return PricePreviewResponse(status="unmapped", warnings=["保存的目录引用未找到"])
+        if entry.context_tier is not None or parse_context_tier(entry.label) is not None:
+            raise HTTPException(
+                status_code=409, detail="Select the complete context price schedule, not one tier",
+            )
         if entry.operation != operation:
             return PricePreviewResponse(
                 status="unsupported", warnings=["目录价格用途与模型不一致，保留已有单价"],

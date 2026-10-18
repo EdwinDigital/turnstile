@@ -13,9 +13,11 @@ import {
   Eye,
   EyeOff,
   KeyRound,
+  List,
   MoreHorizontal,
   PanelLeft,
   Plus,
+  Orbit,
   RefreshCw,
   Save,
   Search,
@@ -29,16 +31,19 @@ import {
   X,
 } from "lucide-react"
 
-import { ApiError, dataSource, usageWindow } from "../data-sources/apim/api"
+import { dataSource, usageWindow } from "../data-sources/apim/api"
+import { RegistryNoticeBanner, type RegistryNotice as Notice } from "../components/ui/registry-notice-banner"
+import { useIsMobile } from "../hooks/use-mobile"
 import {
   ClaudeLogo,
   DeepSeekLogo,
+  FoundryLogo,
   GatewayBrandLogo,
   KimiLogo,
+  MicrosoftLogo,
   OpenAiLogo,
   ProviderBrandLogo,
   gatewayBrandFromIdentity,
-  gatewayBrandLabel,
   providerBrandFromIdentity,
   providerBrandFromMetadata,
   providerBrandLabel,
@@ -46,6 +51,8 @@ import {
   type ProviderBrand,
 } from "../components/brand-logos"
 import { FINOPS_NAVIGATE_EVENT } from "../lib/navigation"
+import { apimGatewayEntries, apimGatewayProfiles, connectionTargetDetails, gatewayEntries, modelTargetDetails, publicationTargetDetails } from "../lib/gateway-topology"
+import { emptyModelFilters, matchesModelFilters, modelFilterRecord, modelInventoryFamily, publicationFilterRecord } from "../lib/model-inventory-filters"
 import { Button } from "../components/ui/button"
 import { ButtonGroup } from "../components/ui/button-group"
 import { Checkbox } from "../components/ui/checkbox"
@@ -84,27 +91,47 @@ import {
 } from "../components/ui/select"
 import { Textarea } from "../components/ui/textarea"
 import { ResizableGridTable } from "../components/ui/resizable-table"
-import { getIntlLocale } from "../locales/index"
-import { priceRequests } from "../lib/pricing"
-import { finopsKeys, finopsQueries } from "../data-sources/apim/queries"
+import { getIntlLocale, useLocale } from "../locales/index"
+import { formatTimeAgo } from "../lib/time"
+import { hasModelPrices, priceRequests } from "../lib/pricing"
+import { finopsKeys, finopsQueries, storeRegistry } from "../data-sources/apim/queries"
 import { assistantSettingsKey } from "../components/assistant/queries"
 import { useTimezone } from "../providers/timezone-provider"
 import { useAuth } from "../providers/auth-provider"
+import { pricingSyncSummary } from "../components/model-management/model-edit-form"
+import type { PriceSyncResponse } from "../data-sources/apim/types"
 import {
   ModelPublicationDialog,
   publicationStatusLabel,
 } from "../components/model-management/model-publication-dialog"
 import { ConnectionDialog } from "../components/model-management/connection-dialog"
 import { ModelEditDialog } from "../components/model-management/model-edit-dialog"
-import { pricingSyncSummary } from "../components/model-management/model-edit-form"
+import { RuntimeDiagnosticDialog, useRuntimeDiagnostics } from "../components/model-management/runtime-diagnostic-dialog"
+import { runtimeDiagnostic, runtimeHealthDescription, runtimeHealthLabels, runtimeHealthState, runtimeWithTelemetryHealth, type RuntimeHealthState } from "../lib/runtime-health"
+import { ModelAvailabilityDialog, ModelAvailabilityStatus, ModelAvailabilitySwitch, useModelAvailabilityCommand } from "../components/model-management/model-availability"
+import { ModelInventoryFilterChips, ModelInventoryFilterMenu } from "../components/model-management/model-inventory-filter-menu"
+import { ModelInventoryGraph } from "../components/model-management/model-inventory-graph"
+import { ModelUsageDetail, modelDetailHref, openModelDetailLink } from "../components/model-management/model-usage-detail"
+import {
+  ModelVendorLogo,
+  modelVendorFromMetadata,
+  modelVendorLabel,
+} from "../components/model-management/model-vendor-select"
+import {
+  ApimGatewayWorkspace,
+  MODEL_MANAGEMENT_TABS,
+  type ModelManagementTab,
+} from "../components/model-management/apim-gateway-workspace"
 import type {
+  ApimTargetTopologyList,
   GatewayPublication,
+  GatewayPublicationList,
   GatewayProfile,
   ManagedModel,
-  PriceSyncResponse,
+  ModelConnectionUpdate,
+  ModelAvailabilityReadback,
   ModelProvider,
   ModelRegistry,
-  ModelConnectionUpdate,
   ModelRuntime,
   RuntimeHealth,
   UsageRequestSummary,
@@ -112,10 +139,18 @@ import type {
 
 type RegistryKind = "runtime" | "model" | "provider" | "gateway"
 type RegistryItem = ModelRuntime | ManagedModel | ModelProvider | GatewayProfile
-type Tab = "models" | "connections" | "gateways"
+type Tab = ModelManagementTab
 type ModelTableTab = Tab
 
-const MODEL_TABLE_COLUMN_MIN_WIDTHS = [180, 120, 160, 80, 48] as const
+const MODEL_TABLE_COLUMN_MIN_WIDTHS = {
+  models: [160, 120, 120, 160, 80, 125],
+  connections: [180, 160, 180, 140],
+  apim: [180, 120, 160, 80, 48],
+  gateways: [180, 120, 160, 80, 48],
+} as const
+
+const MODEL_COMPACT_COLUMN_MIN_WIDTHS = [160, 120, 120, 160, 80, 63] as const
+const MODEL_CONNECTION_COMPACT_COLUMN_MIN_WIDTHS = [180, 160, 180, 63] as const
 
 const capabilityLabels: Record<string, string> = {
   chat: "对话",
@@ -129,101 +164,6 @@ const capabilityLabels: Record<string, string> = {
 const compactNumber = { format: (value: number) => new Intl.NumberFormat(getIntlLocale(), { notation: "compact", maximumFractionDigits: 1 }).format(value) }
 const runtimeCurrency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 4 })
 
-type Notice = {
-  text: string
-  ok: boolean
-  context?: string
-  detail?: string
-  pending?: boolean
-  actionLabel?: string
-}
-
-function RegistryNoticeBanner({ notice, onDismiss, onAction }: {
-  notice: Notice
-  onDismiss: () => void
-  onAction?: () => void
-}) {
-  return <div className={`${notice.pending ? "registry-progress" : notice.ok ? "registry-notice" : "registry-error"} smh-notice`} role="status" aria-live="polite">
-    {notice.pending ? <RefreshCw className="spin" size={13} /> : notice.ok ? <Check size={13} /> : <TriangleAlert size={13} />}
-    <div className="smh-notice-copy">
-      {notice.context && <b data-no-localize>{notice.context}</b>}
-      <span>{notice.text}</span>
-      {notice.detail && <small>{notice.detail}</small>}
-    </div>
-    {notice.actionLabel && onAction && <button type="button" className="smh-notice-action" onClick={onAction}>{notice.actionLabel}</button>}
-    <button type="button" className="smh-notice-close" onClick={onDismiss} aria-label="关闭"><X size={13} /></button>
-  </div>
-}
-
-async function probeRuntimeHealth(runtime: ModelRuntime, registry: ModelRegistry): Promise<RuntimeHealth> {
-  const models = registry.models.filter((model) => model.runtime_id === runtime.id && model.enabled)
-  const model = models.find((candidate) => candidate.is_default) ?? models[0]
-  const checkedAt = new Date().toISOString()
-  if (!model) {
-    return { runtime_id: runtime.id, status: "unavailable", message: "没有可用于健康检查的启用模型", checked_at: checkedAt }
-  }
-  try {
-    const response = await dataSource.invokeModel({
-      runtime_id: runtime.id,
-      model_id: model.id,
-      metadata: {
-        organization_id: "org-contoso-global",
-        organization: "Contoso Global",
-        department_id: "department-platform",
-        department: "AI Platform",
-        project_id: "project-finops",
-        project: "Model FinOps",
-        agent_id: "agent-delivery",
-        agent: "Delivery Engineer",
-        // The probe is the platform checking itself, so it must not borrow a person.
-        // Borrowing one made the verdict depend on that person's budget and model policy:
-        // once they went over, a perfectly healthy runtime reported "unavailable". This id
-        // carries no "@", so the catalog can never mistake it for an employee, and it can
-        // therefore never own a budget or a model policy for the check to trip over.
-        user_id: "system-runtime-health-check",
-        user: "Runtime Health Check",
-        workflow: "runtime-health-check",
-        model_id: model.id,
-        model: model.model_key,
-        runtime: runtime.name,
-        request_source: "runtime-health-check",
-        run_id: crypto.randomUUID(),
-        turn_index: 1,
-      },
-      messages: [{ role: "user", content: "Reply with OK." }],
-      max_output_tokens: 16,
-      stream: false,
-    })
-    return {
-      runtime_id: runtime.id,
-      status: "available",
-      message: `${response.gateway.toUpperCase()} 推理成功 · ${response.model} · ${response.latency_ms.toLocaleString(getIntlLocale())} ms`,
-      checked_at: new Date().toISOString(),
-    }
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "未知错误"
-    // A 409 is this deployment refusing to route, not the provider failing. In production
-    // only APIM-fronted runtimes may be invoked, so a direct runtime is refused before
-    // anything is contacted -- recording that as `unavailable` would put "Offline" next to
-    // a provider nobody asked. It stays `unknown`, which is what "we did not find out"
-    // already means everywhere else on this page.
-    if (error instanceof ApiError && error.status === 409) {
-      return {
-        runtime_id: runtime.id,
-        status: "unknown",
-        message: `无法在此环境检查 · ${detail.slice(0, 180)}`,
-        checked_at: checkedAt,
-      }
-    }
-    return {
-      runtime_id: runtime.id,
-      status: "unavailable",
-      message: `推理检查失败 · ${detail.slice(0, 180)}`,
-      checked_at: new Date().toISOString(),
-    }
-  }
-}
-
 function runtimePayload(runtime: ModelRuntime, patch: Partial<ModelRuntime> = {}) {
   const value = { ...runtime, ...patch }
   return {
@@ -236,28 +176,7 @@ function runtimePayload(runtime: ModelRuntime, patch: Partial<ModelRuntime> = {}
     is_default: value.is_default,
     config: value.config,
     allowed_roles: value.allowed_roles,
-  }
-}
-
-function modelPayload(model: ManagedModel, patch: Partial<ManagedModel> = {}) {
-  const value = { ...model, ...patch }
-  return {
-    provider_id: value.provider_id,
-    runtime_id: value.runtime_id,
-    model_key: value.model_key,
-    display_name: value.display_name,
-    family_key: value.family_key,
-    upstream_model_id: value.upstream_model_id,
-    assignment_required: value.assignment_required,
-    enabled: value.enabled,
-    is_default: value.is_default,
-    capabilities: value.capabilities,
-    context_window: value.context_window,
-    input_cost_per_million: value.input_cost_per_million,
-    output_cost_per_million: value.output_cost_per_million,
-    cached_cost_per_million: value.cached_cost_per_million,
-    cache_write_cost_per_million: value.cache_write_cost_per_million,
-    allowed_roles: value.allowed_roles,
+    price_discount_percent: value.price_discount_percent ?? null,
   }
 }
 
@@ -276,28 +195,46 @@ function gatewayPayload(gateway: GatewayProfile, patch: Partial<GatewayProfile> 
 
 function modelManagementTabFromUrl(): Tab {
   const tab = new URL(window.location.href).searchParams.get("tab")
-  return tab === "connections" || tab === "gateways" ? tab : "models"
+  return tab === "connections" || tab === "apim" || tab === "gateways"
+    ? tab
+    : "models"
 }
 
 export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () => void }) {
-  const { user } = useAuth()
   const client = useQueryClient()
-  const { data, isLoading, error } = useQuery(finopsQueries.registry())
+  const { user } = useAuth()
+  const { data, isLoading, error } = useQuery({
+    ...finopsQueries.registry(),
+    meta: { automaticRefresh: true },
+    refetchInterval: query => query.state.data?.runtimes.some(runtime => runtimeHealthState(runtime) === "checking") ? 2_000 : false,
+  })
+  const availability = useQuery({ ...finopsQueries.modelAvailability(), enabled: Boolean(user) })
+  const [availabilityModelId, setAvailabilityModelId] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>(modelManagementTabFromUrl)
-  const [editor, setEditor] = useState<{ kind: Exclude<RegistryKind, "model">; item?: RegistryItem } | null>(null)
-  const [editingModel, setEditingModel] = useState<ManagedModel | null>(null)
+  const [editor, setEditor] = useState<{ kind: RegistryKind; item?: RegistryItem } | null>(null)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [publicationOpen, setPublicationOpen] = useState(() => Boolean(publicationIdFromUrl()))
   const [publicationId, setPublicationId] = useState<string | null>(publicationIdFromUrl)
   const [publicationDialogId, setPublicationDialogId] = useState<string | null>(publicationIdFromUrl)
+  const [publicationAutoClose, setPublicationAutoClose] = useState(true)
   const [connectionOpen, setConnectionOpen] = useState(false)
   const [editingConnection, setEditingConnection] = useState<ModelRuntime | null>(null)
+  const [diagnosticRuntime, setDiagnosticRuntime] = useState<ModelRuntime | null>(null)
+  const [diagnosticRequestId, setDiagnosticRequestId] = useState<string | null>(null)
+  const [diagnosticGatewayDeploymentId, setDiagnosticGatewayDeploymentId] = useState<string | null>(null)
+  const [, refreshHealthAge] = useState(0)
+  useEffect(() => {
+    const timer = window.setInterval(() => refreshHealthAge(value => value + 1), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
   const [credentialModel, setCredentialModel] = useState<ManagedModel | null>(null)
   const [deletingModel, setDeletingModel] = useState<ManagedModel | null>(null)
+  const [archivingPublication, setArchivingPublication] = useState<GatewayPublication | null>(null)
   const [deletingConnection, setDeletingConnection] = useState<ModelRuntime | null>(null)
   const [deletingGateway, setDeletingGateway] = useState<GatewayProfile | null>(null)
-  const publications = useQuery(finopsQueries.gatewayPublications())
-  const trackedPublication = useQuery(finopsQueries.gatewayPublication(publicationId))
+  const targetTopologies = useQuery(finopsQueries.apimTargetTopologies())
+  const publications = useQuery({ ...finopsQueries.gatewayPublications(), enabled: user?.role === "owner" })
+  const trackedPublication = useQuery({ ...finopsQueries.gatewayPublication(publicationId), enabled: user?.role === "owner" && Boolean(publicationId) })
   // The outcome travels with the text. It used to be a bare string rendered by a banner
   // that was hardcoded green with a check mark, so a failed inference check announced
   // itself as a success -- the words said "failed" and everything around them said "ok".
@@ -306,14 +243,15 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   const syncSummary = syncResult ? pricingSyncSummary(syncResult) : ""
   const syncPrices = useMutation({
     mutationFn: () => dataSource.syncPrices(),
-    onSuccess: result => {
-      client.setQueryData(finopsKeys.registry, result.registry)
+    onSuccess: async result => {
+      await storeRegistry(client, result.registry)
       void client.invalidateQueries({ queryKey: finopsKeys.all })
       setSyncResult(result)
     },
     onError: failure => setNotice({ text: String(failure), ok: false }),
   })
   const [runtimeDetailId, setRuntimeDetailId] = useState(() => new URL(window.location.href).searchParams.get("runtime"))
+  const [modelDetailId, setModelDetailId] = useState(() => new URL(window.location.href).searchParams.get("model"))
   const runtimeHealthWindow = useMemo(() => usageWindow(30), [])
   // One scoped page per runtime matches the detail view. Filtering the global 200-row page
   // would hide older probes for busy runtimes and recreate the list/detail disagreement.
@@ -325,6 +263,10 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   })
 
   const showPublication = (id: string) => {
+    const status = trackedPublication.data?.id === id
+      ? trackedPublication.data.status
+      : publications.data?.items.find(publication => publication.id === id)?.status
+    setPublicationAutoClose(status !== "active")
     setPublicationId(id)
     setPublicationDialogId(id)
     setPublicationOpen(true)
@@ -332,6 +274,7 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   }
 
   const trackPublication = (id: string) => {
+    setPublicationAutoClose(true)
     setPublicationId(id)
     setPublicationDialogId(id)
     setPublicationOpen(true)
@@ -345,6 +288,7 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   }
 
   const openNewPublication = () => {
+    setPublicationAutoClose(true)
     setPublicationDialogId(null)
     setPublicationOpen(true)
     replacePublicationUrl(null)
@@ -353,6 +297,7 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   useEffect(() => {
     const syncRoute = () => {
       setRuntimeDetailId(new URL(window.location.href).searchParams.get("runtime"))
+      setModelDetailId(new URL(window.location.href).searchParams.get("model"))
       setTab(modelManagementTabFromUrl())
     }
     window.addEventListener("popstate", syncRoute)
@@ -374,6 +319,12 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   useEffect(() => {
     const publication = trackedPublication.data
     if (publication?.status === "active") {
+      if (publication.publication_kind === "model_remove") {
+        void client.cancelQueries({ queryKey: finopsKeys.registry })
+        client.setQueryData<ModelRegistry>(finopsKeys.registry, current => current
+          ? { ...current, models: current.models.filter(model => model.model_key !== publication.model_key) }
+          : current)
+      }
       void client.invalidateQueries({ queryKey: finopsKeys.registry })
       void client.invalidateQueries({ queryKey: finopsKeys.gatewayPublications })
       if (publication.publication_kind === "model_remove") {
@@ -397,18 +348,18 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
           })
     } else if (publication?.status === "failed") {
       setNotice(publication.publication_kind === "model_remove"
-        ? { context: publication.display_name, text: "移除失败，模型仍保持可用", actionLabel: "查看详情", ok: false }
+        ? { context: publication.display_name, text: "移除未完成，生效状态未确认。", actionLabel: "查看详情", ok: false }
         : {
             context: publication.display_name,
             text: "发布失败",
-            detail: "当前模型继续正常服务",
+            detail: publication.failure?.message ?? "发布未完成，生效状态未确认。",
             actionLabel: "重新发布",
             ok: false,
           })
     } else if (publication) {
       setNotice(null)
     }
-  }, [client, trackedPublication.data?.display_name, trackedPublication.data?.publication_kind, trackedPublication.data?.status])
+  }, [client, trackedPublication.data?.display_name, trackedPublication.data?.model_key, trackedPublication.data?.publication_kind, trackedPublication.data?.status, trackedPublication.data?.failure?.message])
 
   const save = useMutation({
     mutationFn: async ({ kind, id, value }: { kind: RegistryKind; id?: string; value: Record<string, unknown> }) => {
@@ -417,36 +368,25 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
       if (kind === "provider") return dataSource.saveProvider(value, id)
       return dataSource.saveGateway(value, id)
     },
-    onSuccess: (registry) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry) => {
+      await storeRegistry(client, registry)
       setEditor(null)
-      setEditingModel(null)
       setNotice({ text: "配置已保存", ok: true })
     },
   })
-  const health = useMutation({
-    mutationFn: (runtime: ModelRuntime) => {
-      if (!data) throw new Error("模型目录尚未加载")
-      return probeRuntimeHealth(runtime, data)
+  const health = useRuntimeDiagnostics({
+    supported: data?.runtime_diagnostics_supported === true,
+    onSuccess: (result, request) => {
+      setNotice({ context: request.runtimeName, text: result.outcome === "passed" ? "所选模型检查通过" : "检查未确认连接可用", ok: result.outcome === "passed" })
     },
-    onSuccess: (result) => {
-      setNotice({ text: result.message, ok: result.status === "available" })
-      client.setQueryData<ModelRegistry>(finopsKeys.registry, (current) => current ? {
-        ...current,
-        runtimes: current.runtimes.map((runtime) => runtime.id === result.runtime_id ? {
-          ...runtime,
-          health_status: result.status,
-          health_message: result.message,
-          last_checked_at: result.checked_at,
-        } : runtime),
-      } : current)
-      void client.invalidateQueries({ queryKey: ["finops", "requests"] })
+    onError: (error, request) => {
+      setNotice({ context: request.runtimeName, text: "检查未确认连接可用", detail: errorMessage(error), ok: false })
     },
   })
   const saveConnection = useMutation({
     mutationFn: dataSource.saveConnection,
-    onSuccess: (registry) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry) => {
+      await storeRegistry(client, registry)
       setConnectionOpen(false)
       setEditingConnection(null)
       setNotice({ text: "连接已添加", detail: "添加首个模型后将通过候选 Revision 验证", ok: true })
@@ -464,8 +404,8 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   })
   const updateConnection = useMutation({
     mutationFn: ({ runtime, value }: { runtime: ModelRuntime; value: ModelConnectionUpdate }) => dataSource.updateConnection(runtime.id, value),
-    onSuccess: (registry) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry) => {
+      await storeRegistry(client, registry)
       setConnectionOpen(false)
       setEditingConnection(null)
       setNotice({ text: "连接已更新", ok: true })
@@ -473,16 +413,16 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   })
   const deleteConnection = useMutation({
     mutationFn: (runtime: ModelRuntime) => dataSource.deleteConnection(runtime.id),
-    onSuccess: (registry, runtime) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry, runtime) => {
+      await storeRegistry(client, registry)
       setDeletingConnection(null)
       setNotice({ context: runtime.name, text: "连接已删除", ok: true })
     },
   })
   const deleteGateway = useMutation({
     mutationFn: (gateway: GatewayProfile) => dataSource.deleteGateway(gateway.id),
-    onSuccess: (registry, gateway) => {
-      client.setQueryData(finopsKeys.registry, registry)
+    onSuccess: async (registry, gateway) => {
+      await storeRegistry(client, registry)
       setDeletingGateway(null)
       setNotice({ context: gateway.name, text: "网关记录已删除", ok: true })
     },
@@ -507,6 +447,24 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
       setCredentialModel(null)
       showPublication(publication.id)
       client.setQueryData(finopsKeys.gatewayPublication(publication.id), publication)
+      void client.invalidateQueries({ queryKey: finopsKeys.gatewayPublications })
+    },
+  })
+  const archivePublication = useMutation({
+    retry: false,
+    mutationFn: (publication: GatewayPublication) => dataSource.archiveFailedPublication(publication.id),
+    onSuccess: async (_result, publication) => {
+      await client.cancelQueries({ queryKey: finopsKeys.gatewayPublications })
+      client.setQueriesData<GatewayPublicationList>({ queryKey: finopsKeys.gatewayPublications }, current => current
+        ? { ...current, items: current.items.filter(item => item.id !== publication.id) }
+        : current)
+      setArchivingPublication(null)
+      if (publicationId === publication.id) {
+        setPublicationId(null)
+        closePublication()
+      }
+      setNotice({ text: "失败记录已从模型列表移除", ok: true })
+      client.removeQueries({ queryKey: finopsKeys.gatewayPublication(publication.id), exact: true })
       void client.invalidateQueries({ queryKey: finopsKeys.gatewayPublications })
     },
   })
@@ -536,32 +494,28 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
       runtimeHealthQueries[index]?.data ?? [],
     )),
   }
-  const loadingRuntimeHealthIds = new Set(
-    data.runtimes
-      .filter((runtime, index) => runtime.health_status === "unknown" && runtimeHealthQueries[index]?.isLoading)
-      .map((runtime) => runtime.id),
-  )
+  const checkingRuntimeIds = new Set([
+    ...health.attempts.filter(attempt => attempt.status === "pending").map(attempt => attempt.request.runtimeId),
+    ...data.runtimes.filter(runtime => runtimeHealthState(runtime) === "checking").map(runtime => runtime.id),
+  ])
+  const diagnosticAttempt = health.attempts.find(attempt => attempt.request.id === diagnosticRequestId)
+  const openRuntimeDiagnostic = (runtime: ModelRuntime, preferredGatewayDeploymentId?: string) => {
+    const pending = health.attempts.find(attempt => attempt.status === "pending" && attempt.request.runtimeId === runtime.id)
+    setDiagnosticRequestId(pending?.request.id ?? null)
+    setDiagnosticGatewayDeploymentId(pending?.request.selection.gateway_deployment_id ?? preferredGatewayDeploymentId ?? null)
+    setDiagnosticRuntime(runtime)
+  }
 
-  const updateRuntime = (runtime: ModelRuntime, patch: Partial<ModelRuntime>) =>
-    runtime.brand_key === "azure_databricks"
-      ? updateConnection.mutate({ runtime, value: {
-          name: patch.name ?? runtime.name,
-          enabled: patch.enabled ?? runtime.enabled,
-          is_default: patch.is_default ?? runtime.is_default,
-          // Carried through unchanged: toggling a connection on or off must not quietly
-          // reset the discount someone set on it.
-          price_discount_percent: patch.price_discount_percent ?? runtime.price_discount_percent,
-        } })
-      : save.mutate({ kind: "runtime", id: runtime.id, value: runtimePayload(runtime, patch) })
-  const updateModel = (model: ManagedModel, patch: Partial<ManagedModel>) =>
-    save.mutate({ kind: "model", id: model.id, value: modelPayload(model, patch) })
+  const updateRuntime = (runtime: ModelRuntime, patch: Partial<ModelConnectionUpdate>) =>
+    updateConnection.mutate({ runtime, value: {
+      name: patch.name ?? runtime.name,
+      enabled: patch.enabled ?? runtime.enabled,
+      is_default: patch.is_default ?? runtime.is_default,
+      price_discount_percent: patch.price_discount_percent === undefined
+        ? runtime.price_discount_percent ?? null : patch.price_discount_percent,
+    } })
   const updateGateway = (gateway: GatewayProfile, patch: Partial<GatewayProfile>) =>
     save.mutate({ kind: "gateway", id: gateway.id, value: gatewayPayload(gateway, patch) })
-  const openModelEditor = (model: ManagedModel) => {
-    if (save.isPending) return
-    save.reset()
-    setEditingModel(model)
-  }
   const removingModelKey = trackedPublication.data?.publication_kind === "model_remove"
     && !["active", "failed", "rolled_back", "superseded"].includes(trackedPublication.data.status)
     ? trackedPublication.data.model_key
@@ -576,44 +530,98 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
 
   const changeTab = (next: Tab) => {
     setTab(next)
+    setModelDetailId(null)
     const url = new URL(window.location.href)
     url.searchParams.set("page", "models")
     url.searchParams.set("tab", next)
     url.searchParams.delete("runtime")
+    url.searchParams.delete("model")
     window.history.replaceState(null, "", url)
   }
 
+  const editingModel = editor?.kind === "model" ? editor.item as ManagedModel | undefined : undefined
+  const availabilityByModel = new Map((availability.error ? [] : availability.data?.items ?? []).map((item) => [item.model_id, item]))
+  const availabilityModel = data.models.find((model) => model.id === availabilityModelId)
   const overlays = <>
-    {editor && <RegistryEditor registry={data} kind={editor.kind} item={editor.item} busy={save.isPending} onClose={() => setEditor(null)} onSave={(value) => save.mutate({ kind: editor.kind, id: editor.item?.id, value })} />}
-    {editingModel && <ModelEditDialog key={editingModel.id} registry={data} model={editingModel} busy={save.isPending} error={save.error ? String(save.error) : null} onClose={() => { if (!save.isPending) setEditingModel(null) }} onSave={(value) => save.mutate({ kind: "model", id: editingModel.id, value })} />}
+    {diagnosticRuntime && <RuntimeDiagnosticDialog
+      key={diagnosticRuntime.id}
+      runtime={data.runtimes.find(runtime => runtime.id === diagnosticRuntime.id) ?? diagnosticRuntime}
+      supported={data.runtime_diagnostics_supported === true}
+      busy={checkingRuntimeIds.has(diagnosticRuntime.id)}
+      error={diagnosticAttempt?.error ? errorMessage(diagnosticAttempt.error) : null}
+      result={diagnosticAttempt?.result ?? null}
+      initialSelection={diagnosticAttempt?.request.selection}
+      preferredGatewayDeploymentId={diagnosticGatewayDeploymentId}
+      onCheck={selection => {
+        setDiagnosticGatewayDeploymentId(selection.gateway_deployment_id)
+        setDiagnosticRequestId(health.start(diagnosticRuntime, selection)?.id ?? null)
+      }}
+      onClose={() => { setDiagnosticRuntime(null); setDiagnosticRequestId(null); setDiagnosticGatewayDeploymentId(null) }}
+    />}
+    {availabilityModel && <ModelAvailabilityDialog model={availabilityModel} registry={data} readback={availabilityByModel.get(availabilityModel.id)} loading={availability.isPending} readError={Boolean(availability.error)} onRefresh={() => { void availability.refetch() }} onClose={() => setAvailabilityModelId(null)} />}
+    {editingModel && <ModelEditDialog
+      key={editingModel.id}
+      registry={data}
+      model={editingModel}
+      availability={availabilityByModel.get(editingModel.id)}
+      availabilityLoading={availability.isPending}
+      busy={save.isPending}
+      error={save.variables?.kind === "model" && save.variables.id === editingModel.id && save.error ? errorMessage(save.error) : null}
+      onClose={() => { save.reset(); setEditor(null) }}
+      onSave={(value) => save.mutate({ kind: "model", id: editingModel.id, value })}
+    />}
+    {editor && editor.kind !== "model" && <RegistryEditor registry={data} kind={editor.kind} item={editor.item} busy={save.isPending} onClose={() => setEditor(null)} onSave={(value) => save.mutate({ kind: editor.kind, id: editor.item?.id, value })} />}
     {consoleOpen && <GatewayConsole registry={data} onClose={() => setConsoleOpen(false)} />}
-    {publicationOpen && <ModelPublicationDialog registry={data} publicationId={publicationDialogId} onPublicationQueued={(id) => {
+    {user?.role === "owner" && publicationOpen && <ModelPublicationDialog registry={data} topology={targetTopologies.data ?? null} topologyAvailable={data.apim_target_topology_available === true} topologyLoading={targetTopologies.isLoading} topologyError={targetTopologies.error ? String(targetTopologies.error) : null} publicationId={publicationDialogId} autoCloseOnSuccess={publicationAutoClose} onPublicationQueued={(id) => {
       trackPublication(id)
       void client.invalidateQueries({ queryKey: finopsKeys.gatewayPublications })
-    }} onManageConnections={() => {
+    }} onClose={closePublication} onManageConnections={() => {
       closePublication()
       setRuntimeDetailId(null)
       changeTab("connections")
-    }} onClose={closePublication} />}
-    {connectionOpen && <ConnectionDialog registry={data} runtime={editingConnection ?? undefined} busy={saveConnection.isPending || updateConnection.isPending || adoptConnection.isPending} error={adoptConnection.error ? String(adoptConnection.error) : (editingConnection ? updateConnection.error : saveConnection.error) ? String(editingConnection ? updateConnection.error : saveConnection.error) : null} onClose={() => { if (!saveConnection.isPending && !updateConnection.isPending && !adoptConnection.isPending) { setConnectionOpen(false); setEditingConnection(null); adoptConnection.reset() } }} onCreate={(value) => saveConnection.mutate(value)} onUpdate={(value) => { if (editingConnection) updateConnection.mutate({ runtime: editingConnection, value }) }} onAdopt={(workspaceUrl) => { if (editingConnection) adoptConnection.mutate({ runtime: editingConnection, workspaceUrl }) }} />}
+    }} />}
+    {connectionOpen && <ConnectionDialog registry={data} topology={targetTopologies.data ?? null} topologyLoading={targetTopologies.isLoading} topologyError={targetTopologies.error ? String(targetTopologies.error) : null} runtime={editingConnection ?? undefined} busy={saveConnection.isPending || updateConnection.isPending || adoptConnection.isPending} error={adoptConnection.error ? errorMessage(adoptConnection.error) : (editingConnection ? updateConnection.error : saveConnection.error) ? errorMessage(editingConnection ? updateConnection.error : saveConnection.error) : null} onClose={() => { if (!saveConnection.isPending && !updateConnection.isPending && !adoptConnection.isPending) { setConnectionOpen(false); setEditingConnection(null); adoptConnection.reset() } }} onCreate={(value) => saveConnection.mutate(value)} onUpdate={(value) => { if (editingConnection) updateConnection.mutate({ runtime: editingConnection, value }) }} onAdopt={(workspaceUrl) => { if (editingConnection) adoptConnection.mutate({ runtime: editingConnection, workspaceUrl }) }} />}
     {credentialModel && <CredentialRotationDialog model={credentialModel} oauth={data.runtimes.find((runtime) => runtime.id === credentialModel.runtime_id)?.config.auth_strategy === "oauth_client_credentials"} busy={rotateCredential.isPending} error={rotateCredential.error ? String(rotateCredential.error) : null} onClose={() => { rotationCredential.current = ""; setCredentialModel(null); rotateCredential.reset() }} onSave={(credential) => { rotationCredential.current = credential; rotateCredential.mutate(credentialModel) }} />}
     {deletingModel && <ModelDeleteDialog model={deletingModel} busy={deleteModel.isPending} error={deleteModel.error ? String(deleteModel.error) : null} onClose={() => { if (!deleteModel.isPending) setDeletingModel(null) }} onConfirm={() => deleteModel.mutate(deletingModel)} />}
+    {archivingPublication && <PublicationArchiveDialog publication={archivingPublication} busy={archivePublication.isPending} error={archivePublication.error ? errorMessage(archivePublication.error) : null} onClose={() => { if (!archivePublication.isPending) { setArchivingPublication(null); archivePublication.reset() } }} onConfirm={() => archivePublication.mutate(archivingPublication)} />}
     {deletingConnection && <ConnectionDeleteDialog runtime={deletingConnection} busy={deleteConnection.isPending} error={deleteConnection.error ? String(deleteConnection.error) : null} onClose={() => { if (!deleteConnection.isPending) setDeletingConnection(null) }} onConfirm={() => deleteConnection.mutate(deletingConnection)} />}
     {deletingGateway && <GatewayDeleteDialog gateway={deletingGateway} busy={deleteGateway.isPending} error={deleteGateway.error ? String(deleteGateway.error) : null} onClose={() => { if (!deleteGateway.isPending) setDeletingGateway(null) }} onConfirm={() => deleteGateway.mutate(deletingGateway)} />}
   </>
 
-  if (runtimeDetailId) {
+  if (modelDetailId && tab === "models") {
+    return <>
+      <ModelUsageDetail modelId={modelDetailId} registry={data} onToggleSidebar={onToggleSidebar} />
+      {overlays}
+    </>
+  }
+
+  if (runtimeDetailId && tab === "connections") {
     const detailRuntime = data.runtimes.find((runtime) => runtime.id === runtimeDetailId)
     return <>
       <RuntimeDetailView
         runtime={detailRuntime}
         registry={data}
-        busy={save.isPending || health.isPending}
-        checking={health.isPending}
+        busy={save.isPending}
+        checking={checkingRuntimeIds.has(runtimeDetailId)}
         onEdit={(runtime) => { setEditingConnection(runtime); setConnectionOpen(true) }}
-        onEditModel={openModelEditor}
-        onCheck={(runtime) => health.mutate(runtime)}
+        onEditModel={(model) => setEditor({ kind: "model", item: model })}
+        onCheck={openRuntimeDiagnostic}
         onToggle={(runtime) => updateRuntime(runtime, { enabled: !runtime.enabled })}
+        onToggleSidebar={onToggleSidebar}
+      />
+      {overlays}
+    </>
+  }
+
+  if ((tab === "apim" || tab === "gateways") && data.apim_target_topology_available === true) {
+    return <>
+      <ApimGatewayWorkspace
+        mode={tab}
+        registry={effectiveRegistry}
+        topology={targetTopologies.data ?? null}
+        loading={targetTopologies.isLoading}
+        error={targetTopologies.error}
+        onTabChange={changeTab}
         onToggleSidebar={onToggleSidebar}
       />
       {overlays}
@@ -623,14 +631,20 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   return <>
     <ModelWorkspace
       registry={effectiveRegistry}
-      tab={tab}
+      tab={tab === "apim" ? "gateways" : tab}
       notice={notice}
       error={save.error}
-      busy={save.isPending || health.isPending || deleteModel.isPending || deleteConnection.isPending || deleteGateway.isPending}
-      checkingRuntimeId={health.isPending ? health.variables.id : null}
-      loadingRuntimeHealthIds={loadingRuntimeHealthIds}
+      busy={save.isPending || deleteModel.isPending || deleteConnection.isPending || deleteGateway.isPending || archivePublication.isPending}
+      checkingRuntimeIds={checkingRuntimeIds}
+      diagnosticGatewayDeploymentId={diagnosticGatewayDeploymentId}
+      diagnosticRuntimeId={diagnosticRuntime?.id ?? null}
       removingModelKey={removingModelKey}
       publications={modelPublications}
+      topology={targetTopologies.data ?? null}
+      topologyAvailable={data.apim_target_topology_available === true}
+      availabilityByModel={availabilityByModel}
+      availabilityLoading={availability.isPending}
+      onOpenAvailability={setAvailabilityModelId}
       onTabChange={changeTab}
       onDismissNotice={() => setNotice(null)}
       onNoticeAction={openPublicationRetry}
@@ -649,19 +663,17 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
         if (kind === "runtime") {
           setEditingConnection(item as ModelRuntime)
           setConnectionOpen(true)
-        } else if (kind === "model") {
-          openModelEditor(item as ManagedModel)
         } else {
           setEditor({ kind, item })
         }
       }}
-      onToggleModel={(model) => updateModel(model, { enabled: !model.enabled })}
       onRotateCredential={setCredentialModel}
       onDeleteModel={setDeletingModel}
       onOpenPublication={showPublication}
+      onArchivePublication={user?.role === "owner" && data.failed_publication_archive_supported
+        ? setArchivingPublication : undefined}
       onToggleRuntime={(runtime) => updateRuntime(runtime, { enabled: !runtime.enabled })}
-      onDefaultRuntime={(runtime) => updateRuntime(runtime, { is_default: true, enabled: true })}
-      onCheckRuntime={(runtime) => health.mutate(runtime)}
+      onCheckRuntime={openRuntimeDiagnostic}
       onDeleteConnection={setDeletingConnection}
       onToggleGateway={(gateway) => updateGateway(gateway, { enabled: !gateway.enabled })}
       onDefaultGateway={(gateway) => updateGateway(gateway, { is_default: true, enabled: true })}
@@ -673,26 +685,26 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
     {syncResult && <Dialog open onOpenChange={open => { if (!open) setSyncResult(null) }}>
       <DialogContent className="registry-editor-dialog">
         <div className="registry-editor">
-        <DialogHeader className="registry-editor-header"><DialogTitle>定价同步结果</DialogTitle>
-          <DialogDescription>{syncSummary}</DialogDescription>
-        </DialogHeader>
-        <div className="registry-editor-body"><div className="price-sync-results">
-          {syncResult.details.map(detail => <div className="price-sync-result" key={detail.model_id}>
-            <span data-no-localize>{detail.model_key}</span>
-            <b>{({ updated: "已更新", unchanged: "无变化", skipped_manual: "手动跳过",
-              unmapped: "未匹配", ambiguous: "待确认", stale: "来源失败",
-              review_needed: "待复核", superseded: "计划作废",
-              unsupported: "不支持", deferred: "未执行" } as Record<string, string>)[detail.outcome ?? ""] ?? detail.outcome}</b>
-            {detail.message && <small>{detail.message}</small>}
-            {detail.outcome !== "skipped_manual" && <Button type="button" variant="ghost" size="icon"
-              title="编辑模型" aria-label="编辑模型" onClick={() => {
-                const model = syncResult.registry.models.find(model => model.id === detail.model_id)
-                setSyncResult(null)
-                if (model) openModelEditor(model)
-              }}><Edit3 size={14} /></Button>}
-          </div>)}
-        </div></div>
-        <DialogFooter className="registry-editor-footer"><DialogClose>关闭</DialogClose></DialogFooter>
+          <DialogHeader className="registry-editor-header"><DialogTitle>定价同步结果</DialogTitle>
+            <DialogDescription>{syncSummary}</DialogDescription>
+          </DialogHeader>
+          <div className="registry-editor-body"><div className="price-sync-results">
+            {syncResult.details.map(detail => <div className="price-sync-result" key={detail.model_id}>
+              <span data-no-localize>{detail.model_key}</span>
+              <b>{({ updated: "已更新", unchanged: "无变化", skipped_manual: "手动跳过",
+                unmapped: "未匹配", ambiguous: "待确认", stale: "来源失败",
+                review_needed: "待复核", superseded: "计划作废",
+                unsupported: "不支持", deferred: "未执行" } as Record<string, string>)[detail.outcome ?? ""] ?? detail.outcome}</b>
+              {detail.message && <small>{detail.message}</small>}
+              {detail.outcome !== "skipped_manual" && <Button type="button" variant="ghost" size="icon"
+                title="编辑模型" aria-label="编辑模型" onClick={() => {
+                  const model = syncResult.registry.models.find(model => model.id === detail.model_id)
+                  setSyncResult(null)
+                  if (model) setEditor({ kind: "model", item: model })
+                }}><Edit3 size={14} /></Button>}
+            </div>)}
+          </div></div>
+          <DialogFooter className="registry-editor-footer"><DialogClose>关闭</DialogClose></DialogFooter>
         </div>
       </DialogContent>
     </Dialog>}
@@ -700,32 +712,8 @@ export function ModelManagementPage({ onToggleSidebar }: { onToggleSidebar: () =
   </>
 }
 
-type RuntimeHealthState = "online" | "offline" | "unchecked" | "disabled"
-
-function runtimeHealthState(runtime: ModelRuntime): RuntimeHealthState {
-  if (!runtime.enabled) return "disabled"
-  if (runtime.health_status === "available") return "online"
-  if (runtime.health_status === "unavailable") return "offline"
-  return "unchecked"
-}
-
-function runtimeWithTelemetryHealth(
-  runtime: ModelRuntime,
-  requests: UsageRequestSummary[],
-): ModelRuntime {
-  const latestProbe = requests
-    .filter((request) => request.request_source === "runtime-health-check")
-    .sort((left, right) => right.timestamp.localeCompare(left.timestamp))[0]
-  if (!latestProbe || runtime.last_checked_at && runtime.last_checked_at >= latestProbe.timestamp) {
-    return runtime
-  }
-  const available = latestProbe.status_code >= 200 && latestProbe.status_code < 400
-  return {
-    ...runtime,
-    health_status: available ? "available" : "unavailable",
-    health_message: `${available ? "APIM 推理成功" : `HTTP ${latestProbe.status_code}`} · ${latestProbe.model_name} · ${latestProbe.latency_ms.toLocaleString(getIntlLocale())} ms`,
-    last_checked_at: latestProbe.timestamp,
-  }
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function formatRuntimeTimestamp(timestamp: string, timezone: string) {
@@ -745,10 +733,7 @@ function shortRuntimeId(id: string) {
 
 function RuntimeDetailHealth({ state }: { state: RuntimeHealthState | "checking" }) {
   if (state === "checking") return <span className="runtime-health-badge checking"><RefreshCw className="spin" size={12} />正在检查</span>
-  const label = state === "online" ? "在线"
-    : state === "offline" ? "离线"
-    : state === "disabled" ? "已停用"
-    : "未检查"
+  const label = runtimeHealthLabels[state]
   return <span className={`runtime-health-badge ${state}`}><i />{label}</span>
 }
 
@@ -813,7 +798,7 @@ function RuntimeDetailView({ runtime, registry, busy, checking, onEdit, onEditMo
 
   const models = registry.models.filter((model) => model.runtime_id === runtime.id)
   const enabledModelCount = models.filter((model) => model.enabled).length
-  const missingPrices = models.filter((model) => model.input_cost_per_million == null || model.output_cost_per_million == null)
+  const missingPrices = models.filter(model => !hasModelPrices(model))
   const runtimeRequests = usage.data ?? []
   // The distribution is ranked by tokens, but this card counts calls, so it has to be
   // re-sorted on the field it shows -- otherwise the busiest caller lands mid-list. The
@@ -837,7 +822,7 @@ function RuntimeDetailView({ runtime, registry, busy, checking, onEdit, onEditMo
   const costLabel = missingPrices.length > 0 ? "未计价"
     : (totals?.total_tokens ?? 0) > 0 && (totals?.estimated_cost ?? 0) === 0 ? "待回算"
     : runtimeCurrency.format(totals?.estimated_cost ?? 0)
-  const healthState = runtimeHealthState(effectiveRuntime)
+  const healthState = checking ? "checking" : runtimeHealthState(effectiveRuntime)
 
   return <div className="runtime-detail-workspace">
     <header className="runtime-detail-breadcrumb">
@@ -921,14 +906,15 @@ function RuntimeDetailView({ runtime, registry, busy, checking, onEdit, onEditMo
           <section className="runtime-detail-sidecard diagnostics-card">
             <header><b>诊断</b></header>
             <div className="diagnostics-content">
-              <label>健康状态</label><RuntimeDetailHealth state={checking ? "checking" : healthState} />
+              <label>最近诊断</label><RuntimeDetailHealth state={checking ? "checking" : healthState} />
               <div className="diagnostic-divider" />
               <label>最近检查</label><p>{effectiveRuntime.last_checked_at ? formatRuntimeTimestamp(effectiveRuntime.last_checked_at, timezone) : "尚未检查"}</p>
-              {effectiveRuntime.health_message && <><label>检查结果</label><p>{effectiveRuntime.health_message}</p></>}
+              {effectiveRuntime.health_message && <><label>检查结果</label><p>{runtimeHealthDescription(effectiveRuntime)}</p></>}
+              {runtimeDiagnostic(effectiveRuntime)?.correlation_id && <><label>Correlation ID</label><p data-no-localize>{runtimeDiagnostic(effectiveRuntime)?.correlation_id}</p></>}
               <div className="diagnostic-divider" />
-              <button className="diagnostic-action" title="发起一次最小 APIM/Foundry 推理调用" disabled={busy} onClick={() => onCheck(runtime)}><RefreshCw className={checking ? "spin" : ""} size={14} />{checking ? "正在检查" : "健康检查"}</button>
-              <button className="diagnostic-action" disabled={busy} onClick={() => onEdit(runtime)}><Edit3 size={14} />编辑连接</button>
-              <button className="diagnostic-action destructive" disabled={busy} onClick={() => onToggle(runtime)}><MoreHorizontal size={14} />{runtime.enabled ? "停用连接" : "启用连接"}</button>
+              <button className="diagnostic-action" title="选择模型和 Gateway 后确认检查" disabled={busy} onClick={() => onCheck(runtime)}><RefreshCw className={checking ? "spin" : ""} size={14} />{checking ? "正在检查" : "连接诊断"}</button>
+              <button className="diagnostic-action" disabled={busy || checking} onClick={() => onEdit(runtime)}><Edit3 size={14} />编辑连接</button>
+              <button className="diagnostic-action destructive" disabled={busy || checking} onClick={() => onToggle(runtime)}><MoreHorizontal size={14} />{runtime.enabled ? "停用连接" : "启用连接"}</button>
             </div>
           </section>
         </aside>
@@ -938,6 +924,12 @@ function RuntimeDetailView({ runtime, registry, busy, checking, onEdit, onEditMo
 }
 
 function RuntimeLogo({ runtime, size = 20 }: { runtime: ModelRuntime; size?: number }) {
+  if (runtime.runtime_kind === "openai_compatible" && runtime.config.api_format === "openai_chat") {
+    return <ModelVendorLogo value={modelVendorFromMetadata(
+      runtime.config,
+      `${runtime.name} ${runtime.provider_name ?? ""}`,
+    )} size={size} />
+  }
   const brand = providerBrandFromMetadata(
     runtime.brand_key,
     `${runtime.name} ${runtime.provider_name ?? ""} ${runtime.runtime_kind}`,
@@ -950,16 +942,16 @@ function gatewayBrand(gateway: GatewayProfile): GatewayBrand {
   return gatewayBrandFromIdentity(`${gateway.name} ${gateway.implementation}`)
 }
 
-function RuntimeHealth({ state }: { state: RuntimeHealthState | "checking" }) {
-  if (state === "checking") return <span className="machine-health checking"><RefreshCw className="spin" size={13} />正在检查</span>
-  const label = state === "online" ? "在线"
-    : state === "offline" ? "离线"
-    : state === "disabled" ? "已停用"
-    : "未检查"
-  const icon = state === "online" ? <Wifi size={13} />
-    : state === "offline" ? <WifiOff size={13} />
+function RuntimeHealth({ state, checkedAt }: { state: RuntimeHealthState; checkedAt?: string }) {
+  const { locale } = useLocale()
+  if (state === "checking") return <span className="machine-health checking" role="status"><RefreshCw className="spin" size={13} />正在检查</span>
+  const label = runtimeHealthLabels[state]
+  const icon = state === "online" ? <Check size={13} />
+    : ["offline", "blocked", "configuration", "changed"].includes(state) ? <TriangleAlert size={13} />
     : <CircleDashed size={13} />
-  return <span className={`machine-health ${state}`}>{icon}{label}</span>
+  return <span className="runtime-health-summary"><span className={`machine-health ${state}`}>{icon}<span>{label}</span></span>
+    {checkedAt && Number.isFinite(Date.parse(checkedAt)) && <time dateTime={checkedAt} title={checkedAt} data-no-localize>{formatTimeAgo(checkedAt, locale)}</time>}
+  </span>
 }
 
 function ModelDeleteDialog({ model, busy, error, onClose, onConfirm }: {
@@ -978,7 +970,30 @@ function ModelDeleteDialog({ model, busy, error, onClose, onConfirm }: {
       </div>
       <AlertDialogFooter className="model-delete-footer">
         <AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>
-        <AlertDialogAction variant="destructive" disabled={busy} onClick={onConfirm}>{busy ? "正在提交" : "删除模型"}</AlertDialogAction>
+        <AlertDialogAction variant="destructive" disabled={busy} aria-busy={busy} onClick={onConfirm}>{busy && <RefreshCw className="spin" size={14} aria-hidden="true" />}{busy ? "正在提交" : "删除模型"}</AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>
+}
+
+function PublicationArchiveDialog({ publication, busy, error, onClose, onConfirm }: {
+  publication: GatewayPublication
+  busy: boolean
+  error: string | null
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  return <AlertDialog open onOpenChange={open => { if (!open && !busy) onClose() }}>
+    <AlertDialogContent className="model-delete-dialog publication-archive-dialog">
+      <div className="model-delete-body">
+        <AlertDialogTitle>移除失败记录</AlertDialogTitle>
+        <AlertDialogDescription>从模型列表移除这条失败记录？发布审计和计费记录会保留，不影响已发布模型。</AlertDialogDescription>
+        <p data-no-localize>{publication.display_name}</p>
+        {error && <div className="registry-error" role="alert">{error}</div>}
+      </div>
+      <AlertDialogFooter className="model-delete-footer">
+        <AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>
+        <AlertDialogAction variant="destructive" disabled={busy} aria-busy={busy} onClick={onConfirm}>{busy && <RefreshCw className="spin" size={14} aria-hidden="true" />}{busy ? "正在提交" : "移除失败记录"}</AlertDialogAction>
       </AlertDialogFooter>
     </AlertDialogContent>
   </AlertDialog>
@@ -1056,29 +1071,34 @@ function CredentialRotationDialog({ model, oauth = false, busy, error, onClose, 
   </Dialog>
 }
 
-function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId, loadingRuntimeHealthIds, removingModelKey, publications, onTabChange, onDismissNotice, onNoticeAction, onToggleSidebar, onAdd, onEdit, onToggleModel, onRotateCredential, onDeleteModel, onOpenPublication, onToggleRuntime, onDefaultRuntime, onCheckRuntime, onDeleteConnection, onToggleGateway, onDefaultGateway, onDeleteGateway, canSyncPrices, syncingPrices, onSyncPrices }: {
+function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeIds, diagnosticGatewayDeploymentId, diagnosticRuntimeId, removingModelKey, publications, topology, topologyAvailable, availabilityByModel, availabilityLoading, onOpenAvailability, onTabChange, onDismissNotice, onNoticeAction, onToggleSidebar, onAdd, onEdit, onRotateCredential, onDeleteModel, onOpenPublication, onArchivePublication, onToggleRuntime, onCheckRuntime, onDeleteConnection, onToggleGateway, onDefaultGateway, onDeleteGateway, canSyncPrices, syncingPrices, onSyncPrices }: {
   registry: ModelRegistry
   tab: Tab
   notice: Notice | null
   error: Error | null
   busy: boolean
-  checkingRuntimeId: string | null
-  loadingRuntimeHealthIds: Set<string>
+  checkingRuntimeIds: Set<string>
+  diagnosticGatewayDeploymentId: string | null
+  diagnosticRuntimeId: string | null
   removingModelKey: string | null
   publications: GatewayPublication[]
+  topology: ApimTargetTopologyList | null
+  topologyAvailable: boolean
+  availabilityByModel: Map<string, ModelAvailabilityReadback>
+  availabilityLoading: boolean
+  onOpenAvailability: (modelId: string) => void
   onTabChange: (tab: Tab) => void
   onDismissNotice: () => void
   onNoticeAction: () => void
   onToggleSidebar: () => void
   onAdd: (kind: RegistryKind) => void
   onEdit: (kind: RegistryKind, item: RegistryItem) => void
-  onToggleModel: (model: ManagedModel) => void
   onRotateCredential: (model: ManagedModel) => void
   onDeleteModel: (model: ManagedModel) => void
   onOpenPublication: (publicationId: string) => void
+  onArchivePublication?: (publication: GatewayPublication) => void
   onToggleRuntime: (runtime: ModelRuntime) => void
-  onDefaultRuntime: (runtime: ModelRuntime) => void
-  onCheckRuntime: (runtime: ModelRuntime) => void
+  onCheckRuntime: (runtime: ModelRuntime, gatewayDeploymentId?: string) => void
   onDeleteConnection: (runtime: ModelRuntime) => void
   onToggleGateway: (gateway: GatewayProfile) => void
   onDefaultGateway: (gateway: GatewayProfile) => void
@@ -1088,21 +1108,30 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
   onSyncPrices: () => void
 }) {
   const activeTab: ModelTableTab = tab
+  const compactLayout = useIsMobile(761)
+  const columnMinWidths = activeTab === "models" && compactLayout
+    ? MODEL_COMPACT_COLUMN_MIN_WIDTHS
+    : activeTab === "connections" && compactLayout
+      ? MODEL_CONNECTION_COMPACT_COLUMN_MIN_WIDTHS
+      : MODEL_TABLE_COLUMN_MIN_WIDTHS[activeTab]
   const [search, setSearch] = useState("")
+  const [modelFilters, setModelFilters] = useState(emptyModelFilters)
+  const [modelView, setModelView] = useState<"list" | "graph">("list")
   const [providerFilter, setProviderFilter] = useState("all")
   const [connectionHealthFilter, setConnectionHealthFilter] = useState<"active" | RuntimeHealthState>("active")
+  const connectionHealthState = (runtime: ModelRuntime) => checkingRuntimeIds.has(runtime.id) ? "checking" : runtimeHealthState(runtime)
   const [collapsedProviderIds, setCollapsedProviderIds] = useState<Set<string>>(() => new Set())
   const kind: RegistryKind = activeTab === "connections" ? "runtime" : activeTab.slice(0, -1) as RegistryKind
-  const tabs = ["models", "connections", "gateways"] as const
+  const tabs = topologyAvailable
+    ? MODEL_MANAGEMENT_TABS
+    : MODEL_MANAGEMENT_TABS.filter((value) => value !== "apim")
   const matches = (text: string) => text.toLowerCase().includes(search.toLowerCase())
-  const models = registry.models.filter((model) => matches(`${model.display_name} ${model.model_key} ${model.runtime_name} ${model.provider_name}`))
   const inventoryConnections = registry.runtimes
   const inventoryProviderIds = new Set(
     inventoryConnections.map((runtime) => runtime.provider_id),
   )
   const providers = registry.providers
     .filter((provider) => inventoryProviderIds.has(provider.id))
-    .filter((provider) => matches(`${provider.name} ${provider.provider_kind} ${provider.endpoint_url ?? ""}`))
     .map((provider, index) => ({ provider, index }))
     .sort((left, right) => {
       const rank = (provider: ModelProvider) => provider.brand_key === "microsoft_foundry"
@@ -1113,12 +1142,16 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
       return rank(left.provider) - rank(right.provider) || left.index - right.index
     })
     .map(({ provider }) => provider)
+  const matchingProviderIds = new Set(providers
+    .filter((provider) => matches(`${provider.name} ${provider.provider_kind} ${provider.endpoint_url ?? ""}`))
+    .map((provider) => provider.id))
   const scopedConnections = inventoryConnections.filter((runtime) => connectionHealthFilter === "active"
     ? runtime.enabled
-    : runtimeHealthState(runtime) === connectionHealthFilter)
+    : connectionHealthState(runtime) === connectionHealthFilter)
   const connections = scopedConnections
     .filter((runtime) => providerFilter === "all" || runtime.provider_id === providerFilter)
-    .filter((runtime) => matches(`${runtime.name} ${runtime.provider_name} ${runtime.gateway_name ?? ""} ${runtime.runtime_kind}`))
+    .filter((runtime) => matchingProviderIds.has(runtime.provider_id)
+      || matches(`${runtime.name} ${runtime.provider_name} ${runtime.gateway_name ?? ""} ${runtime.runtime_kind}`))
     .sort((left, right) => left.name.localeCompare(right.name))
   const connectionGroups = providers
     .map((provider) => {
@@ -1139,44 +1172,76 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
     return next
   })
   const gateways = registry.gateways.filter((gateway) => matches(`${gateway.name} ${gateway.implementation} ${gateway.base_url ?? ""}`))
-  const count = activeTab === "connections" ? connections.length : registry[activeTab].length
+  const deploymentCount = topologyAvailable ? gatewayEntries(topology).length : registry.gateways.length
+  const gatewayCount = deploymentCount
+  const count = activeTab === "connections"
+    ? connections.length
+    : activeTab === "gateways"
+      ? gatewayCount
+      : activeTab === "apim"
+        ? topology?.total ?? 0
+        : registry.models.length
   const connectionHealthCounts = {
     active: inventoryConnections.filter((runtime) => runtime.enabled).length,
-    online: inventoryConnections.filter((runtime) => runtimeHealthState(runtime) === "online").length,
-    offline: inventoryConnections.filter((runtime) => runtimeHealthState(runtime) === "offline").length,
-    unchecked: inventoryConnections.filter((runtime) => runtimeHealthState(runtime) === "unchecked").length,
-    disabled: inventoryConnections.filter((runtime) => runtimeHealthState(runtime) === "disabled").length,
+    online: inventoryConnections.filter((runtime) => connectionHealthState(runtime) === "online").length,
+    offline: inventoryConnections.filter((runtime) => connectionHealthState(runtime) === "offline").length,
+    unchecked: inventoryConnections.filter((runtime) => connectionHealthState(runtime) === "unchecked").length,
+    disabled: inventoryConnections.filter((runtime) => connectionHealthState(runtime) === "disabled").length,
+    blocked: inventoryConnections.filter((runtime) => connectionHealthState(runtime) === "blocked").length,
+    configuration: inventoryConnections.filter((runtime) => connectionHealthState(runtime) === "configuration").length,
+    inconclusive: inventoryConnections.filter((runtime) => connectionHealthState(runtime) === "inconclusive").length,
+    changed: inventoryConnections.filter((runtime) => connectionHealthState(runtime) === "changed").length,
+    checking: inventoryConnections.filter((runtime) => connectionHealthState(runtime) === "checking").length,
   }
   const connectionHealthLabels = {
     active: "启用中",
-    online: "在线",
-    offline: "离线",
-    unchecked: "未检查",
-    disabled: "已停用",
+    ...runtimeHealthLabels,
   }
-  const addLabel = activeTab === "models" ? "模型" : activeTab === "connections" ? "连接" : "网关"
+  const addLabel = activeTab === "models" ? "模型" : activeTab === "connections" ? "连接" : activeTab === "apim" ? "APIM 实例" : "网关"
   const columnHeaders = [
     addLabel,
-    activeTab === "models" ? "运行时" : activeTab === "connections" ? "类型" : "实现",
-    activeTab === "models" ? "上下文 / 价格" : activeTab === "connections" ? "接入路径" : "连接",
-    "状态",
+    ...(activeTab === "connections" ? [] : [activeTab === "models" ? "运行时" : "Gateway 类型"]),
+    ...(activeTab === "models" ? ["目标网关"] : []),
+    activeTab === "models" ? "上下文 / 价格" : activeTab === "connections" ? "目标网关" : "API / 端点",
+    activeTab === "connections" ? "最近诊断" : "状态",
     "操作",
   ]
   const latestPublicationByModel = new Map<string, GatewayPublication>()
   for (const publication of [...publications].sort((left, right) => right.updated_at.localeCompare(left.updated_at))) {
-    if (!latestPublicationByModel.has(publication.model_key)) {
-      latestPublicationByModel.set(publication.model_key, publication)
+    if (publication.publication_kind === "model_remove" && publication.status === "failed") continue
+    const identity = `${publication.gateway_profile_id}:${publication.model_key}`
+    if (!latestPublicationByModel.has(identity)) {
+      latestPublicationByModel.set(identity, publication)
     }
   }
   const rowStatuses = new Set<GatewayPublication["status"]>([
     "queued", "validating", "provisioning", "building_revision", "verifying",
-    "awaiting_authorization", "promoting", "failed", "rolling_back", "rolled_back",
+    "awaiting_authorization", "promoting", "failed", "rolling_back",
   ])
   const pendingModelPublications = [...latestPublicationByModel.values()].filter(
     (publication) => publication.publication_kind === "model_add"
       && rowStatuses.has(publication.status)
-      && !registry.models.some((model) => model.model_key === publication.model_key),
+      && !registry.models.some((model) => model.model_key === publication.model_key
+        && registry.runtimes.some(runtime => runtime.id === model.runtime_id && runtime.gateway_profile_id === publication.gateway_profile_id)),
   )
+  const modelRecords = registry.models.map(model => {
+    const runtime = registry.runtimes.find(item => item.id === model.runtime_id)
+    const provider = registry.providers.find(item => item.id === model.provider_id)
+    const record = modelFilterRecord(model, runtime, provider, topology, registry.gateways)
+    const publication = latestPublicationByModel.get(`${runtime?.gateway_profile_id}:${model.model_key}`)
+    if (publication && rowStatuses.has(publication.status)) record.status = publicationFilterRecord(publication).status
+    return { model, record }
+  })
+  const pendingRecords = pendingModelPublications.map(publication => ({ publication, record: publicationFilterRecord(publication) }))
+  const filterRecords = [...modelRecords, ...pendingRecords].map(item => item.record)
+  const models = modelRecords.filter(item => matchesModelFilters(item.record, modelFilters, search)).map(item => item.model)
+  const visiblePublications = pendingRecords.filter(item => matchesModelFilters(item.record, modelFilters, search)).map(item => item.publication)
+  const filterGateways = (topology?.items ?? []).flatMap(apimGatewayEntries).map(({ deployment }) => ({
+    id: deployment.id, name: deployment.display_name.trim() || deployment.native_gateway_id, targetId: deployment.apim_target_id,
+  }))
+  const filterApimInstances = apimGatewayProfiles(registry.gateways, topology, topologyAvailable).filter(profile => profile.implementation === "apim").map(profile => ({
+    id: profile.id, name: profile.name.trim() || topology?.items.find(target => target.target.gateway_profile_id === profile.id)?.target.service_name || profile.id,
+  }))
 
   return <div className="smh-workspace model-workspace">
     <header className="smh-page-header">
@@ -1192,10 +1257,10 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
       </div>}
     </header>
     <div className="model-toolbar">
-      <ButtonGroup className="model-tabs usage-metric-segment" aria-label="模型管理类型">{tabs.map((value) => <button key={value} className={activeTab === value ? "active" : ""} aria-pressed={activeTab === value} onClick={() => onTabChange(value)}>{value === "models" ? "模型" : value === "connections" ? "连接" : "网关"}<span>{value === "connections" ? scopedConnections.length : registry[value].length}</span></button>)}</ButtonGroup>
-      <div className="model-toolbar-filters">
+      <ButtonGroup className="model-tabs usage-metric-segment" aria-label="模型管理类型">{tabs.map((value) => <button key={value} data-tab={value} className={activeTab === value ? "active" : ""} aria-pressed={activeTab === value} onClick={() => onTabChange(value)}>{value === "models" ? "模型" : value === "connections" ? "连接" : value === "apim" ? "APIM 实例" : "网关"}<span>{value === "connections" ? scopedConnections.length : value === "apim" ? topology?.total ?? "—" : value === "gateways" ? topologyAvailable && !topology ? "—" : gatewayCount : registry.models.length}</span></button>)}</ButtonGroup>
+      <div className={`model-toolbar-filters ${activeTab === "models" ? "model-inventory-toolbar-filters" : ""}`}>
         {activeTab === "connections" && <Select value={connectionHealthFilter} onValueChange={(value) => setConnectionHealthFilter((value ?? "active") as "active" | RuntimeHealthState)}>
-          <SelectTrigger className="connection-health-filter" aria-label="按健康状态筛选"><SelectValue>{connectionHealthLabels[connectionHealthFilter]} · {connectionHealthCounts[connectionHealthFilter]}</SelectValue></SelectTrigger>
+          <SelectTrigger className="connection-health-filter" aria-label="按诊断结果筛选"><SelectValue>{connectionHealthLabels[connectionHealthFilter]} · {connectionHealthCounts[connectionHealthFilter]}</SelectValue></SelectTrigger>
           <SelectContent align="end">
             {(Object.keys(connectionHealthLabels) as Array<keyof typeof connectionHealthLabels>)
               .filter((value) => value === "active" || connectionHealthCounts[value] > 0)
@@ -1207,26 +1272,33 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
             ? <span className="registry-option"><Database size={15} /><span>全部提供方</span></span>
             : (() => {
                 const provider = registry.providers.find((item) => item.id === providerFilter)
-                return provider ? <span className="registry-option"><ProviderBrandLogo brand={providerBrand(provider)} size={15} /><span>{provider.name}</span></span> : null
+                return provider ? <span className="registry-option"><ProviderInventoryLogo provider={provider} runtimes={inventoryConnections} size={15} /><span>{providerInventoryName(provider, inventoryConnections)}</span></span> : null
               })()}</SelectValue></SelectTrigger>
           <SelectContent align="end">
             <SelectItem value="all"><span className="registry-option"><Database size={15} /><span>全部提供方</span></span></SelectItem>
-            {providers.map((provider) => <SelectItem key={provider.id} value={provider.id}><span className="registry-option"><ProviderBrandLogo brand={providerBrand(provider)} size={15} /><span>{provider.name}</span></span></SelectItem>)}
+            {providers.map((provider) => <SelectItem key={provider.id} value={provider.id}><span className="registry-option"><ProviderInventoryLogo provider={provider} runtimes={inventoryConnections} size={15} /><span>{providerInventoryName(provider, inventoryConnections)}</span></span></SelectItem>)}
           </SelectContent>
         </Select>}
         <ExpandableSearch key={activeTab} value={search} onChange={setSearch} placeholder={`搜索${addLabel}...`} />
+        {activeTab === "models" && <ButtonGroup className="usage-metric-segment model-view-switch" aria-label="模型视图">
+          <button type="button" className={modelView === "list" ? "active" : ""} aria-label="列表视图" title="列表视图" aria-pressed={modelView === "list"} onClick={() => setModelView("list")}><List size={14} /></button>
+          <button type="button" className={modelView === "graph" ? "active" : ""} aria-label="关系图" title="关系图" aria-pressed={modelView === "graph"} onClick={() => setModelView("graph")}><Orbit size={14} strokeWidth={1.5} /></button>
+        </ButtonGroup>}
+        {activeTab === "models" && <ModelInventoryFilterMenu filters={modelFilters} onChange={setModelFilters} connections={registry.runtimes} gateways={filterGateways} apimInstances={filterApimInstances} records={filterRecords} search={search} compact={compactLayout} />}
       </div>
     </div>
+    {activeTab === "models" && <ModelInventoryFilterChips filters={modelFilters} onChange={setModelFilters} connections={registry.runtimes} gateways={filterGateways} apimInstances={filterApimInstances} />}
     {notice && <RegistryNoticeBanner notice={notice} onDismiss={onDismissNotice} onAction={onNoticeAction} />}
-    {error && <div className="registry-error smh-notice">保存失败：{String(error)}</div>}
-    <ResizableGridTable className={`model-table ${activeTab}`} role="table" aria-label={`${addLabel}列表`} headerSelector=".model-table-head" minWidths={MODEL_TABLE_COLUMN_MIN_WIDTHS} columnGap={12} horizontalPadding={32} resizeAtAllWidths>
+    {error && <div className="registry-error smh-notice infrastructure-error-notice" role="alert"><TriangleAlert size={14} aria-hidden="true" /><div className="smh-notice-copy">保存失败：{String(error)}</div></div>}
+    {activeTab === "models" && modelView === "graph" && (models.length > 0 || visiblePublications.length === 0) && <ModelInventoryGraph registry={registry} models={models} topology={topology} />}
+    {(activeTab !== "models" || modelView === "list" || visiblePublications.length > 0) && <ResizableGridTable className={`model-table ${activeTab}${activeTab === "models" && modelView === "graph" ? " model-graph-publications" : ""}`} role="table" aria-label={`${addLabel}列表`} headerSelector=".model-table-head" minWidths={columnMinWidths} columnGap={12} horizontalPadding={32} resizeAtAllWidths>
       <div className="model-table-head" role="row">
         {columnHeaders.map((label, index) => <span className="model-table-heading" role="columnheader" aria-label={label} key={label}>
           {index < columnHeaders.length - 1 && <span>{label}</span>}
         </span>)}
       </div>
       <div className="model-table-body">
-        {activeTab === "models" && models.map((model) => {
+        {activeTab === "models" && modelView === "list" && models.map((model) => {
           const provider = registry.providers.find((item) => item.id === model.provider_id)
           const runtime = registry.runtimes.find((item) => item.id === model.runtime_id)
           const gateway = registry.gateways.find((item) => item.id === runtime?.gateway_profile_id)
@@ -1235,7 +1307,7 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
             : gateway?.implementation !== "apim"
               ? "当前仅支持删除由 APIM 路由的模型"
               : null
-          const latestPublication = latestPublicationByModel.get(model.model_key)
+          const latestPublication = latestPublicationByModel.get(`${runtime?.gateway_profile_id}:${model.model_key}`)
           const rowPublication = latestPublication && rowStatuses.has(latestPublication.status)
             ? latestPublication
             : null
@@ -1243,35 +1315,40 @@ function ModelWorkspace({ registry, tab, notice, error, busy, checkingRuntimeId,
             || runtime?.config.auth_strategy === "named_value_api_key"
             || runtime?.config.auth_strategy === "oauth_client_credentials"
               && registry.databricks_oauth_supported === true
-          return <ModelRow key={model.id} model={model} oauthCredential={runtime?.config.auth_strategy === "oauth_client_credentials"} busy={busy} removing={removingModelKey === model.model_key} publication={rowPublication} canRotateCredential={Boolean(model.publication_id && managedCredential)} deleteDisabledReason={deleteDisabledReason} onOpenPublication={onOpenPublication} onEdit={() => onEdit("model", model)} onToggle={() => onToggleModel(model)} onRotateCredential={() => onRotateCredential(model)} onDelete={() => onDeleteModel(model)} />
+          return <ModelRow key={model.id} model={model} runtime={runtime} target={modelTargetDetails(model, runtime, registry.gateways, topology)} availability={availabilityByModel.get(model.id)} availabilityLoading={availabilityLoading} onOpenAvailability={() => onOpenAvailability(model.id)} busy={busy} removing={removingModelKey === model.model_key} publication={rowPublication} canRotateCredential={Boolean(model.publication_id && managedCredential)} deleteDisabledReason={deleteDisabledReason} onOpenPublication={onOpenPublication} onEdit={() => onEdit("model", model)} onRotateCredential={() => onRotateCredential(model)} onDelete={() => onDeleteModel(model)} />
         })}
-        {activeTab === "models" && pendingModelPublications.map((publication) => <PublicationModelRow key={publication.id} publication={publication} onOpen={() => onOpenPublication(publication.id)} />)}
+        {activeTab === "models" && visiblePublications.map((publication) => <PublicationModelRow key={publication.id} publication={publication} registry={registry} topology={topology} onOpen={() => onOpenPublication(publication.id)} onArchive={onArchivePublication} busy={busy} />)}
         {activeTab === "connections" && connectionGroups.map(({ provider, connections: providerConnections, connectionCount, modelCount }) => {
           const collapsed = collapsedProviderIds.has(provider.id)
           return <section className="connection-provider-group" role="rowgroup" aria-label={provider.name} key={provider.id}>
             <button className="connection-provider-heading" type="button" aria-expanded={!collapsed} onClick={() => toggleProviderGroup(provider.id)}>
-              <span className="connection-provider-identity"><span className="model-list-icon" data-model-family={providerBrand(provider)}><ProviderBrandLogo brand={providerBrand(provider)} /></span><span><b>{provider.name}</b><small>提供方</small></span></span>
-              <span className="connection-provider-summary"><b>{providerKindLabels[provider.provider_kind] ?? provider.provider_kind.replaceAll("_", " ")}</b><small>提供方类型</small></span>
+              <span className="connection-provider-identity"><span className="model-list-icon" data-model-family={providerBrand(provider)}><ProviderInventoryLogo provider={provider} runtimes={providerConnections} /></span><span><b>{providerInventoryName(provider, providerConnections)}</b><small>{providerKindLabels[provider.provider_kind] ?? provider.provider_kind.replaceAll("_", " ")}</small></span></span>
               <span className="connection-provider-summary"><b>{connectionCount} 个连接</b><small>{modelCount} 个模型</small></span>
-              <span className="model-status-cell"><Health status={provider.enabled ? "available" : "unavailable"} enabled={provider.enabled} /></span>
+              <span className="model-status-cell"><span className="machine-health"><CircleDashed size={13} />{provider.enabled ? "已启用" : "已停用"}</span></span>
               <span className="connection-provider-chevron"><ChevronRight size={15} /></span>
             </button>
-            {!collapsed && providerConnections.map((runtime) => <ConnectionRow key={runtime.id} runtime={runtime} models={registry.models.filter((model) => model.runtime_id === runtime.id)} busy={busy} checking={checkingRuntimeId === runtime.id || loadingRuntimeHealthIds.has(runtime.id)} onEdit={() => onEdit("runtime", runtime)} onToggle={() => onToggleRuntime(runtime)} onDefault={() => onDefaultRuntime(runtime)} onCheck={() => onCheckRuntime(runtime)} onDelete={() => onDeleteConnection(runtime)} />)}
+            {!collapsed && providerConnections.map((runtime) => <ConnectionRow key={runtime.id} runtime={runtime} models={registry.models.filter((model) => model.runtime_id === runtime.id)} profiles={registry.gateways} topology={topology} busy={busy} checking={checkingRuntimeIds.has(runtime.id)} checkingGatewayDeploymentId={diagnosticRuntimeId === runtime.id ? diagnosticGatewayDeploymentId : null} onEdit={() => onEdit("runtime", runtime)} onToggle={() => onToggleRuntime(runtime)} onCheck={(gatewayDeploymentId) => onCheckRuntime(runtime, gatewayDeploymentId)} onDelete={() => onDeleteConnection(runtime)} />)}
           </section>
         })}
         {activeTab === "gateways" && gateways.map((gateway) => {
-          const runtimeCount = registry.runtimes.filter((runtime) => runtime.gateway_profile_id === gateway.id).length
-          const deleteDisabledReason = gateway.is_default
-            ? "请先将其他网关设为默认"
-            : runtimeCount > 0
-              ? "请先移除该网关下的全部连接"
-              : null
-          return <GatewayRow key={gateway.id} gateway={gateway} runtimeCount={runtimeCount} busy={busy} deleteDisabledReason={deleteDisabledReason} onEdit={() => onEdit("gateway", gateway)} onToggle={() => onToggleGateway(gateway)} onDefault={() => onDefaultGateway(gateway)} onDelete={() => onDeleteGateway(gateway)} />
+          const runtimeCount = registry.runtimes.filter(
+            (runtime) => runtime.gateway_profile_id === gateway.id,
+          ).length
+          return <GatewayCompatibilityRow
+            key={gateway.id}
+            gateway={gateway}
+            runtimeCount={runtimeCount}
+            busy={busy}
+            onEdit={() => onEdit("gateway", gateway)}
+            onToggle={() => onToggleGateway(gateway)}
+            onDefault={() => onDefaultGateway(gateway)}
+            onDelete={() => onDeleteGateway(gateway)}
+          />
         })}
-        {((activeTab === "models" && !models.length) || (activeTab === "connections" && !connectionGroups.length) || (activeTab === "gateways" && !gateways.length)) && <div className="smh-empty"><Search size={28} /><b>没有找到{addLabel}</b><span>尝试调整搜索条件。</span></div>}
+        {((activeTab === "models" && !models.length && !visiblePublications.length) || (activeTab === "connections" && !connectionGroups.length) || (activeTab === "gateways" && !gateways.length)) && <div className="smh-empty"><Search size={28} /><b>没有找到{addLabel}</b><span>尝试调整搜索条件。</span></div>}
       </div>
-    </ResizableGridTable>
-    <footer className="model-table-footer">共 {count} 个{addLabel}</footer>
+    </ResizableGridTable>}
+    <footer className="model-table-footer" aria-live="polite">{activeTab === "gateways" ? `${deploymentCount} 个 Gateway API` : `共 ${activeTab === "models" ? models.length + visiblePublications.length : count} 个${addLabel}`}</footer>
   </div>
 }
 
@@ -1289,6 +1366,7 @@ function runtimeRouteHref(runtimeId: string | null) {
   const url = new URL(window.location.href)
   url.searchParams.set("page", "models")
   url.searchParams.set("tab", "connections")
+  url.searchParams.delete("model")
   if (runtimeId) url.searchParams.set("runtime", runtimeId)
   else url.searchParams.delete("runtime")
   return `${url.pathname}${url.search}`
@@ -1317,43 +1395,67 @@ function replacePublicationUrl(publicationId: string | null) {
 
 function ModelPublicationStatus({ publication, onOpen }: { publication: GatewayPublication; onOpen: (publicationId: string) => void }) {
   const failed = publication.status === "failed" || publication.status === "rolled_back"
-  return <button type="button" className={`model-publication-status ${failed ? "failed" : publication.status === "awaiting_authorization" ? "warning" : "running"}`} title={publicationStatusLabel(publication.status)} onClick={() => onOpen(publication.id)}>
+  return <button type="button" className={`model-publication-status ${failed ? "failed" : publication.status === "awaiting_authorization" ? "warning" : publication.publication_kind === "model_remove" ? "removing" : "running"}`} title={publicationStatusLabel(publication.status, publication.configuration_only === true, publication.publication_kind)} onClick={() => onOpen(publication.id)}>
     {failed ? <TriangleAlert size={12} /> : publication.status === "awaiting_authorization" ? <ShieldCheck size={12} /> : <RefreshCw className="spin" size={12} />}
-    <span>{publicationStatusLabel(publication.status)}</span>
+    <span>{publicationStatusLabel(publication.status, publication.configuration_only === true, publication.publication_kind)}</span>
   </button>
 }
 
-function PublicationModelRow({ publication, onOpen }: { publication: GatewayPublication; onOpen: () => void }) {
-  return <article className="model-list-row publication-model-row" role="row">
+export function ModelTargetGatewayCell({ target, emptyLabel = "目标未记录", unrecordedModelCount = 0 }: { target: ReturnType<typeof publicationTargetDetails>; emptyLabel?: string; unrecordedModelCount?: number }) {
+  return <div className="model-target-cell" role="cell">
+    {target.gateways.length ? target.gateways.map(gateway => <div key={gateway.id} data-deployment-id={gateway.id}>
+      {gateway.kind === "managed" ? <b title={gateway.nativeId}>托管网关</b> : <b data-no-localize title={gateway.nativeId}>{gateway.name}</b>}
+      <span title={target.serviceName ?? target.apimName}><span>{gateway.kind === "managed" ? "托管" : "自托管"}</span>{target.apimName && <> · <span data-no-localize>{target.apimName}</span></>}</span>
+    </div>) : <div><b>{emptyLabel}</b><span data-no-localize>{target.apimName || "—"}</span></div>}
+    {target.gateways.length > 0 && unrecordedModelCount > 0 && <div><b>网关未记录</b><span>{unrecordedModelCount} 个模型</span></div>}
+  </div>
+}
+
+function PublicationModelRow({ publication, registry, topology, onOpen, onArchive, busy = false }: {
+  publication: GatewayPublication
+  registry: Pick<ModelRegistry, "gateways">
+  topology: ApimTargetTopologyList | null
+  onOpen: () => void
+  onArchive?: (publication: GatewayPublication) => void
+  busy?: boolean
+}) {
+  return <article className="model-list-row publication-model-row" role="row" data-publication-id={publication.id}>
     <div className="model-primary-cell"><span className="model-list-icon"><Cpu size={16} /></span><div><b data-no-localize>{publication.display_name}</b><code data-no-localize>{publication.model_key}</code></div></div>
-    <div className="model-runtime-cell"><b>Azure API Management</b><span>等待 Registry 激活</span></div>
-    <div className="model-pricing-cell"><b>—</b><span>发布完成后显示</span></div>
+    <div className="model-runtime-cell"><b>—</b></div>
+    <ModelTargetGatewayCell target={publicationTargetDetails(publication, registry.gateways, topology)} />
+    <div className="model-pricing-cell"><b>—</b><span>{publication.status === "failed" ? "发布未完成" : "发布完成后显示"}</span></div>
     <div className="model-status-cell"><ModelPublicationStatus publication={publication} onOpen={() => onOpen()} /></div>
-    <div className="model-row-actions"><button title="查看详情" onClick={onOpen}><Eye size={14} /></button></div>
+    <div className="model-row-actions">
+      <button title="查看详情" onClick={onOpen}><Eye size={14} /></button>
+      {publication.status === "failed" && onArchive && <button title="移除失败记录" aria-label="移除失败记录" disabled={busy} onClick={() => onArchive(publication)}><Trash2 size={14} /></button>}
+    </div>
   </article>
 }
 
-function ModelRow({ model, oauthCredential, busy, removing, publication, canRotateCredential, deleteDisabledReason, onOpenPublication, onEdit, onToggle, onRotateCredential, onDelete }: { model: ManagedModel; oauthCredential: boolean; busy: boolean; removing: boolean; publication: GatewayPublication | null; canRotateCredential: boolean; deleteDisabledReason: string | null; onOpenPublication: (publicationId: string) => void; onEdit: () => void; onToggle: () => void; onRotateCredential: () => void; onDelete: () => void }) {
+function ModelRow({ model, runtime, target, availability, availabilityLoading, onOpenAvailability, busy, removing, publication, canRotateCredential, deleteDisabledReason, onOpenPublication, onEdit, onRotateCredential, onDelete }: { model: ManagedModel; runtime: ModelRuntime | undefined; target: ReturnType<typeof modelTargetDetails>; availability?: ModelAvailabilityReadback; availabilityLoading?: boolean; onOpenAvailability: () => void; busy: boolean; removing: boolean; publication: GatewayPublication | null; canRotateCredential: boolean; deleteDisabledReason: string | null; onOpenPublication: (publicationId: string) => void; onEdit: () => void; onRotateCredential: () => void; onDelete: () => void }) {
+  const availabilityAction = useModelAvailabilityCommand(model.id, availability)
   const family = modelFamily(model)
-  return <article className="model-list-row" role="row">
-    <div className="model-primary-cell"><span className="model-list-icon" data-model-family={family} title={modelFamilyLabel(family)}><ModelFamilyLogo family={family} /></span><div><b>{model.display_name}</b><code>{model.model_key}</code></div>{model.is_default && <em>默认</em>}</div>
-    <div className="model-runtime-cell"><b>{model.runtime_name}</b><span>{model.provider_name}</span></div>
-    <div className="model-pricing-cell"><b>{model.context_window?.toLocaleString() ?? "—"}</b><span>输入 ${model.input_cost_per_million ?? "—"} · 缓存读 ${model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 缓存写 ${model.cache_write_cost_per_million ?? model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 输出 ${model.output_cost_per_million ?? "—"}</span></div>
-    <div className="model-status-cell">{publication ? <ModelPublicationStatus publication={publication} onOpen={onOpenPublication} /> : removing ? <span className="model-removing-status"><RefreshCw className="spin" size={12} />正在删除</span> : <Health status={model.enabled ? "available" : "unavailable"} enabled={model.enabled} />}</div>
-  <div className="model-row-actions"><button className="model-edit-action" title="编辑" disabled={busy || removing || Boolean(publication && publication.status !== "failed" && publication.status !== "rolled_back")} onClick={onEdit}><Edit3 size={14} /></button><button className="model-delete-action" title={deleteDisabledReason ?? "删除模型"} disabled={busy || removing || Boolean(publication) || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button>{canRotateCredential && <button className="model-credential-action" title={oauthCredential ? "更新 OAuth Secret" : "更新 API Key"} disabled={busy || removing || Boolean(publication)} onClick={onRotateCredential}><KeyRound size={14} /></button>}<Toggle checked={model.enabled} disabled={busy || removing || Boolean(publication)} onChange={onToggle} /></div>
+  const decision = model.capabilities.includes("decision")
+  const foundryRouter = runtime?.runtime_kind === "foundry" && model.upstream_model_id === "model-router"
+  const runtimeVendor = runtime?.runtime_kind === "openai_compatible" && runtime.config.api_format === "openai_chat"
+    ? modelVendorFromMetadata(runtime.config, `${model.model_key} ${model.display_name} ${runtime.name}`)
+    : null
+  return <article className="model-list-row" role="row" data-model-id={model.id}>
+    <div className="model-primary-cell"><span className="model-list-icon" data-model-family={runtimeVendor ?? family} title={decision ? "Microsoft" : foundryRouter ? "Microsoft Foundry" : runtimeVendor ? modelVendorLabel(runtimeVendor) : modelFamilyLabel(family)}>{decision ? <MicrosoftLogo size={16} /> : foundryRouter ? <FoundryLogo size={16} /> : runtimeVendor ? <ModelVendorLogo value={runtimeVendor} size={18} /> : <ModelFamilyLogo family={family} />}</span><div><a className="connection-name-link model-name-link" href={modelDetailHref(model.id)} onClick={openModelDetailLink}><b title={model.display_name}>{model.display_name}</b></a><code title={model.model_key}>{model.model_key}</code></div>{model.is_default && <em>默认</em>}</div>
+    <div className="model-runtime-cell model-runtime-identity"><span className="model-list-icon" aria-hidden="true">{runtime ? <RuntimeLogo runtime={runtime} size={16} /> : <Cpu size={16} />}</span><div className="model-runtime-copy"><b title={model.runtime_name}>{model.runtime_name}</b><span>{runtimeVendor ? modelVendorLabel(runtimeVendor) : model.provider_name}</span></div></div>
+    <ModelTargetGatewayCell target={target} />
+    <div className="model-pricing-cell"><b>{model.context_window?.toLocaleString() ?? "—"}</b>{model.context_price_tiers?.length
+      ? <span>分档价格 <span data-no-localize>({model.context_price_tiers.length})</span></span>
+      : <span>输入 ${model.input_cost_per_million ?? "—"} · 缓存读 ${model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 缓存写 ${model.cache_write_cost_per_million ?? model.cached_cost_per_million ?? model.input_cost_per_million ?? "—"} · 输出 ${model.output_cost_per_million ?? "—"}</span>}</div>
+    <div className="model-status-cell">{publication ? <ModelPublicationStatus publication={publication} onOpen={onOpenPublication} /> : removing ? <span className="model-removing-status"><RefreshCw className="spin" size={12} />正在删除</span> : <ModelAvailabilityStatus readback={availability} loading={availabilityLoading} pending={availabilityAction.submitting} requestedEnabled={availabilityAction.requestedEnabled} error={availabilityAction.error} onOpen={onOpenAvailability} />}</div>
+  <div className="model-row-actions"><button className="model-edit-action" title="编辑" disabled={busy || removing || Boolean(publication && publication.status !== "failed" && publication.status !== "rolled_back")} onClick={onEdit}><Edit3 size={14} /></button><button className="model-delete-action" title={deleteDisabledReason ?? "删除模型"} disabled={busy || removing || availabilityAction.inFlight || Boolean(publication) || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button>{canRotateCredential && <button className="model-credential-action" title={runtime?.config.auth_strategy === "oauth_client_credentials" ? "更新 OAuth Secret" : "更新 API Key"} disabled={busy || removing || Boolean(publication)} onClick={onRotateCredential}><KeyRound size={14} /></button>}<ModelAvailabilitySwitch readback={availability} loading={availabilityLoading} registryEnabled={model.enabled} pending={availabilityAction.submitting} requestedEnabled={availabilityAction.requestedEnabled} disabled={busy || removing || Boolean(publication)} onChange={availabilityAction.change} /></div>
   </article>
 }
 
 type ModelFamily = "openai" | "claude" | "deepseek" | "kimi" | "generic"
 
 function modelFamily(model: ManagedModel): ModelFamily {
-  const identity = `${model.model_key} ${model.display_name} ${model.provider_name}`.toLowerCase()
-  if (identity.includes("deepseek")) return "deepseek"
-  if (model.family_key && model.family_key !== "generic") return model.family_key
-  if (identity.includes("gpt") || identity.includes("openai")) return "openai"
-  if (identity.includes("claude") || identity.includes("anthropic")) return "claude"
-  if (identity.includes("kimi")) return "kimi"
-  return "generic"
+  return modelInventoryFamily(model)
 }
 
 function modelFamilyLabel(family: ModelFamily) {
@@ -1375,34 +1477,149 @@ function providerBrand(provider: ModelProvider): ProviderBrand {
   )
 }
 
-function ConnectionRow({ runtime, models, busy, checking, onEdit, onToggle, onDefault, onCheck, onDelete }: { runtime: ModelRuntime; models: ManagedModel[]; busy: boolean; checking: boolean; onEdit: () => void; onToggle: () => void; onDefault: () => void; onCheck: () => void; onDelete: () => void }) {
+function providerInventoryVendor(
+  provider: ModelProvider,
+  runtimes: ModelRuntime[],
+) {
+  if (provider.provider_kind !== "openai_compatible") return null
+  const runtime = runtimes.find((item) => item.provider_id === provider.id)
+  return modelVendorFromMetadata(
+    runtime?.config,
+    `${provider.name} ${runtime?.name ?? ""}`,
+  )
+}
+
+function providerInventoryName(provider: ModelProvider, runtimes: ModelRuntime[]) {
+  const vendor = providerInventoryVendor(provider, runtimes)
+  return vendor ? modelVendorLabel(vendor) : provider.name
+}
+
+function ProviderInventoryLogo({ provider, runtimes, size = 16 }: {
+  provider: ModelProvider
+  runtimes: ModelRuntime[]
+  size?: number
+}) {
+  const vendor = providerInventoryVendor(provider, runtimes)
+  return vendor
+    ? <ModelVendorLogo value={vendor} size={size} />
+    : <ProviderBrandLogo brand={providerBrand(provider)} size={size} />
+}
+
+function ConnectionRow({ runtime, models, profiles, topology, busy, checking, checkingGatewayDeploymentId, onEdit, onToggle, onCheck, onDelete }: { runtime: ModelRuntime; models: ManagedModel[]; profiles: GatewayProfile[]; topology: ApimTargetTopologyList | null; busy: boolean; checking: boolean; checkingGatewayDeploymentId: string | null; onEdit: () => void; onToggle: () => void; onCheck: (gatewayDeploymentId?: string) => void; onDelete: () => void }) {
   const awaitingFirstModel = runtime.config.control_plane_managed === true && models.length === 0
   const hasEnabledModel = models.some((model) => model.enabled)
   const deleteDisabledReason = models.length
     ? "请先删除此连接中的全部模型"
     : runtime.is_default
-      ? "请先设置其他默认连接"
+      ? "请先将其他模型设为默认模型"
       : runtime.config.control_plane_managed !== true
         ? "仅支持删除由 Turnstile 管理的连接"
         : null
-  return <article className="model-list-row connection-list-row" role="row">
-    <div className="model-primary-cell connection-primary-cell"><span className="connection-branch" aria-hidden="true" /><div><a className="connection-name-link" href={runtimeRouteHref(runtime.id)} onClick={openRuntimeRoute(runtime.id)} title={runtime.name}><b>{runtime.name}</b></a><span>{models.length} 个模型</span></div>{runtime.is_default && <em>默认</em>}</div>
-    <div className="model-runtime-cell"><b>{runtimeKindLabels[runtime.runtime_kind]}</b><span>连接类型</span></div>
-    <div className="model-pricing-cell"><b>{runtime.gateway_name ?? "直连"}</b><span>{runtime.gateway_profile_id ? "经网关接入" : "提供方直连"}</span></div>
-    <div className="model-status-cell">{awaitingFirstModel ? <span className="connection-pending-status" role="status" aria-label="等待首次模型验证" title="等待首次模型验证"><span className="connection-pending-primary"><CircleDashed size={12} /><b>待验证</b></span><small>添加首个模型</small></span> : <RuntimeHealth state={runtimeHealthState(runtime)} />}</div>
-    <div className="model-row-actions"><button className="connection-health-action" title={checking ? "正在检查" : hasEnabledModel ? "健康检查" : "添加启用模型后可检查"} disabled={busy || !runtime.enabled || !hasEnabledModel} onClick={onCheck}><RefreshCw className={checking ? "spin" : ""} size={14} /></button><button className="model-edit-action" title="编辑" disabled={busy} onClick={onEdit}><Edit3 size={14} /></button>{!runtime.is_default && <button className="connection-default-action" title="设为默认" disabled={busy || !runtime.enabled} onClick={onDefault}><Check size={14} /></button>}<button className="model-delete-action" title={deleteDisabledReason ?? "删除连接"} disabled={busy || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button><Toggle checked={runtime.enabled} disabled={busy} onChange={onToggle} /></div>
+  const target = connectionTargetDetails(runtime, models, profiles, topology)
+  const hasGatewayChildren = target.gateways.length > 1
+  const primaryGateway = target.gateways.find(gateway => gateway.kind === "managed") ?? target.gateways[0]
+  const diagnostic = runtimeDiagnostic(runtime)
+  const diagnosticMatches = !hasGatewayChildren || diagnostic?.selection?.gateway_deployment_id === primaryGateway.id
+  const primaryChecking = checking && (!hasGatewayChildren || checkingGatewayDeploymentId === primaryGateway.id)
+  const primaryState = primaryChecking ? "checking" : diagnosticMatches ? runtimeHealthState(runtime) : "unchecked"
+  return <>
+    <article className="model-list-row connection-list-row" role="row" data-runtime-id={runtime.id}>
+      <div className="model-primary-cell connection-primary-cell"><span className="connection-branch" aria-hidden="true" /><div><a className="connection-name-link" href={runtimeRouteHref(runtime.id)} onClick={openRuntimeRoute(runtime.id)} title={runtime.name}><b>{runtime.name}</b></a><span>{models.length} 个模型</span></div>{runtime.is_default && <em>默认</em>}</div>
+      <ConnectionTargetGatewayCell runtime={runtime} models={models} profiles={profiles} topology={topology} busy={busy} checking={checking} checkingGatewayDeploymentId={checkingGatewayDeploymentId} onCheck={onCheck} />
+      <div className="model-status-cell" title={primaryChecking ? runtimeHealthLabels.checking : diagnosticMatches ? runtimeHealthDescription(runtime) : "尚无此 Gateway 的诊断结果"} aria-busy={primaryChecking || undefined}>{awaitingFirstModel && !checking ? <span className="connection-pending-status" role="status" aria-label="等待首次模型验证" title="等待首次模型验证"><span className="connection-pending-primary"><CircleDashed size={12} /><b>待验证</b></span><small>添加首个模型</small></span> : <RuntimeHealth state={primaryState} checkedAt={primaryChecking || !diagnosticMatches ? undefined : diagnostic?.checked_at} />}</div>
+      <div className="model-row-actions"><button className="connection-health-action" title={primaryChecking ? "正在检查" : hasEnabledModel ? "连接诊断" : "添加启用模型后可检查"} disabled={busy || !runtime.enabled || !hasEnabledModel} onClick={() => onCheck(hasGatewayChildren ? primaryGateway.id : undefined)}><RefreshCw className={primaryChecking ? "spin" : ""} size={14} /></button><button className="model-edit-action" title="编辑" disabled={busy || checking} onClick={onEdit}><Edit3 size={14} /></button><button className="model-delete-action" title={deleteDisabledReason ?? "删除连接"} disabled={busy || checking || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button><Toggle checked={runtime.enabled} disabled={busy || checking} onChange={onToggle} /></div>
+    </article>
+    {hasGatewayChildren && target.gateways.filter(gateway => gateway.id !== primaryGateway.id).map(gateway => <ConnectionGatewayChildRow
+      key={gateway.id}
+      gateway={gateway}
+      apimName={target.apimName}
+      modelCount={target.gatewayModelCounts[gateway.id] ?? 0}
+      runtime={runtime}
+      checking={checking}
+      checkingGatewayDeploymentId={checkingGatewayDeploymentId}
+      disabled={busy || !runtime.enabled}
+      onCheck={() => onCheck(gateway.id)}
+    />)}
+  </>
+}
+
+export function ConnectionTargetGatewayCell({ runtime, models, profiles, topology, busy, checking, checkingGatewayDeploymentId, onCheck }: {
+  runtime: ModelRuntime
+  models: readonly ManagedModel[]
+  profiles: readonly GatewayProfile[]
+  topology: ApimTargetTopologyList | null
+  busy: boolean
+  checking: boolean
+  checkingGatewayDeploymentId: string | null
+  onCheck: (gatewayDeploymentId?: string) => void
+}) {
+  if (!runtime.gateway_profile_id) return <div className="model-target-cell" role="cell"><b>提供方直连</b></div>
+  const target = connectionTargetDetails(runtime, models, profiles, topology)
+  if (target.gateways.length > 1) {
+    const primaryGateway = target.gateways.find(gateway => gateway.kind === "managed") ?? target.gateways[0]
+    return <ModelTargetGatewayCell target={{ ...target, gateways: [primaryGateway] }} />
+  }
+  return <ModelTargetGatewayCell target={target} emptyLabel={target.modelCount ? "网关未记录" : "尚未发布模型"} unrecordedModelCount={target.unrecordedModelCount} />
+}
+
+function ConnectionGatewayChildRow({ gateway, apimName, modelCount, runtime, checking, checkingGatewayDeploymentId, disabled, onCheck }: {
+  gateway: ReturnType<typeof connectionTargetDetails>["gateways"][number]
+  apimName: string
+  modelCount: number
+  runtime: ModelRuntime
+  checking: boolean
+  checkingGatewayDeploymentId: string | null
+  disabled: boolean
+  onCheck: () => void
+}) {
+  const diagnostic = runtimeDiagnostic(runtime)
+  const diagnosticMatches = diagnostic?.selection?.gateway_deployment_id === gateway.id
+  const state = checking && checkingGatewayDeploymentId === gateway.id
+    ? "checking" : diagnosticMatches ? runtimeHealthState(runtime) : "unchecked"
+  return <article className="model-list-row connection-list-row connection-gateway-child-row" role="row" data-parent-runtime-id={runtime.id} data-gateway-deployment-id={gateway.id}>
+    <div role="cell" />
+    <div className="model-target-cell connection-gateway-child-target" role="cell"><div className="connection-gateway-child-copy" data-deployment-id={gateway.id}><b data-no-localize title={gateway.nativeId}>{gateway.name}</b><span><span>{gateway.kind === "managed" ? "托管" : "自托管"}</span> · <span data-no-localize>{apimName}</span></span></div></div>
+    <div className="model-status-cell" title={diagnosticMatches ? runtimeHealthDescription(runtime) : "尚无此 Gateway 的诊断结果"} aria-busy={checking && checkingGatewayDeploymentId === gateway.id || undefined}>
+      <RuntimeHealth state={state} checkedAt={diagnosticMatches ? diagnostic?.checked_at : undefined} />
+    </div>
+    <div className="model-row-actions connection-gateway-child-actions">
+      <button type="button" className="connection-gateway-diagnostic" title={`诊断 ${gateway.name}`} aria-label={`诊断 ${gateway.name}`} disabled={disabled || checking || modelCount === 0} onClick={onCheck}>
+        <RefreshCw className={checking && checkingGatewayDeploymentId === gateway.id ? "spin" : ""} size={14} />
+      </button>
+    </div>
   </article>
 }
 
-function GatewayRow({ gateway, runtimeCount, busy, deleteDisabledReason, onEdit, onToggle, onDefault, onDelete }: { gateway: GatewayProfile; runtimeCount: number; busy: boolean; deleteDisabledReason: string | null; onEdit: () => void; onToggle: () => void; onDefault: () => void; onDelete: () => void }) {
-  const brand = gatewayBrand(gateway)
-  return <article className="model-list-row" role="row">
-    <div className="model-primary-cell"><span className="model-list-icon" data-model-family={brand} title={gatewayBrandLabel(brand)}><GatewayBrandLogo brand={brand} /></span><div><b>{gateway.name}</b><span>{runtimeCount} 个运行时</span></div>{gateway.is_default && <em>默认</em>}</div>
-    <div className="model-runtime-cell"><b>{gateway.implementation.toUpperCase()}</b><span>{gateway.auth_type}</span></div>
-    <div className="model-pricing-cell"><b>{gateway.credential_configured ? "凭据已配置" : gateway.auth_type === "none" ? "无需凭据" : "未配置凭据"}</b><span>{gateway.base_url ?? "尚未配置 Base URL"}</span></div>
-    <div className="model-status-cell"><Health status={gateway.enabled ? "available" : "unavailable"} enabled={gateway.enabled} /></div>
-    <div className="model-row-actions"><button className="model-edit-action" title="编辑" disabled={busy} onClick={onEdit}><Edit3 size={14} /></button><button className="model-delete-action" title={deleteDisabledReason ?? "删除网关记录"} disabled={busy || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button>{!gateway.is_default && <button title="设为默认" disabled={busy || !gateway.enabled} onClick={onDefault}><Check size={14} /></button>}<Toggle checked={gateway.enabled} disabled={busy} onChange={onToggle} /></div>
+function GatewayCompatibilityRow({ gateway, runtimeCount, busy, onEdit, onToggle, onDefault, onDelete }: {
+  gateway: GatewayProfile
+  runtimeCount: number
+  busy: boolean
+  onEdit: () => void
+  onToggle: () => void
+  onDefault: () => void
+  onDelete: () => void
+}) {
+  const deleteDisabledReason = gateway.is_default
+    ? "请先将其他 Managed APIM 设为默认"
+    : runtimeCount > 0
+      ? "请先移除该 Managed APIM 下的全部连接"
+      : null
+  return <article className="model-list-row gateway-api-row" role="row">
+    <div className="model-primary-cell"><span className="model-list-icon" data-model-family={gatewayBrand(gateway)}><GatewayBrandLogo brand={gatewayBrand(gateway)} /></span><div><b title={gateway.name}>{gateway.name}</b><code>managed</code></div>{gateway.is_default && <em>默认</em>}</div>
+    <div className="model-runtime-cell"><b>Managed APIM</b><span>Inventory unavailable</span></div>
+    <div className="model-pricing-cell"><b>{gateway.base_url ?? "Endpoint 未配置"}</b><span>{`${runtimeCount} 个运行时 · API 关联未读取`}</span></div>
+    <div className="model-status-cell"><GatewayReadiness state={gateway.enabled && gateway.base_url ? "ready" : "unavailable"} label={gateway.enabled && gateway.base_url ? "Configured" : "Unavailable"} detail="Managed APIM" /></div>
+    <div className="model-row-actions gateway-api-actions">
+      <button className="model-edit-action" title="编辑 Managed APIM" disabled={busy} onClick={onEdit}><Edit3 size={14} /></button>
+      <button className="model-delete-action" title={deleteDisabledReason ?? "删除 Managed APIM"} disabled={busy || Boolean(deleteDisabledReason)} onClick={onDelete}><Trash2 size={14} /></button>
+      {!gateway.is_default && <button className="connection-default-action" title="设为默认 Managed APIM" disabled={busy || !gateway.enabled} onClick={onDefault}><Check size={14} /></button>}
+      <Toggle checked={gateway.enabled} disabled={busy} onChange={onToggle} />
+    </div>
   </article>
+}
+
+function GatewayReadiness({ state, label, detail }: { state: "ready" | "warning" | "unavailable"; label: string; detail: string }) {
+  return <span className={`gateway-readiness ${state}`} title={`${label} · ${detail}`}><span><i />{label}</span><small>{detail}</small></span>
 }
 
 function Health({ status, enabled }: { status: string; enabled: boolean }) {
@@ -1421,11 +1638,6 @@ type RegistryOption = { value: string; label: string; icon?: React.ReactNode; di
 const providerKindLabels: Record<string, string> = {
   anthropic: "Anthropic Messages",
   microsoft_foundry: "Microsoft Foundry",
-  openai_compatible: "OpenAI 兼容",
-}
-
-const runtimeKindLabels: Record<ModelRuntime["runtime_kind"], string> = {
-  foundry: "Microsoft Foundry",
   openai_compatible: "OpenAI 兼容",
 }
 
@@ -1518,7 +1730,7 @@ function split(value: FormDataEntryValue | null) { return String(value ?? "").sp
 function GatewayConsole({ registry, onClose }: { registry: ModelRegistry; onClose: () => void }) {
   const defaultRuntime = registry.runtimes.find((item) => item.is_default && item.enabled) ?? registry.runtimes.find((item) => item.enabled)
   const [runtimeId, setRuntimeId] = useState(defaultRuntime?.id ?? "")
-  const availableModels = registry.models.filter((item) => item.runtime_id === runtimeId && item.enabled)
+  const availableModels = registry.models.filter((item) => item.runtime_id === runtimeId && item.enabled && !item.capabilities.includes("decision"))
   const defaultModel = availableModels.find((item) => item.is_default) ?? availableModels[0]
   const [modelId, setModelId] = useState(defaultModel?.id ?? "")
   const selectedRuntime = registry.runtimes.find((item) => item.id === runtimeId)
@@ -1526,7 +1738,7 @@ function GatewayConsole({ registry, onClose }: { registry: ModelRegistry; onClos
   const updateRuntime = (nextRuntimeId: string | null) => {
     if (!nextRuntimeId) return
     setRuntimeId(nextRuntimeId)
-    const nextModels = registry.models.filter((item) => item.runtime_id === nextRuntimeId && item.enabled)
+    const nextModels = registry.models.filter((item) => item.runtime_id === nextRuntimeId && item.enabled && !item.capabilities.includes("decision"))
     setModelId((nextModels.find((item) => item.is_default) ?? nextModels[0])?.id ?? "")
   }
   const invoke = useMutation({ mutationFn: dataSource.invokeModel })
@@ -1555,5 +1767,5 @@ function GatewayConsole({ registry, onClose }: { registry: ModelRegistry; onClos
       stream: false,
     })
   }
-  return <div className="modal-backdrop" onMouseDown={onClose}><form className="modal gateway-console" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>统一网关调用测试</h2><p>请求会经过实际 Runtime Adapter，并写入完整归因 telemetry。</p></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={16} /></button></div><div className="form-grid"><div className="gateway-select-field"><span>运行时</span><Select value={runtimeId} onValueChange={updateRuntime}><SelectTrigger aria-label="运行时" className="gateway-select-trigger"><SelectValue>{selectedRuntime?.name}{selectedRuntime?.is_default ? "（默认）" : ""}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false}>{registry.runtimes.filter((item) => item.enabled).map((runtime) => <SelectItem key={runtime.id} value={runtime.id}>{runtime.name}{runtime.is_default ? "（默认）" : ""}</SelectItem>)}</SelectContent></Select></div><div className="gateway-select-field"><span>模型</span><Select value={selectedModel?.id ?? ""} onValueChange={(value) => value && setModelId(value)}><SelectTrigger aria-label="模型" className="gateway-select-trigger"><SelectValue>{selectedModel?.display_name ?? "无可用模型"}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false}>{availableModels.map((model) => <SelectItem key={model.id} value={model.id}>{model.display_name}</SelectItem>)}</SelectContent></Select></div></div><div className="form-grid three"><label>组织<input name="organization" required defaultValue="contoso" /></label><label>部门<input name="department" required defaultValue="platform" /></label><label>项目<input name="project" required defaultValue="token-finops" /></label></div><div className="form-grid three"><label>智能体<input name="agent" required defaultValue="delivery-engineer" /></label><label>用户<input name="user" required defaultValue="lei" /></label><label>Workflow<input name="workflow" required defaultValue="runtime-smoke-test" /></label></div><label>Prompt<textarea name="prompt" rows={4} required defaultValue="Reply with exactly: RUNTIME_OK" /></label>{invoke.error && <div className="registry-error">调用失败：{String(invoke.error)}</div>}{invoke.data && <div className="gateway-result"><div><span>ADAPTER</span><strong>{invoke.data.gateway}</strong></div><div><span>MODEL</span><strong>{invoke.data.model}</strong></div><div><span>LATENCY</span><strong>{invoke.data.latency_ms}ms</strong></div><div><span>TOKENS</span><strong>{invoke.data.usage ? invoke.data.usage.input_tokens + invoke.data.usage.cached_tokens + invoke.data.usage.output_tokens : "--"}</strong></div><pre>{invoke.data.content}</pre></div>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>关闭</button><button className="primary-button" disabled={invoke.isPending || !selectedModel}><Send size={13} />{invoke.isPending ? "调用中..." : "发送请求"}</button></div></form></div>
+  return <div className="modal-backdrop" onMouseDown={onClose}><form className="modal gateway-console" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>统一网关调用测试</h2><p>请求会经过实际 Runtime Adapter，并写入完整归因 telemetry。</p></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={16} /></button></div><div className="form-grid"><div className="gateway-select-field"><span>运行时</span><Select value={runtimeId} onValueChange={updateRuntime}><SelectTrigger aria-label="运行时" className="gateway-select-trigger"><SelectValue>{selectedRuntime?.name}{selectedRuntime?.is_default ? "（默认）" : ""}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false}>{registry.runtimes.filter((item) => item.enabled).map((runtime) => <SelectItem key={runtime.id} value={runtime.id}>{runtime.name}{runtime.is_default ? "（默认）" : ""}</SelectItem>)}</SelectContent></Select></div><div className="gateway-select-field"><span>模型</span><Select value={selectedModel?.id ?? ""} onValueChange={(value) => value && setModelId(value)}><SelectTrigger aria-label="模型" className="gateway-select-trigger"><SelectValue>{selectedModel?.display_name ?? "无可用模型"}</SelectValue></SelectTrigger><SelectContent align="start" alignItemWithTrigger={false}>{availableModels.map((model) => <SelectItem key={model.id} value={model.id}>{model.display_name}</SelectItem>)}</SelectContent></Select></div></div><div className="form-grid three"><label>组织<input name="organization" required defaultValue="contoso" /></label><label>部门<input name="department" required defaultValue="platform" /></label><label>项目<input name="project" required defaultValue="token-finops" /></label></div><div className="form-grid three"><label>智能体<input name="agent" required defaultValue="delivery-engineer" /></label><label>用户<input name="user" required defaultValue="operator" /></label><label>Workflow<input name="workflow" required defaultValue="runtime-smoke-test" /></label></div><label>Prompt<textarea name="prompt" rows={4} required defaultValue="Reply with exactly: RUNTIME_OK" /></label>{invoke.error && <div className="registry-error">调用失败：{String(invoke.error)}</div>}{invoke.data && <div className="gateway-result"><div><span>ADAPTER</span><strong>{invoke.data.gateway}</strong></div><div><span>MODEL</span><strong>{invoke.data.model}</strong></div><div><span>LATENCY</span><strong>{invoke.data.latency_ms}ms</strong></div><div><span>TOKENS</span><strong>{invoke.data.usage ? invoke.data.usage.input_tokens + invoke.data.usage.cached_tokens + invoke.data.usage.output_tokens : "--"}</strong></div><pre>{invoke.data.content}</pre></div>}<div className="modal-actions"><button type="button" className="ghost-button" onClick={onClose}>关闭</button><button className="primary-button" disabled={invoke.isPending || !selectedModel}><Send size={13} />{invoke.isPending ? "调用中..." : "发送请求"}</button></div></form></div>
 }

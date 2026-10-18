@@ -3,11 +3,14 @@ from __future__ import annotations
 import threading
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
+from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
+from ..domain.model_availability import ModelAvailabilityConflict
 from ..domain.models import ModelIdentity
 from ..domain.pricing import PriceConfigurationChanged
 from ..domain.runtime_models import apply_databricks_adoption
@@ -22,19 +25,19 @@ class PostgreSqlRegistryRepositoryMixin:
         raise NotImplementedError
 
     def registry(self) -> dict[str, Sequence[dict[str, Any]]]:
-        with self._connection() as connection:
-            gateways = connection.execute(
+        with self._connection() as connection, connection.pipeline():
+            gateway_rows = connection.execute(
                 "SELECT * FROM gateway_profile ORDER BY name"
-            ).fetchall()
-            providers = connection.execute(
+            )
+            provider_rows = connection.execute(
                 """SELECT provider.*,
                                     COALESCE(metadata.brand_key, 'generic') AS brand_key
                      FROM model_provider provider
                      LEFT JOIN model_provider_metadata metadata
                          ON metadata.provider_id = provider.id
                      ORDER BY provider.name"""
-            ).fetchall()
-            runtimes = connection.execute(
+            )
+            runtime_rows = connection.execute(
                 """SELECT runtime.*, provider.name AS provider_name,
                                     gateway.name AS gateway_name,
                                     COALESCE(metadata.brand_key, 'generic') AS brand_key,
@@ -65,11 +68,8 @@ class PostgreSqlRegistryRepositoryMixin:
                          LIMIT 1
                      ) adopted ON TRUE
                      ORDER BY runtime.is_default DESC, runtime.name"""
-            ).fetchall()
-            runtimes = [
-                apply_databricks_adoption(row, row.pop("adopted_config", None)) for row in runtimes
-            ]
-            models = connection.execute(
+            )
+            model_rows = connection.execute(
                 """SELECT model.*, provider.name AS provider_name,
                                     runtime.name AS runtime_name,
                                     COALESCE(metadata.family_key, 'generic') AS family_key,
@@ -79,9 +79,8 @@ class PostgreSqlRegistryRepositoryMixin:
                                         AS assignment_required,
                                     metadata.publication_id,
                                     binding.value->'model'->'image_profile' AS image_profile,
-                                    -- A model with no price row was priced by hand, which is
-                                    -- what 'manual' means, so the COALESCE is the whole
-                                    -- backfill.
+                                    -- Explicit manual rows stay manual; an unconfigured
+                                    -- model follows the public synchronization default.
                                     COALESCE(price.price_source, 'models_dev') AS price_source,
                                     (price.model_id IS NOT NULL) AS price_source_configured,
                                     price.updated_at AS price_config_updated_at,
@@ -97,6 +96,9 @@ class PostgreSqlRegistryRepositoryMixin:
                                     price.price_sync_status,
                                     price.price_sync_message,
                                     price.pending_list_price,
+                                    COALESCE(price.context_price_tiers, '[]'::jsonb)
+                                        AS context_price_tiers,
+                                    price.pending_context_price_tiers,
                                     -- Resolved here rather than in the caller so every reader
                                     -- sees the same answer to "which discount actually applied".
                                     COALESCE(
@@ -111,10 +113,18 @@ class PostgreSqlRegistryRepositoryMixin:
                          ON runtime_price.runtime_id = runtime.id
                      LEFT JOIN managed_model_metadata metadata
                          ON metadata.model_id = model.id
+                     LEFT JOIN apim_target_route_binding serving_route
+                         ON serving_route.logical_model_id = model.id
+                         AND serving_route.apim_target_id = runtime.gateway_profile_id
+                         AND serving_route.runtime_id = runtime.id
+                         AND serving_route.enabled AND serving_route.is_default_serving
                      LEFT JOIN effective_gateway_release effective
                          ON effective.gateway_profile_id = runtime.gateway_profile_id
                      LEFT JOIN gateway_publication publication
-                         ON publication.id = effective.publication_id
+                         ON publication.id = COALESCE(
+                             serving_route.current_publication_id, effective.publication_id)
+                         AND publication.status = 'active'
+                         AND publication.gateway_profile_id = runtime.gateway_profile_id
                      LEFT JOIN LATERAL (
                          SELECT value FROM jsonb_array_elements(
                              COALESCE(publication.desired_spec->'bindings', '[]'::jsonb)
@@ -123,7 +133,14 @@ class PostgreSqlRegistryRepositoryMixin:
                          LIMIT 1
                      ) binding ON TRUE
                      ORDER BY model.is_default DESC, model.display_name"""
-            ).fetchall()
+            )
+            gateways = gateway_rows.fetchall()
+            providers = provider_rows.fetchall()
+            runtimes = [
+                apply_databricks_adoption(row, row.pop("adopted_config", None))
+                for row in runtime_rows.fetchall()
+            ]
+            models = model_rows.fetchall()
         return {
             "gateways": cast(Sequence[dict[str, Any]], gateways),
             "providers": cast(Sequence[dict[str, Any]], providers),
@@ -163,6 +180,15 @@ class PostgreSqlRegistryRepositoryMixin:
               )
               AND COALESCE(guard.price_discount_percent, runtime_price.price_discount_percent)
                   IS NOT DISTINCT FROM %(expected_discount_percent)s::numeric
+              AND (%(expected_context_price_tiers)s::jsonb IS NULL
+                OR COALESCE(guard.context_price_tiers, '[]'::jsonb)
+                    = %(expected_context_price_tiers)s::jsonb)
+              AND (%(expected_list_prices)s::jsonb IS NULL OR jsonb_build_object(
+                'list_input_cost_per_million', guard.list_input_cost_per_million,
+                'list_output_cost_per_million', guard.list_output_cost_per_million,
+                'list_cached_cost_per_million', guard.list_cached_cost_per_million,
+                'list_cache_write_cost_per_million', guard.list_cache_write_cost_per_million
+              ) = %(expected_list_prices)s::jsonb)
         )
     """
 
@@ -179,6 +205,9 @@ class PostgreSqlRegistryRepositoryMixin:
                 parameters.setdefault("expected_price_updated_at", None)
                 parameters.setdefault("price_source", parameters.get("expected_source"))
                 parameters.setdefault("price_reference", parameters.get("expected_reference"))
+                for key in ("expected_context_price_tiers", "expected_list_prices",
+                            "context_price_tiers", "pending_context_price_tiers"):
+                    parameters[key] = Jsonb(update[key]) if update.get(key) is not None else None
                 parameters["match_metadata"] = (
                     Jsonb(update["match_metadata"]) if update.get("match_metadata") else None
                 )
@@ -243,8 +272,8 @@ class PostgreSqlRegistryRepositoryMixin:
 
                 # The outcome is recorded either way. On a skip the rates stay exactly as they
                 # are and only the record changes, so the registry can say why a model was
-                # passed over instead of going quiet. An UPDATE is enough: a model without a
-                # price row is manual, and the planner never selects one.
+                # passed over instead of going quiet. Successful first-time matches insert
+                # their price row above; unmatched unconfigured models remain unconfigured.
                 #
                 # list_* moves only when the sync accepted the price. A figure held back for
                 # review goes to pending_list_price, because a baseline that follows the price
@@ -259,6 +288,15 @@ class PostgreSqlRegistryRepositoryMixin:
                                THEN %(match_metadata)s::jsonb ELSE price.match_metadata END,
                            source_snapshot = CASE WHEN %(writes)s
                                THEN %(source_snapshot)s::jsonb ELSE price.source_snapshot END,
+                           context_price_tiers = CASE
+                               WHEN %(writes)s AND %(context_price_tiers)s::jsonb IS NOT NULL
+                                   THEN %(context_price_tiers)s::jsonb
+                               ELSE price.context_price_tiers END,
+                           pending_context_price_tiers = CASE
+                               WHEN %(writes)s THEN NULL
+                               WHEN %(pending_context_price_tiers)s::jsonb IS NOT NULL
+                                   THEN %(pending_context_price_tiers)s::jsonb
+                               ELSE price.pending_context_price_tiers END,
                            list_input_cost_per_million = CASE WHEN %(writes)s
                                THEN COALESCE(%(list_input_cost_per_million)s,
                                              list_input_cost_per_million)
@@ -305,6 +343,7 @@ class PostgreSqlRegistryRepositoryMixin:
 
     def create_registry_item(self, kind: str, values: Mapping[str, Any]) -> dict[str, Any]:
         parameters = dict(values)
+        parameters.setdefault("id", uuid4())
         if "config" in parameters:
             parameters["config"] = Jsonb(parameters["config"])
         with self._connection() as connection, connection.transaction():
@@ -313,10 +352,10 @@ class PostgreSqlRegistryRepositoryMixin:
                     connection.execute("UPDATE gateway_profile SET is_default = FALSE")
                 row = connection.execute(
                     """INSERT INTO gateway_profile (
-                               name, implementation, base_url, auth_type,
+                               id, name, implementation, base_url, auth_type,
                                credential_ciphertext, credential_hint, enabled,
                                is_default, config
-                           ) VALUES (%(name)s, %(implementation)s, %(base_url)s,
+                           ) VALUES (%(id)s, %(name)s, %(implementation)s, %(base_url)s,
                                %(auth_type)s, %(credential_ciphertext)s,
                                %(credential_hint)s, %(enabled)s, %(is_default)s,
                                %(config)s) RETURNING *""",
@@ -325,9 +364,9 @@ class PostgreSqlRegistryRepositoryMixin:
             elif kind == "provider":
                 row = connection.execute(
                     """INSERT INTO model_provider (
-                               name, provider_kind, endpoint_url, auth_type,
+                               id, name, provider_kind, endpoint_url, auth_type,
                                credential_ciphertext, credential_hint, enabled, config
-                           ) VALUES (%(name)s, %(provider_kind)s, %(endpoint_url)s,
+                           ) VALUES (%(id)s, %(name)s, %(provider_kind)s, %(endpoint_url)s,
                                %(auth_type)s, %(credential_ciphertext)s,
                                %(credential_hint)s, %(enabled)s, %(config)s)
                            RETURNING *""",
@@ -344,9 +383,9 @@ class PostgreSqlRegistryRepositoryMixin:
                     connection.execute("UPDATE model_runtime SET is_default = FALSE")
                 row = connection.execute(
                     """INSERT INTO model_runtime (
-                               provider_id, gateway_profile_id, name, runtime_kind,
+                               id, provider_id, gateway_profile_id, name, runtime_kind,
                                enabled, is_default, config, allowed_roles
-                           ) VALUES (%(provider_id)s, %(gateway_profile_id)s,
+                           ) VALUES (%(id)s, %(provider_id)s, %(gateway_profile_id)s,
                                %(name)s, %(runtime_kind)s, %(enabled)s,
                                %(is_default)s, %(config)s, %(allowed_roles)s)
                            RETURNING *""",
@@ -380,12 +419,12 @@ class PostgreSqlRegistryRepositoryMixin:
                     )
                 row = connection.execute(
                     """INSERT INTO managed_model (
-                               provider_id, runtime_id, model_key, display_name,
+                               id, provider_id, runtime_id, model_key, display_name,
                                enabled, is_default, capabilities, context_window,
                                input_cost_per_million, output_cost_per_million,
                                cached_cost_per_million, cache_write_cost_per_million,
                                allowed_roles
-                           ) VALUES (%(provider_id)s, %(runtime_id)s, %(model_key)s,
+                           ) VALUES (%(id)s, %(provider_id)s, %(runtime_id)s, %(model_key)s,
                                %(display_name)s, %(enabled)s, %(is_default)s,
                                %(capabilities)s, %(context_window)s,
                                %(input_cost_per_million)s, %(output_cost_per_million)s,
@@ -441,8 +480,8 @@ class PostgreSqlRegistryRepositoryMixin:
                     """SELECT id FROM gateway_publication
                        WHERE gateway_profile_id = %s
                          AND status IN (
-                             'queued', 'validating', 'provisioning', 'building_revision',
-                             'verifying', 'awaiting_authorization', 'promoting', 'rolling_back'
+                           'queued', 'validating', 'provisioning', 'building_revision',
+                           'verifying', 'awaiting_authorization', 'promoting', 'rolling_back'
                          ) LIMIT 1""",
                     (runtime_values["gateway_profile_id"],),
                 ).fetchone()
@@ -476,7 +515,8 @@ class PostgreSqlRegistryRepositoryMixin:
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     (
-                        f"model-connection:{runtime_values['gateway_profile_id']}:"
+                        "model-connection:"
+                        f"{runtime_values['gateway_profile_id']}:"
                         f"{workspace_url.casefold()}",
                     ),
                 )
@@ -484,43 +524,66 @@ class PostgreSqlRegistryRepositoryMixin:
                     """SELECT runtime.id
                        FROM model_runtime runtime
                        WHERE runtime.gateway_profile_id = %s
-                         AND (
-                             lower(rtrim(runtime.config->>'workspace_url', '/')) = lower(%s)
-                             OR EXISTS (
-                                 SELECT 1 FROM effective_gateway_release effective
-                                 JOIN gateway_publication publication
-                                     ON publication.id = effective.publication_id
-                                 CROSS JOIN LATERAL jsonb_array_elements(
-                                     COALESCE(publication.desired_spec->'bindings', '[]'::jsonb)
-                                 ) binding
-                                 WHERE effective.gateway_profile_id = runtime.gateway_profile_id
-                                   AND binding->>'runtime_id' = runtime.id::text
-                                   AND binding->'runtime_config'
-                                       ->>'databricks_connection_adoption' = 'true'
-                                   AND lower(rtrim(
-                                       binding->'runtime_config'->>'workspace_url', '/'
-                                   )) = lower(%s)
-                             )
-                         ) LIMIT 1""",
+                       AND (
+                       lower(rtrim(runtime.config->>'workspace_url', '/')) = lower(%s)
+                       OR EXISTS (
+                       SELECT 1 FROM effective_gateway_release effective
+                       JOIN gateway_publication publication
+                       ON publication.id = effective.publication_id
+                       CROSS JOIN LATERAL jsonb_array_elements(
+                       COALESCE(publication.desired_spec->'bindings', '[]'::jsonb)
+                       ) binding
+                       WHERE effective.gateway_profile_id = runtime.gateway_profile_id
+                       AND binding->>'runtime_id' = runtime.id::text
+                       AND binding->'runtime_config'
+                       ->>'databricks_connection_adoption' = 'true'
+                       AND lower(rtrim(
+                       binding->'runtime_config'->>'workspace_url', '/'
+                       )) = lower(%s)
+                       )
+                       )
+                       LIMIT 1""",
                     (runtime_values["gateway_profile_id"], workspace_url, workspace_url),
                 ).fetchone()
                 if duplicate is not None:
                     raise ValueError("This connection already exists")
             if provider_values is not None:
+                provider_config = dict(provider_values.get("config") or {})
+                provider_vendor = str(
+                    provider_config.get("model_vendor") or "generic"
+                )
+                provider_kind = str(provider_values["provider_kind"])
+                provider_identity = (
+                    f"{provider_kind}:{provider_vendor}"
+                    if provider_kind == "openai_compatible"
+                    else str(provider_values["brand_key"])
+                )
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
-                    (f"model-provider:{provider_values['brand_key']}",),
+                    (f"model-provider:{provider_identity}",),
                 )
-                provider = connection.execute(
-                    """SELECT provider.*
-                       FROM model_provider provider
-                       JOIN model_provider_metadata metadata
-                         ON metadata.provider_id = provider.id
-                       WHERE metadata.brand_key = %s AND provider.enabled
-                       ORDER BY provider.created_at
-                       LIMIT 1""",
-                    (provider_values["brand_key"],),
-                ).fetchone()
+                if provider_kind == "openai_compatible":
+                    provider = connection.execute(
+                        """SELECT provider.*
+                           FROM model_provider provider
+                           WHERE provider.provider_kind = 'openai_compatible'
+                             AND COALESCE(provider.config->>'model_vendor', 'generic') = %s
+                             AND provider.enabled
+                           ORDER BY provider.created_at
+                           LIMIT 1""",
+                        (provider_vendor,),
+                    ).fetchone()
+                else:
+                    provider = connection.execute(
+                        """SELECT provider.*
+                           FROM model_provider provider
+                           JOIN model_provider_metadata metadata
+                             ON metadata.provider_id = provider.id
+                           WHERE metadata.brand_key = %s AND provider.enabled
+                           ORDER BY provider.created_at
+                           LIMIT 1""",
+                        (provider_values["brand_key"],),
+                    ).fetchone()
                 if provider is None:
                     parameters = dict(provider_values)
                     parameters["config"] = Jsonb(parameters["config"])
@@ -571,6 +634,10 @@ class PostgreSqlRegistryRepositoryMixin:
                          SELECT 1 FROM managed_model model
                          WHERE model.runtime_id = runtime.id
                      )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM apim_target_route_binding binding
+                         WHERE binding.runtime_id = runtime.id
+                     )
                    RETURNING runtime.id""",
                 (runtime_id,),
             ).fetchone()
@@ -595,6 +662,10 @@ class PostgreSqlRegistryRepositoryMixin:
                      AND NOT EXISTS (
                          SELECT 1 FROM effective_gateway_release release
                          WHERE release.gateway_profile_id = gateway.id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM apim_target_metadata target
+                         WHERE target.gateway_profile_id = gateway.id
                      )
                    RETURNING gateway.id""",
                 (gateway_id,),
@@ -659,7 +730,6 @@ class PostgreSqlRegistryRepositoryMixin:
                 "runtime_id",
                 "model_key",
                 "display_name",
-                "enabled",
                 "is_default",
                 "capabilities",
                 "context_window",
@@ -684,6 +754,8 @@ class PostgreSqlRegistryRepositoryMixin:
                 "list_input_cost_per_million", "list_output_cost_per_million",
                 "list_cached_cost_per_million", "list_cache_write_cost_per_million",
                 "match_metadata", "source_snapshot",
+                "context_price_tiers", "pending_list_price", "pending_context_price_tiers",
+                "price_synced_at", "price_sync_status", "price_sync_message",
             },
         }.get(kind, set())
         price_values = {key: values[key] for key in price_fields if key in values}
@@ -706,6 +778,15 @@ class PostgreSqlRegistryRepositoryMixin:
                 if guard is None or guard["updated_at"] != values["pricing_expected_updated_at"]:
                     raise PriceConfigurationChanged("模型在定价期间已修改，请刷新后重试")
             if kind == "model":
+                current = connection.execute(
+                    "SELECT enabled FROM managed_model WHERE id = %s FOR UPDATE", (item_id,),
+                ).fetchone()
+                if current is None:
+                    return None
+                if "enabled" in values and values["enabled"] != current["enabled"]:
+                    raise ModelAvailabilityConflict(
+                        "Change model availability through the versioned availability command"
+                    )
                 removing = connection.execute(
                     """SELECT id FROM gateway_publication
                        WHERE publication_kind = 'model_remove'
@@ -738,11 +819,16 @@ class PostgreSqlRegistryRepositoryMixin:
                         (parameters["runtime_id"],),
                     )
             if assignments:
-                row = connection.execute(
-                    f"UPDATE {table} SET {', '.join(assignments)}, updated_at = now() "
-                    "WHERE id = %(id)s RETURNING *",
-                    parameters,
-                ).fetchone()
+                try:
+                    row = connection.execute(
+                        f"UPDATE {table} SET {', '.join(assignments)}, updated_at = now() "
+                        "WHERE id = %(id)s RETURNING *",
+                        parameters,
+                    ).fetchone()
+                except UniqueViolation:
+                    if kind == "gateway" and set(values) == {"name"}:
+                        raise ValueError("Gateway display name is already in use") from None
+                    raise
             else:
                 row = connection.execute(
                     f"SELECT * FROM {table} WHERE id = %s", (item_id,)
@@ -844,25 +930,51 @@ class PostgreSqlRegistryRepositoryMixin:
                 "price_discount_percent",
                 current["price_discount_percent"] if current else None,
             ),
+            "context_price_tiers": values.get(
+                "context_price_tiers", (current.get("context_price_tiers") or []) if current else []
+            ),
         }
         # Going back to manual drops the reference with it. Keeping it would leave a model
         # that reads as "following gpt-4.1 mini" while charging whatever was typed.
         if merged["price_source"] == "manual":
             merged["price_reference"] = None
+            merged["context_price_tiers"] = []
         baseline_fields = (
             "list_input_cost_per_million", "list_output_cost_per_million",
             "list_cached_cost_per_million", "list_cache_write_cost_per_million",
             "match_metadata", "source_snapshot",
+            "context_price_tiers", "pending_list_price", "pending_context_price_tiers",
+            "price_synced_at", "price_sync_status", "price_sync_message",
         )
-        reset = current is not None and any(
+        reset = current is None or any(
             merged[field] != current.get(field) for field in ("price_source", "price_reference")
         )
+        tiers_changed = merged["context_price_tiers"] != (
+            (current.get("context_price_tiers") or []) if current else []
+        )
         for field in baseline_fields:
+            if field == "context_price_tiers":
+                continue
             merged[field] = values.get(
                 field, None if reset else current.get(field) if current else None,
             )
+        if reset or tiers_changed or values.get("source_snapshot") is not None:
+            merged["pending_list_price"] = None
+            merged["pending_context_price_tiers"] = None
+        if tiers_changed:
+            merged["price_sync_status"] = "ok" if merged["context_price_tiers"] else None
+            merged["price_sync_message"] = None
+            merged["price_synced_at"] = values.get("price_synced_at", datetime.now(UTC))
+        if merged["price_source"] == "manual":
+            for field in baseline_fields:
+                if field != "context_price_tiers":
+                    merged[field] = None
+        json_fields = {
+            "match_metadata", "source_snapshot", "context_price_tiers",
+            "pending_list_price", "pending_context_price_tiers",
+        }
         baseline = {
-            field: Jsonb(merged[field]) if field in {"match_metadata", "source_snapshot"}
+            field: Jsonb(merged[field]) if field in json_fields
             and merged[field] is not None else merged[field] for field in baseline_fields
         }
         connection.execute(
@@ -875,8 +987,6 @@ class PostgreSqlRegistryRepositoryMixin:
                  price_reference = EXCLUDED.price_reference,
                  price_discount_percent = EXCLUDED.price_discount_percent,
                  {", ".join(f"{field} = EXCLUDED.{field}" for field in baseline_fields)},
-                 pending_list_price = CASE WHEN %s
-                     THEN NULL ELSE managed_model_price.pending_list_price END,
                  updated_at = now()""",
             (
                 item_id,
@@ -884,7 +994,6 @@ class PostgreSqlRegistryRepositoryMixin:
                 merged["price_reference"],
                 merged["price_discount_percent"],
                 *baseline.values(),
-                reset or values.get("source_snapshot") is not None,
             ),
         )
         return merged

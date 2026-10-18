@@ -1,1 +1,1 @@
-"""Turnstile backend application package."""
+"""Turnstile FastAPI application and HTTP composition package."""

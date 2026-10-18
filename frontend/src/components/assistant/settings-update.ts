@@ -5,9 +5,9 @@ export function assistantSettingsUpdate(
   changes: Partial<AssistantSettingsWrite>,
 ): AssistantSettingsWrite {
   const next: AssistantSettingsWrite = {
-    model_id: settings.model_available ? settings.model_id : null,
+    model_id: settings.model_id,
     auto_title: settings.auto_title,
-    api_format: settings.api_available === false ? null : settings.api_format ?? null,
+    api_format: settings.model_available && settings.api_available === false ? null : settings.api_format ?? null,
     ...changes,
   }
   if (!Array.isArray(settings.available_api_formats)) {
@@ -15,7 +15,7 @@ export function assistantSettingsUpdate(
     return next
   }
   const api = next.api_format
-  if (api) {
+  if (api && (settings.model_available || next.model_id !== settings.model_id)) {
     const candidates = next.model_id
       ? settings.available_models.filter((model) => model.id === next.model_id)
       : settings.available_models
@@ -30,8 +30,9 @@ export function assistantSettingsModel(
   settings: AssistantSettings,
   draft: AssistantSettingsWrite,
 ) {
-  return settings.available_models.find((model) => model.id === draft.model_id)
-    ?? settings.available_models.find((model) =>
+  if (draft.model_id) return settings.available_models.find((model) => model.id === draft.model_id)
+  if (!settings.model_available && settings.model_id === null) return undefined
+  return settings.available_models.find((model) =>
       !draft.api_format || model.api_formats?.includes(draft.api_format))
     ?? settings.available_models[0]
 }

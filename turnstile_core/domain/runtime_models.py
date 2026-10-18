@@ -3,17 +3,20 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import Field, HttpUrl, PrivateAttr, SecretStr, model_validator
+from pydantic import Field, HttpUrl, JsonValue, PrivateAttr, SecretStr, model_validator
 
+from .gateway_targets import ApimTargetTopologyList
 from .image_profiles import ImageGenerationLimits, ImageGenerationProfile
-from .models import StrictModel
+from .models import ModelPriceTier, StrictModel
+from .models import PriceCatalogRuleSource as PriceCatalogRuleSource
 
 ModelCapability = Literal[
-    "chat", "tools", "vision", "reasoning", "streaming", "embeddings", "image_generation"
+    "chat", "tools", "vision", "reasoning", "streaming", "embeddings", "image_generation",
+    "decision",
 ]
 FOUNDRY_INFERENCE_RESOURCE = "https://ai.azure.com"
 FOUNDRY_INFERENCE_ROLE_ID = "a97b65f3-24c7-4388-baec-2e87135dc908"
@@ -68,11 +71,12 @@ def openai_compatible_endpoint_values(value: str) -> tuple[str, str, str]:
             "The OpenAI-compatible Base URL must be HTTPS without credentials, query, or fragment"
         )
     path = endpoint.path.rstrip("/")
-    suffix = "/chat/completions"
-    if path.casefold().endswith(suffix):
-        path = path[:-len(suffix)].rstrip("/")
+    chat_suffix = "/chat/completions"
+    if path.casefold().endswith(chat_suffix):
+        path = path[: -len(chat_suffix)].rstrip("/")
     origin = f"{endpoint.scheme}://{endpoint.netloc}"
-    return f"{origin}{path}", origin, f"{path}{suffix}"
+    base_url = f"{origin}{path}"
+    return base_url, origin, f"{path}{chat_suffix}"
 
 
 def databricks_workspace_url(value: str) -> str:
@@ -176,10 +180,10 @@ def openai_compatible_runtime_name(
     prefix = f"{model_vendor_label(model_vendor)} "
     suffix = " via APIM"
     identity = f"{endpoint.netloc}{endpoint.path}"
-    maximum = 160 - len(prefix) - len(suffix)
-    if len(identity) > maximum:
+    maximum_identity_length = 160 - len(prefix) - len(suffix)
+    if len(identity) > maximum_identity_length:
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
-        identity = f"{identity[:maximum - len(digest) - 1]}-{digest}"
+        identity = f"{identity[: maximum_identity_length - len(digest) - 1]}-{digest}"
     return f"{prefix}{identity}{suffix}"
 
 
@@ -274,6 +278,108 @@ class PriceSyncStatus(StrEnum):
     DEFERRED = "deferred"
 
 
+class PriceCatalogInputRange(StrictModel):
+    min_input_tokens: int = Field(ge=0, strict=True)
+    max_input_tokens: int | None = Field(default=None, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def require_ordered_bounds(self) -> PriceCatalogInputRange:
+        if self.max_input_tokens is not None and self.max_input_tokens < self.min_input_tokens:
+            raise ValueError("Context pricing bounds must be ordered")
+        return self
+
+
+class ContextPriceRule(StrictModel):
+    short_context_max_tokens: int = Field(gt=0, le=9007199254740990, strict=True)
+    note: str = Field(default="", max_length=500)
+    source_url: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def normalize_rule(self) -> ContextPriceRule:
+        self.note = self.note.strip()
+        if self.source_url is not None:
+            self.source_url = self.source_url.strip()
+            parsed = urlsplit(self.source_url)
+            if (parsed.scheme != "https" or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or any(character.isspace() for character in self.source_url)):
+                raise ValueError("The rule source must be an HTTPS URL without credentials")
+            HttpUrl(self.source_url)
+        return self
+
+    @property
+    def revision(self) -> str:
+        return "sha256:" + hashlib.sha256(self.model_dump_json().encode()).hexdigest()
+
+
+class PriceCatalogContextTier(StrictModel):
+    group_key: str = Field(min_length=1)
+    model_label: str = Field(min_length=1)
+    service_tier: str = ""
+    key: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    order: int = Field(ge=0, strict=True)
+    input_range: PriceCatalogInputRange | None = None
+    input_range_source: PriceCatalogRuleSource | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+
+
+class PriceCatalogModel(StrictModel):
+    """One priceable model in a vendor's published list, named the way that vendor names it."""
+
+    key: str
+    label: str
+    product: str
+    source: PriceSource
+    context_tier: PriceCatalogContextTier | None = None
+    text_to_image: bool = Field(default=False, exclude_if=lambda value: not value)
+
+
+class PriceCatalogModelsResponse(StrictModel):
+    models: list[PriceCatalogModel]
+    # Named rather than silently omitted: a source that cannot be read right now is different
+    # from a source with nothing in it, and only one of those is worth waiting out.
+    unavailable: list[str] = Field(default_factory=list)
+
+
+class PriceCatalogOption(StrictModel):
+    """How one model is priced under one deployment shape.
+
+    `regions` lists every region charging exactly these rates. `region_required` is false when
+    the shape charges one figure everywhere -- Global always does -- because asking for a region
+    that cannot change the answer is asking someone to guess at nothing.
+    """
+
+    reference: str
+    deployment: str
+    regions: list[str] = Field(default_factory=list)
+    # Each region's own reference. The group is how the choice is shown; what gets stored is the
+    # region the person picked, so a later price split follows their region and not the first one.
+    references_by_region: dict[str, str] = Field(default_factory=dict)
+    region_required: bool = False
+    input_per_million: float | None = None
+    output_per_million: float | None = None
+    cached_per_million: float | None = None
+    cache_write_per_million: float | None = None
+    context_window: int | None = None
+
+
+class PriceCatalogOptionsResponse(StrictModel):
+    model_entry: PriceCatalogModel
+    options: list[PriceCatalogOption] = Field(default_factory=list)
+    complete: bool = True
+    # Meters that mention this model but that the vocabulary could not read. Reported rather
+    # than dropped: a parser meeting an unfamiliar naming convention should look like a gap,
+    # not like a model with no published price.
+    unreadable: list[str] = Field(default_factory=list)
+    # Other meters that mention this model but price something else: a batch rate, a
+    # fine-tuning rate, a per-hour reservation. Named so the answer is "that one prices
+    # something else" rather than silence.
+    other_meters: list[str] = Field(default_factory=list)
+    note: str | None = None
+
+
 class GatewayProfileWrite(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     implementation: GatewayKind
@@ -283,6 +389,17 @@ class GatewayProfileWrite(StrictModel):
     enabled: bool = True
     is_default: bool = False
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class GatewayProfileNameWrite(StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def normalize_name(self) -> GatewayProfileNameWrite:
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("The display name cannot be blank")
+        return self
 
 
 class GatewayProfile(GatewayProfileWrite):
@@ -324,10 +441,7 @@ class RuntimeWrite(StrictModel):
     brand_key: BrandKey = BrandKey.GENERIC
     config: dict[str, Any] = Field(default_factory=dict)
     allowed_roles: list[str] = Field(default_factory=lambda: ["owner", "admin", "member"])
-    # Percent of list price charged for every model on this connection that follows a list
-    # price. 90 means a 10% discount. None charges list price. One connection is the right
-    # grain for this: a discount comes from the agreement covering that account, and a single
-    # connection can serve models from several vendors, each with its own published list.
+
     price_discount_percent: float | None = Field(default=None, gt=0, le=100)
 
 
@@ -363,9 +477,7 @@ class ModelConnectionCreate(StrictModel):
         has_openai = self.openai_base_url is not None
         has_databricks = self.databricks_workspace_url is not None
         if sum((has_foundry, has_bedrock, has_openai, has_databricks)) != 1:
-            raise ValueError(
-                "select one Foundry, Bedrock, OpenAI-compatible, or Databricks connection"
-            )
+            raise ValueError("select exactly one supported provider connection")
         if self.provider.template == "azure_databricks" and not has_databricks:
             raise ValueError("a Databricks connection requires its Workspace URL")
         if has_databricks:
@@ -425,16 +537,14 @@ class ModelConnectionUpdate(StrictModel):
     name: str = Field(min_length=1, max_length=160)
     enabled: bool
     is_default: bool
-    # The default percent of list price for models on this connection. Optional so a caller that
-    # predates it keeps working; omitting it clears the discount, which is the same thing the
-    # dialog does when the field is emptied.
-    price_discount_percent: float | None = Field(default=None, gt=0, le=100)
 
     @model_validator(mode="after")
     def require_enabled_default(self) -> ModelConnectionUpdate:
         if self.is_default and not self.enabled:
             raise ValueError("a default connection must be enabled")
         return self
+
+    price_discount_percent: float | None = Field(default=None, gt=0, le=100)
 
 
 class Runtime(RuntimeWrite):
@@ -444,8 +554,54 @@ class Runtime(RuntimeWrite):
     health_status: HealthStatus
     health_message: str | None
     last_checked_at: datetime | None
+    diagnostic: RuntimeHealth | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class PendingListPrice(StrictModel):
+    """A published price waiting for a person, in the same four buckets as the accepted one."""
+
+    input: float | None = None
+    output: float | None = None
+    cached: float | None = None
+    cache_write: float | None = None
+
+
+class StoredContextPriceTier(ModelPriceTier):
+    reference: str = Field(min_length=1, max_length=1000)
+    label: str = Field(min_length=1)
+    list_prices: PendingListPrice
+    input_range_source: PriceCatalogRuleSource | None = None
+    model_key: str = ""
+    model_label: str = ""
+    product: str = ""
+    group_key: str = ""
+    service_tier: str = ""
+    deployment: str = ""
+    regions: list[str] = Field(default_factory=list)
+
+
+def custom_context_rule(tiers: list[StoredContextPriceTier]) -> ContextPriceRule | None:
+    sources = [tier.input_range_source for tier in tiers]
+    if not any(source is not None and source.origin == "custom" for source in sources):
+        return None
+    ordered = sorted(tiers, key=lambda tier: tier.min_input_tokens)
+    source = ordered[0].input_range_source
+    if (len(ordered) != 2 or source is None or source.origin != "custom"
+        or any(item != source for item in sources)
+        or ordered[0].key != "short" or ordered[1].key != "long"
+        or ordered[0].min_input_tokens != 0 or ordered[0].max_input_tokens is None
+        or ordered[1].min_input_tokens != ordered[0].max_input_tokens + 1
+        or ordered[1].max_input_tokens is not None or source.configured_at is None):
+        raise ValueError("Stored custom context rules must describe one complete schedule")
+    rule = ContextPriceRule(
+        short_context_max_tokens=ordered[0].max_input_tokens,
+        note=source.note or "", source_url=source.url,
+    )
+    if source.rule_id != "custom-context-v1" or source.revision != rule.revision:
+        raise ValueError("Stored custom context rule revision does not match its contents")
+    return rule
 
 
 class ManagedModelWrite(StrictModel):
@@ -469,11 +625,6 @@ class ManagedModelWrite(StrictModel):
     # OpenAI 1.25x on GPT-5.6 and later). None falls back to the cached rate.
     cache_write_cost_per_million: float | None = Field(default=None, ge=0)
     allowed_roles: list[str] = Field(default_factory=lambda: ["owner", "admin", "member"])
-    price_source: PriceSource = PriceSource.MODELS_DEV
-    price_reference: str | None = Field(default=None, min_length=1, max_length=1500)
-    # Percent of list price this model is charged at, overriding the connection's own figure.
-    # None inherits it. This is a commercial term, so nothing derives it -- a person types it.
-    price_discount_percent: float | None = Field(default=None, gt=0, le=100)
     price_entry_digest: str | None = Field(default=None, max_length=64)
     allow_unpriced: bool = False
 
@@ -484,23 +635,54 @@ class ManagedModelWrite(StrictModel):
                 raise ValueError("Image generation cannot declare text or streaming capabilities")
             if self.is_default:
                 raise ValueError("An image model cannot be the default chat model")
+            if self.context_price_references:
+                raise ValueError("Image models cannot use context-tier prices")
         return self
 
     @model_validator(mode="after")
+    def validate_decision_model(self) -> ManagedModelWrite:
+        if "decision" in self.capabilities:
+            if set(self.capabilities) != {"decision"}:
+                raise ValueError("Decision cannot declare chat or streaming capabilities")
+            if self.is_default:
+                raise ValueError("A Decision model cannot be the default chat model")
+        return self
+
+    price_source: PriceSource = PriceSource.MODELS_DEV
+
+    price_reference: str | None = Field(default=None, min_length=1, max_length=1500)
+
+    context_price_references: list[str] = Field(
+        default_factory=list, max_length=32, exclude_if=lambda value: not value,
+    )
+
+    context_price_refresh: bool = Field(default=False, exclude_if=lambda value: not value)
+
+    context_price_rule: ContextPriceRule | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+
+    price_discount_percent: float | None = Field(default=None, gt=0, le=100)
+
+    @model_validator(mode="after")
     def validate_price_source(self) -> ManagedModelWrite:
-        if self.price_source in {PriceSource.AZURE_RETAIL, PriceSource.ANTHROPIC} \
+        if self.context_price_rule is not None and len(self.context_price_references) != 2:
+            raise ValueError("A custom context rule requires both short and long catalog tiers")
+        if self.context_price_refresh and not self.context_price_references:
+            raise ValueError("Refreshing context prices requires the complete tier selection")
+        if self.context_price_references:
+            if self.price_source is PriceSource.MANUAL:
+                raise ValueError("Context-tier references require a catalog price source")
+            if (len(self.context_price_references) < 2
+                or len(set(self.context_price_references)) != len(self.context_price_references)):
+                raise ValueError("Context pricing requires distinct tier references")
+            if any(not reference.startswith(f"{self.price_source.value}:")
+                   for reference in self.context_price_references):
+                raise ValueError("Context references must use the selected price source")
+        elif self.price_source in {PriceSource.AZURE_RETAIL, PriceSource.ANTHROPIC} \
                 and not self.price_reference:
             raise ValueError("Following a list price requires the catalog entry to follow")
         return self
-
-
-class PendingListPrice(StrictModel):
-    """A published price waiting for a person, in the same four buckets as the accepted one."""
-
-    input: float | None = None
-    output: float | None = None
-    cached: float | None = None
-    cache_write: float | None = None
 
 
 class ManagedModel(ManagedModelWrite):
@@ -509,23 +691,6 @@ class ManagedModel(ManagedModelWrite):
     runtime_name: str
     publication_id: UUID | None = None
     image_profile: ImageGenerationProfile | None = None
-    # The un-discounted rates last read from the source, kept beside the charged rates so the
-    # dashboard can show the arithmetic instead of a number the reader has to trust.
-    list_input_cost_per_million: float | None = None
-    list_output_cost_per_million: float | None = None
-    list_cached_cost_per_million: float | None = None
-    list_cache_write_cost_per_million: float | None = None
-    price_synced_at: datetime | None = None
-    price_sync_status: PriceSyncStatus | None = None
-    price_sync_message: str | None = None
-    # What the source publishes now, held back because it moved further than the review
-    # threshold. Deliberately not merged into list_*: that is the price this model is charged
-    # from, and the one the next run measures drift against. Letting an unapproved figure land
-    # there makes the second run compare it with itself and accept it unasked.
-    pending_list_price: PendingListPrice | None = None
-    # Resolved from the model's own figure or the connection's, so the caller does not have to
-    # know which one applied.
-    effective_discount_percent: float | None = None
     price_source_configured: bool = True
     price_config_updated_at: datetime | None = None
     match_metadata: dict[str, Any] | None = None
@@ -533,58 +698,38 @@ class ManagedModel(ManagedModelWrite):
     created_at: datetime
     updated_at: datetime
 
+    list_input_cost_per_million: float | None = None
 
-class PriceCatalogModel(StrictModel):
-    """One priceable model in a vendor's published list, named the way that vendor names it."""
+    list_output_cost_per_million: float | None = None
 
-    key: str
-    label: str
-    product: str
-    source: PriceSource
+    list_cached_cost_per_million: float | None = None
 
+    list_cache_write_cost_per_million: float | None = None
 
-class PriceCatalogModelsResponse(StrictModel):
-    models: list[PriceCatalogModel]
-    # Named rather than silently omitted: a source that cannot be read right now is different
-    # from a source with nothing in it, and only one of those is worth waiting out.
-    unavailable: list[str] = Field(default_factory=list)
+    price_synced_at: datetime | None = None
 
+    price_sync_status: PriceSyncStatus | None = None
 
-class PriceCatalogOption(StrictModel):
-    """How one model is priced under one deployment shape.
+    price_sync_message: str | None = None
 
-    `regions` lists every region charging exactly these rates. `region_required` is false when
-    the shape charges one figure everywhere -- Global always does -- because asking for a region
-    that cannot change the answer is asking someone to guess at nothing.
-    """
+    pending_list_price: PendingListPrice | None = None
 
-    reference: str
-    deployment: str
-    regions: list[str] = Field(default_factory=list)
-    # Each region's own reference. The group is how the choice is shown; what gets stored is the
-    # region the person picked, so a later price split follows their region and not the first one.
-    references_by_region: dict[str, str] = Field(default_factory=dict)
-    region_required: bool = False
-    input_per_million: float | None = None
-    output_per_million: float | None = None
-    cached_per_million: float | None = None
-    cache_write_per_million: float | None = None
-    context_window: int | None = None
+    context_price_tiers: list[StoredContextPriceTier] = Field(default_factory=list, max_length=32)
 
+    pending_context_price_tiers: list[StoredContextPriceTier] | None = None
 
-class PriceCatalogOptionsResponse(StrictModel):
-    model_entry: PriceCatalogModel
-    options: list[PriceCatalogOption] = Field(default_factory=list)
-    complete: bool = True
-    # Meters that mention this model but that the vocabulary could not read. Reported rather
-    # than dropped: a parser meeting an unfamiliar naming convention should look like a gap,
-    # not like a model with no published price.
-    unreadable: list[str] = Field(default_factory=list)
-    # Other meters that mention this model but price something else: a batch rate, a
-    # fine-tuning rate, a per-hour reservation. Named so the answer is "that one prices
-    # something else" rather than silence.
-    other_meters: list[str] = Field(default_factory=list)
-    note: str | None = None
+    effective_discount_percent: float | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def restore_context_references(cls, values: Any) -> Any:
+        if isinstance(values, dict) and values.get("context_price_tiers"):
+            values = dict(values)
+            tiers = [StoredContextPriceTier.model_validate(tier)
+                     for tier in values["context_price_tiers"]]
+            values["context_price_references"] = [tier.reference for tier in tiers]
+            values["context_price_rule"] = custom_context_rule(tiers)
+        return values
 
 
 class PriceSyncRequest(StrictModel):
@@ -603,7 +748,7 @@ class PricePreviewRequest(StrictModel):
     upstream_model_id: str | None = Field(default=None, max_length=500)
     display_name: str | None = Field(default=None, max_length=255)
     model_key: str | None = Field(default=None, max_length=255)
-    operation: Literal["chat", "image_generation"] = "chat"
+    operation: Literal["chat", "image_generation", "decision"] = "chat"
     price_reference: str | None = Field(default=None, max_length=1500)
     price_discount_percent: float | None = Field(default=None, gt=0, le=100)
     refresh: bool = False
@@ -649,6 +794,9 @@ class PriceSyncDetail(StrictModel):
 
 
 class RegistryResponse(StrictModel):
+    gateway_name_edit_supported: bool = True
+    runtime_diagnostics_supported: bool = False
+    failed_publication_archive_supported: bool = False
     providers: list[Provider]
     gateways: list[GatewayProfile]
     runtimes: list[Runtime]
@@ -656,9 +804,20 @@ class RegistryResponse(StrictModel):
     backend_pool_session_affinity_supported: bool = False
     databricks_connections_supported: bool = False
     databricks_oauth_supported: bool = False
+    decision_supported: bool = Field(default=False, exclude_if=lambda value: not value)
     image_generation_supported: bool = False
     image_configuration_defaults: ImageGenerationLimits | None = None
     image_configuration_schema_version: Literal[4] = 4
+    apim_target_topology_available: bool = False
+    apim_target_topology: ApimTargetTopologyList | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    explicit_gateway_selection_supported: bool = False
+    self_hosted_gateway_enabled: bool = False
+    multi_apim_target_rollout_enabled: bool = False
+
+    context_pricing_supported: bool = False
+    context_price_rules_supported: bool = False
 
 
 class PriceSyncResponse(StrictModel):
@@ -690,11 +849,80 @@ class PriceSyncResponse(StrictModel):
     registry: RegistryResponse
 
 
+class RuntimeCheckSelection(StrictModel):
+    model_id: UUID
+    gateway_deployment_id: UUID
+
+
+class RuntimeCheckOption(RuntimeCheckSelection):
+    model_key: str
+    model_name: str
+    gateway_profile_id: UUID
+    gateway_name: str
+    native_gateway_id: str
+
+
+class RuntimeDiagnosticAccess(StrictModel):
+    status: Literal["ready", "missing_permissions", "unverified"] = "unverified"
+    reason: Literal[
+        "permission_missing", "permission_unverified", "identity_unavailable", "tenant_mismatch",
+        "probe_subscription_unconfigured",
+    ] | None = None
+    scope: str
+    api_principal_id: UUID | None = None
+    tenant_id: UUID
+    subscription_id: UUID
+    resource_group: str
+    apim_name: str
+    probe_subscription_id: str
+    required_actions: list[str]
+    missing_actions: list[str] = Field(default_factory=list)
+    checked_at: datetime
+    template_path: Literal["infra/modules/runtime-diagnostic-rbac.bicep"] = (
+        "infra/modules/runtime-diagnostic-rbac.bicep"
+    )
+
+
+class RuntimeCheckPlan(StrictModel):
+    runtime_id: UUID
+    options: list[RuntimeCheckOption]
+    unavailable_reason: str | None = None
+    access: RuntimeDiagnosticAccess | None = None
+    max_output_tokens: Literal[64] = 64
+    request_limit: Literal[1] = 1
+
+
 class RuntimeHealth(StrictModel):
     runtime_id: UUID
     status: HealthStatus
     message: str
     checked_at: datetime
+    check_kind: Literal["legacy", "model_inference"] = "legacy"
+    outcome: Literal[
+        "passed", "blocked", "configuration_error", "upstream_error", "inconclusive",
+    ] | None = None
+    selection: RuntimeCheckOption | None = None
+    request_id: str | None = None
+    correlation_id: str | None = None
+    http_status: int | None = None
+    latency_ms: int | None = None
+    error_code: str | None = None
+    valid_until: datetime | None = Field(
+        default=None, description="Legacy expiry; historical diagnostic outcomes do not expire.",
+    )
+    configuration_fingerprint: str | None = Field(
+        default=None, max_length=80,
+        description=(
+            "Server-owned digest of the selected persisted call configuration, not secrets."
+        ),
+    )
+    configuration_status: Literal["current", "changed", "unverified"] = Field(
+        default="unverified",
+        description=(
+            "Configuration comparison only; not a current availability or permission claim."
+        ),
+    )
+    configuration_checked_at: datetime | None = None
 
 
 class InvocationMetadata(StrictModel):
@@ -777,10 +1005,60 @@ class ChatMessage(StrictModel):
         return self
 
 
+class NoulQuestion(StrictModel):
+    type: Literal["noul"]
+    instructions: str = Field(min_length=1)
+    criteria: dict[Literal["true", "false"], str] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+
+
+class ChoiceQuestion(StrictModel):
+    type: Literal["choice"]
+    instructions: str = Field(min_length=1)
+    criteria: dict[str, Annotated[str, Field(min_length=1)]] = Field(min_length=2)
+
+
+class ScoreQuestion(StrictModel):
+    type: Literal["score"]
+    instructions: str = Field(min_length=1)
+    criteria: list[Annotated[str, Field(min_length=1)]] = Field(min_length=2)
+
+
+DecisionQuestion = Annotated[
+    NoulQuestion | ChoiceQuestion | ScoreQuestion, Field(discriminator="type"),
+]
+
+
+class DecisionInput(StrictModel):
+    state: JsonValue
+    questions: dict[str, DecisionQuestion] = Field(min_length=1)
+
+
+class DecisionRequest(DecisionInput):
+    model: str = Field(min_length=1, max_length=500)
+
+
+class DecisionInvocationRequest(DecisionInput):
+    metadata: InvocationMetadata
+    model_id: UUID
+    runtime_id: UUID | None = None
+    gateway_profile_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_gateway_selection(self) -> DecisionInvocationRequest:
+        if (self.gateway_profile_id is None) != (self.gateway_deployment_id is None):
+            raise ValueError("APIM instance and Gateway must be selected together")
+        return self
+
+
 class ModelInvocationRequest(StrictModel):
     metadata: InvocationMetadata
     runtime_id: UUID | None = None
     model_id: UUID | None = None
+    gateway_profile_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
     messages: list[ChatMessage] = Field(min_length=1, max_length=100)
     tools: list[ToolDefinition] | None = Field(default=None, max_length=32)
     temperature: float | None = Field(default=None, ge=0, le=2)
@@ -788,6 +1066,16 @@ class ModelInvocationRequest(StrictModel):
     response_format: Literal["json_object"] | None = None
     stream: bool = False
     api_format: InvocationApiFormat | None = None
+
+    @model_validator(mode="after")
+    def validate_gateway_selection(self) -> ModelInvocationRequest:
+        if (self.gateway_profile_id is None) != (self.gateway_deployment_id is None):
+            raise ValueError("APIM instance and Gateway must be selected together")
+        if self.gateway_profile_id is not None and self.model_id is None:
+            raise ValueError(
+                "Gateway selection requires a specific model without automatic routing"
+            )
+        return self
 
 
 class InvocationUsage(StrictModel):
@@ -806,16 +1094,22 @@ class InvocationUsage(StrictModel):
 
 class ModelInvocationResponse(StrictModel):
     request_id: str
-    correlation_id: str
+    correlation_id: str | None = None
+    upstream_request_id: str | None = None
     content: str
     tool_calls: list[ToolCall] | None = None
     provider: str
     runtime: str
     model: str
     gateway: str
+    gateway_profile_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+    native_gateway_id: str | None = None
     latency_ms: int = Field(ge=0)
     usage: InvocationUsage | None
     estimated_cost: float | None = Field(default=None, ge=0)
+    selected_model_id: UUID | None = None
+    selected_model_name: str | None = None
     _responses_output: list[dict[str, Any]] | None = PrivateAttr(default=None)
     _anthropic_content: list[dict[str, Any]] | None = PrivateAttr(default=None)
 
@@ -828,6 +1122,72 @@ class ModelInvocationResponse(StrictModel):
         message._responses_output = self._responses_output
         message._anthropic_content = self._anthropic_content
         return message
+
+
+class DecisionInvocationResponse(StrictModel):
+    request_id: str
+    correlation_id: str | None = None
+    upstream_request_id: str | None = None
+    answers: dict[str, JsonValue]
+    provider: str
+    runtime: str
+    model: str
+    gateway: str
+    gateway_profile_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+    native_gateway_id: str | None = None
+    latency_ms: int = Field(ge=0)
+    usage: InvocationUsage | None
+    estimated_cost: float | None = Field(default=None, ge=0)
+
+
+class PlatformInvocationAttempt(StrictModel):
+    schema_version: Literal[1] = 1
+    request_id: str = Field(min_length=1, max_length=512)
+    started_at: datetime
+    metadata: InvocationMetadata
+    model_id: UUID
+    model_key: str
+    model_name: str
+    runtime_id: UUID
+    runtime_name: str
+    provider_name: str
+    apim_target_id: UUID | None = None
+    gateway_deployment_id: UUID | None = None
+    native_gateway_id: str | None = None
+    apim_service_id: str | None = None
+    application_id: UUID | None = None
+
+
+class PlatformInvocationCompletion(StrictModel):
+    request_id: str = Field(min_length=1, max_length=512)
+    completed_at: datetime
+    outcome: Literal["succeeded", "failed"]
+    status_code: int = Field(ge=100, le=599)
+    latency_ms: int = Field(ge=0)
+    gateway_correlation_id: str | None = Field(default=None, min_length=1, max_length=512)
+    upstream_request_id: str | None = Field(default=None, min_length=1, max_length=512)
+    failure_kind: (
+        Literal[
+            "gateway_error",
+            "http_error",
+            "timeout",
+            "transport_error",
+            "invalid_response",
+            "internal_error",
+        ]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def consistent_outcome(self) -> PlatformInvocationCompletion:
+        if self.outcome == "failed" and self.failure_kind is None:
+            raise ValueError("A failed invocation requires a failure kind")
+        if self.outcome == "succeeded" and (
+            self.failure_kind is not None or not 200 <= self.status_code < 300
+        ):
+            raise ValueError("A successful invocation requires a successful response")
+        return self
 
 
 class TrafficGenerationRequest(StrictModel):

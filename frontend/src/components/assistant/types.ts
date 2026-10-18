@@ -1,3 +1,5 @@
+
+
 export type ChartKind = "bar" | "line" | "table" | "kpi"
 export type ChartSeries = { key: string; label: string }
 export type ChartQuery = { tool: string; arguments: Record<string, unknown> }
@@ -37,10 +39,15 @@ export type AssistantSettingsWrite = {
   api_format?: AssistantApiFormat | null
 }
 
+
+
+
+
 export type AssistantReply = {
   conversation_id: string
   message: string
   charts: ChartSpec[]
+
   steps: AssistantStep[]
   latency_ms: number
   model: string

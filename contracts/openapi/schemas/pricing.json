@@ -1,667 +1,5 @@
 {
   "schemas": {
-    "AuthType": {
-      "type": "string",
-      "enum": [
-        "none",
-        "api_key",
-        "bearer",
-        "azure_ad"
-      ],
-      "title": "AuthType"
-    },
-    "BrandKey": {
-      "type": "string",
-      "enum": [
-        "generic",
-        "amazon_bedrock",
-        "anthropic",
-        "azure_databricks",
-        "github",
-        "microsoft",
-        "microsoft_foundry",
-        "openai"
-      ],
-      "title": "BrandKey"
-    },
-    "GatewayKind": {
-      "type": "string",
-      "enum": [
-        "apim",
-        "litellm",
-        "direct"
-      ],
-      "title": "GatewayKind"
-    },
-    "GatewayProfile": {
-      "properties": {
-        "name": {
-          "type": "string",
-          "maxLength": 120,
-          "minLength": 1,
-          "title": "Name"
-        },
-        "implementation": {
-          "$ref": "#/schemas/GatewayKind"
-        },
-        "base_url": {
-          "anyOf": [
-            {
-              "type": "string",
-              "maxLength": 2000
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Base Url"
-        },
-        "auth_type": {
-          "$ref": "#/schemas/AuthType",
-          "default": "none"
-        },
-        "credential": {
-          "type": "null",
-          "title": "Credential"
-        },
-        "enabled": {
-          "type": "boolean",
-          "title": "Enabled",
-          "default": true
-        },
-        "is_default": {
-          "type": "boolean",
-          "title": "Is Default",
-          "default": false
-        },
-        "config": {
-          "additionalProperties": true,
-          "type": "object",
-          "title": "Config"
-        },
-        "id": {
-          "type": "string",
-          "format": "uuid",
-          "title": "Id"
-        },
-        "created_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Created At"
-        },
-        "updated_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Updated At"
-        },
-        "credential_configured": {
-          "type": "boolean",
-          "title": "Credential Configured"
-        },
-        "credential_hint": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Credential Hint"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "implementation",
-        "id",
-        "created_at",
-        "updated_at",
-        "credential_configured",
-        "credential_hint"
-      ],
-      "title": "GatewayProfile"
-    },
-    "HealthStatus": {
-      "type": "string",
-      "enum": [
-        "unknown",
-        "available",
-        "unavailable"
-      ],
-      "title": "HealthStatus"
-    },
-    "ImageGenerationLimits": {
-      "properties": {
-        "max_request_bytes": {
-          "type": "integer",
-          "maximum": 16777216.0,
-          "minimum": 1.0,
-          "title": "Max Request Bytes"
-        },
-        "max_response_bytes": {
-          "type": "integer",
-          "maximum": 16777216.0,
-          "minimum": 1.0,
-          "title": "Max Response Bytes"
-        },
-        "output_reservation_tokens": {
-          "type": "integer",
-          "maximum": 2147483647.0,
-          "minimum": 1.0,
-          "title": "Output Reservation Tokens"
-        },
-        "timeout_seconds": {
-          "type": "integer",
-          "maximum": 240.0,
-          "minimum": 1.0,
-          "title": "Timeout Seconds"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "max_request_bytes",
-        "max_response_bytes",
-        "output_reservation_tokens",
-        "timeout_seconds"
-      ],
-      "title": "ImageGenerationLimits"
-    },
-    "ImageGenerationProfile": {
-      "properties": {
-        "max_request_bytes": {
-          "type": "integer",
-          "maximum": 16777216.0,
-          "minimum": 1.0,
-          "title": "Max Request Bytes"
-        },
-        "max_response_bytes": {
-          "type": "integer",
-          "maximum": 16777216.0,
-          "minimum": 1.0,
-          "title": "Max Response Bytes"
-        },
-        "output_reservation_tokens": {
-          "type": "integer",
-          "maximum": 2147483647.0,
-          "minimum": 1.0,
-          "title": "Output Reservation Tokens"
-        },
-        "timeout_seconds": {
-          "type": "integer",
-          "maximum": 240.0,
-          "minimum": 1.0,
-          "title": "Timeout Seconds"
-        },
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "title": "Id"
-        },
-        "version": {
-          "type": "integer",
-          "const": 4,
-          "title": "Version"
-        },
-        "display_name": {
-          "type": "string",
-          "minLength": 1,
-          "title": "Display Name"
-        },
-        "provider_kind": {
-          "type": "string",
-          "const": "microsoft_foundry",
-          "title": "Provider Kind"
-        },
-        "provider_model": {
-          "type": "string",
-          "minLength": 1,
-          "title": "Provider Model"
-        },
-        "protocol": {
-          "type": "string",
-          "const": "openai_images",
-          "title": "Protocol"
-        },
-        "api_version": {
-          "type": "string",
-          "minLength": 1,
-          "title": "Api Version"
-        },
-        "backend_path": {
-          "type": "string",
-          "pattern": "^/",
-          "title": "Backend Path"
-        },
-        "public_path": {
-          "type": "string",
-          "pattern": "^/",
-          "title": "Public Path"
-        },
-        "usage_format": {
-          "type": "string",
-          "const": "text-input-image-output-v1",
-          "title": "Usage Format"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "max_request_bytes",
-        "max_response_bytes",
-        "output_reservation_tokens",
-        "timeout_seconds",
-        "id",
-        "version",
-        "display_name",
-        "provider_kind",
-        "provider_model",
-        "protocol",
-        "api_version",
-        "backend_path",
-        "public_path",
-        "usage_format"
-      ],
-      "title": "ImageGenerationProfile"
-    },
-    "ManagedModel": {
-      "properties": {
-        "provider_id": {
-          "type": "string",
-          "format": "uuid",
-          "title": "Provider Id"
-        },
-        "runtime_id": {
-          "type": "string",
-          "format": "uuid",
-          "title": "Runtime Id"
-        },
-        "model_key": {
-          "type": "string",
-          "maxLength": 255,
-          "minLength": 1,
-          "title": "Model Key"
-        },
-        "display_name": {
-          "type": "string",
-          "maxLength": 255,
-          "minLength": 1,
-          "title": "Display Name"
-        },
-        "family_key": {
-          "$ref": "#/schemas/ModelFamilyKey",
-          "default": "generic"
-        },
-        "upstream_model_id": {
-          "anyOf": [
-            {
-              "type": "string",
-              "maxLength": 500,
-              "minLength": 1
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Upstream Model Id"
-        },
-        "assignment_required": {
-          "type": "boolean",
-          "title": "Assignment Required",
-          "default": false
-        },
-        "enabled": {
-          "type": "boolean",
-          "title": "Enabled",
-          "default": true
-        },
-        "is_default": {
-          "type": "boolean",
-          "title": "Is Default",
-          "default": false
-        },
-        "capabilities": {
-          "items": {
-            "type": "string",
-            "enum": [
-              "chat",
-              "tools",
-              "vision",
-              "reasoning",
-              "streaming",
-              "embeddings",
-              "image_generation"
-            ]
-          },
-          "type": "array",
-          "title": "Capabilities"
-        },
-        "context_window": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 1.0
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Context Window"
-        },
-        "input_cost_per_million": {
-          "anyOf": [
-            {
-              "type": "number",
-              "minimum": 0.0
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Input Cost Per Million"
-        },
-        "output_cost_per_million": {
-          "anyOf": [
-            {
-              "type": "number",
-              "minimum": 0.0
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Output Cost Per Million"
-        },
-        "cached_cost_per_million": {
-          "anyOf": [
-            {
-              "type": "number",
-              "minimum": 0.0
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Cached Cost Per Million"
-        },
-        "cache_write_cost_per_million": {
-          "anyOf": [
-            {
-              "type": "number",
-              "minimum": 0.0
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Cache Write Cost Per Million"
-        },
-        "allowed_roles": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "title": "Allowed Roles"
-        },
-        "price_source": {
-          "$ref": "#/schemas/PriceSource",
-          "default": "models_dev"
-        },
-        "price_reference": {
-          "anyOf": [
-            {
-              "type": "string",
-              "maxLength": 1500,
-              "minLength": 1
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Price Reference"
-        },
-        "price_discount_percent": {
-          "anyOf": [
-            {
-              "type": "number",
-              "maximum": 100.0,
-              "exclusiveMinimum": 0.0
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Price Discount Percent"
-        },
-        "price_entry_digest": {
-          "anyOf": [
-            {
-              "type": "string",
-              "maxLength": 64
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Price Entry Digest"
-        },
-        "allow_unpriced": {
-          "type": "boolean",
-          "title": "Allow Unpriced",
-          "default": false
-        },
-        "id": {
-          "type": "string",
-          "format": "uuid",
-          "title": "Id"
-        },
-        "provider_name": {
-          "type": "string",
-          "title": "Provider Name"
-        },
-        "runtime_name": {
-          "type": "string",
-          "title": "Runtime Name"
-        },
-        "publication_id": {
-          "anyOf": [
-            {
-              "type": "string",
-              "format": "uuid"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Publication Id"
-        },
-        "image_profile": {
-          "anyOf": [
-            {
-              "$ref": "#/schemas/ImageGenerationProfile"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "list_input_cost_per_million": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "List Input Cost Per Million"
-        },
-        "list_output_cost_per_million": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "List Output Cost Per Million"
-        },
-        "list_cached_cost_per_million": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "List Cached Cost Per Million"
-        },
-        "list_cache_write_cost_per_million": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "List Cache Write Cost Per Million"
-        },
-        "price_synced_at": {
-          "anyOf": [
-            {
-              "type": "string",
-              "format": "date-time"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Price Synced At"
-        },
-        "price_sync_status": {
-          "anyOf": [
-            {
-              "$ref": "#/schemas/PriceSyncStatus"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "price_sync_message": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Price Sync Message"
-        },
-        "pending_list_price": {
-          "anyOf": [
-            {
-              "$ref": "#/schemas/PendingListPrice"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "effective_discount_percent": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Effective Discount Percent"
-        },
-        "price_source_configured": {
-          "type": "boolean",
-          "title": "Price Source Configured",
-          "default": true
-        },
-        "price_config_updated_at": {
-          "anyOf": [
-            {
-              "type": "string",
-              "format": "date-time"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Price Config Updated At"
-        },
-        "match_metadata": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Match Metadata"
-        },
-        "source_snapshot": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Source Snapshot"
-        },
-        "created_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Created At"
-        },
-        "updated_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Updated At"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "provider_id",
-        "runtime_id",
-        "model_key",
-        "display_name",
-        "id",
-        "provider_name",
-        "runtime_name",
-        "created_at",
-        "updated_at"
-      ],
-      "title": "ManagedModel"
-    },
-    "ModelFamilyKey": {
-      "type": "string",
-      "enum": [
-        "generic",
-        "claude",
-        "copilot",
-        "openai"
-      ],
-      "title": "ModelFamilyKey"
-    },
     "PendingListPrice": {
       "properties": {
         "input": {
@@ -714,6 +52,97 @@
       "title": "PendingListPrice",
       "description": "A published price waiting for a person, in the same four buckets as the accepted one."
     },
+    "PriceCatalogContextTier": {
+      "properties": {
+        "group_key": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Group Key"
+        },
+        "model_label": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Model Label"
+        },
+        "service_tier": {
+          "type": "string",
+          "title": "Service Tier",
+          "default": ""
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Key"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Label"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Order"
+        },
+        "input_range": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/PriceCatalogInputRange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_range_source": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/PriceCatalogRuleSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "group_key",
+        "model_label",
+        "key",
+        "label",
+        "order"
+      ],
+      "title": "PriceCatalogContextTier"
+    },
+    "PriceCatalogInputRange": {
+      "properties": {
+        "min_input_tokens": {
+          "type": "integer",
+          "minimum": 0.0,
+          "title": "Min Input Tokens"
+        },
+        "max_input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0.0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Max Input Tokens"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "min_input_tokens"
+      ],
+      "title": "PriceCatalogInputRange"
+    },
     "PriceCatalogModel": {
       "properties": {
         "key": {
@@ -730,6 +159,21 @@
         },
         "source": {
           "$ref": "#/schemas/PriceSource"
+        },
+        "context_tier": {
+          "anyOf": [
+            {
+              "$ref": "#/schemas/PriceCatalogContextTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text_to_image": {
+          "type": "boolean",
+          "title": "Text To Image",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -911,6 +355,85 @@
       ],
       "title": "PriceCatalogOptionsResponse"
     },
+    "PriceCatalogRuleSource": {
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Rule Id"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^https://"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Url"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Revision"
+        },
+        "verified_on": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Verified On"
+        },
+        "origin": {
+          "type": "string",
+          "enum": [
+            "official",
+            "reference",
+            "custom"
+          ],
+          "title": "Origin",
+          "default": "official"
+        },
+        "configured_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Configured At"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "rule_id",
+        "revision"
+      ],
+      "title": "PriceCatalogRuleSource"
+    },
     "PriceMatch": {
       "properties": {
         "reference": {
@@ -1076,7 +599,8 @@
           "type": "string",
           "enum": [
             "chat",
-            "image_generation"
+            "image_generation",
+            "decision"
           ],
           "title": "Operation",
           "default": "chat"
@@ -1451,7 +975,7 @@
           "title": "Details"
         },
         "registry": {
-          "$ref": "#/schemas/RegistryResponse"
+          "$ref": "../../openapi.yaml#/components/schemas/RegistryResponse"
         }
       },
       "additionalProperties": false,
@@ -1481,332 +1005,6 @@
         "deferred"
       ],
       "title": "PriceSyncStatus"
-    },
-    "Provider": {
-      "properties": {
-        "name": {
-          "type": "string",
-          "maxLength": 120,
-          "minLength": 1,
-          "title": "Name"
-        },
-        "provider_kind": {
-          "$ref": "#/schemas/ProviderKind"
-        },
-        "endpoint_url": {
-          "anyOf": [
-            {
-              "type": "string",
-              "maxLength": 2000
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Endpoint Url"
-        },
-        "auth_type": {
-          "$ref": "#/schemas/AuthType",
-          "default": "none"
-        },
-        "credential": {
-          "type": "null",
-          "title": "Credential"
-        },
-        "enabled": {
-          "type": "boolean",
-          "title": "Enabled",
-          "default": true
-        },
-        "brand_key": {
-          "$ref": "#/schemas/BrandKey",
-          "default": "generic"
-        },
-        "config": {
-          "additionalProperties": true,
-          "type": "object",
-          "title": "Config"
-        },
-        "id": {
-          "type": "string",
-          "format": "uuid",
-          "title": "Id"
-        },
-        "created_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Created At"
-        },
-        "updated_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Updated At"
-        },
-        "credential_configured": {
-          "type": "boolean",
-          "title": "Credential Configured"
-        },
-        "credential_hint": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Credential Hint"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "name",
-        "provider_kind",
-        "id",
-        "created_at",
-        "updated_at",
-        "credential_configured",
-        "credential_hint"
-      ],
-      "title": "Provider"
-    },
-    "ProviderKind": {
-      "type": "string",
-      "enum": [
-        "github",
-        "anthropic",
-        "microsoft_foundry",
-        "openai_compatible"
-      ],
-      "title": "ProviderKind"
-    },
-    "RegistryResponse": {
-      "properties": {
-        "providers": {
-          "items": {
-            "$ref": "#/schemas/Provider"
-          },
-          "type": "array",
-          "title": "Providers"
-        },
-        "gateways": {
-          "items": {
-            "$ref": "#/schemas/GatewayProfile"
-          },
-          "type": "array",
-          "title": "Gateways"
-        },
-        "runtimes": {
-          "items": {
-            "$ref": "#/schemas/Runtime"
-          },
-          "type": "array",
-          "title": "Runtimes"
-        },
-        "models": {
-          "items": {
-            "$ref": "#/schemas/ManagedModel"
-          },
-          "type": "array",
-          "title": "Models"
-        },
-        "backend_pool_session_affinity_supported": {
-          "type": "boolean",
-          "title": "Backend Pool Session Affinity Supported",
-          "default": false
-        },
-        "databricks_connections_supported": {
-          "type": "boolean",
-          "title": "Databricks Connections Supported",
-          "default": false
-        },
-        "databricks_oauth_supported": {
-          "type": "boolean",
-          "title": "Databricks Oauth Supported",
-          "default": false
-        },
-        "image_generation_supported": {
-          "type": "boolean",
-          "title": "Image Generation Supported",
-          "default": false
-        },
-        "image_configuration_defaults": {
-          "anyOf": [
-            {
-              "$ref": "#/schemas/ImageGenerationLimits"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "image_configuration_schema_version": {
-          "type": "integer",
-          "const": 4,
-          "title": "Image Configuration Schema Version",
-          "default": 4
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "providers",
-        "gateways",
-        "runtimes",
-        "models"
-      ],
-      "title": "RegistryResponse"
-    },
-    "Runtime": {
-      "properties": {
-        "provider_id": {
-          "type": "string",
-          "format": "uuid",
-          "title": "Provider Id"
-        },
-        "gateway_profile_id": {
-          "anyOf": [
-            {
-              "type": "string",
-              "format": "uuid"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Gateway Profile Id"
-        },
-        "name": {
-          "type": "string",
-          "maxLength": 160,
-          "minLength": 1,
-          "title": "Name"
-        },
-        "runtime_kind": {
-          "$ref": "#/schemas/RuntimeKind"
-        },
-        "enabled": {
-          "type": "boolean",
-          "title": "Enabled",
-          "default": true
-        },
-        "is_default": {
-          "type": "boolean",
-          "title": "Is Default",
-          "default": false
-        },
-        "brand_key": {
-          "$ref": "#/schemas/BrandKey",
-          "default": "generic"
-        },
-        "config": {
-          "additionalProperties": true,
-          "type": "object",
-          "title": "Config"
-        },
-        "allowed_roles": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "title": "Allowed Roles"
-        },
-        "price_discount_percent": {
-          "anyOf": [
-            {
-              "type": "number",
-              "maximum": 100.0,
-              "exclusiveMinimum": 0.0
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Price Discount Percent"
-        },
-        "id": {
-          "type": "string",
-          "format": "uuid",
-          "title": "Id"
-        },
-        "provider_name": {
-          "type": "string",
-          "title": "Provider Name"
-        },
-        "gateway_name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Gateway Name"
-        },
-        "health_status": {
-          "$ref": "#/schemas/HealthStatus"
-        },
-        "health_message": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Health Message"
-        },
-        "last_checked_at": {
-          "anyOf": [
-            {
-              "type": "string",
-              "format": "date-time"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Last Checked At"
-        },
-        "created_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Created At"
-        },
-        "updated_at": {
-          "type": "string",
-          "format": "date-time",
-          "title": "Updated At"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "provider_id",
-        "name",
-        "runtime_kind",
-        "id",
-        "provider_name",
-        "gateway_name",
-        "health_status",
-        "health_message",
-        "last_checked_at",
-        "created_at",
-        "updated_at"
-      ],
-      "title": "Runtime"
-    },
-    "RuntimeKind": {
-      "type": "string",
-      "enum": [
-        "copilot_cli",
-        "foundry",
-        "openai_compatible"
-      ],
-      "title": "RuntimeKind"
     }
   }
 }

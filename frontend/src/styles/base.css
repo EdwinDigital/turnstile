@@ -356,14 +356,14 @@ table { font-size: 12px; line-height: 16px; } th { font-size: 12px; line-height:
 .registry-tabs { height: 40px; gap: 20px; }.registry-tabs button { height: 40px; gap: 6px; padding: 0 6px; font-size: 14px; line-height: 20px; }.registry-tabs button span { width: 18px; height: 18px; font-size: 10px; }
 .registry-row { min-height: 120px; grid-template-columns: 40px minmax(0,1fr) auto; gap: 12px; padding: 16px; }.registry-icon { width: 36px; height: 36px; }.registry-title h3 { font-size: 14px; line-height: 20px; }.registry-main > p, .health-message { font-size: 12px; line-height: 16px; }.registry-tags { gap: 6px; }.registry-tags > span { min-height: 24px; padding: 3px 8px; font-size: 11px; line-height: 16px; }.default-pill, .registry-health, .credential-state { font-size: 11px; line-height: 16px; }.registry-actions { gap: 8px; }.registry-actions > button:not(.toggle) { min-width: 32px; height: 32px; border-radius: 8px; font-size: 12px; }.toggle { width: 32px; height: 18px; }.toggle i { width: 12px; height: 12px; }.toggle.on i { transform: translateX(14px); }
 .dimension-picker span { font-size: 12px; }.dimension-picker select { min-height: 32px; width: 144px; font-size: 12px; }
-.dimension-picker span { font-size: 12px; }.dimension-picker .dimension-select-trigger { min-height: 32px; width: 144px; font-size: 12px; }
-.settings-section .settings-select-trigger { width: 330px; max-width: 100%; background: var(--card); }
+.dimension-picker span { font-size: 12px; }.dimension-picker .dimension-select-trigger { width: 144px; }
+.settings-section .settings-select-trigger { width: 330px; max-width: 100%; }
 .settings-page { grid-template-columns: 208px minmax(0,1fr); }
 .settings-sidebar { padding: 16px; }.settings-sidebar h1 { margin-bottom: 16px; padding: 0 8px; font-size: 14px; line-height: 20px; }.settings-sidebar > span { min-height: 28px; display: flex; align-items: center; margin: 4px 0 0; padding: 0 8px; font-size: 12px; line-height: 16px; }.settings-sidebar button { min-height: 36px; gap: 8px; padding: 0 8px; font-size: 14px; line-height: 20px; }.settings-sidebar button svg { width: 16px; height: 16px; }
 .settings-content { width: min(760px,100%); padding: 24px; }.settings-section { gap: 16px; padding-bottom: 32px; }.settings-section + .settings-section { padding-top: 32px; }.settings-section h2 { font-size: 14px; line-height: 20px; }.settings-section p, .settings-section > small { font-size: 12px; line-height: 16px; }
 .theme-options { display: flex; gap: 24px; }.theme-options > button { width: 144px; flex: 0 0 144px; gap: 8px; }.theme-preview { width: 144px; height: 108px; border-radius: 10px; }.theme-options > button > span:last-child { font-size: 14px; line-height: 20px; }
-.language-control { gap: 12px; }.language-control button { min-height: 38px; padding: 8px 16px; font-size: 14px; line-height: 20px; }.settings-select-trigger { min-height: 38px; font-size: 14px; }
-.language-control button:disabled { cursor: not-allowed; opacity: .5; }
+.language-control { gap: 12px; }.language-control button:not([data-slot="select-trigger"]) { min-height: 38px; padding: 8px 16px; font-size: 14px; line-height: 20px; }
+.language-control button:not([data-slot="select-trigger"]):disabled { cursor: not-allowed; opacity: .5; }
 /* The model option carries a second line, so the item is a two-row block rather than the
    single-line label every other Select in this app uses. */
 .settings-model-option { display: grid; gap: 2px; }
@@ -372,7 +372,7 @@ table { font-size: 12px; line-height: 16px; } th { font-size: 12px; line-height:
 .settings-switch { display: inline-flex; align-items: center; gap: 10px; color: var(--foreground); font-size: 14px; line-height: 20px; cursor: pointer; }
 /* The picker waits for its own options; the pane around it does not wait for the picker. */
 .settings-inline-loading { display: inline-flex; align-items: center; gap: 7px; color: var(--muted-foreground); }
-.settings-section [data-slot="select-trigger"]:disabled, .settings-switch:has(:disabled) { opacity: .6; cursor: default; }
+.settings-switch:has(:disabled) { opacity: .6; cursor: default; }
 /* `.settings-section p` is (0,1,1) and would otherwise win over a lone class, painting
    this line the same muted grey as the description above it. Amber rather than red: the
    assistant is still answering, it is just not answering with the model that was picked. */

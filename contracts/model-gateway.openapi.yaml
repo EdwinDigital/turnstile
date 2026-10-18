@@ -2,49 +2,68 @@ openapi: 3.1.0
 info:
   title: SmartHive Internal Model Invocation API
   version: 1.0.0
-  description: |
-    Internal Dashboard invocation schema used during the APIM migration. It is
+  description: 'Internal Dashboard invocation schema used during the APIM migration. It is
+
     not the API product delivered to business consumers. APIM Product
+
     subscriptions are the production access and token-counter boundary.
+
+    '
 servers:
-  - url: http://localhost:8000
+- url: http://localhost:8000
 security:
-  - bearerAuth: []
+- sessionCookie: []
 paths:
   /api/v1/model-gateway/images/generations:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-gateway~1images~1generations
-  /api/v1/model-gateway/invoke:
     post:
-      operationId: invokeModel
-      summary: Invoke the selected or default model runtime
+      summary: Generate Image
+      operationId: generate_image_api_v1_model_gateway_images_generations_post
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ModelInvocationRequest'
+              $ref: ./openapi.yaml#/components/schemas/ImageInvocationRequest
+        required: true
       responses:
         '200':
-          description: Normalized model response
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ModelInvocationResponse'
-        '403':
-          description: The APIM product subscription exceeded its monthly token quota
-          headers:
-            X-Request-ID:
-              description: APIM policy-denial trace identifier
-              required: true
+                $ref: ./openapi.yaml#/components/schemas/ImageInvocationResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
               schema:
-                type: string
-                format: uuid
-        '429':
-          description: The APIM product subscription exceeded its token-per-minute limit
-        '404':
-          description: No enabled route matched the request
-        '502':
-          description: The configured gateway could not be reached or returned an unsupported response
+                $ref: ./openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
+  /api/v1/model-gateway/invoke:
+    post:
+      summary: Invoke Model
+      operationId: invoke_model_api_v1_model_gateway_invoke_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ./openapi.yaml#/components/schemas/ModelInvocationRequest
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ./openapi.yaml#/components/schemas/ModelInvocationResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ./openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
   /api/v1/model-management:
     get:
       operationId: getModelRegistry
@@ -52,6 +71,31 @@ paths:
       responses:
         '200':
           description: Redacted model registry; credential plaintext is never returned
+  /api/v1/model-gateway/decision:
+    post:
+      summary: Invoke Decision
+      operationId: invoke_decision_api_v1_model_gateway_decision_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ./openapi.yaml#/components/schemas/DecisionInvocationRequest
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: ./openapi.yaml#/components/schemas/DecisionInvocationResponse
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ./openapi.yaml#/components/schemas/HTTPValidationError
+      security:
+      - sessionCookie: []
 components:
   securitySchemes:
     sessionCookie:
@@ -61,80 +105,410 @@ components:
       scheme: bearer
   schemas:
     InvocationMetadata:
-      type: object
-      additionalProperties: false
-      required: [organization, department, project, agent, user, workflow, model, runtime, run_id, turn_index]
       properties:
-        organization: { type: string, minLength: 1, maxLength: 255 }
-        department: { type: string, minLength: 1, maxLength: 255 }
-        project: { type: string, minLength: 1, maxLength: 255 }
-        agent: { type: string, minLength: 1, maxLength: 255 }
-        user: { type: string, minLength: 1, maxLength: 255 }
-        workflow: { type: string, minLength: 1, maxLength: 255 }
+        organization_id:
+          type: string
+          maxLength: 255
+          minLength: 1
+        organization:
+          type: string
+          maxLength: 255
+          minLength: 1
+        department_id:
+          type: string
+          maxLength: 255
+          minLength: 1
+        department:
+          type: string
+          maxLength: 255
+          minLength: 1
+        project_id:
+          type: string
+          maxLength: 255
+          minLength: 1
+        project:
+          type: string
+          maxLength: 255
+          minLength: 1
+        agent_id:
+          type: string
+          maxLength: 255
+          minLength: 1
+        agent:
+          type: string
+          maxLength: 255
+          minLength: 1
+        user_id:
+          type: string
+          maxLength: 255
+          minLength: 1
+        user:
+          type: string
+          maxLength: 255
+          minLength: 1
+        workflow:
+          type: string
+          maxLength: 255
+          minLength: 1
+        model_id:
+          type: string
+          maxLength: 255
+          minLength: 1
         model:
           type: string
+          maxLength: 255
+          minLength: 1
           description: Model UUID, model key, display name, or `default`.
         runtime:
           type: string
+          maxLength: 255
+          minLength: 1
           description: Runtime UUID, runtime name, or `default`.
-        run_id: { type: string, minLength: 1, maxLength: 255 }
-        turn_index: { type: integer, minimum: 1 }
+        request_source:
+          type: string
+          maxLength: 255
+          minLength: 1
+        usage_domain:
+          type: string
+          enum:
+          - apim
+          - github_copilot
+          default: apim
+        run_id:
+          type: string
+          maxLength: 255
+          minLength: 1
+        turn_index:
+          type: integer
+          minimum: 1.0
+          default: 1
+      additionalProperties: false
+      type: object
+      required:
+      - organization_id
+      - organization
+      - department_id
+      - department
+      - project_id
+      - project
+      - agent_id
+      - agent
+      - user_id
+      - user
+      - workflow
+      - model_id
+      - model
+      - runtime
+      - request_source
+      - run_id
+    ToolFunctionDefinition:
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          minLength: 1
+        description:
+          type: string
+          minLength: 1
+          maxLength: 4000
+        parameters:
+          additionalProperties: true
+          type: object
+      additionalProperties: false
+      type: object
+      required:
+      - name
+      - description
+      - parameters
+    ToolDefinition:
+      properties:
+        type:
+          type: string
+          const: function
+          default: function
+        function:
+          $ref: '#/components/schemas/ToolFunctionDefinition'
+      additionalProperties: false
+      type: object
+      required:
+      - function
+    ToolFunctionCall:
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          minLength: 1
+        arguments:
+          type: string
+          maxLength: 100000
+          default: '{}'
+      additionalProperties: false
+      type: object
+      required:
+      - name
+    ToolCall:
+      properties:
+        id:
+          type: string
+          maxLength: 255
+          minLength: 1
+        type:
+          type: string
+          const: function
+          default: function
+        function:
+          $ref: '#/components/schemas/ToolFunctionCall'
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - function
     ChatMessage:
-      type: object
-      additionalProperties: false
-      required: [role, content]
       properties:
-        role: { type: string, enum: [system, user, assistant] }
-        content: { type: string, minLength: 1, maxLength: 200000 }
+        role:
+          type: string
+          enum:
+          - system
+          - user
+          - assistant
+          - tool
+          title: Role
+        content:
+          anyOf:
+          - type: string
+            maxLength: 200000
+          - type: 'null'
+          title: Content
+        tool_calls:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/ToolCall'
+            type: array
+            maxItems: 20
+          - type: 'null'
+          title: Tool Calls
+        tool_call_id:
+          anyOf:
+          - type: string
+            maxLength: 255
+            minLength: 1
+          - type: 'null'
+          title: Tool Call Id
+      additionalProperties: false
+      type: object
+      required:
+      - role
+      title: ChatMessage
+      description: 'One turn in an OpenAI-shaped conversation.
+
+
+        `content` is optional because an assistant turn that only calls tools carries no
+
+        text, and a `tool` turn carries the result of exactly one call. The validator below
+
+        is what keeps that from degrading into "any field may be missing".'
     ModelInvocationRequest:
-      type: object
-      additionalProperties: false
-      required: [metadata, messages]
       properties:
-        metadata: { $ref: '#/components/schemas/InvocationMetadata' }
-        runtime_id: { type: [string, 'null'], format: uuid }
-        model_id: { type: [string, 'null'], format: uuid }
+        metadata:
+          $ref: '#/components/schemas/InvocationMetadata'
+        runtime_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Runtime Id
+        model_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Model Id
+        gateway_profile_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Gateway Profile Id
+        gateway_deployment_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Gateway Deployment Id
         messages:
+          items:
+            $ref: '#/components/schemas/ChatMessage'
           type: array
-          minItems: 1
           maxItems: 100
-          items: { $ref: '#/components/schemas/ChatMessage' }
-        temperature: { type: [number, 'null'], minimum: 0, maximum: 2 }
-        max_output_tokens: { type: [integer, 'null'], minimum: 1 }
+          minItems: 1
+          title: Messages
+        tools:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/ToolDefinition'
+            type: array
+            maxItems: 32
+          - type: 'null'
+          title: Tools
+        temperature:
+          anyOf:
+          - type: number
+            maximum: 2.0
+            minimum: 0.0
+          - type: 'null'
+          title: Temperature
+        max_output_tokens:
+          anyOf:
+          - type: integer
+            maximum: 1000000.0
+            minimum: 1.0
+          - type: 'null'
+          title: Max Output Tokens
+        response_format:
+          anyOf:
+          - type: string
+            const: json_object
+          - type: 'null'
+          title: Response Format
         stream:
           type: boolean
-          const: false
-          description: Streaming will use a future dedicated SSE operation.
+          title: Stream
+          default: false
+        api_format:
+          anyOf:
+          - $ref: '#/components/schemas/InvocationApiFormat'
+          - type: 'null'
+      additionalProperties: false
+      type: object
+      required:
+      - metadata
+      - messages
+      title: ModelInvocationRequest
     InvocationUsage:
-      type: object
-      additionalProperties: false
-      required: [input_tokens, cached_tokens, output_tokens, estimated]
       properties:
-        input_tokens: { type: integer, minimum: 0 }
-        cached_tokens: { type: integer, minimum: 0 }
-        output_tokens: { type: integer, minimum: 0 }
-        estimated: { type: boolean }
+        input_tokens:
+          type: integer
+          minimum: 0.0
+        cached_tokens:
+          type: integer
+          minimum: 0.0
+        cache_write_tokens:
+          type: integer
+          minimum: 0.0
+          default: 0
+        output_tokens:
+          type: integer
+          minimum: 0.0
+        estimated:
+          type: boolean
+      additionalProperties: false
+      type: object
+      required:
+      - input_tokens
+      - cached_tokens
+      - output_tokens
+      - estimated
     ModelInvocationResponse:
-      type: object
-      additionalProperties: false
-      required: [request_id, content, provider, runtime, model, gateway, latency_ms]
       properties:
-        request_id: { type: string, format: uuid }
-        content: { type: string }
-        provider: { type: string }
-        runtime: { type: string }
-        model: { type: string }
-        gateway: { type: string, enum: [local-cli, apim, litellm, direct] }
-        latency_ms: { type: integer, minimum: 0 }
+        request_id:
+          type: string
+          title: Request Id
+        correlation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Correlation Id
+        upstream_request_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Upstream Request Id
+        content:
+          type: string
+          title: Content
+        tool_calls:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/ToolCall'
+            type: array
+          - type: 'null'
+          title: Tool Calls
+        provider:
+          type: string
+          title: Provider
+        runtime:
+          type: string
+          title: Runtime
+        model:
+          type: string
+          title: Model
+        gateway:
+          type: string
+          title: Gateway
+        gateway_profile_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Gateway Profile Id
+        gateway_deployment_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Gateway Deployment Id
+        native_gateway_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Native Gateway Id
+        latency_ms:
+          type: integer
+          minimum: 0.0
+          title: Latency Ms
         usage:
-          oneOf:
-            - $ref: '#/components/schemas/InvocationUsage'
-            - type: 'null'
-        estimated_cost: { type: [number, 'null'], minimum: 0 }
+          anyOf:
+          - $ref: '#/components/schemas/InvocationUsage'
+          - type: 'null'
+        estimated_cost:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Estimated Cost
+        selected_model_id:
+          anyOf:
+          - type: string
+            format: uuid
+          - type: 'null'
+          title: Selected Model Id
+        selected_model_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Selected Model Name
+      additionalProperties: false
+      type: object
+      required:
+      - request_id
+      - content
+      - provider
+      - runtime
+      - model
+      - gateway
+      - latency_ms
+      - usage
+      title: ModelInvocationResponse
+    InvocationApiFormat:
+      type: string
+      enum:
+      - openai_chat
+      - openai_responses
+      - anthropic_messages
+      title: InvocationApiFormat
 x-gateway-adapters:
   internal-schema: ModelInvocationRequest
   implementations:
-    - local-cli
-    - apim
-    - litellm
-    - direct
+  - apim
+  - litellm
+  - direct

@@ -14,6 +14,9 @@ import httpx
 from turnstile_core.integrations.apim_control_plane_contract import PolicyCompilationError
 from turnstile_core.integrations.apim_image_policy import IMAGE_OPERATION_ID
 from turnstile_core.integrations.apim_policy_components import (
+    CACHE_READ_WITH_FALLBACK,
+    CACHE_READ_WITHOUT_FALLBACK,
+    POOL_RUNTIME_HEADER,
     component_digest,
     compose_image_parent_policy,
     parse_policy,
@@ -119,8 +122,28 @@ def plan_image_upgrade(
     try:
         parent = snapshot.parent_policy
         root = parse_policy(parent)
+        inbound = root.find("inbound")
+        if inbound is None:
+            raise PolicyCompilationError("Image admission requires a parent inbound policy")
+        if inbound.find(f"set-header[@name='{POOL_RUNTIME_HEADER}']") is None:
+            member = inbound.find("set-header[@name='x-turnstile-pool-member']")
+            if member is None:
+                raise PolicyCompilationError(
+                    "The source parent policy does not scrub the pool member header"
+                )
+            inbound.insert(list(inbound).index(member) + 1, ElementTree.Element(
+                "set-header", {"name": POOL_RUNTIME_HEADER, "exists-action": "delete"},
+            ))
+        for node in root.iter("set-variable"):
+            if node.get("name") == "usagePayload":
+                value = node.get("value", "")
+                if CACHE_READ_WITHOUT_FALLBACK in value:
+                    node.set("value", value.replace(
+                        CACHE_READ_WITHOUT_FALLBACK, CACHE_READ_WITH_FALLBACK,
+                    ))
+        parent = serialize_policy(root)
         if not root.findall(".//set-variable[@name='imageGenerationPolicyVersion']"):
-            parent = compose_image_parent_policy(parent, ())
+            parent = compose_image_parent_policy(parent, canonical_parent, ())
             upgraded = parse_policy(parent)
             actual_rates = [
                 rate for rate in upgraded.iter("rate-limit-by-key")
@@ -137,6 +160,8 @@ def plan_image_upgrade(
                 actual.set("increment-count", count)
             parent = serialize_policy(upgraded)
         validate_parent_policy(parent, canonical_parent)
+        if policy_digest(parent) == policy_digest(snapshot.parent_policy):
+            parent = snapshot.parent_policy
     except (PolicyCompilationError, ElementTree.ParseError, KeyError, ValueError) as error:
         raise ApimUpgradeError(
             "The existing APIM parent policy is not a supported public version; "

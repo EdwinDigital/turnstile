@@ -1,6 +1,8 @@
 import { KOREAN_CORE_PHRASES } from "./ko/phrases-core"
 import { KOREAN_COPILOT_PHRASES } from "./ko/phrases-copilot"
 import { KOREAN_AUTH_PHRASES } from "./ko/phrases-auth"
+import { APPLICATION_CREATE_PHRASES } from "./ko/phrases-application-create"
+import { POOL_AFFINITY_PHRASES } from "./ko/phrases-pool-affinity"
 import { IMAGE_GENERATION_PHRASES } from "./ko/phrases-image-generation"
 import { DYNAMIC_RULES } from "./ko/dynamic-rules"
 
@@ -8,6 +10,8 @@ const KOREAN_PHRASES: Record<string, string> = {
   ...KOREAN_CORE_PHRASES,
   ...KOREAN_COPILOT_PHRASES,
   ...KOREAN_AUTH_PHRASES,
+  ...APPLICATION_CREATE_PHRASES,
+  ...POOL_AFFINITY_PHRASES,
   ...IMAGE_GENERATION_PHRASES,
 }
 

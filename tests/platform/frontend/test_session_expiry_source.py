@@ -1,4 +1,22 @@
-from tests.support.paths import FRONTEND_SOURCE
+import shutil
+import subprocess
+from pathlib import Path
+
+from tests.support.paths import FRONTEND_SOURCE, REPOSITORY_ROOT
+
+
+def test_password_login_reports_authentication_and_service_failures_separately() -> None:
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required for login error tests"
+    result = subprocess.run(
+        [node, "--test", str(Path(__file__).with_name("login-errors.test.mjs"))],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_frontend_expires_the_application_session_authoritatively() -> None:

@@ -43,11 +43,30 @@ static_resources:
                           pool_runtime: "%DYNAMIC_METADATA(turnstile.request:pool_runtime)%"
                           api_format: "%DYNAMIC_METADATA(turnstile.request:api_format)%"
                           request_source: "%DYNAMIC_METADATA(turnstile.request:request_source)%"
+                          budget_execution: "%DYNAMIC_METADATA(turnstile.request:budget_execution)%"
+                          gateway_profile_id: "%DYNAMIC_METADATA(turnstile.request:gateway_profile_id)%"
+                          native_gateway_id: "%DYNAMIC_METADATA(turnstile.request:native_gateway_id)%"
+                          usage_id: "%DYNAMIC_METADATA(turnstile.request:usage_id)%"
+                          native_gateway_instance_id: "%DYNAMIC_METADATA(turnstile.request:native_gateway_instance_id)%"
+                          gateway_is_managed: "%DYNAMIC_METADATA(turnstile.request:gateway_is_managed)%"
+                          apim_service_id: "%DYNAMIC_METADATA(turnstile.request:apim_service_id)%"
+                          apim_region: "%DYNAMIC_METADATA(turnstile.request:apim_region)%"
+                          api_revision: "%DYNAMIC_METADATA(turnstile.request:api_revision)%"
+                          apim_subscription_id: "%DYNAMIC_METADATA(turnstile.request:apim_subscription_id)%"
+                          application_actor_type: "%DYNAMIC_METADATA(turnstile.request:application_actor_type)%"
+                          application_actor_id: "%DYNAMIC_METADATA(turnstile.request:application_actor_id)%"
                           prompt_tokens: "%DYNAMIC_METADATA(turnstile.usage:prompt_tokens)%"
                           cache_read_tokens: "%DYNAMIC_METADATA(turnstile.usage:cache_read_tokens)%"
                           cache_read_tokens_fallback: "%DYNAMIC_METADATA(turnstile.usage:cache_read_tokens_fallback)%"
                           cache_write_tokens: "%DYNAMIC_METADATA(turnstile.usage:cache_write_tokens)%"
                           output_tokens: "%DYNAMIC_METADATA(turnstile.usage:output_tokens)%"
+                          total_tokens: "%DYNAMIC_METADATA(turnstile.usage:total_tokens)%"
+                          last_event_type: "%DYNAMIC_METADATA(turnstile.usage:last_event_type)%"
+                          response_type: "%DYNAMIC_METADATA(turnstile.usage:response_type)%"
+                          response_status: "%DYNAMIC_METADATA(turnstile.usage:response_status)%"
+                          stop_reason: "%DYNAMIC_METADATA(turnstile.usage:stop_reason)%"
+                          response_content_type: "%RESP(CONTENT-TYPE)%"
+                          response_flags: "%RESPONSE_FLAGS%"
                           response_code: "%RESPONSE_CODE%"
                           latency_ms: "%DURATION%"
                 route_config:
@@ -108,6 +127,18 @@ static_resources:
                       request_rules:
                         - { header: x-request-id, on_header_present: { metadata_namespace: turnstile.request, key: request_id, type: STRING }, remove: true }
                         - { header: x-turnstile-correlation-id, on_header_present: { metadata_namespace: turnstile.request, key: correlation_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-budget-execution, on_header_present: { metadata_namespace: turnstile.request, key: budget_execution, type: STRING }, remove: true }
+                        - { header: x-turnstile-gateway-profile-id, on_header_present: { metadata_namespace: turnstile.request, key: gateway_profile_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-native-gateway-id, on_header_present: { metadata_namespace: turnstile.request, key: native_gateway_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-usage-id, on_header_present: { metadata_namespace: turnstile.request, key: usage_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-native-gateway-instance-id, on_header_present: { metadata_namespace: turnstile.request, key: native_gateway_instance_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-gateway-is-managed, on_header_present: { metadata_namespace: turnstile.request, key: gateway_is_managed, type: STRING }, remove: true }
+                        - { header: x-turnstile-apim-service-id, on_header_present: { metadata_namespace: turnstile.request, key: apim_service_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-apim-region, on_header_present: { metadata_namespace: turnstile.request, key: apim_region, type: STRING }, remove: true }
+                        - { header: x-turnstile-api-revision, on_header_present: { metadata_namespace: turnstile.request, key: api_revision, type: STRING }, remove: true }
+                        - { header: x-turnstile-apim-subscription-id, on_header_present: { metadata_namespace: turnstile.request, key: apim_subscription_id, type: STRING }, remove: true }
+                        - { header: x-turnstile-application-actor-type, on_header_present: { metadata_namespace: turnstile.request, key: application_actor_type, type: STRING }, remove: true }
+                        - { header: x-turnstile-application-actor-id, on_header_present: { metadata_namespace: turnstile.request, key: application_actor_id, type: STRING }, remove: true }
                         - { header: x-org-name, on_header_present: { metadata_namespace: turnstile.request, key: organization, type: STRING }, remove: true }
                         - { header: x-org-id, on_header_present: { metadata_namespace: turnstile.request, key: organization_id, type: STRING }, remove: true }
                         - { header: x-department-name, on_header_present: { metadata_namespace: turnstile.request, key: department, type: STRING }, remove: true }
@@ -146,6 +177,10 @@ static_resources:
                           typed_config:
                             "@type": type.googleapis.com/envoy.extensions.content_parsers.json.v3.JsonContentParser
                             rules:
+                              - rule: { selectors: [{ key: type }], on_present: { metadata_namespace: turnstile.usage, key: last_event_type, type: STRING } }
+                              - rule: { selectors: [{ key: response }, { key: status }], on_present: { metadata_namespace: turnstile.usage, key: response_status, type: STRING } }
+                              - rule: { selectors: [{ key: response }, { key: usage }, { key: total_tokens }], on_present: { metadata_namespace: turnstile.usage, key: total_tokens, type: NUMBER } }
+                              - rule: { selectors: [{ key: usage }, { key: total_tokens }], on_present: { metadata_namespace: turnstile.usage, key: total_tokens, type: NUMBER } }
                               - rule: { selectors: [{ key: usage }, { key: prompt_tokens }], on_present: { metadata_namespace: turnstile.usage, key: prompt_tokens, type: NUMBER } }
                               - rule: { selectors: [{ key: usage }, { key: cached_tokens }], on_present: { metadata_namespace: turnstile.usage, key: cache_read_tokens_fallback, type: NUMBER } }
                               - rule: { selectors: [{ key: usage }, { key: prompt_tokens_details }, { key: cached_tokens }], on_present: { metadata_namespace: turnstile.usage, key: cache_read_tokens, type: NUMBER } }
@@ -168,6 +203,14 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.json_to_metadata.v3.JsonToMetadata
                       response_rules:
                         rules:
+                          - selectors: [{ key: type }]
+                            on_present: { metadata_namespace: turnstile.usage, key: response_type, type: STRING }
+                          - selectors: [{ key: stop_reason }]
+                            on_present: { metadata_namespace: turnstile.usage, key: stop_reason, type: STRING }
+                          - selectors: [{ key: status }]
+                            on_present: { metadata_namespace: turnstile.usage, key: response_status, type: STRING }
+                          - selectors: [{ key: usage }, { key: total_tokens }]
+                            on_present: { metadata_namespace: turnstile.usage, key: total_tokens, type: NUMBER }
                           - selectors: [{ key: usage }, { key: prompt_tokens }]
                             on_present: { metadata_namespace: turnstile.usage, key: prompt_tokens, type: NUMBER }
                           - selectors: [{ key: usage }, { key: cached_tokens }]

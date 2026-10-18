@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from ..domain.model_availability import ModelAvailabilityConflict
 from ..domain.pricing import PriceConfigurationChanged
 from ..domain.runtime_models import apply_databricks_adoption
 
@@ -16,16 +17,29 @@ class InMemoryRegistryRepositoryMixin:
     models: list[dict[str, Any]]
     gateway_publications: list[dict[str, Any]]
     effective_gateway_releases: dict[UUID, UUID]
+    apim_targets: dict[UUID, dict[str, Any]]
+    apim_target_route_bindings: dict[UUID, dict[str, Any]]
 
     def _published_image_profile(self, model: Mapping[str, Any]) -> object:
         runtime = next((row for row in self.runtimes if row["id"] == model["runtime_id"]), None)
         gateway_id = runtime.get("gateway_profile_id") if runtime else None
-        if gateway_id is None:
+        if gateway_id is None or runtime is None:
             return None
         publication_id = self.effective_gateway_releases.get(gateway_id)
+        route = next((row for row in self.apim_target_route_bindings.values()
+                      if row["logical_model_id"] == model["id"]
+                      and row["apim_target_id"] == gateway_id and row["runtime_id"] == runtime["id"]
+                      and row["enabled"] and row["is_default_serving"]), None)
+        if route is not None:
+            publication_id = route.get("current_publication_id")
         publication = next(
             (row for row in self.gateway_publications if row["id"] == publication_id), None
         )
+        if route is not None and (
+            publication is None or publication["status"] != "active"
+            or publication["gateway_profile_id"] != gateway_id
+        ):
+            return None
         for binding in publication["desired_spec"]["bindings"] if publication else []:
             if binding["model"]["model_key"].casefold() == model["model_key"].casefold():
                 return binding["model"].get("image_profile")
@@ -49,22 +63,6 @@ class InMemoryRegistryRepositoryMixin:
             ):
                 return apply_databricks_adoption(runtime, binding["runtime_config"])
         return runtime
-
-    def _effective_discount(self, model: dict[str, Any]) -> float | None:
-        """The discount that actually applies: the model's own, else its connection's.
-
-        The SQL repository resolves this in the query. Resolving it here too keeps the two
-        implementations answering the same question -- without it the fake charges list price
-        for every model whose discount is set on the connection, and the tests would agree
-        with it.
-        """
-        own = model.get("price_discount_percent")
-        if own is not None:
-            return cast(float, own)
-        runtime = next(
-            (row for row in self.runtimes if row["id"] == model.get("runtime_id")), None
-        )
-        return cast("float | None", runtime.get("price_discount_percent") if runtime else None)
 
     def registry(self) -> dict[str, Sequence[dict[str, Any]]]:
         return {
@@ -134,6 +132,16 @@ class InMemoryRegistryRepositoryMixin:
                     if current == planned:
                         model["price_sync_status"] = "superseded"
                     continue
+            if (update.get("expected_context_price_tiers") is not None
+                and (model.get("context_price_tiers") or [])
+                != update["expected_context_price_tiers"]):
+                model["price_sync_status"] = "superseded"
+                continue
+            if update.get("expected_list_prices") is not None and any(
+                model.get(field) != update["expected_list_prices"].get(field) for field in listed
+            ):
+                model["price_sync_status"] = "superseded"
+                continue
             if not update.get("writes") and not model.get(
                 "price_source_configured", "price_source" in model,
             ):
@@ -147,6 +155,9 @@ class InMemoryRegistryRepositoryMixin:
                 for column in charged:
                     model[column] = update.get(column)
                 model["pending_list_price"] = None
+                if update.get("context_price_tiers") is not None:
+                    model["context_price_tiers"] = update["context_price_tiers"]
+                model["pending_context_price_tiers"] = None
                 model["updated_at"] = now
                 model["price_source"] = update.get("price_source") or update.get("expected_source")
                 model["price_reference"] = update.get("price_reference") \
@@ -158,6 +169,8 @@ class InMemoryRegistryRepositoryMixin:
                 written += 1
             elif update.get("pending_list_price") is not None:
                 model["pending_list_price"] = update["pending_list_price"]
+            if not update.get("writes") and update.get("pending_context_price_tiers") is not None:
+                model["pending_context_price_tiers"] = update["pending_context_price_tiers"]
 
             model["price_sync_status"] = update.get("status")
             model["price_sync_message"] = update.get("message")
@@ -237,18 +250,28 @@ class InMemoryRegistryRepositoryMixin:
         if workspace_url and any(
             runtime.get("gateway_profile_id") == runtime_values["gateway_profile_id"]
             and str((runtime.get("config") or {}).get("workspace_url") or "")
-            .rstrip("/").casefold() == workspace_url.casefold()
+            .rstrip("/")
+            .casefold()
+            == workspace_url.casefold()
             for runtime in self.registry()["runtimes"]
         ):
             raise ValueError("This connection already exists")
         provider_count = len(self.providers)
         if provider_values is not None:
+            provider_config = dict(provider_values.get("config") or {})
+            provider_vendor = str(provider_config.get("model_vendor") or "generic")
             provider = next(
                 (
                     row
                     for row in self.providers
                     if row["enabled"]
-                    and row.get("brand_key") == provider_values["brand_key"]
+                    and (
+                        str(row.get("provider_kind")) == "openai_compatible"
+                        and str((row.get("config") or {}).get("model_vendor") or "generic")
+                        == provider_vendor
+                        if str(provider_values.get("provider_kind")) == "openai_compatible"
+                        else row.get("brand_key") == provider_values["brand_key"]
+                    )
                 ),
                 None,
             )
@@ -269,10 +292,20 @@ class InMemoryRegistryRepositoryMixin:
     def update_registry_item(
         self, kind: str, item_id: UUID, values: Mapping[str, Any]
     ) -> dict[str, Any] | None:
+        if kind == "model" and values.get("price_source") == "manual":
+            values = {**values, "price_reference": None, "context_price_tiers": []}
         target = self._registry_target(kind)
         row = self._find(target, item_id)
         if row is None:
             return None
+        if kind == "gateway" and set(values) == {"name"} and any(
+            item["id"] != item_id and item["name"] == values["name"] for item in target
+        ):
+            raise ValueError("Gateway display name is already in use")
+        if kind == "model" and "enabled" in values and values["enabled"] != row["enabled"]:
+            raise ModelAvailabilityConflict(
+                "Change model availability through the versioned availability command"
+            )
         if kind == "model" and values.get("pricing_expected_updated_at") is not None \
                 and row["updated_at"] != values["pricing_expected_updated_at"]:
             raise PriceConfigurationChanged("模型在定价期间已修改，请刷新后重试")
@@ -315,6 +348,8 @@ class InMemoryRegistryRepositoryMixin:
             field in values and values[field] != row.get(field)
             for field in ("price_source", "price_reference")
         )
+        if kind == "model" and "context_price_tiers" in values:
+            row["pending_context_price_tiers"] = None
         row.update({
             key: value for key, value in values.items() if key != "pricing_expected_updated_at"
         })
@@ -353,6 +388,9 @@ class InMemoryRegistryRepositoryMixin:
         runtime = self._find(self.runtimes, runtime_id)
         if runtime is None or any(
             model["runtime_id"] == runtime_id for model in self.models
+        ) or any(
+            binding["runtime_id"] == runtime_id
+            for binding in self.apim_target_route_bindings.values()
         ):
             return False
         self.runtimes.remove(runtime)
@@ -369,6 +407,7 @@ class InMemoryRegistryRepositoryMixin:
                 for publication in self.gateway_publications
             )
             or gateway_id in self.effective_gateway_releases
+            or gateway_id in self.apim_targets
         ):
             return False
         self.gateways.remove(gateway)
@@ -397,3 +436,19 @@ class InMemoryRegistryRepositoryMixin:
         if item is None:
             raise ValueError(f"Unknown {label}: {item_id}")
         return item
+
+    def _effective_discount(self, model: dict[str, Any]) -> float | None:
+        """The discount that actually applies: the model's own, else its connection's.
+
+        The SQL repository resolves this in the query. Resolving it here too keeps the two
+        implementations answering the same question -- without it the fake charges list price
+        for every model whose discount is set on the connection, and the tests would agree
+        with it.
+        """
+        own = model.get("price_discount_percent")
+        if own is not None:
+            return cast(float, own)
+        runtime = next(
+            (row for row in self.runtimes if row["id"] == model.get("runtime_id")), None
+        )
+        return cast("float | None", runtime.get("price_discount_percent") if runtime else None)

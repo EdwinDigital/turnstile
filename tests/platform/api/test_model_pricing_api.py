@@ -122,7 +122,7 @@ def test_image_publication_carries_accepted_public_prices_without_paid_probe(
     from turnstile_core.services.control_plane import GatewayControlPlaneService
 
     service = GatewayControlPlaneService(
-        publication_api, image_generation_enabled=True, apim_principal_id="unit-principal",
+        publication_api, apim_principal_id="unit-principal",
     )
     app.dependency_overrides[control_plane_service] = lambda: service
     management_runtime_service._price_catalog = CompositeCatalog([

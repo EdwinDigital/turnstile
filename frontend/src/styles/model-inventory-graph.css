@@ -1,0 +1,57 @@
+.model-inventory-graph { position: relative; min-height: 280px; flex: 1 1 0; overflow: hidden; border-top: 1px solid var(--border); background: var(--background); color: var(--foreground); }
+.model-inventory-graph [data-tone] { --model-graph-color: var(--muted-foreground); }
+.model-inventory-graph [data-tone="foundry"] { --model-graph-color: #8e8ff4; }
+.model-inventory-graph [data-tone="databricks"] { --model-graph-color: #ff3621; }
+.model-inventory-graph [data-tone="bedrock"] { --model-graph-color: #01a88d; }
+.model-inventory-graph [data-tone="claude"] { --model-graph-color: #d97757; }
+.model-inventory-graph [data-tone="kimi"] { --model-graph-color: #191c21; }
+.model-inventory-graph [data-tone="gateway"] { --model-graph-color: var(--brand); }
+.dark .model-inventory-graph [data-tone="foundry"] { --model-graph-color: #8e8ff4; }
+.dark .model-inventory-graph [data-tone="databricks"] { --model-graph-color: #ff3621; }
+.dark .model-inventory-graph [data-tone="kimi"] { --model-graph-color: var(--foreground); }
+.model-inventory-graph .react-flow__node-connection { z-index: 0 !important; pointer-events: none; }
+.model-graph-connection { width: 100%; height: 100%; }
+.model-graph-connection > svg { overflow: visible; pointer-events: none; }
+.model-graph-ring { fill: color-mix(in oklch, var(--model-graph-color) 5%, var(--background)); stroke: color-mix(in oklch, var(--model-graph-color) 55%, var(--border)); stroke-width: 1.2; stroke-dasharray: 4 5; pointer-events: auto; cursor: grab; }
+.model-graph-connection-center { position: absolute; width: 60px; height: 60px; display: grid; place-items: center; padding: 0; border: 1.5px solid var(--model-graph-color); border-radius: 50%; background: color-mix(in oklch, var(--model-graph-color) 7%, var(--background)); pointer-events: auto; cursor: grab; }
+.model-graph-connection-center:hover, .model-graph-connection-center.active { border-width: 2px; background: color-mix(in oklch, var(--model-graph-color) 12%, var(--background)); }
+.model-graph-gateway { width: 220px; height: 152px; display: flex; flex-direction: column; align-items: center; cursor: grab; }
+.model-graph-gateway-circle { width: 92px; height: 92px; flex: 0 0 92px; display: grid; place-items: center; padding: 0; border: 2px solid color-mix(in oklch, var(--brand) 45%, var(--background)); border-radius: 50%; background: var(--background); box-shadow: 0 0 0 6px var(--muted); cursor: grab; }
+.model-graph-gateway-circle:hover, .model-graph-gateway-circle[aria-pressed="true"] { border-color: var(--brand); background: color-mix(in oklch, var(--brand) 8%, var(--background)); }
+.model-graph-gateway > strong { max-width: 100%; margin-top: 12px; font-size: 13px; line-height: 18px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-graph-gateway > small { max-width: 100%; font-size: 11px; line-height: 16px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-graph-model { width: 100%; height: 38px; display: flex; align-items: center; gap: 9px; border: 1px solid color-mix(in oklch, var(--model-graph-color) 40%, var(--border)); border-radius: 8px; padding: 0 11px; background: var(--background); color: var(--foreground); box-shadow: 0 2px 4px color-mix(in oklch, var(--model-graph-color) 8%, transparent); font-size: 12px; cursor: pointer; }
+.model-graph-model > svg, .model-graph-model > img { width: 18px; height: 18px; flex: 0 0 18px; }
+.model-graph-model > span { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-graph-model > i { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--muted-foreground); }
+.model-graph-model > i[data-enabled="true"] { background: var(--success); }
+.model-graph-model:hover, .model-graph-model.selected { border-color: var(--model-graph-color); box-shadow: 0 0 0 2px var(--model-graph-color), 0 0 0 4px color-mix(in oklch, var(--model-graph-color) 12%, transparent); }
+.model-graph-model:focus-visible, .model-graph-connection-center:focus-visible { outline: 2px solid var(--model-graph-color); outline-offset: 3px; }
+.model-graph-gateway-circle:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+.model-graph-edge { stroke: color-mix(in oklch, var(--model-graph-color) 25%, var(--border)); stroke-width: 1; pointer-events: none; }
+.model-graph-edge.gateway { stroke: var(--muted-foreground); stroke-width: 2; stroke-dasharray: 6 5; }
+.model-graph-edge.active { stroke: var(--model-graph-color); stroke-width: 2.5; stroke-dasharray: none; }
+.model-inventory-graph .relation-muted { opacity: .28; }
+.model-graph-controls { display: flex; align-items: center; gap: 1px; border: 1px solid var(--border); border-radius: 8px; padding: 2px 1.5px; background: var(--background); box-shadow: none; }
+.model-graph-controls button[data-slot="button"] { background-color: transparent; }
+.model-graph-controls button[data-slot="button"]:hover { background-color: var(--muted); }
+.model-graph-controls .model-graph-zoom { min-width: 48px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.model-graph-details { position: absolute; z-index: 10; top: 12px; right: 12px; width: 290px; max-height: calc(100% - 24px); overflow: auto; padding: 16px 16px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); box-shadow: 0 2px 6px color-mix(in oklch, var(--foreground) 6%, transparent); }
+.model-graph-details-close { position: absolute; top: 8px; right: 8px; }
+.model-graph-details-close[data-slot="button"], .model-graph-details-close[data-slot="button"]:hover { background-color: transparent; }
+.model-graph-details > header { display: flex; align-items: center; gap: 10px; padding-right: 24px; }
+.model-graph-details h2 { min-width: 0; margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.model-graph-details > header > svg, .model-graph-details > header > img { flex: 0 0 auto; }
+.model-graph-details dl { margin: 16px 0 0; }
+.model-graph-details dl > div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 8px; padding: 8px 0; border-top: 1px solid var(--border); font-size: 12px; }
+.model-graph-details dt { color: var(--muted-foreground); }
+.model-graph-details dd { margin: 0; overflow-wrap: anywhere; }
+.model-graph-empty { position: absolute; inset: 0; pointer-events: none; }
+.model-view-switch { flex: 0 0 auto; height: 28px; align-items: center; }
+.model-view-switch.usage-metric-segment > button { width: 28px; min-width: 28px; height: 24px; padding: 0; display: grid; place-items: center; }
+.model-view-switch > button + button { margin-left: 1px; }
+.model-graph-publications { max-height: 192px; flex: 0 0 auto !important; }
+@media (max-width: 760px) {
+  .model-graph-details { top: auto; bottom: 56px; left: 12px; right: 12px; width: auto; max-height: 45%; padding: 12px 12px 8px; }
+  .model-graph-details dl > div { padding: 6px 0; }
+}

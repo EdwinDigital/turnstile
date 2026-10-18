@@ -42,12 +42,20 @@ test("automatic model selection retains a compatible explicit protocol", () => {
   })
 })
 
-test("unavailable stored choices are never re-saved", () => {
+test("changing only the title setting preserves an unavailable model pin and protocol", () => {
   assert.deepEqual(assistantSettingsUpdate({
     ...settings, model_available: false, api_available: false,
   }, { auto_title: false }), {
-    model_id: null, auto_title: false, api_format: null,
+    model_id: "gpt", auto_title: false, api_format: "openai_responses",
   })
+})
+
+test("an unavailable explicit or default model never becomes a different effective model", () => {
+  const unavailable = { ...settings, model_available: false, available_models: settings.available_models.slice(1) }
+  assert.equal(assistantSettingsModel(unavailable, assistantSettingsUpdate(unavailable, {})), undefined)
+  const automatic = { ...unavailable, model_id: null }
+  assert.equal(assistantSettingsModel(automatic, assistantSettingsUpdate(automatic, {})), undefined)
+  assert.equal(assistantSettingsModel(unavailable, { model_id: "claude", auto_title: true }).id, "claude")
 })
 
 test("unknown legacy protocol metadata cannot enable an override", () => {

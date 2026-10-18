@@ -5,6 +5,7 @@ import { Cloud, Database, Network } from "lucide-react"
 import deepseekIcon from "../assets/models/deepseek.svg"
 import kimiIcon from "../assets/models/kimi.svg"
 import amazonBedrockIcon from "../assets/providers/amazon-bedrock.svg"
+import azureGatewaysIcon from "../assets/providers/azure-gateways.svg"
 import type { BrandKey } from "../data-sources/apim/types"
 import type { RuntimeAccessPoint } from "../lib/access-points"
 
@@ -135,6 +136,10 @@ export function LiteLlmLogo({ size }: { size: number }) {
   )
 }
 
+export function ManagedGatewayLogo({ size }: { size: number }) {
+  return <img aria-hidden="true" src={azureGatewaysIcon} width={size} height={size} alt="" />
+}
+
 export type GatewayBrand = "apim" | "litellm" | "generic"
 
 export function gatewayBrandFromIdentity(identity: string): GatewayBrand {
@@ -154,7 +159,7 @@ export function GatewayBrandLogo({ brand, size = 16 }: { brand: GatewayBrand; si
   return <Network size={size} />
 }
 
-export type ProviderBrand = "bedrock" | "foundry" | "microsoft" | "databricks" | "copilot" | "claude" | "openai" | "generic"
+export type ProviderBrand = "bedrock" | "foundry" | "microsoft" | "databricks" | "copilot" | "claude" | "openai" | "kimi" | "deepseek" | "generic"
 
 export function providerBrandFromKey(key: BrandKey | undefined): ProviderBrand {
   return {
@@ -171,6 +176,8 @@ export function providerBrandFromKey(key: BrandKey | undefined): ProviderBrand {
 
 export function providerBrandFromIdentity(identity: string): ProviderBrand {
   const text = identity.toLowerCase()
+  if (text.includes("deepseek")) return "deepseek"
+  if (text.includes("kimi") || text.includes("moonshot")) return "kimi"
   if (text.includes("bedrock") || text.includes("amazon")) return "bedrock"
   if (text.includes("databricks")) return "databricks"
   if (text.includes("copilot") || text.includes("github")) return "copilot"
@@ -190,7 +197,7 @@ export function providerBrandFromMetadata(
 }
 
 export function providerBrandLabel(brand: ProviderBrand) {
-  return { bedrock: "Amazon Bedrock", foundry: "Microsoft Foundry", microsoft: "Microsoft", databricks: "Databricks", copilot: "GitHub Copilot", claude: "Anthropic", openai: "OpenAI", generic: "Provider" }[brand]
+  return { bedrock: "Amazon Bedrock", foundry: "Microsoft Foundry", microsoft: "Microsoft", databricks: "Databricks", copilot: "GitHub Copilot", claude: "Anthropic", openai: "OpenAI", kimi: "Kimi", deepseek: "DeepSeek", generic: "Provider" }[brand]
 }
 
 export function ProviderBrandLogo({ brand, size = 16 }: { brand: ProviderBrand; size?: number }) {
@@ -201,6 +208,8 @@ export function ProviderBrandLogo({ brand, size = 16 }: { brand: ProviderBrand; 
   if (brand === "copilot") return <CopilotLogo size={size} />
   if (brand === "claude") return <ClaudeLogo size={size} />
   if (brand === "openai") return <OpenAiLogo size={size} />
+  if (brand === "kimi") return <KimiLogo size={size} />
+  if (brand === "deepseek") return <DeepSeekLogo size={size} />
   return <Database size={size} />
 }
 
@@ -249,6 +258,8 @@ const SHORT_PROVIDER_LABELS: Record<ProviderBrand, string | null> = {
   copilot: "Copilot CLI",
   claude: "Anthropic",
   openai: "OpenAI",
+  kimi: "Kimi",
+  deepseek: "DeepSeek",
   generic: null,
 }
 

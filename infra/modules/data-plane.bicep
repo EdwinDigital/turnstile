@@ -28,7 +28,6 @@ param ledgerTableName string
 param gatewayReleaseWorkerEnabled bool = false
 param gatewayApplicationKeyManagementEnabled bool = false
 param gatewayApplicationProvisioningEnabled bool = false
-param imageGenerationEnabled bool = false
 param databricksOAuthEnabled bool = false
 @minValue(1)
 param gatewayApplicationDefaultMonthlyTokenLimit int = 100000
@@ -49,6 +48,7 @@ var eventHubName = 'token-usage'
 var workspaceName = 'log-${resourcePrefix}-${suffix}'
 var appInsightsName = 'appi-${resourcePrefix}-${suffix}'
 var keyVaultName = 'kv-${resourcePrefix}-${take(suffix, 8)}'
+var credentialVaultName = 'kv-${resourcePrefix}-rt-${take(suffix, 6)}'
 var planName = 'plan-${resourcePrefix}-${suffix}'
 var telemetryPlanName = 'plan-${resourcePrefix}-telemetry-${suffix}'
 var apiName = 'api-${resourcePrefix}-${suffix}'
@@ -111,6 +111,29 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     networkAcls: {
       bypass: 'AzureServices'
       defaultAction: 'Allow'
+      ipRules: []
+      virtualNetworkRules: []
+    }
+    accessPolicies: []
+  }
+}
+
+resource credentialVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
+  name: credentialVaultName
+  location: location
+  properties: {
+    tenantId: subscription().tenantId
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    enableRbacAuthorization: true
+    enableSoftDelete: true
+    softDeleteRetentionInDays: 7
+    publicNetworkAccess: 'Enabled'
+    networkAcls: {
+      bypass: 'AzureServices'
+      defaultAction: 'Deny'
       ipRules: []
       virtualNetworkRules: []
     }
@@ -301,7 +324,12 @@ resource ledgerTable 'Microsoft.Storage/storageAccounts/tableServices/tables@202
   name: ledgerTableName
 }
 
-var ledgerTableEndpoint = ledgerStorage.properties.primaryEndpoints.table
+resource routeTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
+  parent: ledgerTableService
+  name: 'ModelRoutes'
+}
+
+var ledgerTableEndpoint = 'https://${ledgerStorage.name}.table.${environment().suffixes.storage}'
 
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' = {
   name: virtualNetworkName
@@ -589,6 +617,46 @@ module keyVaultPrivateEndpoint 'key-vault-private-endpoint.bicep' = {
   }
 }
 
+resource vaultPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' existing = {
+  name: keyVaultPrivateEndpoint.outputs.privateDnsZoneName
+}
+
+resource credentialVaultPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+  name: 'pe-${credentialVaultName}-vault'
+  location: location
+  properties: {
+    subnet: {
+      id: privateEndpointSubnet.id
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'route-credentials'
+        properties: {
+          privateLinkServiceId: credentialVault.id
+          groupIds: [
+            'vault'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource credentialVaultPrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+  parent: credentialVaultPrivateEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'vault'
+        properties: {
+          privateDnsZoneId: vaultPrivateDnsZone.id
+        }
+      }
+    ]
+  }
+}
+
 resource apiPlan 'Microsoft.Web/serverfarms@2024-11-01' = {
   name: planName
   location: location
@@ -651,6 +719,7 @@ resource api 'Microsoft.Web/sites@2024-11-01' = {
         { name: 'MANAGEMENT_API_KEY', value: managementApiKey }
         { name: 'APIM_PRINCIPAL_ID', value: apimPrincipalId }
         { name: 'DATABRICKS_OAUTH_ENABLED', value: string(databricksOAuthEnabled) }
+        { name: 'AZURE_TENANT_ID', value: subscription().tenantId }
         { name: 'AZURE_SUBSCRIPTION_ID', value: subscription().subscriptionId }
         { name: 'APIM_RESOURCE_GROUP', value: apimResourceGroupName }
         { name: 'APIM_SERVICE_NAME', value: apimName }
@@ -660,7 +729,6 @@ resource api 'Microsoft.Web/sites@2024-11-01' = {
         { name: 'APIM_DASHBOARD_SUBSCRIPTION_KEY', value: apimSubscriptionKey }
         { name: 'GATEWAY_RELEASE_WORKER_ENABLED', value: string(gatewayReleaseWorkerEnabled) }
         { name: 'GATEWAY_APPLICATION_PROVISIONING_ENABLED', value: string(gatewayApplicationProvisioningEnabled) }
-        { name: 'IMAGE_GENERATION_ENABLED', value: string(imageGenerationEnabled) }
         { name: 'GATEWAY_APPLICATION_DEFAULT_MONTHLY_TOKEN_LIMIT', value: string(gatewayApplicationDefaultMonthlyTokenLimit) }
         { name: 'GATEWAY_APPLICATION_DEFAULT_TOKENS_PER_MINUTE', value: string(gatewayApplicationDefaultTokensPerMinute) }
         { name: 'LEDGER_SYNC_ENABLED', value: 'true' }
@@ -840,6 +908,36 @@ resource apiLedgerContributor 'Microsoft.Authorization/roleAssignments@2022-04-0
   }
 }
 
+resource apiRouteReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(routeTable.id, api.id, 'route-table-reader')
+  scope: routeTable
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '76199698-9eea-4c19-bc75-cec21354c6b6')
+  }
+}
+
+resource apimRouteReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(routeTable.id, apimPrincipalId, 'route-table-reader')
+  scope: routeTable
+  properties: {
+    principalId: apimPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '76199698-9eea-4c19-bc75-cec21354c6b6')
+  }
+}
+
+resource apimRouteCredentialReader 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(credentialVault.id, apimPrincipalId, 'route-credential-reader')
+  scope: credentialVault
+  properties: {
+    principalId: apimPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+  }
+}
+
 resource telemetryLedgerContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(ledgerTable.id, functionApp.id, 'table-data-contributor')
   scope: ledgerTable
@@ -870,6 +968,66 @@ resource apimEventHubSender 'Microsoft.Authorization/roleAssignments@2022-04-01'
   }
 }
 
+var rbacAdminRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'f58310d9-a9f6-439a-9e8d-f62e7b41a168')
+
+resource apiEventHubRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(usageEventHub.id, api.id, 'apim-event-hub-rbac-delegator')
+  scope: usageEventHub
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {2b629674-e913-4c01-ae53-ef4638d8f975} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource apiLedgerRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(ledgerTable.id, api.id, 'apim-ledger-rbac-delegator')
+  scope: ledgerTable
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource apiRouteRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(routeTable.id, api.id, 'apim-route-rbac-delegator')
+  scope: routeTable
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {76199698-9eea-4c19-bc75-cec21354c6b6} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource apiCredentialVaultRoleDelegator 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(credentialVault.id, api.id, 'apim-credential-vault-rbac-delegator')
+  scope: credentialVault
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: rbacAdminRoleDefinitionId
+    conditionVersion: '2.0'
+    condition: '((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {4633458b-17de-408a-b874-0445c86b69e6} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})))'
+  }
+}
+
+resource apiResourceGroupApimContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(resourceGroup().id, api.id, 'apim-service-contributor')
+  scope: resourceGroup()
+  properties: {
+    principalId: api.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '312a565d-c81f-4fd8-895a-4e21e48d571c')
+  }
+}
+
 output postgresServerName string = postgresServerName
 output postgresFqdn string = '${postgresServerName}.postgres.database.azure.com'
 output databaseName string = databaseName
@@ -880,7 +1038,11 @@ output applicationInsightsName string = appInsights.name
 output applicationInsightsConnectionString string = appInsights.properties.ConnectionString
 output ledgerStorageName string = ledgerStorage.name
 output ledgerTableEndpoint string = ledgerTableEndpoint
+output ledgerTableResourceId string = ledgerTable.id
+output routeTableResourceId string = routeTable.id
 output keyVaultName string = keyVault.name
+output credentialVaultName string = credentialVault.name
+output credentialVaultResourceId string = credentialVault.id
 output databaseUrlSecretUri string = databaseUrlSecret.properties.secretUri
 output apimSubscriptionKeySecretUri string = apimKeySecret.properties.secretUri
 output apimProbeSubscriptionKeySecretUri string = apimProbeKeySecret.properties.secretUri

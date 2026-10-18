@@ -1,0 +1,13 @@
+{
+  "burst_tokens": 32768,
+  "isInferenceOperation": "e5caad1512035c32554cb02c753a40471f42ec116ab1c01cf9cbd45b6091ad4f",
+  "maxOutputBound": "82fea8b5afc0be4a057271f774ee1d190258d493200387353cf3fd4daea48435",
+  "applicationMaxOutputBound": "aa8f1bea0efc59a7ae997707d6c7c1e35fdf1b8d087d5415c63a68e9a8e9e2e5",
+  "budgetRequestCannotFit": "c6d32d32dc97520efe172dfe4fd08c98392f164bf7c734b669dd05a467f45950",
+  "applicationBudgetCannotFit": "3c53eed953204942aaff60419da241b2ba2fa067999751c3f3e7d2a6435f0e8b",
+  "request_body": "086a2b25cdec9c1a905ac900a0385ce1f07e1d5338bdfce611a05fa5cef7b6ef",
+  "usage": [
+    "122daaf8c1bffd76051b56fe3b5f6a5bcaa3cb4c59b0c49cfa462f2bff139520",
+    "72a0287621888ded6b6135779efc73b47b21910b5b5899edc33a4f1ffcecd9ba"
+  ]
+}

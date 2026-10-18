@@ -6,8 +6,8 @@ info:
 
     processor. Query responses contain token counts and metadata only. Prompt
 
-    and completion content are absent from usage queries. Authenticated image invocation
-    accepts a transient provider payload and returns an image without storing its content.
+    and completion content are absent from usage queries. Authenticated image invocation accepts a transient
+    provider payload and returns an image without storing its content.
 
     '
 servers:
@@ -26,7 +26,8 @@ tags:
 - name: Budgets
   description: Monthly soft Token allocation, utilization, forecast, and audit history.
 - name: Application Access
-  description: APIM consumer inventory, attribution, Ledger-backed quotas, and Owner-managed lifecycle metadata.
+  description: APIM consumer inventory, attribution, Ledger-backed quotas, and Owner-managed lifecycle
+    metadata.
 - name: GitHub Copilot
   description: 'Organization Copilot subscription, usage metrics, AI-credit billing, explicit
 
@@ -48,30 +49,230 @@ tags:
 - name: Model Router
   description: User-scoped model routing drafts, validation, version publication, and lifecycle.
 paths:
+  /api/v1/assistant/ask:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1ask
+  /api/v1/assistant/conversations:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1conversations
+  /api/v1/assistant/conversations/{conversation_id}:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1conversations~1{conversation_id}
+  /api/v1/assistant/settings:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1settings
+  /api/v1/assistant/pinned-charts:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts
+  /api/v1/assistant/pinned-charts/{report_id}:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}
+  /api/v1/assistant/pinned-charts/{report_id}/visibility:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1visibility
+  /api/v1/assistant/pinned-charts/{report_id}/layout:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1layout
+  /api/v1/assistant/pinned-charts/{report_id}/refresh:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1refresh
+  /api/v1/assistant/pinned-charts/{report_id}/charts/order:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1charts~1order
+  /api/v1/assistant/pinned-charts/{report_id}/charts/{chart_id}:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1charts~1{chart_id}
+  /api/v1/anomaly-rules:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1anomaly-rules
+  /api/v1/anomaly-rules/{rule_id}:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1anomaly-rules~1{rule_id}
+  /api/v1/budgets/reservations:
+    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1reservations
+  /api/v1/budgets/reservations/resolve:
+    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1reservations~1resolve
+  /api/v1/budgets:
+    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets
+  /api/v1/budgets/users:
+    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1users
+  /api/v1/budgets/users/bulk:
+    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1users~1bulk
+  /api/v1/budgets/enforcement/{department_id}:
+    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1enforcement~1{department_id}
+  /api/v1/budgets/{scope_type}/{scope_id}:
+    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1{scope_type}~1{scope_id}
+  /api/v1/model-management:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management
+  /api/v1/model-management/model-availability:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1model-availability
+  /api/v1/model-management/models/{item_id}/availability:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1models~1{item_id}~1availability
+  /api/v1/model-management/model-availability/operations/{operation_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1model-availability~1operations~1{operation_id}
+  /api/v1/model-management/model-availability/operations/{operation_id}/retry:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1model-availability~1operations~1{operation_id}~1retry
+  /api/v1/model-management/apim-targets:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets
+  /api/v1/model-management/apim-onboarding:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-onboarding
+  /api/v1/model-management/apim-onboarding/preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-onboarding~1preview
+  /api/v1/model-management/apim-onboarding/{operation_id}/retry:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-onboarding~1{operation_id}~1retry
+  /api/v1/model-management/apim-targets/{gateway_profile_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/removal-preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1removal-preview
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1self-hosted-gateway-provisions
+  /api/v1/model-management/self-hosted-gateway-provisions:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateway-provisions
+  /api/v1/model-management/self-hosted-gateway-provisions/{operation_id}/retry:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateway-provisions~1{operation_id}~1retry
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/bootstrap:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1bootstrap
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/self-hosted-gateways:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1self-hosted-gateways
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/name:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1name
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/removal-preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1removal-preview
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/validations:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1validations
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/apim-association:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1apim-association
+  /api/v1/model-management/gateways:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways
+  /api/v1/model-management/gateways/{item_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{item_id}
+  /api/v1/model-management/gateways/{item_id}/name:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{item_id}~1name
+  /api/v1/model-management/providers:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1providers
+  /api/v1/model-management/providers/{item_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1providers~1{item_id}
+  /api/v1/model-management/runtimes:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1runtimes
+  /api/v1/model-management/connections:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections
+  /api/v1/model-management/connections/{runtime_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections~1{runtime_id}
+  /api/v1/model-management/connections/{runtime_id}/adopt:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections~1{runtime_id}~1adopt
+  /api/v1/model-management/runtimes/{item_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1runtimes~1{item_id}
+  /api/v1/model-management/price-catalog/models:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1price-catalog~1models
+  /api/v1/model-management/price-catalog/options:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1price-catalog~1options
+  /api/v1/model-management/price-sync:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1price-sync
+  /api/v1/model-management/models:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1models
+  /api/v1/model-management/models/{item_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1models~1{item_id}
+  /api/v1/model-management/models/{item_id}/backend-pool:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1models~1{item_id}~1backend-pool
+  /api/v1/model-management/releases:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases
+  /api/v1/model-management/releases/{release_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}
+  /api/v1/model-management/releases/{release_id}/diff:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1diff
+  /api/v1/model-management/releases/{release_id}/integrity:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1integrity
+  /api/v1/model-management/releases/{release_id}/protection:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1protection
+  /api/v1/model-management/releases/{release_id}/integrity-checks:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1integrity-checks
+  /api/v1/model-management/releases/{release_id}/rollback-preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1rollback-preview
+  /api/v1/model-management/releases/{release_id}/rollback:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1rollback
+  /api/v1/model-management/release-operations/{operation_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1release-operations~1{operation_id}
+  /api/v1/model-management/gateways/{gateway_profile_id}/gc-plans:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1gc-plans
+  /api/v1/model-management/runtimes/{runtime_id}/check:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1runtimes~1{runtime_id}~1check
+  /api/v1/model-management/gateways/{gateway_profile_id}/budget-readiness:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1budget-readiness
+  /api/v1/model-management/gateways/{gateway_profile_id}/budget-execution-verification:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1budget-execution-verification
+  /api/v1/model-gateway/decision:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-gateway~1decision
+  /api/v1/model-gateway/invoke:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-gateway~1invoke
   /api/v1/model-gateway/images/generations:
     $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-gateway~1images~1generations
+  /api/v1/traffic/plan:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1traffic~1plan
+  /api/v1/traffic/execute:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1traffic~1execute
+  /api/v1/enterprise/entities:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1enterprise~1entities
+  /api/v1/observability/executive-overview:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1executive-overview
+  /api/v1/observability/distribution:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1distribution
+  /api/v1/observability/requests:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1requests
+  /api/v1/observability/requests/{request_id}:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1requests~1{request_id}
+  /api/v1/observability/anomalies:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1anomalies
+  /api/v1/observability/overview:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1overview
+  /api/v1/observability/trends:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1trends
+  /api/v1/observability/runs:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1runs
+  /api/v1/observability/runs/{run_id}:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1runs~1{run_id}
+  /api/v1/observability/audit-findings:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1audit-findings
+  /api/v1/observability/audit-findings/{finding_id}:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1audit-findings~1{finding_id}
+  /api/v1/observability/optimization-events:
+    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1optimization-events
   /api/v1/application-access/applications:
     $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1applications
   /api/v1/application-access/applications/{application_id}:
     $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1applications~1{application_id}
+  /api/v1/application-access/applications/{application_id}/usage-activity:
+    $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1applications~1{application_id}~1usage-activity
+  ? /api/v1/application-access/applications/{application_id}/subscriptions/{application_subscription_id}/keys/{key_kind}/reveal
+  : $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1applications~1{application_id}~1subscriptions~1{application_subscription_id}~1keys~1{key_kind}~1reveal
+  ? /api/v1/application-access/applications/{application_id}/subscriptions/{application_subscription_id}/keys/{key_kind}/rotate
+  : $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1applications~1{application_id}~1subscriptions~1{application_subscription_id}~1keys~1{key_kind}~1rotate
   /api/v1/application-access/applications/{application_id}/avatar:
     $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1applications~1{application_id}~1avatar
   /api/v1/application-access/applications/{application_id}/budget:
     $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1applications~1{application_id}~1budget
   /api/v1/application-access/applications/{application_id}/model-access:
     $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1applications~1{application_id}~1model-access
+  /api/v1/application-access/applications/{application_id}/organization:
+    $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1applications~1{application_id}~1organization
   /api/v1/application-access/gateways/{gateway_profile_id}/sync:
     $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1gateways~1{gateway_profile_id}~1sync
   /api/v1/application-access/gateways/{gateway_profile_id}/subscriptions:
     $ref: ./openapi/paths/application-access.yaml#/paths/~1api~1v1~1application-access~1gateways~1{gateway_profile_id}~1subscriptions
+  /api/v1/assistant/conversations/{conversation_id}/title:
+    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1conversations~1{conversation_id}~1title
+  /api/v1/model-management/publications:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1publications
+  /api/v1/model-management/rollouts:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1rollouts
+  /api/v1/model-management/rollouts/{rollout_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1rollouts~1{rollout_id}
+  /api/v1/model-management/gateways/{gateway_profile_id}/reconcile:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1reconcile
+  /api/v1/model-management/publications/{publication_id}:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1publications~1{publication_id}
+  /api/v1/model-management/publications/{publication_id}/retry:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1publications~1{publication_id}~1retry
+  /api/v1/model-management/publications/{publication_id}/authorization/resume:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1publications~1{publication_id}~1authorization~1resume
+  /api/v1/model-management/gateways/{gateway_profile_id}/credentials/rotate:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1credentials~1rotate
+  /api/v1/copilot/oauth/callback:
+    $ref: ./openapi/paths/github-copilot.yaml#/paths/~1api~1v1~1copilot~1oauth~1callback
   /api/v1/copilot/status:
     $ref: ./openapi/paths/github-copilot.yaml#/paths/~1api~1v1~1copilot~1status
   /api/v1/copilot/oauth/config:
     $ref: ./openapi/paths/github-copilot.yaml#/paths/~1api~1v1~1copilot~1oauth~1config
   /api/v1/copilot/oauth/login:
     $ref: ./openapi/paths/github-copilot.yaml#/paths/~1api~1v1~1copilot~1oauth~1login
-  /api/v1/copilot/oauth/callback:
-    $ref: ./openapi/paths/github-copilot.yaml#/paths/~1api~1v1~1copilot~1oauth~1callback
   /api/v1/copilot/connections:
     $ref: ./openapi/paths/github-copilot.yaml#/paths/~1api~1v1~1copilot~1connections
   /api/v1/copilot/dashboard:
@@ -104,56 +305,6 @@ paths:
     $ref: ./openapi/paths/github-copilot.yaml#/paths/~1api~1v1~1copilot~1assistant~1conversations~1{conversation_id}
   /api/v1/copilot/assistant/conversations/{conversation_id}/title:
     $ref: ./openapi/paths/github-copilot.yaml#/paths/~1api~1v1~1copilot~1assistant~1conversations~1{conversation_id}~1title
-  /api/v1/model-management/connections:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections
-  /api/v1/model-management/price-preview:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1price-preview
-  /api/v1/model-management/price-sync:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1price-sync
-  /api/v1/model-management/price-catalog/models:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1price-catalog~1models
-  /api/v1/model-management/price-catalog/options:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1price-catalog~1options
-  /api/v1/model-management/connections/{runtime_id}:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections~1{runtime_id}
-  /api/v1/model-management/connections/{runtime_id}/adopt:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1connections~1{runtime_id}~1adopt
-  /api/v1/model-management/models/{item_id}:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1models~1{item_id}
-  /api/v1/model-management/models/{item_id}/backend-pool:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1models~1{item_id}~1backend-pool
-  /api/v1/model-management/publications:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1publications
-  /api/v1/model-management/releases:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases
-  /api/v1/model-management/releases/{release_id}:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}
-  /api/v1/model-management/releases/{release_id}/diff:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1diff
-  /api/v1/model-management/releases/{release_id}/integrity:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1integrity
-  /api/v1/model-management/releases/{release_id}/protection:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1protection
-  /api/v1/model-management/releases/{release_id}/integrity-checks:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1integrity-checks
-  /api/v1/model-management/releases/{release_id}/rollback-preview:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1rollback-preview
-  /api/v1/model-management/releases/{release_id}/rollback:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1releases~1{release_id}~1rollback
-  /api/v1/model-management/release-operations/{operation_id}:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1release-operations~1{operation_id}
-  /api/v1/model-management/gateways/{gateway_profile_id}/gc-plans:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1gc-plans
-  /api/v1/model-management/publications/{publication_id}:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1publications~1{publication_id}
-  /api/v1/model-management/publications/{publication_id}/retry:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1publications~1{publication_id}~1retry
-  /api/v1/model-management/publications/{publication_id}/authorization/resume:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1publications~1{publication_id}~1authorization~1resume
-  /api/v1/model-management/gateways/{gateway_profile_id}/credentials/rotate:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1credentials~1rotate
-  /api/v1/model-management/gateways/{gateway_profile_id}/reconcile:
-    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1reconcile
   /api/v1/auth/login:
     $ref: ./openapi/paths/authentication.yaml#/paths/~1api~1v1~1auth~1login
   /api/v1/auth/entra:
@@ -162,56 +313,28 @@ paths:
     $ref: ./openapi/paths/authentication.yaml#/paths/~1api~1v1~1auth~1me
   /api/v1/auth/logout:
     $ref: ./openapi/paths/authentication.yaml#/paths/~1api~1v1~1auth~1logout
-  /api/v1/anomaly-rules:
-    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1anomaly-rules
-  /api/v1/anomaly-rules/{rule_id}:
-    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1anomaly-rules~1{rule_id}
-  /api/v1/assistant/ask:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1ask
-  /api/v1/assistant/conversations:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1conversations
-  /api/v1/assistant/conversations/{conversation_id}:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1conversations~1{conversation_id}
-  /api/v1/assistant/conversations/{conversation_id}/title:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1conversations~1{conversation_id}~1title
-  /api/v1/assistant/settings:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1settings
-  /api/v1/assistant/pinned-charts:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts
-  /api/v1/assistant/pinned-charts/{report_id}:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}
-  /api/v1/assistant/pinned-charts/{report_id}/refresh:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1refresh
-  /api/v1/assistant/pinned-charts/{report_id}/visibility:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1visibility
-  /api/v1/assistant/pinned-charts/{report_id}/layout:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1layout
-  /api/v1/assistant/pinned-charts/{report_id}/charts/order:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1charts~1order
-  /api/v1/assistant/pinned-charts/{report_id}/charts/{chart_id}:
-    $ref: ./openapi/paths/assistant.yaml#/paths/~1api~1v1~1assistant~1pinned-charts~1{report_id}~1charts~1{chart_id}
-  /api/v1/budgets:
-    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets
-  /api/v1/budgets/users:
-    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1users
-  /api/v1/budgets/users/bulk:
-    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1users~1bulk
-  /api/v1/budgets/{scope_type}/{scope_id}:
-    $ref: ./openapi/paths/budgets.yaml#/paths/~1api~1v1~1budgets~1{scope_type}~1{scope_id}
-  /api/v1/observability/overview:
-    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1overview
-  /api/v1/observability/trends:
-    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1trends
-  /api/v1/observability/runs:
-    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1runs
-  /api/v1/observability/runs/{run_id}:
-    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1runs~1{run_id}
-  /api/v1/observability/audit-findings:
-    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1audit-findings
-  /api/v1/observability/audit-findings/{finding_id}:
-    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1audit-findings~1{finding_id}
-  /api/v1/observability/optimization-events:
-    $ref: ./openapi/paths/observability.yaml#/paths/~1api~1v1~1observability~1optimization-events
+  /api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-syncs:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1apim-targets~1{gateway_profile_id}~1inventory-syncs
+  /api/v1/model-management/gateways/{gateway_profile_id}/managed-program-initializations:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1managed-program-initializations
+  /api/v1/model-management/gateways/{gateway_profile_id}/managed-program-initializations/preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1managed-program-initializations~1preview
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-migrations:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1program-migrations
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-migrations/preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1program-migrations~1preview
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-upgrades:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1program-upgrades
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-upgrades/cutover:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1program-upgrades~1cutover
+  /api/v1/model-management/gateways/{gateway_profile_id}/program-upgrades/preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1gateways~1{gateway_profile_id}~1program-upgrades~1preview
+  /api/v1/model-management/publications/{publication_id}/archive:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1publications~1{publication_id}~1archive
+  /api/v1/model-management/self-hosted-gateways/{deployment_id}/node-enrollments:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1self-hosted-gateways~1{deployment_id}~1node-enrollments
+  /api/v1/model-management/price-preview:
+    $ref: ./openapi/paths/model-platform.yaml#/paths/~1api~1v1~1model-management~1price-preview
 components:
   securitySchemes:
     sessionCookie:
@@ -261,20 +384,86 @@ components:
     ErrorResponse:
       $ref: ./openapi/components/common.yaml#/responses/ErrorResponse
   schemas:
-    PriceSource:
-      $ref: ./openapi/schemas/pricing.json#/schemas/PriceSource
-    PricePreviewRequest:
-      $ref: ./openapi/schemas/pricing.json#/schemas/PricePreviewRequest
-    PricePreviewResponse:
-      $ref: ./openapi/schemas/pricing.json#/schemas/PricePreviewResponse
-    PriceSyncRequest:
-      $ref: ./openapi/schemas/pricing.json#/schemas/PriceSyncRequest
-    PriceSyncResponse:
-      $ref: ./openapi/schemas/pricing.json#/schemas/PriceSyncResponse
-    PriceCatalogModelsResponse:
-      $ref: ./openapi/schemas/pricing.json#/schemas/PriceCatalogModelsResponse
-    PriceCatalogOptionsResponse:
-      $ref: ./openapi/schemas/pricing.json#/schemas/PriceCatalogOptionsResponse
+    ModelAvailabilityAccepted:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityAccepted
+    ModelAvailabilityCommand:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityCommand
+    ModelAvailabilityList:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityList
+    ModelAvailabilityOperation:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityOperation
+    ModelAvailabilityReadback:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityReadback
+    ModelAvailabilityRetry:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityRetry
+    ModelAvailabilityTargetResult:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityTargetResult
+    BudgetDelegationCheck:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetDelegationCheck
+    BudgetExecutionVerificationOptions:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetExecutionVerificationOptions
+    BudgetDelegationReadiness:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetDelegationReadiness
+    BudgetExecutionVerificationRequest:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetExecutionVerificationRequest
+    BudgetExecutionScopeReadback:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetExecutionScopeReadback
+    BudgetExecutionVerification:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/BudgetExecutionVerification
+    LedgerScope:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/LedgerScope
+    LedgerSummary:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/LedgerSummary
+    LedgerAttemptIdentity:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/LedgerAttemptIdentity
+    LedgerAttempt:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/LedgerAttempt
+    MultiTargetPublicationChildCreate:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/MultiTargetPublicationChildCreate
+    MultiTargetPublicationCreate:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/MultiTargetPublicationCreate
+    MultiTargetPublicationRequestAccepted:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/MultiTargetPublicationRequestAccepted
+    MultiTargetRollout:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/MultiTargetRollout
+    MultiTargetRolloutList:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/MultiTargetRolloutList
+    TargetRolloutChild:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/TargetRolloutChild
+    TargetRolloutChildStatus:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/TargetRolloutChildStatus
+    TargetRolloutKind:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/TargetRolloutKind
+    TargetRolloutStatus:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/TargetRolloutStatus
+    SelfHostedGatewayWrite:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayWrite
+    SelfHostedGatewayCreate:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayCreate
+    SelfHostedGatewayBootstrapRequest:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayBootstrapRequest
+    SelfHostedGatewayBootstrap:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayBootstrap
+    SelfHostedGatewayProvisionOperations:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayProvisionOperations
+    SelfHostedGatewayNameWrite:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayNameWrite
+    SelfHostedGatewayAssociationChange:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayAssociationChange
+    SelfHostedGatewayRemovalPreview:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewayRemovalPreview
+    SelfHostedGatewaySummary:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/SelfHostedGatewaySummary
+    ApimTargetRemovalPreview:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetRemovalPreview
+    ApimOnboardingRequest:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingRequest
+    ApimOnboardingPlan:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingPlan
+    ApimOnboardingStart:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingStart
+    ApimOnboardingOperations:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimOnboardingOperations
     GatewayApplicationUsage:
       $ref: ./openapi/schemas/application-access.yaml#/schemas/GatewayApplicationUsage
     GatewayApplicationUserUsage:
@@ -385,6 +574,72 @@ components:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/DatabricksConnectionAdopt
     ModelRegistry:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelRegistry
+    RuntimeCheckSelection:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeCheckSelection
+    RuntimeCheckOption:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeCheckOption
+    RuntimeDiagnosticAccess:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeDiagnosticAccess
+    RuntimeCheckPlan:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeCheckPlan
+    RuntimeHealth:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RuntimeHealth
+    GatewayProfileNameWrite:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayProfileNameWrite
+    ApimTarget:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTarget
+    ApimTargetCapabilitySnapshot:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetCapabilitySnapshot
+    ApimTargetConnectionState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetConnectionState
+    ApimTargetDriftState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetDriftState
+    ApimTargetOwnershipMode:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetOwnershipMode
+    ApimTargetTopology:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetTopology
+    ApimTargetTopologyList:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetTopologyList
+    ApimTargetWrite:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTargetWrite
+    ApimTierFamily:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/ApimTierFamily
+    CapabilitySupport:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/CapabilitySupport
+    GatewayCertificateAuthorityInventory:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayCertificateAuthorityInventory
+    GatewayDeclaredState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeclaredState
+    GatewayDeployment:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeployment
+    GatewayDeploymentInventory:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentInventory
+    GatewayDeploymentKind:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentKind
+    GatewayDeploymentTopology:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentTopology
+    GatewayHostingMode:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayHostingMode
+    GatewayHostnameConfigurationInventory:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayHostnameConfigurationInventory
+    GatewayLifecycleOwnership:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayLifecycleOwnership
+    GatewayObservationState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayObservationState
+    GatewayPublishedModelSummary:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayPublishedModelSummary
+    GatewayReachabilityState:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayReachabilityState
+    GatewayReleaseGate:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayReleaseGate
+    GatewayDeploymentScope:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentScope
+    GatewayDeploymentScopeMode:
+      $ref: ./openapi/schemas/gateway-targets.yaml#/schemas/GatewayDeploymentScopeMode
+    StoredContextPriceTier:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/StoredContextPriceTier
+    ContextPriceRule:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ContextPriceRule
     ImageGenerationLimits:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/ImageGenerationLimits
     ImageGenerationProfile:
@@ -429,6 +684,8 @@ components:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayModelTarget
     BrandKey:
       $ref: ./openapi/schemas/common.yaml#/schemas/BrandKey
+    GatewayPublicationFailure:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayPublicationFailure
     GatewayPublication:
       $ref: ./openapi/schemas/model-platform.yaml#/schemas/GatewayPublication
     GatewayReleaseChangeSet:
@@ -551,6 +808,12 @@ components:
       $ref: ./openapi/schemas/observability.yaml#/schemas/RunDetail
     PageInfo:
       $ref: ./openapi/schemas/observability.yaml#/schemas/PageInfo
+    UsageRequestSummary:
+      $ref: ./openapi/schemas/observability.yaml#/schemas/UsageRequestSummary
+    UsageRequestDetail:
+      $ref: ./openapi/schemas/observability.yaml#/schemas/UsageRequestDetail
+    UsageRequestListResponse:
+      $ref: ./openapi/schemas/observability.yaml#/schemas/UsageRequestListResponse
     RunListResponse:
       $ref: ./openapi/schemas/observability.yaml#/schemas/RunListResponse
     AuditFinding:
@@ -619,6 +882,262 @@ components:
       $ref: ./openapi/schemas/assistant.yaml#/schemas/AssistantModelChoice
     Error:
       $ref: ./openapi/schemas/common.yaml#/schemas/Error
+    AuthStrategy:
+      $ref: ./openapi/schemas/common.yaml#/schemas/AuthStrategy
+    AuthType:
+      $ref: ./openapi/schemas/common.yaml#/schemas/AuthType
+    BudgetPriceProjection:
+      $ref: ./openapi/schemas/common.yaml#/schemas/BudgetPriceProjection
+    BudgetReservationResolution:
+      $ref: ./openapi/schemas/common.yaml#/schemas/BudgetReservationResolution
+    BudgetReservationResolutionWrite:
+      $ref: ./openapi/schemas/common.yaml#/schemas/BudgetReservationResolutionWrite
+    ChatMessage:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ChatMessage
+    ChoiceQuestion:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ChoiceQuestion
+    ConnectionAuthMode:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ConnectionAuthMode
+    DecisionInvocationRequest:
+      $ref: ./openapi/schemas/common.yaml#/schemas/DecisionInvocationRequest
+    DecisionInvocationResponse:
+      $ref: ./openapi/schemas/common.yaml#/schemas/DecisionInvocationResponse
+    DepartmentEnforcementWrite:
+      $ref: ./openapi/schemas/common.yaml#/schemas/DepartmentEnforcementWrite
+    DistributionBreakdown:
+      $ref: ./openapi/schemas/common.yaml#/schemas/DistributionBreakdown
+    DistributionItem:
+      $ref: ./openapi/schemas/common.yaml#/schemas/DistributionItem
+    DistributionResponse:
+      $ref: ./openapi/schemas/common.yaml#/schemas/DistributionResponse
+    EnterpriseEntity:
+      $ref: ./openapi/schemas/common.yaml#/schemas/EnterpriseEntity
+    EnterpriseEntityCatalog:
+      $ref: ./openapi/schemas/common.yaml#/schemas/EnterpriseEntityCatalog
+    ExecutiveChanges:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ExecutiveChanges
+    ExecutiveOverviewResponse:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ExecutiveOverviewResponse
+    ExecutiveTotals:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ExecutiveTotals
+    GatewayApplicationOrganization:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayApplicationOrganization
+    GatewayApplicationOrganizationUpdate:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayApplicationOrganizationUpdate
+    GatewayApplicationProvisioningDefaults:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayApplicationProvisioningDefaults
+    GatewayKind:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayKind
+    GatewayProfile:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayProfile
+    GatewayProfileWrite:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayProfileWrite
+    GatewayPublicationList:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayPublicationList
+    GatewayPublicationRequestAccepted:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayPublicationRequestAccepted
+    GatewayPublicationView:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayPublicationView
+    GatewayReleaseOperationKind:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayReleaseOperationKind
+    GatewayReleaseOperationStatus:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayReleaseOperationStatus
+    GatewayReleaseRole:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayReleaseRole
+    GatewayServingDeployment:
+      $ref: ./openapi/schemas/common.yaml#/schemas/GatewayServingDeployment
+    HTTPValidationError:
+      $ref: ./openapi/schemas/common.yaml#/schemas/HTTPValidationError
+    HealthStatus:
+      $ref: ./openapi/schemas/common.yaml#/schemas/HealthStatus
+    InvocationMetadata:
+      $ref: ./openapi/schemas/common.yaml#/schemas/InvocationMetadata
+    InvocationUsage:
+      $ref: ./openapi/schemas/common.yaml#/schemas/InvocationUsage
+    JsonValue:
+      $ref: ./openapi/schemas/common.yaml#/schemas/JsonValue
+    LedgerAdmissionReceipt-Input:
+      $ref: ./openapi/schemas/common.yaml#/schemas/LedgerAdmissionReceipt-Input
+    LedgerAdmissionReceipt-Output:
+      $ref: ./openapi/schemas/common.yaml#/schemas/LedgerAdmissionReceipt-Output
+    ManagedModel:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ManagedModel
+    ManagedModelWrite:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ManagedModelWrite
+    ModelCreateTarget:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ModelCreateTarget
+    ModelFamilyKey:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ModelFamilyKey
+    ModelInvocationRequest:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ModelInvocationRequest
+    ModelInvocationResponse:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ModelInvocationResponse
+    ModelPrice:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ModelPrice
+    ModelPriceTier:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ModelPriceTier
+    ModelVendorKey:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ModelVendorKey
+    NoulQuestion:
+      $ref: ./openapi/schemas/common.yaml#/schemas/NoulQuestion
+    PendingListPrice:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PendingListPrice
+    PriceCatalogContextTier:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceCatalogContextTier
+    PriceCatalogInputRange:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceCatalogInputRange
+    PriceCatalogModel:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceCatalogModel
+    PriceCatalogModelsResponse:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceCatalogModelsResponse
+    PriceCatalogOption:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceCatalogOption
+    PriceCatalogOptionsResponse:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceCatalogOptionsResponse
+    PriceCatalogRuleSource:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceCatalogRuleSource
+    PriceSource:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceSource
+    PriceSyncDetail:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceSyncDetail
+    PriceSyncRequest:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceSyncRequest
+    PriceSyncResponse:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceSyncResponse
+    PriceSyncStatus:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PriceSyncStatus
+    Profile:
+      $ref: ./openapi/schemas/common.yaml#/schemas/Profile
+    Provider:
+      $ref: ./openapi/schemas/common.yaml#/schemas/Provider
+    ProviderKind:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ProviderKind
+    ProviderTarget:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ProviderTarget
+    ProviderWrite:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ProviderWrite
+    PublicationKind:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PublicationKind
+    PublicationStatus:
+      $ref: ./openapi/schemas/common.yaml#/schemas/PublicationStatus
+    RegistryResponse:
+      $ref: ./openapi/schemas/common.yaml#/schemas/RegistryResponse
+    Runtime:
+      $ref: ./openapi/schemas/common.yaml#/schemas/Runtime
+    RuntimeKind:
+      $ref: ./openapi/schemas/common.yaml#/schemas/RuntimeKind
+    RuntimeTarget:
+      $ref: ./openapi/schemas/common.yaml#/schemas/RuntimeTarget
+    RuntimeWrite:
+      $ref: ./openapi/schemas/common.yaml#/schemas/RuntimeWrite
+    ScoreQuestion:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ScoreQuestion
+    ToolCall:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ToolCall
+    ToolDefinition:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ToolDefinition
+    ToolFunctionCall:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ToolFunctionCall
+    ToolFunctionDefinition:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ToolFunctionDefinition
+    TrafficExecutionItem:
+      $ref: ./openapi/schemas/common.yaml#/schemas/TrafficExecutionItem
+    TrafficGenerationPlan:
+      $ref: ./openapi/schemas/common.yaml#/schemas/TrafficGenerationPlan
+    TrafficGenerationRequest:
+      $ref: ./openapi/schemas/common.yaml#/schemas/TrafficGenerationRequest
+    TrafficGenerationResult:
+      $ref: ./openapi/schemas/common.yaml#/schemas/TrafficGenerationResult
+    TrafficPlanItem:
+      $ref: ./openapi/schemas/common.yaml#/schemas/TrafficPlanItem
+    UsageAnomaly:
+      $ref: ./openapi/schemas/common.yaml#/schemas/UsageAnomaly
+    UsageAnomalyListResponse:
+      $ref: ./openapi/schemas/common.yaml#/schemas/UsageAnomalyListResponse
+    ValidationError:
+      $ref: ./openapi/schemas/common.yaml#/schemas/ValidationError
+    ActiveRouteHead:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ActiveRouteHead
+    ConfigurationApproval:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ConfigurationApproval
+    ConnectionApproval:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ConnectionApproval
+    ConnectionRevision:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ConnectionRevision
+    ControlledGatewayFleet:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ControlledGatewayFleet
+    ControlledGatewayHost:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ControlledGatewayHost
+    CountCredential:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/CountCredential
+    FixedProgramCutover:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/FixedProgramCutover
+    FixedProgramInstallation:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/FixedProgramInstallation
+    FixedProgramMigration:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/FixedProgramMigration
+    FixedProgramUpgrade:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/FixedProgramUpgrade
+    ImageGenerationProfile-Input:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ImageGenerationProfile-Input
+    ImageGenerationProfile-Output:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ImageGenerationProfile-Output
+    ManagedProgramInitialization-Input:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ManagedProgramInitialization-Input
+    ManagedProgramInitialization-Output:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ManagedProgramInitialization-Output
+    ModelAvailabilityNodeEndpoint:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityNodeEndpoint
+    ModelAvailabilityNodeEnrollment:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelAvailabilityNodeEnrollment
+    ModelCountContract:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ModelCountContract
+    NativeCountContract:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/NativeCountContract
+    OAuthClientCredentialsConfig:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/OAuthClientCredentialsConfig
+    OutputTokenRequirement:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/OutputTokenRequirement
+    ProgramIdentity:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ProgramIdentity
+    ProtocolCountContract:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ProtocolCountContract
+    ProtocolRejectionRule:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ProtocolRejectionRule
+    ProtocolRequestPolicy:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/ProtocolRequestPolicy
+    RequestErrorEmpty:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RequestErrorEmpty
+    RequestErrorValue:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RequestErrorValue
+    RequestRejectionRule:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RequestRejectionRule
+    RouteBackendPool:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RouteBackendPool
+    RouteContent-Input:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RouteContent-Input
+    RouteContent-Output:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RouteContent-Output
+    RouteCredential:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RouteCredential
+    RouteMember:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RouteMember
+    RoutePoolMember:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RoutePoolMember
+    RouteScope:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RouteScope
+    RouteSnapshot-Input:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RouteSnapshot-Input
+    RouteSnapshot-Output:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/RouteSnapshot-Output
+    InvocationApiFormat:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/InvocationApiFormat
+    PriceMatch:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/PriceMatch
+    PricePreviewRequest:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/PricePreviewRequest
+    PricePreviewResponse:
+      $ref: ./openapi/schemas/model-platform.yaml#/schemas/PricePreviewResponse
 x-event-contracts:
   usage-event:
     transport: Azure Event Hubs

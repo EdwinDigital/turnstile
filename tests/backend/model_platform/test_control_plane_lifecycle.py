@@ -113,7 +113,7 @@ def test_databricks_publication_activates_existing_connection_after_verification
         databricks_oauth_enabled=oauth,
     )
     secret = "unit-oauth-onboarding-secret"
-    publication = service.publish(GatewayPublicationCreate(
+    publication = service.seed_legacy_publication(GatewayPublicationCreate(
         gateway_profile_id=APIM_ID, provider=ProviderTarget(existing_id=runtime.provider_id),
         runtime=RuntimeTarget(
             existing_id=runtime.id, oauth_client_secret=SecretStr(secret) if oauth else None,
@@ -148,7 +148,7 @@ def test_databricks_publication_activates_existing_connection_after_verification
         current = next(row for row in repository.registry()["runtimes"] if row["id"] == runtime.id)
         assert current["config"]["credential_provisioned"] is True
         prior_provider_id = current["config"]["oauth"]["provider_id"]
-        service.publish(GatewayPublicationCreate(
+        service.seed_legacy_publication(GatewayPublicationCreate(
             gateway_profile_id=APIM_ID, provider=ProviderTarget(existing_id=runtime.provider_id),
             runtime=RuntimeTarget(existing_id=runtime.id),
             model=ModelCreateTarget(
@@ -354,7 +354,7 @@ def test_runtime_url_model_id_and_key_generate_the_bedrock_configuration() -> No
     )
     assert binding.backend_path == "/model/{upstream_model_id}/invoke"
     assert binding.named_value_name is not None
-    assert binding.named_value_name.startswith("finops-bedrock-")
+    assert binding.named_value_name.startswith("turnstile-bedrock-")
     assert binding.runtime_config["region"] == "ap-southeast-2"
     assert "api_key" not in publication.model_dump_json()
 
@@ -427,7 +427,7 @@ def test_active_bedrock_runtime_must_be_reused_instead_of_recreated_in_the_same_
 def test_a_different_bedrock_region_creates_an_independent_runtime() -> None:
     repository = InMemoryRepository()
     service = GatewayControlPlaneService(repository)
-    first = service.publish(bedrock_publication(), "owner@example.com")
+    first = service.seed_legacy_publication(bedrock_publication(), "owner@example.com")
     current = "queued"
     for status in (
         "validating",
@@ -456,7 +456,7 @@ def test_a_different_bedrock_region_creates_an_independent_runtime() -> None:
         upstream_model_id="global.anthropic.claude-opus-4-8",
     )
 
-    second = service.publish(request, "owner@example.com")
+    second = service.seed_legacy_publication(request, "owner@example.com")
     binding = second.desired_spec.bindings[-1]
 
     assert binding.runtime_id is None
@@ -686,7 +686,7 @@ def test_removed_bedrock_model_can_be_readded_repeatedly() -> None:
             current = status
         activate_publication(repository, publication_id, "worker")
 
-    first_addition = service.publish(bedrock_publication(), "owner@example.com")
+    first_addition = service.seed_legacy_publication(bedrock_publication(), "owner@example.com")
     activate(first_addition.id)
     model = next(
         item
@@ -705,7 +705,7 @@ def test_removed_bedrock_model_can_be_readded_repeatedly() -> None:
         runtime=RuntimeTarget(existing_id=runtime_id),
         model=bedrock_publication().model,
     )
-    second_addition = service.publish(repeat_request, "owner@example.com")
+    second_addition = service.seed_legacy_publication(repeat_request, "owner@example.com")
     assert second_addition.status.value == "queued"
     activate(second_addition.id)
     restored = next(
@@ -717,7 +717,7 @@ def test_removed_bedrock_model_can_be_readded_repeatedly() -> None:
 
     second_removal = service.remove_model(restored["id"], "owner@example.com")
     activate(second_removal.id)
-    third_addition = service.publish(repeat_request, "owner@example.com")
+    third_addition = service.seed_legacy_publication(repeat_request, "owner@example.com")
 
     assert third_addition.status.value == "queued"
     assert third_addition.id != second_addition.id
@@ -832,7 +832,7 @@ def test_model_cannot_be_edited_while_removal_is_in_flight() -> None:
 def test_second_model_reuses_dynamic_runtime_without_falling_back_to_databricks() -> None:
     repository = InMemoryRepository()
     service = GatewayControlPlaneService(repository)
-    first = service.publish(bedrock_publication(), "owner@example.com")
+    first = service.seed_legacy_publication(bedrock_publication(), "owner@example.com")
     current = "queued"
     for status in (
         "validating",
@@ -856,7 +856,7 @@ def test_second_model_reuses_dynamic_runtime_without_falling_back_to_databricks(
     request = bedrock_publication("claude-opus-bedrock-test")
     request.provider = ProviderTarget(existing_id=provider["id"])
     request.runtime = RuntimeTarget(existing_id=runtime["id"])
-    second = service.publish(request, "owner@example.com")
+    second = service.seed_legacy_publication(request, "owner@example.com")
     compiled = ApimPolicyCompiler().compile(second)
 
     assert second.desired_spec.bindings[-1].routing_managed is True
@@ -944,7 +944,7 @@ def test_route_reconcile_adopts_and_probes_existing_managed_runtime_models() -> 
         streaming_mode="native",
     )
     service = GatewayControlPlaneService(repository)
-    initial = service.publish(
+    initial = service.seed_legacy_publication(
         GatewayPublicationCreate(
             gateway_profile_id=APIM_ID,
             provider=ProviderTarget(existing_id=provider["id"]),
@@ -1031,7 +1031,7 @@ def test_route_reconcile_adopts_and_probes_existing_managed_runtime_models() -> 
     )
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -1063,7 +1063,7 @@ def test_route_reconcile_adopts_and_probes_existing_managed_runtime_models() -> 
         assert alias in fake_client.operation_policies["responses"]
         assert alias in fake_client.operation_policies["responses-compact"]
 
-    follow_up = service.publish(
+    follow_up = service.seed_legacy_publication(
         GatewayPublicationCreate(
             gateway_profile_id=APIM_ID,
             provider=ProviderTarget(existing_id=provider["id"]),
@@ -1148,7 +1148,7 @@ def test_unknown_managed_runtime_without_backend_path_is_rejected() -> None:
 def test_effective_release_survives_more_than_one_hundred_newer_failures() -> None:
     repository = InMemoryRepository()
     service = GatewayControlPlaneService(repository)
-    first = service.publish(bedrock_publication(), "owner@example.com")
+    first = service.seed_legacy_publication(bedrock_publication(), "owner@example.com")
     current = "queued"
     for status in (
         "validating",
@@ -1171,7 +1171,7 @@ def test_effective_release_survives_more_than_one_hundred_newer_failures() -> No
         request = bedrock_publication(f"failed-model-{index}")
         request.provider = ProviderTarget(existing_id=provider["id"])
         request.runtime = RuntimeTarget(existing_id=runtime["id"])
-        failed = service.publish(request, "owner@example.com")
+        failed = service.seed_legacy_publication(request, "owner@example.com")
         assert transition_publication(
             repository,
             failed.id,
@@ -1184,7 +1184,7 @@ def test_effective_release_survives_more_than_one_hundred_newer_failures() -> No
     request = bedrock_publication("next-model")
     request.provider = ProviderTarget(existing_id=provider["id"])
     request.runtime = RuntimeTarget(existing_id=runtime["id"])
-    publication = service.publish(request, "owner@example.com")
+    publication = service.seed_legacy_publication(request, "owner@example.com")
 
     aliases = {binding.model.model_key for binding in publication.desired_spec.bindings}
     assert "claude-sonnet-4-6-bedrock" in aliases
