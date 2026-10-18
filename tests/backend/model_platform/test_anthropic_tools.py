@@ -75,7 +75,8 @@ def test_anthropic_tools_map_definitions_calls_cache_usage_and_attribution(
     assert result.content == ""
     assert result.tool_calls[0].id == "toolu-1"
     assert json.loads(result.tool_calls[0].function.arguments) == {"dimension": "department"}
-    assert result.correlation_id == "claude-request-1"
+    assert result.correlation_id == (None if kind is GatewayKind.APIM else "claude-request-1")
+    assert result.upstream_request_id == "claude-request-1"
     assert result.usage is not None
     assert result.usage.input_tokens == 10
     assert result.usage.cached_tokens == 25

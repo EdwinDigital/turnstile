@@ -176,7 +176,8 @@ def test_gpt6_tools_use_responses_and_keep_apim_alias_and_attribution(
         ),
     ),)
     assert result.responses_output == [REASONING, FUNCTION_CALL]
-    assert result.correlation_id == "apim-1"
+    assert result.correlation_id is None
+    assert result.upstream_request_id == "apim-1"
     assert result.usage is not None
     assert result.usage.input_tokens == 72
     assert result.usage.cached_tokens == 1128

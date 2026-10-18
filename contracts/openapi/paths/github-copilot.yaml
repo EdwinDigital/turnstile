@@ -1,96 +1,48 @@
 paths:
-  /api/v1/copilot/status:
+  /api/v1/copilot/oauth/callback:
     get:
-      tags:
-      - GitHub Copilot
-      operationId: getCopilotStatus
-      summary: Read the viewer-safe Copilot connection state
+      summary: Complete GitHub account linking for the current Turnstile session
+      operationId: completeCopilotOAuth
+      parameters:
+      - name: code
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Code
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: State
+      - name: error
+        in: query
+        required: false
+        schema:
+          type: string
+          default: ''
+          title: Error
       responses:
         '200':
-          description: Configured organizations and the viewer's explicit GitHub mapping
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/CopilotStatus
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '302':
+          description: Redirect to the initiating Turnstile page
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/oauth/config:
-    get:
-      tags:
-      - GitHub Copilot
-      operationId: getCopilotOAuthConfig
-      summary: Read the origin-scoped GitHub OAuth App configuration
-      description: Owner only. The client secret is never returned.
-      responses:
-        '200':
-          description: Sanitized configuration and effective callback URL
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/CopilotOAuthConfigSummary
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    put:
-      tags:
-      - GitHub Copilot
-      operationId: saveCopilotOAuthConfig
-      summary: Save an origin-scoped GitHub OAuth App configuration
-      description: 'Owner only. The client secret is encrypted before storage. An omitted secret
-
-        retains the existing encrypted value for this origin.
-
-        '
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: ../../openapi.yaml#/components/schemas/CopilotOAuthConfigWrite
-      responses:
-        '200':
-          description: Sanitized saved configuration
-          content:
-            application/json:
-              schema:
-                $ref: ../../openapi.yaml#/components/schemas/CopilotOAuthConfigSummary
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/oauth/login:
-    get:
-      tags:
-      - GitHub Copilot
-      operationId: startCopilotOAuth
-      summary: Start linking the current Turnstile session to a GitHub account
-      parameters:
-      - name: return_path
-        in: query
-        schema:
-          type: string
-          maxLength: 1000
-          default: /?page=finops-overview&source=github-copilot
-      responses:
-        '302':
-          description: Redirect to GitHub authorization
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '503':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/oauth/callback:
-    get:
-      tags:
-      - GitHub Copilot
-      operationId: completeCopilotOAuth
-      summary: Complete GitHub account linking for the current Turnstile session
       security: []
       description: 'The callback does not require a session cookie because the browser may start on
 
@@ -105,45 +57,157 @@ paths:
         only the GitHub login mapping.
 
         '
-      parameters:
-      - name: code
-        in: query
-        schema:
-          type: string
-      - name: state
-        in: query
-        schema:
-          type: string
-      - name: error
-        in: query
-        schema:
-          type: string
+      tags:
+      - GitHub Copilot
+  /api/v1/copilot/status:
+    get:
+      summary: Read the viewer-safe Copilot connection state
+      operationId: getCopilotStatus
       responses:
-        '302':
-          description: Redirect to the initiating Turnstile page
+        '200':
+          description: Configured organizations and the viewer's explicit GitHub mapping
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/CopilotStatus
         '401':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/connections:
-    put:
+      security:
+      - sessionCookie: []
       tags:
       - GitHub Copilot
-      operationId: saveCopilotConnection
-      summary: Validate and save an encrypted organization billing connection
-      description: 'Owner only. The server verifies the token against the requested organization and
+  /api/v1/copilot/oauth/config:
+    get:
+      summary: Read the origin-scoped GitHub OAuth App configuration
+      operationId: getCopilotOAuthConfig
+      responses:
+        '200':
+          description: Sanitized configuration and effective callback URL
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/CopilotOAuthConfigSummary
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: Owner only. The client secret is never returned.
+      tags:
+      - GitHub Copilot
+    put:
+      summary: Save an origin-scoped GitHub OAuth App configuration
+      operationId: saveCopilotOAuthConfig
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: ../../openapi.yaml#/components/schemas/CopilotOAuthConfigWrite
+        required: true
+      responses:
+        '200':
+          description: Sanitized saved configuration
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/CopilotOAuthConfigSummary
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'Owner only. The client secret is encrypted before storage. An omitted secret
 
-        Copilot billing endpoint before encrypting it. The token is write-only. GitHub
-
-        mutation remains disabled unless write_enabled is explicitly set.
+        retains the existing encrypted value for this origin.
 
         '
+      tags:
+      - GitHub Copilot
+  /api/v1/copilot/oauth/login:
+    get:
+      summary: Start linking the current Turnstile session to a GitHub account
+      operationId: startCopilotOAuth
+      parameters:
+      - name: purpose
+        in: query
+        required: false
+        schema:
+          enum:
+          - identity
+          - organization
+          type: string
+          default: identity
+          title: Purpose
+      - name: organization
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 39
+          - type: 'null'
+          title: Organization
+      - name: return_origin
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 1000
+          - type: 'null'
+          title: Return Origin
+      - name: return_path
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 1000
+          default: /?page=finops-overview&source=github-copilot
+          title: Return Path
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '302':
+          description: Redirect to GitHub authorization
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '503':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - GitHub Copilot
+  /api/v1/copilot/connections:
+    put:
+      summary: Validate and save an encrypted organization billing connection
+      operationId: saveCopilotConnection
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/CopilotConnectionWrite
+        required: true
       responses:
         '200':
           description: Sanitized saved connection
@@ -151,33 +215,43 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotConnectionSummary
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '502':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/dashboard:
-    get:
-      tags:
-      - GitHub Copilot
-      operationId: getCopilotDashboard
-      summary: Read organization or personal Copilot usage and billing
-      description: 'Owners receive organization members and aggregate usage. Members are restricted
+      security:
+      - sessionCookie: []
+      description: 'Owner only. The server verifies the token against the requested organization and
 
-        server-side to the GitHub login explicitly mapped to their application account.
+        Copilot billing endpoint before encrypting it. The token is write-only. GitHub
+
+        mutation remains disabled unless write_enabled is explicitly set.
 
         '
+      tags:
+      - GitHub Copilot
+  /api/v1/copilot/dashboard:
+    get:
+      summary: Read organization or personal Copilot usage and billing
+      operationId: getCopilotDashboard
       parameters:
       - name: organization
         in: query
+        required: false
         schema:
-          type:
-          - string
-          - 'null'
-          maxLength: 39
+          anyOf:
+          - type: string
+            maxLength: 39
+          - type: 'null'
+          title: Organization
       responses:
         '200':
           description: Normalized Copilot subscription, usage, billing, and member data
@@ -185,6 +259,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotDashboard
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '502':
@@ -193,21 +273,29 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/governance:
-    get:
+      security:
+      - sessionCookie: []
+      description: 'Owners receive organization members and aggregate usage. Members are restricted
+
+        server-side to the GitHub login explicitly mapped to their application account.
+
+        '
       tags:
       - GitHub Copilot
-      operationId: getCopilotGovernance
+  /api/v1/copilot/governance:
+    get:
       summary: Read live Enterprise teams, cost centers, seats, and budgets
-      description: Owner only. Each domain is read directly from GitHub and degrades independently.
+      operationId: getCopilotGovernance
       parameters:
       - name: organization
         in: query
+        required: false
         schema:
-          type:
-          - string
-          - 'null'
-          maxLength: 39
+          anyOf:
+          - type: string
+            maxLength: 39
+          - type: 'null'
+          title: Organization
       responses:
         '200':
           description: Live Enterprise governance aggregate
@@ -215,32 +303,97 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotGovernance
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '502':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/usage-imports:
-    get:
+      security:
+      - sessionCookie: []
+      description: Owner only. Each domain is read directly from GitHub and degrades independently.
       tags:
       - GitHub Copilot
-      operationId: listCopilotUsageImports
+  /api/v1/copilot/usage-imports:
+    post:
+      summary: Import a supplemental GitHub AI Usage or Usage Report CSV
+      operationId: importCopilotUsageCsv
+      parameters:
+      - name: filename
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 255
+          title: Filename
+      - name: organization
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 39
+          - type: 'null'
+          title: Organization
+      responses:
+        '201':
+          description: Accepted import and row-level deduplication counts
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/CopilotUsageImportSummary
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '403':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '413':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        '415':
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+        default:
+          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      description: 'Owner only. The request body is parsed in memory with a 5 MB and 25,000-row
+
+        limit, normalized, SHA-256 deduplicated, and written transactionally to PostgreSQL.
+
+        '
+      tags:
+      - GitHub Copilot
+    get:
       summary: List supplemental GitHub CSV imports
-      description: Owner only. Files are never persisted to local disk.
+      operationId: listCopilotUsageImports
       parameters:
       - name: source_kind
         in: query
         required: true
         schema:
-          $ref: ../../openapi.yaml#/components/schemas/CopilotUsageImportKind
+          enum:
+          - ai_usage
+          - usage_report
+          type: string
+          title: Source Kind
       - name: organization
         in: query
+        required: false
         schema:
-          type:
-          - string
-          - 'null'
-          maxLength: 39
+          anyOf:
+          - type: string
+            maxLength: 39
+          - type: 'null'
+          title: Organization
       responses:
         '200':
           description: Import history
@@ -250,80 +403,45 @@ paths:
                 type: array
                 items:
                   $ref: ../../openapi.yaml#/components/schemas/CopilotUsageImportSummary
-        '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        default:
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    post:
-      tags:
-      - GitHub Copilot
-      operationId: importCopilotUsageCsv
-      summary: Import a supplemental GitHub AI Usage or Usage Report CSV
-      description: 'Owner only. The request body is parsed in memory with a 5 MB and 25,000-row
-
-        limit, normalized, SHA-256 deduplicated, and written transactionally to PostgreSQL.
-
-        '
-      parameters:
-      - name: filename
-        in: query
-        required: true
-        schema:
-          type: string
-          minLength: 1
-          maxLength: 255
-      - name: organization
-        in: query
-        schema:
-          type:
-          - string
-          - 'null'
-          maxLength: 39
-      requestBody:
-        required: true
-        content:
-          text/csv:
-            schema:
-              type: string
-              format: binary
-              maxLength: 5242880
-      responses:
-        '201':
-          description: Accepted import and row-level deduplication counts
+                title: Response List Copilot Usage Imports Api V1 Copilot Usage Imports Get
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                $ref: ../../openapi.yaml#/components/schemas/CopilotUsageImportSummary
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '413':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '415':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-        '422':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/imported-usage:
-    get:
+      security:
+      - sessionCookie: []
+      description: Owner only. Files are never persisted to local disk.
       tags:
       - GitHub Copilot
-      operationId: getCopilotImportedUsage
+  /api/v1/copilot/imported-usage:
+    get:
       summary: Read database-aggregated supplemental GitHub CSV usage
-      description: Owner only. Live GitHub APIs remain the primary data source.
+      operationId: getCopilotImportedUsage
       parameters:
       - name: source_kind
         in: query
         required: true
         schema:
-          $ref: ../../openapi.yaml#/components/schemas/CopilotUsageImportKind
+          enum:
+          - ai_usage
+          - usage_report
+          type: string
+          title: Source Kind
       - name: organization
         in: query
+        required: false
         schema:
-          type:
-          - string
-          - 'null'
-          maxLength: 39
+          anyOf:
+          - type: string
+            maxLength: 39
+          - type: 'null'
+          title: Organization
       responses:
         '200':
           description: Supplemental usage KPIs, trends, breakdowns, and user rows
@@ -331,24 +449,35 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotImportedUsage
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/cost-centers/options:
-    get:
+      security:
+      - sessionCookie: []
+      description: Owner only. Live GitHub APIs remain the primary data source.
       tags:
       - GitHub Copilot
-      operationId: getCopilotCostCenterOptions
+  /api/v1/copilot/cost-centers/options:
+    get:
       summary: List live GitHub Enterprise cost centers available to the viewer
+      operationId: getCopilotCostCenterOptions
       parameters:
       - name: organization
         in: query
+        required: false
         schema:
-          type:
-          - string
-          - 'null'
-          maxLength: 39
+          anyOf:
+          - type: string
+            maxLength: 39
+          - type: 'null'
+          title: Organization
       responses:
         '200':
           description: Live cost center options
@@ -358,19 +487,27 @@ paths:
                 type: array
                 items:
                   $ref: ../../openapi.yaml#/components/schemas/CopilotCostCenterOption
+                title: Response Get Copilot Cost Center Options Api V1 Copilot Cost Centers Options Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '502':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/cost-center-requests:
-    get:
+      security:
+      - sessionCookie: []
       tags:
       - GitHub Copilot
-      operationId: listCopilotCostCenterRequests
+  /api/v1/copilot/cost-center-requests:
+    get:
       summary: List cost center requests visible to the current viewer
-      description: Owners see all requests. Members see only requests from their account.
+      operationId: listCopilotCostCenterRequests
       responses:
         '200':
           description: Role-scoped cost center request list
@@ -380,17 +517,20 @@ paths:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotCostCenterRequestList
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    post:
+      security:
+      - sessionCookie: []
+      description: Owners see all requests. Members see only requests from their account.
       tags:
       - GitHub Copilot
-      operationId: createCopilotCostCenterRequest
+    post:
       summary: Request assignment to an active GitHub cost center
+      operationId: createCopilotCostCenterRequest
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/CopilotCostCenterRequestCreate
+        required: true
       responses:
         '201':
           description: Created pending request
@@ -398,23 +538,24 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotCostCenterRequest
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/cost-center-requests/{request_id}/review:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - GitHub Copilot
-      operationId: reviewCopilotCostCenterRequest
+  /api/v1/copilot/cost-center-requests/{request_id}/review:
+    post:
       summary: Approve or reject a pending cost center assignment request
-      description: 'Owner only. A GitHub resource assignment occurs only when apply_to_github is true,
-
-        the connection enables writes, and the target cost center is still active.
-
-        '
+      operationId: reviewCopilotCostCenterRequest
       parameters:
       - name: request_id
         in: path
@@ -422,6 +563,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Request Id
       requestBody:
         required: true
         content:
@@ -435,6 +577,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotCostCenterRequest
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -443,33 +591,42 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/identities:
-    get:
+      security:
+      - sessionCookie: []
+      description: 'Owner only. A GitHub resource assignment occurs only when apply_to_github is true,
+
+        the connection enables writes, and the target cost center is still active.
+
+        '
       tags:
       - GitHub Copilot
-      operationId: listCopilotIdentities
+  /api/v1/copilot/identities:
+    get:
       summary: List application users and explicit GitHub login mappings
-      description: Owner only.
+      operationId: listCopilotIdentities
       responses:
         '200':
           description: Enabled application users and optional GitHub mappings
           content:
             application/json:
               schema:
-                type: array
                 items:
                   $ref: ../../openapi.yaml#/components/schemas/CopilotIdentityMapping
+                type: array
+                title: Response List Copilot Identities Api V1 Copilot Identities Get
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/identities/{app_user_id}:
-    put:
+      security:
+      - sessionCookie: []
+      description: Owner only.
       tags:
       - GitHub Copilot
-      operationId: saveCopilotIdentity
+  /api/v1/copilot/identities/{app_user_id}:
+    put:
       summary: Map one application user to one GitHub login
-      description: Owner only. Email similarity is never accepted as identity proof.
+      operationId: saveCopilotIdentity
       parameters:
       - name: app_user_id
         in: path
@@ -477,6 +634,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: App User Id
       requestBody:
         required: true
         content:
@@ -490,19 +648,27 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotIdentityMapping
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/budget-requests:
-    get:
+      security:
+      - sessionCookie: []
+      description: Owner only. Email similarity is never accepted as identity proof.
       tags:
       - GitHub Copilot
-      operationId: listCopilotBudgetRequests
+  /api/v1/copilot/budget-requests:
+    get:
       summary: List Copilot budget requests visible to the current viewer
-      description: Owners see all requests. Members see only requests from their account.
+      operationId: listCopilotBudgetRequests
       responses:
         '200':
           description: Role-scoped request list and status counts
@@ -514,17 +680,20 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    post:
+      security:
+      - sessionCookie: []
+      description: Owners see all requests. Members see only requests from their account.
       tags:
       - GitHub Copilot
-      operationId: createCopilotBudgetRequest
+    post:
       summary: Submit a personal monthly AI-credit budget request
+      operationId: createCopilotBudgetRequest
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/CopilotBudgetRequestCreate
+        required: true
       responses:
         '201':
           description: Created pending request
@@ -532,23 +701,24 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotBudgetRequest
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/budget-requests/{request_id}/review:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - GitHub Copilot
-      operationId: reviewCopilotBudgetRequest
+  /api/v1/copilot/budget-requests/{request_id}/review:
+    post:
       summary: Approve or reject a pending Copilot budget request
-      description: 'Owner only. Approval updates Turnstile first. A real GitHub budget is created or
-
-        updated only when apply_to_github is true and the connection also enables writes.
-
-        '
+      operationId: reviewCopilotBudgetRequest
       parameters:
       - name: request_id
         in: path
@@ -556,6 +726,7 @@ paths:
         schema:
           type: string
           format: uuid
+          title: Request Id
       requestBody:
         required: true
         content:
@@ -569,6 +740,12 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/CopilotBudgetRequest
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '403':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '404':
@@ -577,24 +754,25 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/assistant/ask:
-    post:
-      tags:
-      - GitHub Copilot
-      - Assistant
-      operationId: askCopilotAssistant
-      summary: Ask a grounded question about GitHub Copilot usage and budgets
-      description: 'Uses a distinct conversation namespace and telemetry identity from the APIM
+      security:
+      - sessionCookie: []
+      description: 'Owner only. Approval updates Turnstile first. A real GitHub budget is created or
 
-        assistant. Its tools are read-only and expose normalized Copilot data only.
+        updated only when apply_to_github is true and the connection also enables writes.
 
         '
+      tags:
+      - GitHub Copilot
+  /api/v1/copilot/assistant/ask:
+    post:
+      summary: Ask a grounded question about GitHub Copilot usage and budgets
+      operationId: askCopilotAssistant
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: ../../openapi.yaml#/components/schemas/AssistantAskRequest
+        required: true
       responses:
         '200':
           description: Grounded answer and read-only tool evidence
@@ -602,19 +780,30 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/AssistantReply
-        '409':
-          $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
+        '409':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/assistant/conversations:
-    get:
+      security:
+      - sessionCookie: []
+      description: 'Uses a distinct conversation namespace and telemetry identity from the APIM
+
+        assistant. Its tools are read-only and expose normalized Copilot data only.
+
+        '
       tags:
       - GitHub Copilot
       - Assistant
-      operationId: listCopilotAssistantConversations
+  /api/v1/copilot/assistant/conversations:
+    get:
       summary: List the caller's recent Copilot assistant conversations
+      operationId: listCopilotAssistantConversations
       responses:
         '200':
           description: Copilot conversation summaries
@@ -626,15 +815,23 @@ paths:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/assistant/conversations/{conversation_id}:
-    get:
+      security:
+      - sessionCookie: []
       tags:
       - GitHub Copilot
       - Assistant
-      operationId: getCopilotAssistantConversation
+  /api/v1/copilot/assistant/conversations/{conversation_id}:
+    get:
       summary: Read one Copilot assistant conversation
+      operationId: getCopilotAssistantConversation
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/ConversationId
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Conversation Id
       responses:
         '200':
           description: Stored Copilot conversation and exchanges
@@ -642,18 +839,32 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/Conversation
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    patch:
+      security:
+      - sessionCookie: []
       tags:
       - GitHub Copilot
       - Assistant
-      operationId: renameCopilotAssistantConversation
+    patch:
       summary: Rename one Copilot assistant conversation
+      operationId: renameCopilotAssistantConversation
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/ConversationId
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Conversation Id
       requestBody:
         required: true
         content:
@@ -667,34 +878,62 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/Conversation
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-    delete:
+      security:
+      - sessionCookie: []
       tags:
       - GitHub Copilot
       - Assistant
-      operationId: deleteCopilotAssistantConversation
+    delete:
       summary: Delete one Copilot assistant conversation
+      operationId: deleteCopilotAssistantConversation
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/ConversationId
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Conversation Id
       responses:
         '204':
           description: Deleted
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
-  /api/v1/copilot/assistant/conversations/{conversation_id}/title:
-    post:
+      security:
+      - sessionCookie: []
       tags:
       - GitHub Copilot
       - Assistant
-      operationId: titleCopilotAssistantConversation
+  /api/v1/copilot/assistant/conversations/{conversation_id}/title:
+    post:
       summary: Name a Copilot assistant conversation from its first exchange
+      operationId: titleCopilotAssistantConversation
       parameters:
-      - $ref: ../../openapi.yaml#/components/parameters/ConversationId
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Conversation Id
       requestBody:
         required: true
         content:
@@ -708,7 +947,18 @@ paths:
             application/json:
               schema:
                 $ref: ../../openapi.yaml#/components/schemas/ConversationSummary
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: ../../openapi.yaml#/components/schemas/HTTPValidationError
         '404':
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
         default:
           $ref: ../../openapi.yaml#/components/responses/ErrorResponse
+      security:
+      - sessionCookie: []
+      tags:
+      - GitHub Copilot
+      - Assistant

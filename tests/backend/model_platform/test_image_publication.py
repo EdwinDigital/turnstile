@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import uuid4
 from xml.etree import ElementTree
 
@@ -16,6 +17,9 @@ from tests.backend.model_platform.control_plane_support import (
     external_tenant_foundry_publication,
     foundry_publication,
     publisher_settings,
+)
+from tests.backend.model_platform.control_plane_support import (
+    GatewayControlPlaneService as LegacyGatewayControlPlaneService,
 )
 from tests.backend.model_platform.test_image_options import _limits
 from turnstile_core.domain.control_plane import (
@@ -35,6 +39,7 @@ from turnstile_core.domain.control_plane import (
 from turnstile_core.domain.runtime_models import ProviderTarget
 from turnstile_core.integrations.apim_control_plane_contract import (
     PolicyCompilationError,
+    ProbeVerificationDeferred,
     RetryablePublicationError,
 )
 from turnstile_core.integrations.apim_policy_compiler import ApimPolicyCompiler
@@ -42,11 +47,10 @@ from turnstile_core.integrations.apim_publisher_client import AzureApimPublisher
 from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.services.control_plane import (
     ControlPlaneConflictError,
-    ControlPlaneUnavailableError,
     GatewayControlPlaneService,
 )
 from turnstile_core.services.gateway_publication_worker import GatewayPublicationWorker
-from turnstile_core.services.probe_journal import PersistentProbeJournal
+from turnstile_core.services.probe_journal import PersistentProbeJournal, PublicationProbeProgress
 from turnstile_core.services.worker_lease import WorkerLease
 
 
@@ -70,7 +74,6 @@ def test_image_publication_uses_explicit_profile_and_isolated_protocol() -> None
     service = GatewayControlPlaneService(
         repository,
         apim_principal_id="unit-principal",
-        image_generation_enabled=True,
     )
     result = service.publish(image_publication(repository), "owner@example.com")
     binding = result.desired_spec.bindings[-1]
@@ -88,7 +91,7 @@ def test_image_publication_uses_explicit_profile_and_isolated_protocol() -> None
 def test_infrastructure_upgrade_failure_has_a_safe_actionable_public_message() -> None:
     repository = InMemoryRepository()
     service = GatewayControlPlaneService(
-        repository, apim_principal_id="unit-principal", image_generation_enabled=True,
+        repository, apim_principal_id="unit-principal",
     )
     publication = service.publish(image_publication(repository), "owner@example.com")
     failed = publication.model_copy(update={
@@ -107,9 +110,9 @@ def test_infrastructure_upgrade_failure_has_a_safe_actionable_public_message() -
     assert ordinary.error_message is None
 
 
-def test_disabled_images_cannot_queue_publications() -> None:
+def test_image_publication_still_requires_the_apim_identity() -> None:
     repository = InMemoryRepository()
-    with pytest.raises(ControlPlaneUnavailableError, match="not enabled"):
+    with pytest.raises(ControlPlaneConflictError, match="APIM managed identity"):
         GatewayControlPlaneService(repository).publish(
             image_publication(repository), "owner@example.com"
         )
@@ -121,7 +124,6 @@ def test_image_activation_keeps_chat_connection_and_uses_effective_snapshot() ->
     service = GatewayControlPlaneService(
         repository,
         apim_principal_id="unit-principal",
-        image_generation_enabled=True,
     )
     publication = service.publish(image_publication(repository), "owner@example.com")
     row = next(item for item in repository.gateway_publications if item["id"] == publication.id)
@@ -159,17 +161,63 @@ def test_image_prices_are_explicit(field: str) -> None:
     service = GatewayControlPlaneService(
         repository,
         apim_principal_id="unit-principal",
-        image_generation_enabled=True,
     )
     with pytest.raises(ControlPlaneConflictError, match="explicit"):
         service.publish(request, "owner@example.com")
+
+
+def test_probe_progress_slices_persist_before_dispatch_and_skip_completed() -> None:
+    changes: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
+    requests: list[str] = []
+    progress = PublicationProbeProgress(
+        "a" * 64, None, lambda old, new: changes.append((old, new)), maximum_steps=1,
+        clock=lambda: 100,
+    )
+
+    def verify() -> None:
+        assert changes[-1][1]["steps"]["b" * 64] == "started"
+        assert progress.request_timeout(200) == 120
+        requests.append("verify")
+
+    progress.run_step("b" * 64, verify)
+    assert changes[0][0] is None and changes[1][0] == changes[0][1]
+    progress.run_step("b" * 64, verify)
+    with pytest.raises(ProbeVerificationDeferred):
+        progress.run_step("c" * 64, verify)
+    assert requests == ["verify"]
+    resumed = PublicationProbeProgress(
+        "a" * 64, progress.snapshot(), lambda old, new: changes.append((old, new)),
+        clock=lambda: 100,
+    )
+    resumed.run_step("b" * 64, verify)
+    assert requests == ["verify"]
+    with pytest.raises(PolicyCompilationError, match="context changed"):
+        PublicationProbeProgress("d" * 64, progress.snapshot(), lambda old, new: None)
+
+
+def test_probe_progress_unknown_never_replays_and_requires_explicit_recovery() -> None:
+    progress = PublicationProbeProgress("a" * 64, None, lambda old, new: None)
+    requests: list[str] = []
+
+    def unknown() -> None:
+        requests.append("sent")
+        raise TimeoutError("unit-only unconfirmed response")
+
+    with pytest.raises(TimeoutError):
+        progress.run_step("b" * 64, unknown)
+    assert progress.snapshot()["steps"] == {"b" * 64: "started"}
+    resumed = PublicationProbeProgress("a" * 64, progress.snapshot(), lambda old, new: None)
+    with pytest.raises(PolicyCompilationError, match="no request was replayed"):
+        resumed.run_step("b" * 64, unknown)
+    resumed.run_step("b" * 64, unknown, recover=lambda: requests.append("readback"))
+    assert requests == ["sent", "readback"]
+    assert resumed.snapshot()["steps"] == {"b" * 64: "passed"}
 
 
 def test_probe_journal_reuses_only_same_verified_plan() -> None:
     repository = InMemoryRepository()
     publication = GatewayControlPlaneService(
         repository,
-        image_generation_enabled=True,
         apim_principal_id="unit-principal",
     ).publish(image_publication(repository), "owner@example.com")
     binding = publication.desired_spec.bindings[-1]
@@ -195,6 +243,32 @@ def test_probe_journal_reuses_only_same_verified_plan() -> None:
     assert len(requests) == 1
 
 
+def test_image_probe_journal_keeps_each_gateway_endpoint_evidence_separate() -> None:
+    repository = InMemoryRepository()
+    publication = GatewayControlPlaneService(
+        repository, apim_principal_id="unit-principal",
+    ).publish(image_publication(repository), "unit-owner")
+    binding = publication.desired_spec.bindings[-1]
+    planned = publication_model_id(publication.id, binding.model.model_key)
+    journal = PersistentProbeJournal(
+        repository, "unit-deployments", uuid4(),
+        planned_model_ids={binding.model.model_key: planned},
+    )
+    requests = []
+
+    def send(request_id: str, model_id: str) -> dict[str, object]:
+        requests.append((request_id, model_id))
+        return {"total_tokens": 30, "correlation_id": request_id, "image_validated": True}
+
+    for endpoint in ("https://managed.example.test/api;rev=1",
+                     "https://edge.example.test/api;rev=1"):
+        journal.run(binding, "1", {"prompt": "unit"}, send, gateway_endpoint=endpoint)
+        journal.run(binding, "1", {"prompt": "unit"}, send, gateway_endpoint=endpoint)
+    assert len(requests) == 2 and len({request[0] for request in requests}) == 2
+    assert all(request[1] == str(planned) for request in requests)
+    assert len(repository.billable_requests) == 2
+
+
 @pytest.mark.parametrize("status,limit,available", [
     ("queued", 1, False), ("failed", 1, True), ("failed", 31, True),
     ("failed", 32, False), ("failed", 0, False), ("failed", True, False),
@@ -203,9 +277,10 @@ def test_image_retry_capability_is_failed_only_and_bounded(
     status: str, limit: int, available: bool
 ) -> None:
     repository = InMemoryRepository()
-    publication = GatewayControlPlaneService(
-        repository, image_generation_enabled=True, apim_principal_id="unit-principal"
-    ).publish(image_publication(repository), "owner@example.com")
+    service = GatewayControlPlaneService(
+        repository, apim_principal_id="unit-principal"
+    )
+    publication = service.publish(image_publication(repository), "owner@example.com")
     publication = publication.model_copy(update={
         "status": PublicationStatus(status),
         "resource_manifest": {
@@ -221,7 +296,7 @@ def test_image_retry_capability_is_failed_only_and_bounded(
 def test_image_retry_authorization_is_explicit_and_cannot_exceed_limit() -> None:
     repository = InMemoryRepository()
     service = GatewayControlPlaneService(
-        repository, image_generation_enabled=True, apim_principal_id="unit-principal"
+        repository, apim_principal_id="unit-principal"
     )
     publication = service.publish(image_publication(repository), "owner@example.com")
     stored = next(row for row in repository.gateway_publications if row["id"] == publication.id)
@@ -264,7 +339,6 @@ def test_expired_publication_lease_cannot_commit_or_activate() -> None:
     repository = InMemoryRepository()
     publication = GatewayControlPlaneService(
         repository,
-        image_generation_enabled=True,
         apim_principal_id="unit-principal",
     ).publish(image_publication(repository), "owner@example.com")
     row = repository.claim_gateway_publication("expired-worker", 180)
@@ -310,7 +384,7 @@ def test_image_removal_probe_accepts_compiled_rejection(
 ) -> None:
     repository = InMemoryRepository()
     publication = GatewayControlPlaneService(
-        repository, apim_principal_id="unit-principal", image_generation_enabled=True,
+        repository, apim_principal_id="unit-principal",
     ).publish(image_publication(repository), "owner@example.com")
     removed_model = "removed-image"
     publication.publication_kind = PublicationKind.MODEL_REMOVE
@@ -484,7 +558,6 @@ def test_image_worker_checks_parent_and_journals_before_activation() -> None:
     repository = InMemoryRepository()
     publication = GatewayControlPlaneService(
         repository,
-        image_generation_enabled=True,
         apim_principal_id="unit-principal",
     ).publish(image_publication(repository), "owner@example.com")
     client = FakeApimClient()
@@ -494,7 +567,7 @@ def test_image_worker_checks_parent_and_journals_before_activation() -> None:
         worker.run_once("unit-worker")
     row = repository.get_gateway_publication(publication.id)
     assert row is not None and row["status"] == "active"
-    assert row["resource_manifest"]["images_generations_operation"] is True
+    assert row["resource_manifest"]["images_generations_operation"] == "images-generations"
     assert len(repository.billable_requests) == 1
     attempt = next(iter(repository.billable_requests.values()))
     assert attempt.state == "exact" and attempt.actual_tokens == 30
@@ -505,8 +578,8 @@ def test_image_worker_checks_parent_and_journals_before_activation() -> None:
 
 def test_rotation_uses_shared_connection_id_for_chat_and_image() -> None:
     repository = InMemoryRepository()
-    service = GatewayControlPlaneService(repository, TEST_CIPHER, image_generation_enabled=True)
-    text = service.publish(
+    service = LegacyGatewayControlPlaneService(repository, TEST_CIPHER)
+    text = service.seed_legacy_publication(
         external_tenant_foundry_publication(
             repository, account="unit-account", project="unit", deployment="unit-text"
         ),
@@ -521,7 +594,7 @@ def test_rotation_uses_shared_connection_id_for_chat_and_image() -> None:
     old_name = runtime["config"]["named_value_name"]
     image = image_publication(repository)
     image.runtime = RuntimeTarget(existing_id=runtime["id"])
-    published = service.publish(image, "owner@example.com")
+    published = service.seed_legacy_publication(image, "owner@example.com")
     image_row = repository.get_gateway_publication(published.id)
     assert image_row is not None
     image_row["status"] = "promoting"

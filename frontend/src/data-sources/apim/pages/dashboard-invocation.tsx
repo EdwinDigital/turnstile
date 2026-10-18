@@ -1,19 +1,27 @@
 import { useEffect, useMemo, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { AlertTriangle, Image as ImageIcon, MessageSquare, RefreshCw, Send } from "lucide-react"
+import { AlertTriangle, Cpu, Image as ImageIcon, ListChecks, MessageSquare, RefreshCw, Send } from "lucide-react"
 
+import { FoundryLogo, MicrosoftLogo } from "../../../components/brand-logos"
+import { ModelVendorLogo, modelVendorFromMetadata } from "../../../components/model-management/model-vendor-select"
+import { ButtonGroup } from "../../../components/ui/button-group"
+import { Input } from "../../../components/ui/input"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "../../../components/ui/select"
-import { useAuth } from "../../../providers/auth-provider"
-import { ButtonGroup } from "../../../components/ui/button-group"
 import { dataSource } from "../api"
 import { finopsQueries, invalidateFinOps } from "../queries"
-import type { EnterpriseEntityCatalog, ImageGenerationOptions, ImageInvocationResponse, ModelInvocationResponse } from "../types"
+import { useAuth } from "../../../providers/auth-provider"
+import { gatewayInvocationChoices, resolveInvocationModel, type GatewaySelection } from "../../../lib/gateway-topology"
+import { modelInventoryFamily } from "../../../lib/model-inventory-filters"
+import type { DecisionInvocationRequest, DecisionInvocationResponse, EnterpriseEntityCatalog, ImageGenerationOptions, ImageInvocationResponse, ManagedModel, ModelInvocationResponse, ModelRuntime } from "../types"
 import { ImageGenerationResult, ImageOptions } from "./image-generation-result"
 import {
   compact,
@@ -29,7 +37,25 @@ import {
 
 const DEFAULT_MODEL_OPTION = "__default__"
 const MODEL_TARGET_PREFIX = "model:"
+
 const INVOCATION_MAX_OUTPUT_TOKENS = 1_024
+const DECISION_STATE_SAMPLE = "The checkout service has returned HTTP 500 errors for 15 minutes. Customers cannot complete purchases, and the issue affects all regions."
+const DECISION_STATE_JSON_SAMPLE = JSON.stringify({
+  service: "checkout",
+  error: "HTTP 500",
+  duration_minutes: 15,
+  impact: "Customers cannot complete purchases in any region",
+}, null, 2)
+
+function InvocationModelLogo({ model, runtime }: { model: ManagedModel; runtime?: ModelRuntime }) {
+  if (model.capabilities.includes("decision")) return <MicrosoftLogo size={16} />
+  if (runtime?.runtime_kind === "foundry" && model.upstream_model_id === "model-router") return <FoundryLogo size={16} />
+  if (runtime?.runtime_kind === "openai_compatible" && runtime.config.api_format === "openai_chat") {
+    return <ModelVendorLogo value={modelVendorFromMetadata(runtime.config, `${model.model_key} ${model.display_name} ${runtime.name}`)} size={16} />
+  }
+  const family = modelInventoryFamily(model)
+  return family === "generic" ? <Cpu aria-hidden="true" size={16} /> : <ModelVendorLogo value={family === "claude" ? "anthropic" : family} size={16} />
+}
 
 export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalog }) {
   const queryClient = useQueryClient();
@@ -67,17 +93,55 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
     if (users.some((person) => person.id === userId)) return;
     setUserId(sessionUser?.email ?? users[0]?.id ?? "");
   }, [sessionUser?.email, userId, users]);
+  const [mode, setMode] = useState<"chat" | "image" | "decision">("chat");
+  const imageMode = mode === "image";
+  const decisionMode = mode === "decision";
+
   const [invocationTarget, setInvocationTarget] = useState(DEFAULT_MODEL_OPTION);
-  const [imageMode, setImageMode] = useState(false);
-  const [imageOptions, setImageOptions] = useState<ImageGenerationOptions>({});
-  const [imageResult, setImageResult] = useState<ImageInvocationResponse | null>(null);
+  const [gatewaySelection, setGatewaySelection] = useState<GatewaySelection>({ targetId: null, deploymentId: null });
+  const selectedDirectModelId = invocationTarget.startsWith(MODEL_TARGET_PREFIX)
+    ? invocationTarget.slice(MODEL_TARGET_PREFIX.length) : "";
+  const explicitGatewayAvailable = registry.data?.explicit_gateway_selection_supported === true;
+  const topology = useQuery({ ...finopsQueries.apimTargetTopologies(), enabled: explicitGatewayAvailable && Boolean(selectedDirectModelId) });
+  const invocationGateways = registry.data && selectedDirectModelId
+    ? gatewayInvocationChoices(registry.data.gateways, topology.data ?? null, selectedDirectModelId)
+      .filter(choice => choice.kind === "managed" || registry.data?.self_hosted_gateway_enabled === true)
+    : [];
+  const selectedGateway = invocationGateways.find(choice => choice.targetId === gatewaySelection.targetId && choice.deploymentId === gatewaySelection.deploymentId);
+  const explicitGateway = gatewaySelection.targetId !== null;
+  const observedGatewayStream = topology.data?.items.some(item =>
+    item.target.gateway_profile_id === gatewaySelection.targetId
+    && item.target.capabilities.response_observer === "supported",
+  ) === true;
+  const gatewayReady = !explicitGateway || (explicitGatewayAvailable && !topology.isLoading && !topology.error && Boolean(selectedGateway?.selectable));
+  const [imageOptions, setImageOptions] = useState<ImageGenerationOptions | null>(null);
+  const invocationModel = resolveInvocationModel(
+    registry.data?.models ?? [],
+    invocationTarget === DEFAULT_MODEL_OPTION ? null : selectedDirectModelId,
+    imageMode,
+    decisionMode,
+  );
+  const selectedModelUnavailable = invocationTarget.startsWith(MODEL_TARGET_PREFIX) && !invocationModel;
   const imageProfile = imageMode && invocationTarget.startsWith(MODEL_TARGET_PREFIX)
     ? registry.data?.models.find(model => model.id === invocationTarget.slice(MODEL_TARGET_PREFIX.length))?.image_profile
     : null;
+  const effectiveImageOptions = imageProfile ? imageOptions ?? {} : null;
+  const [imageResult, setImageResult] = useState<ImageInvocationResponse | null>(null);
   const [prompt, setPrompt] = useState(
     "Return one short recommendation for reducing model cost.",
   );
-  const [result, setResult] = useState<(ModelInvocationResponse & { requested_max_output_tokens?: number }) | null>(null);
+  const [stateFormat, setStateFormat] = useState<"text" | "json">("text");
+  const [questions, setQuestions] = useState(JSON.stringify({
+    urgent: { type: "noul", instructions: "Does this incident need urgent attention?" },
+    team: { type: "choice", instructions: "Which team should handle this incident?",
+      criteria: { engineering: "Bugs, errors, and outages", support: "How-to and account questions" } },
+    severity: { type: "score", instructions: "How severe is this incident?",
+      criteria: ["Minor", "Major", "Critical"] },
+  }, null, 2));
+  const [outputLimit, setOutputLimit] = useState(String(INVOCATION_MAX_OUTPUT_TOKENS));
+  const maxOutputTokens = Number(outputLimit);
+  const validOutputLimit = Number.isSafeInteger(maxOutputTokens) && maxOutputTokens >= 1 && maxOutputTokens <= 1_000_000;
+  const [result, setResult] = useState<((ModelInvocationResponse | DecisionInvocationResponse) & { requested_max_output_tokens?: number }) | null>(null);
   const [isInvoking, setIsInvoking] = useState(false);
   const [invokeError, setInvokeError] = useState<string | null>(null);
   const selectUser = (value: string | undefined) => {
@@ -95,6 +159,7 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
     setDepartmentId(nextDepartmentId);
     setProjectId(nextProjectId);
     setAgentId(nextAgentId);
+    setUserId(sessionUser?.email ?? "");
   };
   const selectProject = (value: string | undefined) => {
     const nextProjectId = value ?? "";
@@ -105,16 +170,12 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
     );
   };
   const invoke = async () => {
-    if (!registry.data) return;
-    const selectedModelId = invocationTarget.startsWith(MODEL_TARGET_PREFIX)
-      ? invocationTarget.slice(MODEL_TARGET_PREFIX.length)
-      : "";
-    const candidates = registry.data.models.filter(item => item.enabled && item.capabilities.includes("image_generation") === imageMode);
-    const model = candidates.find(item => item.id === selectedModelId)
-      ?? (imageMode ? undefined : candidates.find(item => item.is_default) ?? candidates[0]);
+    if (!registry.data || !gatewayReady || isInvoking || (mode === "chat" && !validOutputLimit)) return;
+
+    const model = invocationModel;
     if (!model) return;
-    if (imageMode && (registry.data.image_generation_supported !== true
-      || registry.data.image_configuration_schema_version !== 4 || !imageProfile)) return;
+    if (imageMode && (registry.data.image_generation_supported !== true || registry.data.image_configuration_schema_version !== 4 || !model || !imageProfile || !effectiveImageOptions)) return;
+    if (decisionMode && (registry.data.decision_supported !== true || !model)) return;
     const runtime = registry.data.runtimes.find(
       (item) => item.id === model?.runtime_id,
     );
@@ -130,8 +191,9 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
     setImageResult(null);
     try {
       const invocation = {
-        runtime_id: model.runtime_id,
-        model_id: model.id,
+        ...{ runtime_id: explicitGateway ? undefined : model.runtime_id, model_id: model.id,
+              gateway_profile_id: explicitGateway ? gatewaySelection.targetId! : undefined,
+              gateway_deployment_id: explicitGateway ? gatewaySelection.deploymentId! : undefined },
         metadata: {
           organization_id: entities.organizations[0].id,
           organization: entities.organizations[0].name,
@@ -143,7 +205,7 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
           agent: agent.name,
           user_id: invocationUser.id,
           user: invocationUser.name,
-          workflow: imageMode ? "image-generation" : `${project.id}-interactive`,
+          workflow: decisionMode ? "decision" : imageMode ? "image-generation" : `${project.id}-interactive`,
           model_id: model.id,
           // These two are display values, so they must carry names. Sending the registry
           // UUID here put a bare UUID in the model column of every denial trace; the
@@ -153,23 +215,35 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
           // missing registry entry now degrades to unattributed rather than to a UUID.
           model: model.model_key,
           runtime: runtime?.name ?? "unattributed",
-          request_source: imageMode ? "image-invocation-module" : "agent-invocation-module",
+          request_source: decisionMode ? "decision-invocation-module" : imageMode ? "image-invocation-module" : "agent-invocation-module",
           run_id: crypto.randomUUID(),
           turn_index: 1,
         },
         messages: [{ role: "user", content: prompt }],
-        max_output_tokens: INVOCATION_MAX_OUTPUT_TOKENS,
-        stream: true,
+        max_output_tokens: maxOutputTokens,
+        stream: !explicitGateway || observedGatewayStream,
       };
-      if (imageMode) {
+      if (imageMode && model && imageProfile && effectiveImageOptions) {
         const response = await dataSource.generateImage({
-          ...imageOptions, model_id: model.id, runtime_id: model.runtime_id,
+          ...effectiveImageOptions, model_id: model.id, runtime_id: explicitGateway ? undefined : model.runtime_id,
+          gateway_profile_id: explicitGateway ? gatewaySelection.targetId! : undefined,
+          gateway_deployment_id: explicitGateway ? gatewaySelection.deploymentId! : undefined,
           metadata: invocation.metadata, prompt, n: 1, stream: false,
         });
         setImageResult(response);
+      } else if (decisionMode && model) {
+        const response = await dataSource.invokeDecision({
+          model_id: model.id, runtime_id: explicitGateway ? undefined : model.runtime_id,
+          gateway_profile_id: explicitGateway ? gatewaySelection.targetId! : undefined,
+          gateway_deployment_id: explicitGateway ? gatewaySelection.deploymentId! : undefined,
+          metadata: invocation.metadata,
+          state: stateFormat === "json" ? JSON.parse(prompt) : prompt,
+          questions: JSON.parse(questions) as DecisionInvocationRequest["questions"],
+        });
+        setResult(response);
       } else {
         const response = await dataSource.invokeModel(invocation);
-        setResult({ ...response, requested_max_output_tokens: INVOCATION_MAX_OUTPUT_TOKENS });
+        setResult({ ...response, requested_max_output_tokens: maxOutputTokens });
       }
       void invalidateFinOps(queryClient);
     } catch (error) {
@@ -180,10 +254,12 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
   };
   if (registry.isLoading) return <LoadingState label="正在加载调用配置" />;
   if (registry.error) return <ErrorState error={registry.error} />;
-  const models = registry.data?.models.filter(item => item.enabled && item.capabilities.includes("image_generation") === imageMode) ?? [];
+  const models = registry.data?.models.filter((item) => item.enabled && item.capabilities.includes("image_generation") === imageMode
+    && item.capabilities.includes("decision") === decisionMode) ?? [];
   const selectedModel = invocationTarget.startsWith(MODEL_TARGET_PREFIX)
-    ? models.find((model) => model.id === invocationTarget.slice(MODEL_TARGET_PREFIX.length))
+    ? invocationModel
     : null;
+
   const totalTokens = result?.usage
     ? result.usage.input_tokens +
       result.usage.cached_tokens +
@@ -193,30 +269,35 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
   const cacheReadTokens = result?.usage
     ? Math.max(result.usage.cached_tokens - cacheWriteTokens, 0)
     : null;
-  const exhaustedOutputBudget = !!result?.usage && result.usage.output_tokens >= (result.requested_max_output_tokens ?? 64);
-  const imageAvailable = registry.data?.image_generation_supported === true
-    && registry.data.image_configuration_schema_version === 4;
-  const canInvoke = !isInvoking && Boolean(prompt.trim() && userId && projectId && agentId)
-    && (!imageMode || (imageAvailable && Boolean(selectedModel && imageProfile)));
-  const selectMode = (images: boolean) => {
-    if (isInvoking || imageMode === images) return;
-    setImageMode(images);
-    setImageOptions({});
+  const exhaustedOutputBudget = mode === "chat" && !!result?.usage && result.usage.output_tokens >= (result.requested_max_output_tokens ?? 64);
+  const canInvoke = !isInvoking && gatewayReady && Boolean(invocationModel) && (mode !== "chat" || validOutputLimit) && Boolean(prompt.trim() && userId && projectId && agentId)
+    && (!decisionMode || (registry.data?.decision_supported === true && Boolean(questions.trim())))
+    && (!imageMode || (registry.data?.image_generation_supported === true && registry.data.image_configuration_schema_version === 4 && Boolean(selectedModel) && Boolean(imageProfile && effectiveImageOptions)));
+  const selectMode = (next: typeof mode) => {
+    if (next === mode || isInvoking) return;
+    setMode(next);
+    setImageOptions(null);
     setInvocationTarget(DEFAULT_MODEL_OPTION);
+    setGatewaySelection({ targetId: null, deploymentId: null });
     setResult(null);
     setImageResult(null);
     setInvokeError(null);
-    setPrompt("");
+    setPrompt(next === "decision" ? (stateFormat === "json" ? DECISION_STATE_JSON_SAMPLE : DECISION_STATE_SAMPLE) : "");
+  };
+  const selectStateFormat = (next: typeof stateFormat) => {
+    setStateFormat(next);
+    if (!prompt.trim() || prompt === DECISION_STATE_SAMPLE || prompt === DECISION_STATE_JSON_SAMPLE) {
+      setPrompt(next === "json" ? DECISION_STATE_JSON_SAMPLE : DECISION_STATE_SAMPLE);
+    }
   };
   return (
     <div className="invoke-layout">
       <section className="finops-panel">
         <PanelTitle title="调用参数" meta="在线模型" />
         <div className="invoke-modebar"><ButtonGroup className="usage-metric-segment" aria-label="调用模式">
-          <button type="button" aria-pressed={!imageMode} className={!imageMode ? "active" : ""}
-            disabled={isInvoking} onClick={() => selectMode(false)}><MessageSquare size={14} />对话</button>
-          <button type="button" aria-pressed={imageMode} className={imageMode ? "active" : ""}
-            disabled={isInvoking} onClick={() => selectMode(true)}><ImageIcon size={14} />文生图</button>
+          <button type="button" className={mode === "chat" ? "active" : ""} aria-pressed={mode === "chat"} disabled={isInvoking} onClick={() => selectMode("chat")}><MessageSquare size={14} />对话</button>
+          <button type="button" className={imageMode ? "active" : ""} aria-pressed={imageMode} disabled={isInvoking} onClick={() => selectMode("image")}><ImageIcon size={14} />文生图</button>
+          {registry.data?.decision_supported === true && <button type="button" className={decisionMode ? "active" : ""} aria-pressed={decisionMode} disabled={isInvoking} onClick={() => selectMode("decision")}><ListChecks size={14} />Decision</button>}
         </ButtonGroup></div>
         <div className="invoke-form">
           <FilterSelect
@@ -249,38 +330,78 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
             <Select
               value={invocationTarget}
               disabled={isInvoking}
-              onValueChange={(next) => {
-                setInvocationTarget(next ?? DEFAULT_MODEL_OPTION);
-                setImageOptions({});
-                setImageResult(null);
-                setResult(null);
-                setInvokeError(null);
-              }}
+              onValueChange={(next) => { setInvocationTarget(next ?? DEFAULT_MODEL_OPTION); setImageOptions(null); setGatewaySelection({ targetId: null, deploymentId: null }); }}
             >
-              <SelectTrigger aria-label="调用目标" title={selectedModel?.display_name ?? (imageMode ? "选择图片模型" : "默认可用模型")}>
+              <SelectTrigger aria-label="调用目标" title={selectedModelUnavailable ? "所选模型不可用" : selectedModel?.display_name ?? "默认可用模型"}>
                 <SelectValue>
-                  {selectedModel?.display_name ?? (imageMode ? "选择图片模型" : "默认可用模型")}
+                  {selectedModel && !selectedModelUnavailable ? <span className="invoke-model-option">
+                    <InvocationModelLogo model={selectedModel} runtime={registry.data?.runtimes.find(runtime => runtime.id === selectedModel.runtime_id)} />
+                    <span>{selectedModel.display_name}</span>
+                  </span> : selectedModelUnavailable ? "所选模型不可用" : (decisionMode ? "选择 Decision 模型" : imageMode ? "选择图片模型" : "默认可用模型")}
                 </SelectValue>
               </SelectTrigger>
-              <SelectContent align="start" alignItemWithTrigger={false}>
+              <SelectContent className="invoke-target-menu" align="start" alignItemWithTrigger={false}>
                 <SelectItem value={DEFAULT_MODEL_OPTION}>
-                  {imageMode ? "选择图片模型" : "默认可用模型"}
+                  {decisionMode ? "选择 Decision 模型" : imageMode ? "选择图片模型" : "默认可用模型"}
                 </SelectItem>
-                {models.map((model) => (
+                <SelectSeparator />
+                <SelectGroup><SelectLabel>直接模型</SelectLabel>{models.map((model) => (
                   <SelectItem key={model.id} value={`${MODEL_TARGET_PREFIX}${model.id}`}>
-                    {model.display_name}
+                    <span className="invoke-model-option">
+                      <InvocationModelLogo model={model} runtime={registry.data?.runtimes.find(runtime => runtime.id === model.runtime_id)} />
+                      <span>{model.display_name}</span>
+                    </span>
                   </SelectItem>
-                ))}
+                ))}</SelectGroup>
+
               </SelectContent>
             </Select>
+            {selectedModelUnavailable && <div className="invoke-error" role="alert">所选模型不可用</div>}
+
           </div>
-          {imageMode && imageProfile && <ImageOptions value={imageOptions} onChange={setImageOptions} disabled={isInvoking} />}
+          {explicitGatewayAvailable && selectedDirectModelId && <>
+            <div className="invoke-select">
+              <span>APIM 实例</span>
+              <Select value={gatewaySelection.targetId ?? DEFAULT_MODEL_OPTION} disabled={isInvoking || topology.isLoading || Boolean(topology.error)} onValueChange={value => {
+                const targetId = value && value !== DEFAULT_MODEL_OPTION ? value : null;
+                const first = invocationGateways.find(choice => choice.targetId === targetId && choice.selectable);
+                setGatewaySelection({ targetId, deploymentId: first?.deploymentId ?? null });
+                setInvokeError(null);
+              }}>
+                <SelectTrigger aria-label="APIM 实例"><SelectValue>{explicitGateway ? registry.data?.gateways.find(item => item.id === gatewaySelection.targetId)?.name ?? "选择 APIM 实例" : "默认路由"}</SelectValue></SelectTrigger>
+                <SelectContent align="start" alignItemWithTrigger={false}>
+                  <SelectItem value={DEFAULT_MODEL_OPTION}>默认路由</SelectItem>
+                  {registry.data?.gateways.filter(target => invocationGateways.some(choice => choice.targetId === target.id)).map(target => <SelectItem value={target.id} key={target.id}>{target.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            {explicitGateway && <div className="invoke-select">
+              <span>Gateway</span>
+              <Select value={gatewaySelection.deploymentId} disabled={isInvoking || topology.isLoading || Boolean(topology.error)} onValueChange={value => setGatewaySelection(current => ({ ...current, deploymentId: value }))}>
+                <SelectTrigger aria-label="Gateway"><SelectValue>{selectedGateway?.name ?? "选择 Gateway API"}</SelectValue></SelectTrigger>
+                <SelectContent align="start" alignItemWithTrigger={false}>
+                  {invocationGateways.filter(choice => choice.targetId === gatewaySelection.targetId).map(choice => <SelectItem key={choice.value} value={choice.deploymentId!} disabled={!choice.selectable} title={choice.reason ?? choice.endpoint ?? undefined}>{choice.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>}
+            {topology.error && <div className="invoke-error" role="alert">{queryError(topology.error)}</div>}
+            {explicitGateway && !topology.isLoading && !gatewayReady && <div className="invoke-error" role="alert">请选择可用的 Gateway API。</div>}
+          </>}
+          {imageMode && imageProfile && effectiveImageOptions && <ImageOptions value={effectiveImageOptions} onChange={setImageOptions} disabled={isInvoking} />}
           {imageMode && registry.data?.image_configuration_schema_version !== 4 && <div className="invoke-error" role="alert">后端尚未支持图像参数透传</div>}
+          {mode === "chat" && <label className="invoke-select">
+            <span>最大输出 Tokens</span>
+            <Input type="number" aria-label="最大输出 Tokens" min={1} max={1_000_000} step={1} value={outputLimit} disabled={isInvoking} aria-invalid={!validOutputLimit} onChange={event => setOutputLimit(event.target.value)} />
+          </label>}
           <div className="invoke-prompt">
-            <span>Prompt</span>
+            <span>{decisionMode ? "State" : "Prompt"}</span>
+            {decisionMode && <ButtonGroup className="usage-metric-segment invoke-state-format" aria-label="State 格式">
+              <button type="button" className={stateFormat === "text" ? "active" : ""} aria-pressed={stateFormat === "text"} disabled={isInvoking} onClick={() => selectStateFormat("text")}>Text</button>
+              <button type="button" className={stateFormat === "json" ? "active" : ""} aria-pressed={stateFormat === "json"} disabled={isInvoking} onClick={() => selectStateFormat("json")}>JSON</button>
+            </ButtonGroup>}
             <div className="invoke-composer">
               <textarea
-                aria-label="Prompt"
+                aria-label={decisionMode ? "State" : "Prompt"}
                 value={prompt}
                 disabled={isInvoking}
                 onChange={(event) => setPrompt(event.target.value)}
@@ -293,6 +414,10 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
               />
             </div>
           </div>
+          {decisionMode && <label className="invoke-prompt"><span>Questions · JSON</span>
+            <div className="invoke-composer"><textarea aria-label="Questions" value={questions} disabled={isInvoking}
+              spellCheck={false} onChange={event => setQuestions(event.target.value)} rows={10} /></div>
+          </label>}
           {invokeError && (
             <div className="invoke-error" role="alert">
               {invokeError}
@@ -311,18 +436,19 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
         </div>
       </section>
       <section className="finops-panel invoke-result">
-        {imageMode ? <ImageGenerationResult result={imageResult} pending={isInvoking} available={imageAvailable} /> : <>
-        <PanelTitle title="调用结果" />
-        {result ? (
+        {!imageMode && <PanelTitle title="调用结果" />}
+        {imageMode ? <ImageGenerationResult result={imageResult} pending={isInvoking} available={registry.data?.image_generation_supported === true} /> : result ? (
           <div className="invoke-response">
             <dl className="invoke-result-facts">
+
               <div>
                 <dt>网关</dt>
-                <dd>{result.gateway.toUpperCase()}</dd>
+                <dd>{result.native_gateway_id ?? result.gateway.toUpperCase()}</dd>
               </div>
+              {result.gateway_profile_id && <div><dt>APIM 实例</dt><dd>{registry.data?.gateways.find(item => item.id === result.gateway_profile_id)?.name ?? result.gateway_profile_id}</dd></div>}
               <div>
-                <dt>模型</dt>
-                <dd>{result.model}</dd>
+                <dt></dt>
+                <dd>{"selected_model_name" in result ? result.selected_model_name ?? result.model : result.model}</dd>
               </div>
               <div>
                 <dt>运行时</dt>
@@ -362,12 +488,12 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
               </div>
               <div>
                 <dt>Correlation ID</dt>
-                <dd>{result.correlation_id}</dd>
+                <dd>{result.correlation_id ?? "未知"}</dd>
               </div>
             </dl>
             <div className="invoke-result-content">
-              <span>响应内容</span>
-              {result.content.trim()
+              <span>{"answers" in result ? "Answers" : "响应内容"}</span>
+              {"answers" in result ? <pre>{JSON.stringify(result.answers, null, 2)}</pre> : result.content.trim()
                 ? <pre>{result.content}</pre>
                 : <div className="invoke-empty-content"><AlertTriangle size={16} /><div><b>模型未返回可见文本</b><span>{exhaustedOutputBudget ? `本次输出使用了 ${result.usage?.output_tokens ?? 0} Token，已达到请求上限；模型可能在生成可见回答前耗尽了输出预算。后续调用已提高上限。` : "模型返回了 Token 用量，但响应内容为空，请重试或缩短提示词。"}</span></div></div>}
             </div>
@@ -378,7 +504,6 @@ export function AgentInvocation({ entities }: { entities: EnterpriseEntityCatalo
             detail="选择业务元数据和模型后发起请求。"
           />
         )}
-        </>}
       </section>
     </div>
   );

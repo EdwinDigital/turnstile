@@ -55,5 +55,5 @@ def test_creation_credentials_never_enter_dom_or_query_cache() -> None:
     assert "if (failed) primaryKey.current = null" in dialog
     assert "applicationOperationIdFromUrl(window.location.href)" in page
     assert 'createOpen && user?.role === "owner"' in page
-    assert "defaults.monthly_token_limit" in dialog
-    assert "defaults.tokens_per_minute" in dialog
+    assert "inventory?.provisioning_defaults?.monthly_token_limit" in dialog
+    assert "inventory?.provisioning_defaults?.tokens_per_minute" in dialog

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any, cast
+from unittest.mock import Mock
 from uuid import UUID
 
 import httpx
@@ -19,7 +21,9 @@ from tests.backend.model_platform.control_plane_support import (
     foundry_publication,
     publisher_settings,
 )
+from tests.backend.model_platform.test_gateway_targets import TARGET, target
 from turnstile_core.domain.control_plane import (
+    PUBLICATION_REQUIRED_ACTIONS,
     ApiFormat,
     GatewayBackendPoolConfig,
     GatewayBackendPoolMember,
@@ -29,8 +33,26 @@ from turnstile_core.domain.control_plane import (
     GatewayRateLimitResilience,
     ModelCreateTarget,
     RuntimeTarget,
+    publication_model_id,
+)
+from turnstile_core.domain.gateway_targets import (
+    GatewayDeploymentScope,
+    GatewayServingDeployment,
+    SelfHostedGatewayBootstrapRequest,
+    SelfHostedGatewayCreate,
+    SelfHostedGatewayProvisionSpec,
+    gateway_deployment_id_for,
+    self_hosted_gateway_native_id_for,
 )
 from turnstile_core.domain.runtime_models import OAuthClientCredentialsConfig, ProviderTarget
+from turnstile_core.domain.storage_routes import (
+    ConnectionRevision,
+    RouteBackendPool,
+    RouteCredential,
+    RoutePoolMember,
+    RouteScope,
+    document_digest,
+)
 from turnstile_core.integrations.apim_control_plane import (
     ApimPolicyCompiler,
     AuthorizationRequiredError,
@@ -44,10 +66,601 @@ from turnstile_core.integrations.apim_control_plane import (
     RetryablePublicationError,
 )
 from turnstile_core.integrations.apim_control_plane_contract import (
+    CredentialSourceMissingError,
     OAuthCredentialResource,
     OperationResource,
+    PublisherPermissionError,
+    missing_management_actions,
 )
 from turnstile_core.persistence.in_memory import InMemoryRepository
+from turnstile_core.persistence.repository_support import ModelActivationValidator
+
+
+@pytest.mark.parametrize("defect", [
+    None, "wrong-resource", "method", "duplicate", "missing-policy",
+])
+def test_fixed_route_operation_reader_is_bounded_readonly_and_identity_bound(
+    defect: str | None,
+) -> None:
+    settings = publisher_settings()
+    policy = "<policies><inbound><base/></inbound><backend><base/></backend></policies>"
+    requests: list[httpx.Request] = []
+    resource = (f"/subscriptions/{settings.azure_subscription_id}/resourceGroups/"
+                f"{settings.apim_resource_group}/providers/Microsoft.ApiManagement/service/"
+                f"{settings.apim_service_name}/apis/{settings.apim_api_id};rev=1/operations/")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "GET"
+        if request.url.path.endswith("/operations"):
+            row: dict[str, Any] = {
+                "id": resource + "microsoft-decision", "name": "microsoft-decision",
+                "properties": {
+                    "method": "POST", "urlTemplate": "/providers/microsoft/v1/systemone",
+                },
+            }
+            if defect == "wrong-resource":
+                row["id"] = resource.replace(";rev=1", ";rev=2") + "microsoft-decision"
+            if defect == "method":
+                row["properties"]["method"] = "DELETE"
+            return httpx.Response(200, json={
+                "value": [row, row] if defect == "duplicate" else [row],
+            })
+        if defect == "missing-policy":
+            return httpx.Response(404)
+        return httpx.Response(200, json={"properties": {"value": policy}})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as transport:
+        tokens = Mock()
+        tokens.token.return_value = "unit-only-token"
+        client = AzureApimPublisherClient(
+            settings, token_provider=tokens, client=transport,
+        )
+        if defect:
+            with pytest.raises(ValueError, match="Fixed program operation"):
+                client.route_program_operations("1")
+        else:
+            assert client.route_program_operations("1") == {
+                "microsoft-decision": ("POST", "/providers/microsoft/v1/systemone", policy),
+            }
+    assert len(requests) <= 2
+
+
+@pytest.mark.parametrize("defect", [None, "revision", "etag", "release"])
+def test_fixed_program_promotion_creates_only_new_release_with_unchanged_base(
+    defect: str | None,
+) -> None:
+    settings = publisher_settings()
+    requests: list[httpx.Request] = []
+    reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal reads
+        requests.append(request)
+        if request.method == "GET" and request.url.path.endswith("/apis/" + settings.apim_api_id):
+            reads += 1
+            return httpx.Response(200, json={"properties": {
+                "apiRevision": "changed" if defect == "revision" else "1",
+            }}, headers={"ETag": '"changed"' if defect == "etag" and reads == 2 else '"unit"'})
+        if request.method == "GET" and request.url.path.endswith("/releases/unit-release"):
+            return httpx.Response(200 if defect == "release" else 404,
+                                  json={"error": {"code": "ResourceNotFound"}})
+        assert request.method == "PUT" and request.url.path.endswith("/releases/unit-release")
+        assert request.headers["If-None-Match"] == "*"
+        assert "if-match" not in request.headers
+        assert json.loads(request.content)["properties"]["apiId"].endswith(
+            "/apis/" + settings.apim_api_id + ";rev=2",
+        )
+        return httpx.Response(201, json={})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as transport:
+        tokens = Mock()
+        tokens.token.return_value = "unit-only-token"
+        management = AzureApimPublisherClient(settings, token_provider=tokens, client=transport)
+        if defect:
+            with pytest.raises(ValueError, match="Fixed program promotion"):
+                management.promote_fixed_revision("2", "unit-release", "1")
+        else:
+            management.promote_fixed_revision("2", "unit-release", "1")
+    assert sum(request.method == "PUT" for request in requests) == (0 if defect else 1)
+
+
+def test_fixed_route_backend_properties_preserve_tls_and_reject_unsupported_readback() -> None:
+    transport_adapter = httpx.MockTransport(lambda request: httpx.Response(500))
+    with httpx.Client(transport=transport_adapter) as transport:
+        tokens = Mock()
+        client = AzureApimPublisherClient(
+            publisher_settings(), token_provider=tokens, client=transport,
+        )
+        backend = BackendResource("unit-backend", "unit", "https://unit.example.test", (), None)
+        properties = client.route_backend_properties(backend)
+        assert properties["tls"] == {
+            "validateCertificateChain": True, "validateCertificateName": True,
+        }
+        assert client._pool_resource_values(properties, False) == properties
+        assert client._normalized_duration("P1DT1H1M1S") == 90061
+        assert client._normalized_duration("PT60S") == 60
+        assert client._normalized_duration("PT") == "PT"
+        with pytest.raises(ValueError, match="unsupported properties"):
+            client._pool_resource_values({**properties, "authentication": "invented"}, False)
+        with pytest.raises(ValueError, match="credential header"):
+            client.route_backend_properties(BackendResource("unit", "unit", backend.url,
+                (("X-Key", "unit"), ("x-key", "unit")), None))
+        tokens.token.assert_not_called()
+
+
+def test_route_backend_creation_unknown_is_recoveronly_and_keeps_exact_tls_contract() -> None:
+    settings = publisher_settings().model_copy(update={"apim_gateway_profile_id": APIM_ID})
+    scope = RouteScope(target_id=str(settings.apim_gateway_profile_id), api_id=settings.apim_api_id,
+                        gateway_id="managed")
+    properties: dict[str, Any] = {"type": "Single", "protocol": "http", "url": "https://unit.example.test",
+                  "tls": {"validateCertificateChain": True, "validateCertificateName": True},
+                  "credentials": {}, "circuitBreaker": None}
+    connection = ConnectionRevision(
+        scope=scope, revision_id=str(UUID(int=31)), backend_id="unit-backend",
+        origin=properties["url"], path="/chat/completions",
+        dependency_sha256=document_digest(properties), credential=RouteCredential(mode="none"),
+    )
+    requests: list[str] = []
+    saved: list[dict[str, Any]] = []
+    observed = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.method)
+        if request.method == "PUT":
+            assert len(saved) == 1 and request.headers["If-None-Match"] == "*"
+            assert json.loads(request.content) == {"properties": properties}
+            raise httpx.ReadTimeout("unit-only unknown result")
+        return (httpx.Response(200, json={"properties": properties}) if observed
+            else httpx.Response(404))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as transport:
+        tokens = Mock()
+        tokens.token.return_value = "unit-only-token"
+        client = AzureApimPublisherClient(settings, token_provider=tokens, client=transport)
+        with pytest.raises(RuntimeError, match="read-only recovery"):
+            client.prepare_route_connection(connection, lambda intent: saved.append(intent))
+        assert requests == ["GET", "PUT", "GET"]
+        observed = True
+        assert client.prepare_route_connection(connection, lambda *_: None,
+                                                recovery_only=True) == connection.dependency_sha256
+        assert requests.count("PUT") == 1
+        properties["tls"]["validateCertificateName"] = False
+        with pytest.raises(ValueError, match="approved dependency"):
+            client.verify_route_connection(connection)
+
+
+def test_route_pool_preparation_caps_four_creates_and_resumes_from_exact_readback() -> None:
+    settings = publisher_settings().model_copy(update={"apim_gateway_profile_id": APIM_ID})
+    scope = RouteScope(target_id=str(APIM_ID), api_id=settings.apim_api_id, gateway_id="managed")
+    rows: dict[str, dict[str, Any]] = {}
+    writes: list[str] = []
+    intents: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            assert len(intents) == len(writes) + 1 and request.headers["If-None-Match"] == "*"
+            writes.append(request.url.path)
+            rows[request.url.path] = json.loads(request.content)["properties"]
+            return httpx.Response(201, json={"properties": rows[request.url.path]})
+        return httpx.Response(200, json={"properties": rows[request.url.path]}) \
+            if request.url.path in rows else httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as transport:
+        tokens = Mock()
+        tokens.token.return_value = "unit-only-token"
+        client = AzureApimPublisherClient(settings, token_provider=tokens, client=transport)
+        backends = tuple(BackendResource(
+            f"unit-member-{index}", "unit", "https://unit.example.test", (), None,
+        ) for index in range(5))
+        pool = RouteBackendPool(members=tuple(RoutePoolMember(
+            runtime_id=str(UUID(int=index + 1)), backend_id=backend.id,
+            dependency_sha256=document_digest(client.route_backend_properties(backend)),
+            priority=0, weight=1,
+        ) for index, backend in enumerate(backends)), rate_limit=GatewayRateLimitResilience(
+            max_attempts_per_request=2, retry_interval_seconds=1, first_fast_retry=True,
+            circuit_breaker=GatewayRateLimitCircuitBreaker(failure_count=1, interval_seconds=60,
+                trip_duration_seconds=60, accept_retry_after=True),
+        ))
+        native_pool = BackendPoolResource(id="unit-pool", title="unit", url="", members=tuple(
+            BackendPoolMemberResource(member.backend_id, member.priority, member.weight)
+            for member in pool.members
+        ))
+        connection = ConnectionRevision(
+            scope=scope, revision_id=str(UUID(int=32)), backend_id="unit-pool",
+            origin="https://unit.example.test", path="/chat/completions", pool=pool,
+            credential=RouteCredential(mode="none"),
+            dependency_sha256=document_digest(client.route_backend_properties(native_pool)))
+        with pytest.raises(RuntimeError, match="slice completed"):
+            client.prepare_route_pool(connection, backends, lambda intent: intents.append(intent))
+        assert len(writes) == 4
+        client.prepare_route_pool(connection, backends, lambda intent: intents.append(intent))
+        assert len(writes) == 6
+        client.prepare_route_pool(connection, backends, lambda intent: intents.append(intent))
+        assert len(writes) == 6
+        assert client.verify_route_pool(connection) == connection.dependency_sha256
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"value": [], "nextLink": "https://example.test/next"},
+    {"value": [{"actions": ["*"], "condition": "unverified"}]},
+    {"value": [{"actions": [None]}]},
+])
+def test_permission_inventory_rejects_incomplete_evidence(payload: object) -> None:
+    with pytest.raises(ValueError):
+        missing_management_actions(payload, PUBLICATION_REQUIRED_ACTIONS)
+
+
+def test_publication_permission_preflight_uses_current_source_and_readonly_recovery() -> None:
+    publication = GatewayControlPlaneService(InMemoryRepository()).publish(
+        bedrock_publication(), "unit-owner",
+    )
+    compiled = ApimPolicyCompiler().compile(publication)
+    required = list(PUBLICATION_REQUIRED_ACTIONS)
+    assert "Microsoft.ApiManagement/service/apis/operations/write" in required
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "GET"
+        assert request.url.path.endswith("/providers/Microsoft.Authorization/permissions")
+        return httpx.Response(200, json={"value": [{"actions": required}]})
+
+    client = AzureApimPublisherClient(
+        publisher_settings(), cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    client.verify_publication_permissions(compiled)
+    required.remove("Microsoft.ApiManagement/service/backends/write")
+    with pytest.raises(PublisherPermissionError) as error:
+        client.verify_publication_permissions(compiled)
+    assert error.value.missing_actions == ("Microsoft.ApiManagement/service/backends/write",)
+    client.verify_publication_permissions(compiled, recovery_only=True)
+    assert len(requests) == 3
+    assert missing_management_actions({"value": [
+        {"actions": ["MICROSOFT.APIMANAGEMENT/*"], "notActions": ["*/write"]},
+        {"actions": ["Microsoft.ApiManagement/service/backends/write"]},
+    ]}, ["Microsoft.ApiManagement/service/apis/read",
+         "Microsoft.ApiManagement/service/backends/write"]) == ()
+
+
+@pytest.mark.parametrize("interrupted", [None, "gateway", "association"])
+@pytest.mark.parametrize("association_status", [200, 204])
+def test_new_self_hosted_gateway_creates_and_recovers_without_duplicate_resources(
+    interrupted: str | None, association_status: int,
+) -> None:
+    settings = publisher_settings().model_copy(update={
+        "azure_subscription_id": str(UUID(int=2)), "apim_resource_group": "unit-group",
+        "apim_service_name": "unit-service", "apim_api_id": "unit-api",
+    })
+    native_id = self_hosted_gateway_native_id_for(TARGET, UUID(int=91))
+    spec = SelfHostedGatewayProvisionSpec(
+        request_id=UUID(int=91), target=target(), native_gateway_id=native_id,
+        deployment_id=gateway_deployment_id_for(TARGET, native_id),
+        configuration=SelfHostedGatewayCreate(
+            display_name="New edge", endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+            endpoint_control_confirmed=True,
+        ),
+    )
+    resources: dict[str, Any] = {}
+    writes: list[str] = []
+    token_requests: list[dict[str, Any]] = []
+    interrupted_once = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal interrupted_once
+        assert request.headers["Authorization"]
+        assert request.url.host == "management.azure.com"
+        path = request.url.path.removeprefix(spec.target.arm_resource_id)
+        if path in {
+            "/providers/Microsoft.Authorization/permissions",
+            f"/gateways/{native_id}/providers/Microsoft.Authorization/permissions",
+        }:
+            return httpx.Response(200, json={"value": [{"actions": ["*"], "notActions": []}]})
+        if path == "":
+            return httpx.Response(200, json={"id": spec.target.arm_resource_id,
+                                           "sku": {"name": "Developer"}})
+        if path == "/apis/unit-api":
+            return httpx.Response(200, json={
+                "id": spec.target.arm_resource_id + path,
+                "properties": {"path": spec.target.api_path},
+            })
+        if path.endswith("/generateToken"):
+            token_requests.append(json.loads(request.content))
+            return httpx.Response(200, json={"value": native_id + "&202601010000&unit-secret"})
+        if request.method == "HEAD":
+            assert path == f"/gateways/{native_id}/apis/unit-api"
+            return httpx.Response(association_status if path in resources else 404)
+        if request.method == "GET":
+            assert "/apis/" not in path
+            if path in resources:
+                return httpx.Response(200, json=resources[path])
+            return httpx.Response(404)
+        assert request.method == "PUT"
+        if path == "/gateways/" + native_id:
+            assert request.headers["if-none-match"] == "*"
+        writes.append(path)
+        resources[path] = {"id": spec.target.arm_resource_id + path, **json.loads(request.content)}
+        step = "association" if "/apis/" in path else "gateway"
+        if interrupted == step and not interrupted_once:
+            interrupted_once = True
+            raise httpx.ReadTimeout("Response lost after server commit", request=request)
+        return httpx.Response(201, json=resources[path])
+
+    client = AzureApimPublisherClient(
+        settings, cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    lease = Mock()
+    if interrupted:
+        with pytest.raises(httpx.ReadTimeout):
+            client.ensure_self_hosted_gateway(spec, lease)
+    client.ensure_self_hosted_gateway(spec, lease)
+    client.ensure_self_hosted_gateway(spec, lease)
+    assert writes == [f"/gateways/{native_id}", f"/gateways/{native_id}/apis/unit-api"]
+    assert lease.call_count == 2
+    bootstrap = client.self_hosted_gateway_bootstrap(
+        spec, SelfHostedGatewayBootstrapRequest(
+            expires_in_hours=24, endpoint_control_confirmed=True,
+        ), "mcr.microsoft.com/azure-api-management/gateway:2.12.1",
+    )
+    assert bootstrap.native_gateway_id == native_id
+    environment_file = bootstrap.environment_file.get_secret_value()
+    assert "GatewayKey " + native_id in environment_file
+    assert "unit-secret" not in repr(bootstrap)
+    assert "unit-secret" not in bootstrap.docker_command
+    assert "chmod 600" in bootstrap.docker_command
+    assert "--env-file" in bootstrap.docker_command
+    assert "config.service.endpoint=https://unit-service.configuration.azure-api.net" in (
+        environment_file
+    )
+    assert token_requests[0]["keyType"] == "primary"
+    assert 23 * 3600 < (bootstrap.expires_at - datetime.now(UTC)).total_seconds() < 24 * 3600
+    assert len(writes) == 2
+
+
+@pytest.mark.parametrize("blocked", [
+    "permission", "foreign", "lease", "permission_shape", "permission_page", "sku", "api",
+])
+def test_gateway_creation_never_overwrites_foreign_resources_or_bypasses_permissions(
+    blocked: str,
+) -> None:
+    settings = publisher_settings().model_copy(update={
+        "azure_subscription_id": str(UUID(int=2)), "apim_resource_group": "unit-group",
+        "apim_service_name": "unit-service", "apim_api_id": "unit-api",
+    })
+    native_id = self_hosted_gateway_native_id_for(TARGET, UUID(int=92))
+    spec = SelfHostedGatewayProvisionSpec(
+        request_id=UUID(int=92), target=target(), native_gateway_id=native_id,
+        deployment_id=gateway_deployment_id_for(TARGET, native_id),
+        configuration=SelfHostedGatewayCreate(
+            display_name="New edge", endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+            endpoint_control_confirmed=True,
+        ),
+    )
+    writes = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(spec.target.arm_resource_id)
+        if request.method != "GET":
+            writes.append(path)
+            raise AssertionError("No ARM write may be issued")
+        if path.endswith("/permissions"):
+            if blocked == "permission_shape":
+                return httpx.Response(200, json={"value": [{"actions": "*"}]})
+            if blocked == "permission_page":
+                return httpx.Response(200, json={"value": [{"actions": ["*"]}],
+                                                "nextLink": "https://foreign.example.test"})
+            return httpx.Response(200, json={"value": [{
+                "actions": ["*"],
+                "notActions": ["*/gateways/write"] if blocked == "permission" else [],
+            }]})
+        if path == "":
+            return httpx.Response(200, json={
+                "id": spec.target.arm_resource_id,
+                "sku": {"name": "StandardV2" if blocked == "sku" else "Developer"},
+            })
+        if path == "/apis/unit-api":
+            resource_id = "wrong" if blocked == "api" else spec.target.arm_resource_id + path
+            return httpx.Response(200, json={
+                "id": resource_id, "properties": {"path": spec.target.api_path},
+            })
+        return httpx.Response(200, json={"id": spec.target.arm_resource_id + path,
+                                        "properties": {"description": "customer-owned"}}) \
+            if blocked == "foreign" else httpx.Response(404)
+
+    client = AzureApimPublisherClient(
+        settings, cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    def lease() -> None:
+        if blocked == "lease":
+            raise RetryablePublicationError("Lease lost")
+
+    with pytest.raises((PolicyCompilationError, RetryablePublicationError)):
+        client.ensure_self_hosted_gateway(spec, lease)
+    assert writes == []
+
+
+@pytest.mark.parametrize("defect", [
+    "foreign", "association", "association_pending", "token_target", "token_newline",
+])
+def test_gateway_bootstrap_rejects_changed_ownership_or_invalid_token(defect: str) -> None:
+    settings = publisher_settings().model_copy(update={
+        "azure_subscription_id": str(UUID(int=2)), "apim_resource_group": "unit-group",
+        "apim_service_name": "unit-service", "apim_api_id": "unit-api",
+    })
+    native_id = self_hosted_gateway_native_id_for(TARGET, UUID(int=93))
+    spec = SelfHostedGatewayProvisionSpec(
+        request_id=UUID(int=93), target=target(), native_gateway_id=native_id,
+        deployment_id=gateway_deployment_id_for(TARGET, native_id),
+        configuration=SelfHostedGatewayCreate(
+            display_name="New edge", endpoint_url=HttpUrl("https://edge.example.test/unit/llm"),
+            endpoint_control_confirmed=True,
+        ),
+    )
+    issued = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(spec.target.arm_resource_id)
+        if path == f"/gateways/{native_id}/providers/Microsoft.Authorization/permissions":
+            assert request.method == "GET"
+            return httpx.Response(200, json={"value": [{"actions": ["*"]}]})
+        if request.method == "GET":
+            assert path == f"/gateways/{native_id}"
+            marker = f"Turnstile gateway {TARGET}/{spec.request_id}"
+            return httpx.Response(200, json={
+                "id": spec.target.arm_resource_id + path,
+                "properties": {"description": "foreign" if defect == "foreign" else marker},
+            })
+        if request.method == "HEAD":
+            assert path == f"/gateways/{native_id}/apis/unit-api"
+            return httpx.Response({"association": 404, "association_pending": 202}.get(defect, 204))
+        assert request.method == "POST" and path == f"/gateways/{native_id}/generateToken"
+        issued.append(path)
+        value = "another&unit-secret" if defect == "token_target" else native_id + "&unit-secret\n"
+        return httpx.Response(200, json={"value": value})
+
+    client = AzureApimPublisherClient(
+        settings, cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    error_type = (
+        RetryablePublicationError
+        if defect in {"association", "association_pending"}
+        else PolicyCompilationError
+    )
+    with pytest.raises(error_type) as error:
+        client.self_hosted_gateway_bootstrap(
+            spec, SelfHostedGatewayBootstrapRequest(
+                expires_in_hours=24, endpoint_control_confirmed=True,
+            ), "mcr.microsoft.com/azure-api-management/gateway:2.12.1",
+        )
+    assert "unit-secret" not in str(error.value)
+    assert len(issued) == (1 if defect.startswith("token_") else 0)
+
+
+@pytest.mark.parametrize("out_of_scope", [False, True])
+def test_candidate_probe_uses_each_gateway_scope_and_records_optional_failure(
+    out_of_scope: bool,
+) -> None:
+    repository = InMemoryRepository()
+    repository.models = []
+    publication = GatewayControlPlaneService(repository).publish(
+        bedrock_publication(), "unit-owner",
+    )
+    endpoints = tuple(GatewayServingDeployment.model_validate({
+        "deployment_id": str(UUID(int=index + 1)), "native_gateway_id": name,
+        "kind": "managed" if name == "managed" else "self_hosted",
+        "endpoint_url": f"https://{name}.example.test/unit/llm", "release_gate": gate,
+    }) for index, (name, gate) in enumerate((("managed", "required"), ("edge", "required"),
+                                           ("optional", "optional"))))
+    binding = publication.desired_spec.bindings[-1].model_copy(update={
+        "logical_model_id": UUID(int=80),
+        "deployment_scope": GatewayDeploymentScope.model_validate({
+            "mode": "selected", "deployment_ids": [endpoints[1].deployment_id],
+        }), "serving_deployments": (endpoints[1],),
+    })
+    spec = publication.desired_spec.model_copy(update={
+        "bindings": [binding], "gateway_deployments": endpoints,
+    })
+    publication = publication.model_copy(update={"desired_spec": spec})
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "optional.example.test":
+            return httpx.Response(503)
+        if request.method == "GET":
+            serves_model = request.url.host == "edge.example.test" or out_of_scope
+            ids = [binding.model.model_key] if serves_model else []
+            return httpx.Response(200, json={"data": [{"id": identity} for identity in ids]})
+        if request.url.host == "managed.example.test":
+            body = json.loads(request.content)
+            assert body["model"] == binding.model.model_key
+            if request.url.path.endswith("/count_tokens"):
+                from turnstile_core.domain.control_plane import COUNT_TOKENS_REJECTIONS
+
+                denial = COUNT_TOKENS_REJECTIONS["unpublished"]
+                return httpx.Response(denial.status_code, json=denial.payload())
+            assert body["stream"] is False and body["max_tokens"] == 8
+            return httpx.Response(400, json={"error": "The model is not published"})
+        assert request.url.host == "edge.example.test"
+        assert request.headers["x-model-id"] == str(binding.logical_model_id)
+        if request.url.path.endswith("/count_tokens"):
+            from turnstile_core.domain.control_plane import COUNT_TOKENS_REJECTIONS
+
+            denial = COUNT_TOKENS_REJECTIONS["unavailable"]
+            return httpx.Response(denial.status_code, json=denial.payload())
+        return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}],
+                                        "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    settings = publisher_settings().model_copy(update={
+        "apim_probe_subscription_key": SecretStr("unit-probe-key"),
+    })
+    client = AzureApimPublisherClient(settings, cast(Any, StubTokenProvider()),
+                                     httpx.Client(transport=httpx.MockTransport(handler)))
+    if out_of_scope:
+        with pytest.raises(RetryablePublicationError, match="outside this Gateway scope"):
+            client.probe_revision("unit-revision", publication)
+        assert len(requests) == 1
+    else:
+        results = client.probe_revision("unit-revision", publication)
+        assert [item.status for item in results] == ["succeeded", "succeeded", "optional_pending"]
+        assert results[-1].error_code == "RetryablePublicationError"
+        assert {request.url.host for request in requests} == {
+            "managed.example.test", "edge.example.test", "optional.example.test",
+        }
+
+
+@pytest.mark.parametrize("tier", ["Developer", "StandardV2"])
+def test_target_inventory_is_read_only_and_whitelists_gateway_fields(tier: str) -> None:
+    settings = publisher_settings().model_copy(update={"azure_subscription_id": str(UUID(int=2))})
+    base = (
+        f"/subscriptions/{settings.azure_subscription_id}"
+        f"/resourceGroups/{settings.apim_resource_group}"
+        f"/providers/Microsoft.ApiManagement/service/{settings.apim_service_name}"
+    )
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        path = request.url.path.removeprefix(base)
+        requests.append(path)
+        if not path:
+            return httpx.Response(200, json={
+                "id": base, "sku": {"name": tier}, "location": "eastus",
+            })
+        if path == f"/apis/{settings.apim_api_id}":
+            return httpx.Response(200, json={"id": base + path,
+                                           "properties": {"path": "unit/llm", "apiRevision": "1"}})
+        if path == "/gateways":
+            return httpx.Response(200, json={"value": [{"id": base + "/gateways/edge",
+                "properties": {"locationData": {"name": "Unit edge"}, "key": "not-in-inventory"}}]})
+        return httpx.Response(200, json={"value": []})
+
+    client = AzureApimPublisherClient(settings, cast(Any, StubTokenProvider()),
+                                     httpx.Client(transport=httpx.MockTransport(handler)))
+    inventory = client.discover_apim_target_inventory(APIM_ID)
+    assert inventory.api_path == "unit/llm"
+    assert "not-in-inventory" not in inventory.model_dump_json()
+    assert inventory.capabilities.table_ledger == "unknown"
+    assert ("/gateways" in requests) == (tier == "Developer")
+    assert len(inventory.gateways) == int(tier == "Developer")
+
+
+def test_target_inventory_rejects_foreign_service_before_any_child_requests() -> None:
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "/subscriptions/foreign/service/other"})
+
+    client = AzureApimPublisherClient(publisher_settings(), cast(Any, StubTokenProvider()),
+                                     httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(PolicyCompilationError, match="another resource identity"):
+        client.discover_apim_target_inventory(APIM_ID)
+    assert len(requests) == 1
 
 
 def test_databricks_oauth_provisions_owned_resources_without_secret_readback() -> None:
@@ -94,6 +707,9 @@ def test_databricks_oauth_provisions_owned_resources_without_secret_readback() -
     assert len(writes) == 3
     client.ensure_oauth_credential(OAuthCredentialResource(config))
     assert len(writes) == 3 and client.oauth_credential_issues(resource) == []
+    intents: list[dict[str, Any]] = []
+    client.prepare_route_oauth(resource, lambda intent: intents.append(intent))
+    assert len(writes) == 3 and intents == []
     assert all("unit-oauth-secret" not in json.dumps(value) for value in resources.values())
     extra_policy = writes[2].rsplit("/", 1)[0] + "/other-identity"
     resources[extra_policy] = {"properties": {
@@ -128,7 +744,7 @@ def test_fixed_image_operation_is_read_only_and_requires_infrastructure_upgrade(
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     operation = OperationResource(
@@ -169,7 +785,7 @@ def test_arm_client_accepts_redacted_existing_backend_headers() -> None:
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -202,7 +818,7 @@ def test_surviving_candidate_failure_requires_a_matching_nontransient_baseline(
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     probe = getattr(client, method_name)
@@ -232,7 +848,7 @@ def test_new_candidate_failure_has_no_baseline_exemption(method_name: str) -> No
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(AuthorizationRequiredError):
@@ -261,7 +877,7 @@ def test_transient_candidate_failure_never_uses_a_baseline_exemption(
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     with pytest.raises(RetryablePublicationError):
@@ -271,7 +887,9 @@ def test_transient_candidate_failure_never_uses_a_baseline_exemption(
             "existing-model",
             baseline_base="https://gateway.example.com/turnstile/llm;rev=current",
         )
-    assert len(requests) == 1
+    assert len(requests) == (3 if status_code == 503 else 1)
+    assert all(";rev=candidate" in request.url.path for request in requests)
+    assert all(request.content == requests[0].content for request in requests)
 
 
 @pytest.mark.parametrize("field", ("max_tokens", "max_completion_tokens"))
@@ -284,7 +902,7 @@ def test_openai_candidate_probe_uses_the_connections_token_field(field: str) -> 
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     client._probe_model(
@@ -313,7 +931,7 @@ def test_arm_client_creates_native_pool_and_rate_limit_breakers() -> None:
     settings = publisher_settings()
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     breaker = BackendCircuitBreakerResource(
@@ -457,7 +1075,7 @@ def test_arm_client_pool_readback_is_immutable_and_idempotent() -> None:
 
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     pool = BackendPoolResource(
@@ -552,7 +1170,7 @@ def test_foundry_candidate_probes_chat_and_responses_before_promotion() -> None:
     )
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -562,10 +1180,15 @@ def test_foundry_candidate_probes_chat_and_responses_before_promotion() -> None:
         request.url.path for request in requests if request.method == "POST"
     ] == [
         "/turnstile/llm;rev=turnstile-test/chat/completions",
-        "/turnstile/llm;rev=turnstile-test/chat/completions",
         "/turnstile/llm;rev=turnstile-test/responses",
         "/turnstile/llm;rev=turnstile-test/responses/compact",
     ]
+    for request in requests:
+        assert request.headers["x-hive-run-id"] == str(publication.id)
+        if request.method == "POST":
+            assert request.headers["x-model-id"] == str(publication_model_id(publication.id, alias))
+            assert request.headers["x-hive-model"] == alias
+            assert "x-hive-runtime" not in request.headers
 
 def test_pool_candidate_probe_covers_every_member_and_operation() -> None:
     repository = InMemoryRepository()
@@ -657,6 +1280,13 @@ def test_pool_candidate_probe_covers_every_member_and_operation() -> None:
                 },
             )
         member_id = request.headers["x-turnstile-pool-member"]
+        assert request.headers["x-hive-run-id"] == str(publication.id)
+        assert request.headers["x-model-id"] == str(
+            publication_model_id(publication.id, binding.model.model_key)
+        )
+        assert request.headers["x-hive-model"] == binding.model.model_key
+        assert request.headers["x-runtime-id"] == str(binding.runtime_id)
+        assert "x-hive-runtime" not in request.headers
         calls.append((member_id, request.url.path.rsplit("/", 1)[-1]))
         if request.url.path.endswith("/responses/compact"):
             return httpx.Response(
@@ -685,7 +1315,7 @@ def test_pool_candidate_probe_covers_every_member_and_operation() -> None:
                 "apim_regression_model_key": binding.model.model_key,
             }
         ),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -768,7 +1398,7 @@ def test_foundry_removal_probe_requires_survivor_and_removed_alias_rejection() -
     )
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -785,6 +1415,14 @@ def test_foundry_removal_probe_requires_survivor_and_removed_alias_rejection() -
     assert probe_headers["x-user-id"] == "system-gateway-publication"
     assert probe_headers["x-hive-user"] == "Turnstile Publisher"
     assert probe_headers["x-hive-workflow"] == "gateway-publication-probe"
+    for request in requests:
+        assert request.headers["x-hive-run-id"] == str(publication.id)
+        if request.method == "POST":
+            alias = json.loads(request.content)["model"]
+            assert request.headers["x-hive-model"] == alias
+            assert request.headers["x-model-id"] == (
+                str(model["id"]) if alias == model["model_key"] else alias
+            )
 
 @pytest.mark.parametrize("api_format", [ApiFormat.OPENAI_CHAT, ApiFormat.ANTHROPIC_MESSAGES])
 @pytest.mark.parametrize("json_body", [False, True], ids=["plain-text", "json"])
@@ -886,7 +1524,7 @@ def test_only_new_model_assignment_denial_is_retryable() -> None:
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -934,12 +1572,16 @@ def test_activation_failure_after_promotion_converges_without_failed_state() -> 
     original_activate = repository.activate_gateway_publication
     failed_once = False
 
-    def flaky_activate(publication_id: UUID, actor: str) -> dict[str, object]:
+    def flaky_activate(
+        publication_id: UUID, actor: str,
+        *, validate_model_activation: ModelActivationValidator | None = None,
+    ) -> dict[str, Any]:
         nonlocal failed_once
         if not failed_once:
             failed_once = True
             raise RuntimeError("database temporarily unavailable")
-        return original_activate(publication_id, actor)
+        return original_activate(publication_id, actor,
+                     validate_model_activation=validate_model_activation)
 
     repository.activate_gateway_publication = flaky_activate  # type: ignore[method-assign]
     converging = worker.run_once("worker-a")
@@ -971,7 +1613,7 @@ def test_arm_client_clones_revision_from_current_api() -> None:
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     client.ensure_revision("turnstile-1-test", "Candidate")
@@ -1010,10 +1652,19 @@ def test_arm_client_reads_current_policy_wire_formats(
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/apis/turnstile-llm"):
             return httpx.Response(200, json={"properties": {"apiRevision": "1"}})
+        if request.method == "HEAD":
+            assert request.url.path.endswith("/apis/turnstile-llm;rev=1/policies/policy")
+            return httpx.Response(200, headers={"ETag": '"original"'})
+        if request.url.path.endswith("/apis/turnstile-llm;rev=1/policies"):
+            assert request.method == "GET" and request.url.params["format"] == "xml"
+            return httpx.Response(200, json={"value": [{
+                "name": "policy", "id": request.url.path + "/policy",
+                "properties": {"format": "xml", "value": expected},
+            }]})
         assert request.url.path.endswith(
             "/apis/turnstile-llm;rev=1/policies/policy"
         )
-        assert request.url.params["format"] == "rawxml"
+        assert request.url.params["format"] == "xml"
         return httpx.Response(
             200,
             text=body,
@@ -1022,24 +1673,68 @@ def test_arm_client_reads_current_policy_wire_formats(
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
+    assert client._policy_response_value(httpx.Response(
+        200, text=body, headers={"Content-Type": content_type},
+    )) == expected
     assert client.current_api_policy() == ("1", expected)
+
+@pytest.mark.parametrize("observed", [
+    None, {"secret": False}, {"secret": True, "provisioningState": "Creating"},
+    {"secret": True, "keyVault": {"secretIdentifier": "https://foreign.test/secret"}},
+])
+def test_named_value_readback_rejects_unready_or_wrong_credential_sources(
+    observed: dict[str, Any] | None,
+) -> None:
+    reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal reads
+        if request.method == "GET":
+            reads += 1
+            return httpx.Response(404) if reads == 1 or observed is None else httpx.Response(
+                200, json={"properties": observed},
+            )
+        assert request.method == "PUT"
+        return httpx.Response(201)
+
+    client = AzureApimPublisherClient(
+        publisher_settings(), cast(Any, StubTokenProvider()),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises((PolicyCompilationError, RetryablePublicationError)):
+        client.ensure_named_value(NamedValueResource(
+            id="unit-value", key_vault_secret_id=None, value="unit-test-credential",
+        ))
+    assert reads == 2
+    with pytest.raises(CredentialSourceMissingError) as missing:
+        AzureApimPublisherClient(
+            publisher_settings(), cast(Any, StubTokenProvider()),
+            httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404))),
+        ).ensure_named_value(NamedValueResource(id="unit-missing", key_vault_secret_id=None))
+    assert missing.value.named_value_id == "unit-missing"
+
 
 def test_arm_client_creates_tls_backend_and_secret_named_values() -> None:
     requests: list[httpx.Request] = []
+    resources: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.method == "GET":
+            if request.url.path in resources:
+                return httpx.Response(200, json=resources[request.url.path])
             return httpx.Response(404, json={"error": {"code": "NotFound"}})
+        if request.method == "PUT":
+            resources[request.url.path] = json.loads(request.content)
         return httpx.Response(201, json={})
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     client.ensure_backend(
@@ -1071,7 +1766,9 @@ def test_arm_client_creates_tls_backend_and_secret_named_values() -> None:
         )
     )
     client.put_operation_policy(
-        "turnstile-1-test", "anthropic-messages", "<policies />"
+        "turnstile-1-test", "anthropic-messages",
+        '<policies><inbound><base/></inbound><backend><forward-request buffer-response="false"/>'
+        '</backend><outbound><base/></outbound><on-error><base/></on-error></policies>',
     )
 
     backend = next(
@@ -1121,8 +1818,10 @@ def test_arm_client_creates_tls_backend_and_secret_named_values() -> None:
             value="one-time-direct-key",
         )
     )
-    policy = requests[-1]
-    assert policy.headers["If-Match"] == "*"
+    policy = next(request for request in requests
+                  if request.method == "PUT" and request.url.path.endswith("/policies/policy"))
+    assert policy.headers["If-None-Match"] == "*"
+    assert "If-Match" not in policy.headers
     assert "bedrock-key" not in policy.content.decode("utf-8")
 
 def test_arm_client_refreshes_an_existing_direct_secret_named_value() -> None:
@@ -1145,7 +1844,7 @@ def test_arm_client_refreshes_an_existing_direct_secret_named_value() -> None:
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -1184,7 +1883,7 @@ def test_arm_client_never_refreshes_another_publications_direct_secret() -> None
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -1315,7 +2014,7 @@ def test_arm_client_inspects_recorded_release_dependencies(
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     result = client.inspect_revision_dependencies(release)
@@ -1536,7 +2235,7 @@ def test_gc_plan_protects_policy_and_pool_references() -> None:
 
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
     evidence = client.plan_release_garbage_collection(
@@ -1580,7 +2279,7 @@ def test_gc_plan_rejects_pagination_outside_the_configured_apim_service() -> Non
 
     client = AzureApimPublisherClient(
         publisher_settings(),
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 
@@ -1619,7 +2318,7 @@ def test_apim_list_accepts_same_service_pagination_on_explicit_https_port() -> N
 
     client = AzureApimPublisherClient(
         settings,
-        StubTokenProvider(),  # type: ignore[arg-type]
+        StubTokenProvider(),
         httpx.Client(transport=httpx.MockTransport(handler)),
     )
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, time
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Any, cast
 
 from turnstile_core.domain.enterprise import (
@@ -61,9 +62,11 @@ class TokenBudgetService:
         self,
         repository: QueryRepository,
         project_model_access: ModelAccessProjector | None = None,
+        *, require_atomic_budget: Callable[[], None] | None = None,
     ) -> None:
         self._repository = repository
         self._project_model_access = project_model_access
+        self._require_atomic_budget = require_atomic_budget
 
     def _publish_model_access(self, user_ids: Sequence[str]) -> None:
         """Push a just-saved policy to the ledger the gateway reads.
@@ -118,6 +121,20 @@ class TokenBudgetService:
         period_days = (period_end - period_start).days
         return round(used_tokens * period_days / elapsed_days)
 
+    @staticmethod
+    def _forecast_usd(
+        used_usd: Decimal, period_start: date, period_end: date, now: datetime,
+    ) -> Decimal:
+        if now.date() >= period_end:
+            return used_usd
+        if now.date() < period_start:
+            return Decimal(0)
+        elapsed_days = max(1, (now.date() - period_start).days + 1)
+        period_days = (period_end - period_start).days
+        return (used_usd * period_days / elapsed_days).quantize(
+            Decimal("0.00000000000001"), rounding=ROUND_HALF_UP,
+        )
+
     def overview(self, period: str, *, include_users: bool = False) -> TokenBudgetResponse:
         period_start, period_end = period_bounds(period)
         budgets = {
@@ -132,10 +149,19 @@ class TokenBudgetService:
             (row["scope_type"], row["scope_id"]): int(row["used_tokens"])
             for row in usage_rows
         }
+        usd_usage = {
+            (row["scope_type"], row["scope_id"]): Decimal(str(row.get("used_usd") or 0))
+            for row in usage_rows
+        }
+        unpriced_usage = {
+            (row["scope_type"], row["scope_id"]): int(row.get("unpriced_usage_count") or 0)
+            for row in usage_rows
+        }
         now = datetime.now(UTC)
         items: list[dict[str, Any]] = []
         risk_items: list[dict[str, Any]] = []
         entities = self._entities()
+        scope_modes: dict[tuple[BudgetScopeType, str], str] = {}
         for scope_type in cast(
             tuple[BudgetScopeType, ...],
             ("organization", "department", "user"),
@@ -151,24 +177,74 @@ class TokenBudgetService:
                 ]
             for entity in scoped_entities:
                 budget = budgets.get((scope_type, entity.id))
-                token_limit = int(budget["token_limit"]) if budget else None
+                parent_type = self._parent_scope.get(scope_type)
+                inherited_mode = (
+                    scope_modes.get((parent_type, entity.parent_id), "tokens")
+                    if parent_type and entity.parent_id else "tokens"
+                )
+                budget_mode = (
+                    budget.get("budget_mode", inherited_mode) if budget else inherited_mode
+                )
+                scope_modes[(scope_type, entity.id)] = budget_mode
+                token_limit = (
+                    int(budget["token_limit"])
+                    if budget and budget_mode == "tokens" and budget["token_limit"] is not None
+                    else None
+                )
+                usd_limit = (
+                    Decimal(str(budget["usd_limit"]))
+                    if budget and budget_mode == "usd" and budget.get("usd_limit") is not None
+                    else None
+                )
                 warning_threshold = (
                     int(budget["warning_threshold_percent"]) if budget else 80
                 )
                 used_tokens = usage.get((scope_type, entity.id), 0)
+                scope_key = (scope_type, entity.id)
+                used_usd = usd_usage.get(scope_key, Decimal(0))
+                unpriced_usage_count = unpriced_usage.get(scope_key, 0)
+                has_unpriced_usage = unpriced_usage_count > 0
                 forecast_tokens = self._forecast_tokens(
                     used_tokens, period_start, period_end, now
                 )
+                forecast_usd = self._forecast_usd(
+                    used_usd, period_start, period_end, now,
+                )
                 usage_percent = (
-                    round(used_tokens / token_limit * 100, 1) if token_limit else None
+                    round(used_tokens / token_limit * 100, 1)
+                    if token_limit
+                    else round(float(used_usd / usd_limit * 100), 1)
+                    if usd_limit is not None and used_usd is not None
+                    else None
                 )
                 forecast_percent = (
                     round(forecast_tokens / token_limit * 100, 1)
                     if token_limit
+                    else round(float(forecast_usd / usd_limit * 100), 1)
+                    if usd_limit is not None and forecast_usd is not None
                     else None
                 )
-                if token_limit is None:
+                remaining_usd = (
+                    usd_limit - used_usd
+                    if usd_limit is not None and used_usd is not None
+                    else None
+                )
+                if budget is None:
                     status = "unallocated"
+                elif (
+                    budget_mode == "usd"
+                    and usd_limit is None
+                ) or (token_limit is None and usd_limit is None):
+                    status = "unverified"
+                elif budget_mode == "usd" and used_usd is not None and usd_limit is not None:
+                    if used_usd >= usd_limit:
+                        status = "exceeded"
+                    elif max(usage_percent or 0, forecast_percent or 0) >= warning_threshold:
+                        status = "warning"
+                    else:
+                        status = "healthy"
+                elif token_limit is None:
+                    status = "unverified"
                 elif used_tokens >= token_limit:
                     status = "exceeded"
                 elif max(usage_percent or 0, forecast_percent or 0) >= warning_threshold:
@@ -180,10 +256,17 @@ class TokenBudgetService:
                     "scope_id": entity.id,
                     "scope_name": entity.name,
                     "parent_scope_id": entity.parent_id,
+                    "budget_mode": budget_mode,
                     "token_limit": token_limit,
+                    "usd_limit": usd_limit,
                     "warning_threshold_percent": warning_threshold,
                     "used_tokens": used_tokens,
                     "remaining_tokens": token_limit - used_tokens if token_limit else None,
+                    "used_usd": used_usd,
+                    "remaining_usd": remaining_usd,
+                    "forecast_usd": forecast_usd,
+                    "usd_cost_available": not has_unpriced_usage,
+                    "unpriced_usage_count": unpriced_usage_count,
                     "usage_percent": usage_percent,
                     "forecast_tokens": forecast_tokens,
                     "forecast_percent": forecast_percent,
@@ -230,7 +313,10 @@ class TokenBudgetService:
             }
             for row in self._repository.list_token_budget_audit(period_start, 50)
             if row["action"] != "updated"
+            or row.get("previous_budget_mode", "tokens")
+            != row.get("new_budget_mode", "tokens")
             or row["previous_token_limit"] != row["new_token_limit"]
+            or row.get("previous_usd_limit") != row.get("new_usd_limit")
             or row["previous_warning_threshold_percent"]
             != row["new_warning_threshold_percent"]
         ]
@@ -321,9 +407,9 @@ class TokenBudgetService:
         if status == "all":
             return True
         if status == "assigned":
-            return item.token_limit is not None
+            return item.token_limit is not None or item.usd_limit is not None
         if status == "unallocated":
-            return item.token_limit is None
+            return item.token_limit is None and item.usd_limit is None
         return item.status == status
 
     def people(
@@ -367,7 +453,9 @@ class TokenBudgetService:
             )
             for item in all_people
         ]
-        assigned_count = sum(item.token_limit is not None for item in all_people)
+        assigned_count = sum(
+            item.token_limit is not None or item.usd_limit is not None for item in all_people
+        )
         unallocated_count = len(all_people) - assigned_count
         risk_count = sum(item.status in {"warning", "exceeded"} for item in all_people)
         model_configured_count = sum(
@@ -381,7 +469,11 @@ class TokenBudgetService:
             and self._matches_people_filter(item, status)
         ]
         allocated = sum(item.token_limit or 0 for item in all_people)
+        allocated_usd = sum(
+            (item.usd_limit or Decimal(0) for item in all_people), Decimal(0)
+        )
         department_limit = department_budget.token_limit if department_budget else None
+        department_usd_limit = department_budget.usd_limit if department_budget else None
         return TokenBudgetPeopleResponse(
             period=period,
             department_id=department_id,
@@ -390,6 +482,12 @@ class TokenBudgetService:
             department_allocated_tokens=allocated,
             department_available_tokens=(
                 department_limit - allocated if department_limit is not None else None
+            ),
+            department_usd_limit=department_usd_limit,
+            department_allocated_usd=allocated_usd if department_usd_limit is not None else None,
+            department_available_usd=(
+                department_usd_limit - allocated_usd
+                if department_usd_limit is not None else None
             ),
             total=len(filtered),
             offset=offset,
@@ -455,9 +553,13 @@ class TokenBudgetService:
 
         selected_ids = {entity.id for entity in selected}
         token_limit: int | None = None
+        usd_limit: Decimal | None = None
         total_allocated: int | None = None
-        entries: list[tuple[str, int]] = []
+        total_usd_allocated: Decimal | None = None
+        entries: list[tuple[str, Any]] = []
         if write.allocation_mode != "preserve":
+            if write.budget_mode == "usd" and self._require_atomic_budget is not None:
+                self._require_atomic_budget()
             department_budget = next(
                 (
                     item
@@ -467,35 +569,64 @@ class TokenBudgetService:
                 ),
                 None,
             )
-            if department_budget is None or department_budget.token_limit is None:
+            if department_budget is None or (
+                department_budget.token_limit is None and department_budget.usd_limit is None
+            ):
                 raise BudgetConflictError(
                     "Assign the department budget before allocating user budgets"
                 )
-            unselected_total = sum(
-                item.token_limit or 0
+            if department_budget.budget_mode != write.budget_mode:
+                raise BudgetConflictError("Parent and child budgets must use the same mode")
+            limit_field = "usd_limit" if write.budget_mode == "usd" else "token_limit"
+            department_limit = getattr(department_budget, limit_field)
+            if department_limit is None:
+                raise BudgetConflictError("Department budget has an incomplete limit")
+            existing_child_limits = [
+                getattr(item, limit_field)
                 for item in user_items.values()
                 if item.scope_id not in selected_ids
+                and (item.token_limit is not None or item.usd_limit is not None)
+            ]
+            if any(value is None for value in existing_child_limits):
+                raise BudgetConflictError("Budget hierarchy has an incomplete limit")
+            unselected_total = sum(
+                (value for value in existing_child_limits if value is not None),
+                Decimal(0) if write.budget_mode == "usd" else 0,
             )
-            available_for_selection = department_budget.token_limit - unselected_total
+            available_for_selection = department_limit - unselected_total
             if write.allocation_mode == "equal_remaining":
-                token_limit = available_for_selection // len(selected)
-                if token_limit < 1:
-                    raise BudgetConflictError(
-                        "The department has no remaining budget to distribute"
-                    )
+                if write.budget_mode == "usd":
+                    usd_limit = (
+                        available_for_selection / len(selected)
+                    ).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+                    if usd_limit < Decimal("0.01"):
+                        raise BudgetConflictError(
+                            "The department has no remaining budget to distribute"
+                        )
+                else:
+                    token_limit = available_for_selection // len(selected)
+                    if token_limit < 1:
+                        raise BudgetConflictError(
+                            "The department has no remaining budget to distribute"
+                        )
             else:
-                if write.token_limit is None:
-                    raise BudgetConflictError(
-                        "token_limit is required for fixed bulk allocation"
-                    )
                 token_limit = write.token_limit
-            total_allocated = token_limit * len(selected)
-            if total_allocated > available_for_selection:
+                usd_limit = write.usd_limit
+            amount_per_user: int | Decimal | None = (
+                usd_limit if write.budget_mode == "usd" else token_limit
+            )
+            if amount_per_user is None:
+                raise BudgetConflictError("A budget limit is required for fixed allocation")
+            total = amount_per_user * len(selected)
+            if total > available_for_selection:
                 raise BudgetConflictError(
-                    "User allocations would exceed the department budget of "
-                    f"{department_budget.token_limit} tokens"
+                    "User allocations would exceed the department budget"
                 )
-            entries = [(entity.id, token_limit) for entity in selected]
+            if write.budget_mode == "usd":
+                total_usd_allocated = cast(Decimal, total)
+            else:
+                total_allocated = cast(int, total)
+            entries = [(entity.id, amount_per_user) for entity in selected]
         try:
             self._repository.bulk_upsert_user_budgets(
                 period_start,
@@ -503,6 +634,7 @@ class TokenBudgetService:
                 entries,
                 write.warning_threshold_percent,
                 changed_by,
+                budget_mode=write.budget_mode,
                 selected_user_ids=[entity.id for entity in selected],
                 model_ids=write.model_ids,
             )
@@ -515,7 +647,9 @@ class TokenBudgetService:
             department_id=department.id,
             updated_count=len(selected),
             token_limit_per_user=token_limit,
+            usd_limit_per_user=usd_limit,
             total_allocated=total_allocated,
+            total_usd_allocated=total_usd_allocated,
             model_policy_updated_count=(
                 len(selected) if write.model_ids is not None else 0
             ),
@@ -536,6 +670,24 @@ class TokenBudgetService:
             for row in self._repository.list_token_budgets(period_start)
         }
         entities = self._entities()
+        amount = write.usd_limit if write.budget_mode == "usd" else write.token_limit
+        if amount is None:
+            raise BudgetConflictError("A budget limit is required")
+        limit_field = "usd_limit" if write.budget_mode == "usd" else "token_limit"
+        previous = budgets.get((scope_type, scope_id))
+        if (self._require_atomic_budget is not None
+            and (write.budget_mode == "usd" or (previous or {}).get("budget_mode") == "usd")):
+            self._require_atomic_budget()
+        if (scope_type == "organization" and previous is not None
+            and previous.get("budget_mode", "tokens") != write.budget_mode):
+            try:
+                self._repository.switch_organization_budget(
+                    period_start, scope_id, write.budget_mode, amount,
+                    write.warning_threshold_percent, changed_by,
+                )
+            except BudgetConstraintViolation as error:
+                raise BudgetConflictError(str(error)) from error
+            return self.overview(period)
 
         parent_type = self._parent_scope.get(scope_type)
         if parent_type is not None:
@@ -544,30 +696,55 @@ class TokenBudgetService:
                 raise BudgetConflictError(
                     f"Assign the {parent_type} budget before allocating {scope_type} budgets"
                 )
-            sibling_total = write.token_limit + sum(
-                int(budgets[(scope_type, sibling.id)]["token_limit"])
+            if parent.get("budget_mode", "tokens") != write.budget_mode:
+                raise BudgetConflictError(
+                    "Parent and child budgets must use the same mode"
+                )
+            siblings = [
+                budgets[(scope_type, sibling.id)]
                 for sibling in entities[scope_type]
                 if sibling.parent_id == entity.parent_id
                 and sibling.id != scope_id
                 and (scope_type, sibling.id) in budgets
+            ]
+            if any(item.get("budget_mode", "tokens") != write.budget_mode for item in siblings):
+                raise BudgetConflictError("Sibling budgets must use the same mode")
+            sibling_limits = [
+                budgets[(scope_type, sibling.id)].get(limit_field)
+                for sibling in entities[scope_type]
+                if sibling.parent_id == entity.parent_id
+                and sibling.id != scope_id
+                and (scope_type, sibling.id) in budgets
+            ]
+            if any(value is None for value in sibling_limits):
+                raise BudgetConflictError("Budget hierarchy has an incomplete limit")
+            sibling_total = amount + sum(
+                value for value in sibling_limits if value is not None
             )
-            if sibling_total > int(parent["token_limit"]):
+            parent_limit = parent.get(limit_field)
+            if parent_limit is None or sibling_total > parent_limit:
                 raise BudgetConflictError(
                     f"{scope_type.title()} allocations would exceed the "
-                    f"{parent_type} budget of {int(parent['token_limit'])} tokens"
+                    f"{parent_type} budget"
                 )
 
         child_type = self._child_scope.get(scope_type)
         if child_type is not None:
-            child_total = sum(
-                int(budgets[(child_type, child.id)]["token_limit"])
+            children = [
+                budgets[(child_type, child.id)]
                 for child in entities[child_type]
                 if child.parent_id == scope_id and (child_type, child.id) in budgets
-            )
-            if child_total > write.token_limit:
+            ]
+            if any(item.get("budget_mode", "tokens") != write.budget_mode for item in children):
+                raise BudgetConflictError("Parent and child budgets must use the same mode")
+            child_limits = [item.get(limit_field) for item in children]
+            if any(value is None for value in child_limits):
+                raise BudgetConflictError("Budget hierarchy has an incomplete limit")
+            child_total = sum(value for value in child_limits if value is not None)
+            if child_total > amount:
                 raise BudgetConflictError(
                     f"The {scope_type} budget cannot be lower than its "
-                    f"{child_total} allocated child tokens"
+                    "allocated child budgets"
                 )
 
         try:
@@ -579,6 +756,8 @@ class TokenBudgetService:
                 write.token_limit,
                 write.warning_threshold_percent,
                 changed_by,
+                budget_mode=write.budget_mode,
+                usd_limit=write.usd_limit,
             )
         except BudgetConstraintViolation as error:
             raise BudgetConflictError(str(error)) from error

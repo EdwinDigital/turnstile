@@ -290,11 +290,9 @@ class AssistantModelChoice(StrictModel):
 class AssistantSettings(AssistantSettingsWrite):
     """The configuration plus what it actually resolves to right now.
 
-    `effective_*` exists because the two can legitimately differ: a pinned model that is
-    later disabled, or moved to a runtime that cannot carry tool calls, stops qualifying
-    and the assistant falls back to automatic selection rather than refusing to answer.
-    That fallback has to be visible somewhere or it is just a setting that quietly does
-    nothing -- `model_available` is what the settings page reads to say so.
+    An unavailable pinned or default model stops analysis without changing the saved
+    selection. An unavailable protocol may fall back on the same eligible model;
+    `model_available` and `api_available` expose these distinct states to the settings page.
 
     `available_models` is served rather than derived in the browser on purpose. Deciding
     which models qualify is a server rule with three parts, one of which is the runtime's

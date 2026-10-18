@@ -3,11 +3,14 @@ from __future__ import annotations
 import threading
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
+from datetime import UTC, datetime
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
+from ..domain.model_availability import ModelAvailabilityConflict
 from ..domain.models import ModelIdentity
 from ..domain.runtime_models import apply_databricks_adoption
 
@@ -21,19 +24,19 @@ class PostgreSqlRegistryRepositoryMixin:
         raise NotImplementedError
 
     def registry(self) -> dict[str, Sequence[dict[str, Any]]]:
-        with self._connection() as connection:
-            gateways = connection.execute(
+        with self._connection() as connection, connection.pipeline():
+            gateway_rows = connection.execute(
                 "SELECT * FROM gateway_profile ORDER BY name"
-            ).fetchall()
-            providers = connection.execute(
+            )
+            provider_rows = connection.execute(
                 """SELECT provider.*,
                                     COALESCE(metadata.brand_key, 'generic') AS brand_key
                      FROM model_provider provider
                      LEFT JOIN model_provider_metadata metadata
                          ON metadata.provider_id = provider.id
                      ORDER BY provider.name"""
-            ).fetchall()
-            runtimes = connection.execute(
+            )
+            runtime_rows = connection.execute(
                 """SELECT runtime.*, provider.name AS provider_name,
                                     gateway.name AS gateway_name,
                                     COALESCE(metadata.brand_key, 'generic') AS brand_key,
@@ -64,11 +67,8 @@ class PostgreSqlRegistryRepositoryMixin:
                          LIMIT 1
                      ) adopted ON TRUE
                      ORDER BY runtime.is_default DESC, runtime.name"""
-            ).fetchall()
-            runtimes = [
-                apply_databricks_adoption(row, row.pop("adopted_config", None)) for row in runtimes
-            ]
-            models = connection.execute(
+            )
+            model_rows = connection.execute(
                 """SELECT model.*, provider.name AS provider_name,
                                     runtime.name AS runtime_name,
                                     COALESCE(metadata.family_key, 'generic') AS family_key,
@@ -92,6 +92,9 @@ class PostgreSqlRegistryRepositoryMixin:
                                     price.price_sync_status,
                                     price.price_sync_message,
                                     price.pending_list_price,
+                                    COALESCE(price.context_price_tiers, '[]'::jsonb)
+                                        AS context_price_tiers,
+                                    price.pending_context_price_tiers,
                                     -- Resolved here rather than in the caller so every reader
                                     -- sees the same answer to "which discount actually applied".
                                     COALESCE(
@@ -106,10 +109,18 @@ class PostgreSqlRegistryRepositoryMixin:
                          ON runtime_price.runtime_id = runtime.id
                      LEFT JOIN managed_model_metadata metadata
                          ON metadata.model_id = model.id
+                     LEFT JOIN apim_target_route_binding serving_route
+                         ON serving_route.logical_model_id = model.id
+                         AND serving_route.apim_target_id = runtime.gateway_profile_id
+                         AND serving_route.runtime_id = runtime.id
+                         AND serving_route.enabled AND serving_route.is_default_serving
                      LEFT JOIN effective_gateway_release effective
                          ON effective.gateway_profile_id = runtime.gateway_profile_id
                      LEFT JOIN gateway_publication publication
-                         ON publication.id = effective.publication_id
+                         ON publication.id = COALESCE(
+                             serving_route.current_publication_id, effective.publication_id)
+                         AND publication.status = 'active'
+                         AND publication.gateway_profile_id = runtime.gateway_profile_id
                      LEFT JOIN LATERAL (
                          SELECT value FROM jsonb_array_elements(
                              COALESCE(publication.desired_spec->'bindings', '[]'::jsonb)
@@ -118,7 +129,14 @@ class PostgreSqlRegistryRepositoryMixin:
                          LIMIT 1
                      ) binding ON TRUE
                      ORDER BY model.is_default DESC, model.display_name"""
-            ).fetchall()
+            )
+            gateways = gateway_rows.fetchall()
+            providers = provider_rows.fetchall()
+            runtimes = [
+                apply_databricks_adoption(row, row.pop("adopted_config", None))
+                for row in runtime_rows.fetchall()
+            ]
+            models = model_rows.fetchall()
         return {
             "gateways": cast(Sequence[dict[str, Any]], gateways),
             "providers": cast(Sequence[dict[str, Any]], providers),
@@ -126,128 +144,9 @@ class PostgreSqlRegistryRepositoryMixin:
             "models": cast(Sequence[dict[str, Any]], models),
         }
 
-    # A sync reads every model, talks to a price feed over the network, then writes. Between the
-    # read and the write someone can open the model and change how it is priced -- switch it back
-    # to manual and type a rate, repoint it, change the discount. The plan carries what it was
-    # made against and every write is guarded by it, so a result that is about to land on a
-    # configuration that no longer exists lands nowhere instead.
-    _PRICE_CONFIG_STILL_MATCHES = """
-        EXISTS (
-            SELECT 1 FROM managed_model_price guard
-            LEFT JOIN model_runtime runtime ON runtime.id = model.runtime_id
-            LEFT JOIN model_runtime_price runtime_price
-                ON runtime_price.runtime_id = runtime.id
-            WHERE guard.model_id = model.id
-              AND guard.price_source = %(expected_source)s
-              AND guard.price_reference IS NOT DISTINCT FROM %(expected_reference)s
-              AND COALESCE(
-                    guard.price_discount_percent, runtime_price.price_discount_percent
-                  ) IS NOT DISTINCT FROM %(expected_discount_percent)s
-        )
-    """
-
-    def apply_model_price_sync(self, updates: Sequence[Mapping[str, Any]]) -> int:
-        written = 0
-        with self._connection() as connection, connection.transaction():
-            connection.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended('model-pricing', 0))"
-            )
-            for update in updates:
-                parameters = dict(update)
-                parameters["pending_list_price"] = (
-                    Jsonb(update["pending_list_price"])
-                    if update.get("pending_list_price") is not None
-                    else None
-                )
-                superseded = False
-                if update.get("writes"):
-                    # The charged rates live on managed_model and always have: they are what
-                    # the billing path reads, and this job is only one of the ways they get
-                    # set. Where they came from is the part that is new.
-                    row = connection.execute(
-                        f"""UPDATE managed_model model SET
-                               input_cost_per_million = %(input_cost_per_million)s,
-                               output_cost_per_million = %(output_cost_per_million)s,
-                               cached_cost_per_million = %(cached_cost_per_million)s,
-                               cache_write_cost_per_million =
-                                   %(cache_write_cost_per_million)s,
-                               updated_at = now()
-                           WHERE model.id = %(model_id)s
-                             AND {self._PRICE_CONFIG_STILL_MATCHES}
-                           RETURNING model.id""",
-                        parameters,
-                    ).fetchone()
-                    if row is None:
-                        superseded = True
-                    else:
-                        written += 1
-
-                if superseded:
-                    # Nothing about the rates changed, so nothing about the baseline should
-                    # either. Only the record of what happened, and only if the row is still
-                    # the one that was planned for.
-                    connection.execute(
-                        """UPDATE managed_model_price SET
-                               price_sync_status = 'superseded',
-                               price_sync_message =
-                                   '同步期间该模型的计价配置被改动，本次结果已作废，未写入',
-                               price_synced_at = now(),
-                               updated_at = now()
-                           WHERE model_id = %(model_id)s""",
-                        parameters,
-                    )
-                    continue
-
-                # The outcome is recorded either way. On a skip the rates stay exactly as they
-                # are and only the record changes, so the registry can say why a model was
-                # passed over instead of going quiet. An UPDATE is enough: a model without a
-                # price row is manual, and the planner never selects one.
-                #
-                # list_* moves only when the sync accepted the price. A figure held back for
-                # review goes to pending_list_price, because a baseline that follows the price
-                # it is meant to gate agrees with it on the second run.
-                connection.execute(
-                    """UPDATE managed_model_price SET
-                           list_input_cost_per_million = CASE WHEN %(writes)s
-                               THEN COALESCE(%(list_input_cost_per_million)s,
-                                             list_input_cost_per_million)
-                               ELSE list_input_cost_per_million END,
-                           list_output_cost_per_million = CASE WHEN %(writes)s
-                               THEN COALESCE(%(list_output_cost_per_million)s,
-                                             list_output_cost_per_million)
-                               ELSE list_output_cost_per_million END,
-                           list_cached_cost_per_million = CASE WHEN %(writes)s
-                               THEN COALESCE(%(list_cached_cost_per_million)s,
-                                             list_cached_cost_per_million)
-                               ELSE list_cached_cost_per_million END,
-                           list_cache_write_cost_per_million = CASE WHEN %(writes)s
-                               THEN COALESCE(%(list_cache_write_cost_per_million)s,
-                                             list_cache_write_cost_per_million)
-                               ELSE list_cache_write_cost_per_million END,
-                           -- Accepting the price clears the proposal; proposing one replaces
-                           -- it; a run that could not read the source leaves the standing
-                           -- proposal alone rather than forgetting what is waiting.
-                           --
-                           -- The cast is load-bearing. This parameter appears only inside
-                           -- `IS NOT NULL` and a CASE branch, so when it is NULL -- which is
-                           -- every ordinary sync -- PostgreSQL has nothing to infer a type
-                           -- from and rejects the statement with AmbiguousParameter.
-                           pending_list_price = CASE
-                               WHEN %(writes)s THEN NULL
-                               WHEN %(pending_list_price)s::jsonb IS NOT NULL
-                                   THEN %(pending_list_price)s::jsonb
-                               ELSE pending_list_price END,
-                           price_sync_status = %(status)s,
-                           price_sync_message = %(message)s,
-                           price_synced_at = now(),
-                           updated_at = now()
-                       WHERE model_id = %(model_id)s""",
-                    parameters,
-                )
-        return written
-
     def create_registry_item(self, kind: str, values: Mapping[str, Any]) -> dict[str, Any]:
         parameters = dict(values)
+        parameters.setdefault("id", uuid4())
         if "config" in parameters:
             parameters["config"] = Jsonb(parameters["config"])
         with self._connection() as connection, connection.transaction():
@@ -256,10 +155,10 @@ class PostgreSqlRegistryRepositoryMixin:
                     connection.execute("UPDATE gateway_profile SET is_default = FALSE")
                 row = connection.execute(
                     """INSERT INTO gateway_profile (
-                               name, implementation, base_url, auth_type,
+                               id, name, implementation, base_url, auth_type,
                                credential_ciphertext, credential_hint, enabled,
                                is_default, config
-                           ) VALUES (%(name)s, %(implementation)s, %(base_url)s,
+                           ) VALUES (%(id)s, %(name)s, %(implementation)s, %(base_url)s,
                                %(auth_type)s, %(credential_ciphertext)s,
                                %(credential_hint)s, %(enabled)s, %(is_default)s,
                                %(config)s) RETURNING *""",
@@ -268,9 +167,9 @@ class PostgreSqlRegistryRepositoryMixin:
             elif kind == "provider":
                 row = connection.execute(
                     """INSERT INTO model_provider (
-                               name, provider_kind, endpoint_url, auth_type,
+                               id, name, provider_kind, endpoint_url, auth_type,
                                credential_ciphertext, credential_hint, enabled, config
-                           ) VALUES (%(name)s, %(provider_kind)s, %(endpoint_url)s,
+                           ) VALUES (%(id)s, %(name)s, %(provider_kind)s, %(endpoint_url)s,
                                %(auth_type)s, %(credential_ciphertext)s,
                                %(credential_hint)s, %(enabled)s, %(config)s)
                            RETURNING *""",
@@ -287,9 +186,9 @@ class PostgreSqlRegistryRepositoryMixin:
                     connection.execute("UPDATE model_runtime SET is_default = FALSE")
                 row = connection.execute(
                     """INSERT INTO model_runtime (
-                               provider_id, gateway_profile_id, name, runtime_kind,
+                               id, provider_id, gateway_profile_id, name, runtime_kind,
                                enabled, is_default, config, allowed_roles
-                           ) VALUES (%(provider_id)s, %(gateway_profile_id)s,
+                           ) VALUES (%(id)s, %(provider_id)s, %(gateway_profile_id)s,
                                %(name)s, %(runtime_kind)s, %(enabled)s,
                                %(is_default)s, %(config)s, %(allowed_roles)s)
                            RETURNING *""",
@@ -323,12 +222,12 @@ class PostgreSqlRegistryRepositoryMixin:
                     )
                 row = connection.execute(
                     """INSERT INTO managed_model (
-                               provider_id, runtime_id, model_key, display_name,
+                               id, provider_id, runtime_id, model_key, display_name,
                                enabled, is_default, capabilities, context_window,
                                input_cost_per_million, output_cost_per_million,
                                cached_cost_per_million, cache_write_cost_per_million,
                                allowed_roles
-                           ) VALUES (%(provider_id)s, %(runtime_id)s, %(model_key)s,
+                           ) VALUES (%(id)s, %(provider_id)s, %(runtime_id)s, %(model_key)s,
                                %(display_name)s, %(enabled)s, %(is_default)s,
                                %(capabilities)s, %(context_window)s,
                                %(input_cost_per_million)s, %(output_cost_per_million)s,
@@ -360,24 +259,13 @@ class PostgreSqlRegistryRepositoryMixin:
                     "price_source": values.get("price_source") or "manual",
                     "price_reference": values.get("price_reference"),
                     "price_discount_percent": values.get("price_discount_percent"),
+                    "context_price_tiers": values.get("context_price_tiers") or [],
                 }
-                # A row only when there is something to say. 'manual' with no reference and no
-                # override is exactly what an absent row means, and every model created before
-                # this migration has no row.
-                if price != {"price_source": "manual", "price_reference": None,
-                             "price_discount_percent": None}:
-                    connection.execute(
-                        """INSERT INTO managed_model_price (
-                               model_id, price_source, price_reference,
-                               price_discount_percent
-                           ) VALUES (%s, %s, %s, %s)""",
-                        (
-                            row["id"],
-                            price["price_source"],
-                            price["price_reference"],
-                            price["price_discount_percent"],
-                        ),
-                    )
+                if price != {
+                    "price_source": "manual", "price_reference": None,
+                    "price_discount_percent": None, "context_price_tiers": [],
+                }:
+                    price = self._write_price(connection, kind, row["id"], values)
                 row = {**row, **metadata, **price}
             else:
                 raise ValueError(f"Unsupported registry kind: {kind}")
@@ -405,8 +293,8 @@ class PostgreSqlRegistryRepositoryMixin:
                     """SELECT id FROM gateway_publication
                        WHERE gateway_profile_id = %s
                          AND status IN (
-                             'queued', 'validating', 'provisioning', 'building_revision',
-                             'verifying', 'awaiting_authorization', 'promoting', 'rolling_back'
+                           'queued', 'validating', 'provisioning', 'building_revision',
+                           'verifying', 'awaiting_authorization', 'promoting', 'rolling_back'
                          ) LIMIT 1""",
                     (runtime_values["gateway_profile_id"],),
                 ).fetchone()
@@ -440,7 +328,8 @@ class PostgreSqlRegistryRepositoryMixin:
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     (
-                        f"model-connection:{runtime_values['gateway_profile_id']}:"
+                        "model-connection:"
+                        f"{runtime_values['gateway_profile_id']}:"
                         f"{workspace_url.casefold()}",
                     ),
                 )
@@ -448,43 +337,66 @@ class PostgreSqlRegistryRepositoryMixin:
                     """SELECT runtime.id
                        FROM model_runtime runtime
                        WHERE runtime.gateway_profile_id = %s
-                         AND (
-                             lower(rtrim(runtime.config->>'workspace_url', '/')) = lower(%s)
-                             OR EXISTS (
-                                 SELECT 1 FROM effective_gateway_release effective
-                                 JOIN gateway_publication publication
-                                     ON publication.id = effective.publication_id
-                                 CROSS JOIN LATERAL jsonb_array_elements(
-                                     COALESCE(publication.desired_spec->'bindings', '[]'::jsonb)
-                                 ) binding
-                                 WHERE effective.gateway_profile_id = runtime.gateway_profile_id
-                                   AND binding->>'runtime_id' = runtime.id::text
-                                   AND binding->'runtime_config'
-                                       ->>'databricks_connection_adoption' = 'true'
-                                   AND lower(rtrim(
-                                       binding->'runtime_config'->>'workspace_url', '/'
-                                   )) = lower(%s)
-                             )
-                         ) LIMIT 1""",
+                       AND (
+                       lower(rtrim(runtime.config->>'workspace_url', '/')) = lower(%s)
+                       OR EXISTS (
+                       SELECT 1 FROM effective_gateway_release effective
+                       JOIN gateway_publication publication
+                       ON publication.id = effective.publication_id
+                       CROSS JOIN LATERAL jsonb_array_elements(
+                       COALESCE(publication.desired_spec->'bindings', '[]'::jsonb)
+                       ) binding
+                       WHERE effective.gateway_profile_id = runtime.gateway_profile_id
+                       AND binding->>'runtime_id' = runtime.id::text
+                       AND binding->'runtime_config'
+                       ->>'databricks_connection_adoption' = 'true'
+                       AND lower(rtrim(
+                       binding->'runtime_config'->>'workspace_url', '/'
+                       )) = lower(%s)
+                       )
+                       )
+                       LIMIT 1""",
                     (runtime_values["gateway_profile_id"], workspace_url, workspace_url),
                 ).fetchone()
                 if duplicate is not None:
                     raise ValueError("This connection already exists")
             if provider_values is not None:
+                provider_config = dict(provider_values.get("config") or {})
+                provider_vendor = str(
+                    provider_config.get("model_vendor") or "generic"
+                )
+                provider_kind = str(provider_values["provider_kind"])
+                provider_identity = (
+                    f"{provider_kind}:{provider_vendor}"
+                    if provider_kind == "openai_compatible"
+                    else str(provider_values["brand_key"])
+                )
                 connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
-                    (f"model-provider:{provider_values['brand_key']}",),
+                    (f"model-provider:{provider_identity}",),
                 )
-                provider = connection.execute(
-                    """SELECT provider.*
-                       FROM model_provider provider
-                       JOIN model_provider_metadata metadata
-                         ON metadata.provider_id = provider.id
-                       WHERE metadata.brand_key = %s AND provider.enabled
-                       ORDER BY provider.created_at
-                       LIMIT 1""",
-                    (provider_values["brand_key"],),
-                ).fetchone()
+                if provider_kind == "openai_compatible":
+                    provider = connection.execute(
+                        """SELECT provider.*
+                           FROM model_provider provider
+                           WHERE provider.provider_kind = 'openai_compatible'
+                             AND COALESCE(provider.config->>'model_vendor', 'generic') = %s
+                             AND provider.enabled
+                           ORDER BY provider.created_at
+                           LIMIT 1""",
+                        (provider_vendor,),
+                    ).fetchone()
+                else:
+                    provider = connection.execute(
+                        """SELECT provider.*
+                           FROM model_provider provider
+                           JOIN model_provider_metadata metadata
+                             ON metadata.provider_id = provider.id
+                           WHERE metadata.brand_key = %s AND provider.enabled
+                           ORDER BY provider.created_at
+                           LIMIT 1""",
+                        (provider_values["brand_key"],),
+                    ).fetchone()
                 if provider is None:
                     parameters = dict(provider_values)
                     parameters["config"] = Jsonb(parameters["config"])
@@ -535,6 +447,10 @@ class PostgreSqlRegistryRepositoryMixin:
                          SELECT 1 FROM managed_model model
                          WHERE model.runtime_id = runtime.id
                      )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM apim_target_route_binding binding
+                         WHERE binding.runtime_id = runtime.id
+                     )
                    RETURNING runtime.id""",
                 (runtime_id,),
             ).fetchone()
@@ -559,6 +475,10 @@ class PostgreSqlRegistryRepositoryMixin:
                      AND NOT EXISTS (
                          SELECT 1 FROM effective_gateway_release release
                          WHERE release.gateway_profile_id = gateway.id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM apim_target_metadata target
+                         WHERE target.gateway_profile_id = gateway.id
                      )
                    RETURNING gateway.id""",
                 (gateway_id,),
@@ -623,7 +543,6 @@ class PostgreSqlRegistryRepositoryMixin:
                 "runtime_id",
                 "model_key",
                 "display_name",
-                "enabled",
                 "is_default",
                 "capabilities",
                 "context_window",
@@ -643,7 +562,13 @@ class PostgreSqlRegistryRepositoryMixin:
         metadata_values = {key: values[key] for key in metadata_fields if key in values}
         price_fields = {
             "runtime": {"price_discount_percent"},
-            "model": {"price_source", "price_reference", "price_discount_percent"},
+            "model": {
+                "price_source", "price_reference", "price_discount_percent", "context_price_tiers",
+                "list_input_cost_per_million", "list_output_cost_per_million",
+                "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+                "pending_list_price", "pending_context_price_tiers",
+                "price_synced_at", "price_sync_status", "price_sync_message",
+            },
         }.get(kind, set())
         price_values = {key: values[key] for key in price_fields if key in values}
         if not assignments and not metadata_values and not price_values:
@@ -658,6 +583,15 @@ class PostgreSqlRegistryRepositoryMixin:
                     "SELECT pg_advisory_xact_lock(hashtextextended('model-pricing', 0))"
                 )
             if kind == "model":
+                current = connection.execute(
+                    "SELECT enabled FROM managed_model WHERE id = %s FOR UPDATE", (item_id,),
+                ).fetchone()
+                if current is None:
+                    return None
+                if "enabled" in values and values["enabled"] != current["enabled"]:
+                    raise ModelAvailabilityConflict(
+                        "Change model availability through the versioned availability command"
+                    )
                 removing = connection.execute(
                     """SELECT id FROM gateway_publication
                        WHERE publication_kind = 'model_remove'
@@ -690,11 +624,16 @@ class PostgreSqlRegistryRepositoryMixin:
                         (parameters["runtime_id"],),
                     )
             if assignments:
-                row = connection.execute(
-                    f"UPDATE {table} SET {', '.join(assignments)}, updated_at = now() "
-                    "WHERE id = %(id)s RETURNING *",
-                    parameters,
-                ).fetchone()
+                try:
+                    row = connection.execute(
+                        f"UPDATE {table} SET {', '.join(assignments)}, updated_at = now() "
+                        "WHERE id = %(id)s RETURNING *",
+                        parameters,
+                    ).fetchone()
+                except UniqueViolation:
+                    if kind == "gateway" and set(values) == {"name"}:
+                        raise ValueError("Gateway display name is already in use") from None
+                    raise
             else:
                 row = connection.execute(
                     f"SELECT * FROM {table} WHERE id = %s", (item_id,)
@@ -762,6 +701,165 @@ class PostgreSqlRegistryRepositoryMixin:
         self._invalidate_identities()
         return cast(dict[str, Any] | None, row)
 
+    _PRICE_CONFIG_STILL_MATCHES = """
+        EXISTS (
+            SELECT 1 FROM managed_model_price guard
+            LEFT JOIN model_runtime runtime ON runtime.id = model.runtime_id
+            LEFT JOIN model_runtime_price runtime_price
+                ON runtime_price.runtime_id = runtime.id
+            WHERE guard.model_id = model.id
+              AND guard.price_source = %(expected_source)s
+              AND guard.price_reference IS NOT DISTINCT FROM %(expected_reference)s
+              AND guard.context_price_tiers = %(expected_context_price_tiers)s::jsonb
+                            AND jsonb_build_object(
+                    'list_input_cost_per_million',
+                    guard.list_input_cost_per_million,
+                    'list_output_cost_per_million',
+                    guard.list_output_cost_per_million,
+                    'list_cached_cost_per_million',
+                    guard.list_cached_cost_per_million,
+                    'list_cache_write_cost_per_million',
+                    guard.list_cache_write_cost_per_million
+                                    ) = %(expected_list_prices)s::jsonb
+              AND COALESCE(
+                    guard.price_discount_percent, runtime_price.price_discount_percent
+                  ) IS NOT DISTINCT FROM %(expected_discount_percent)s
+        )
+    """
+
+    def apply_model_price_sync(self, updates: Sequence[Mapping[str, Any]]) -> int:
+        written = 0
+        with self._connection() as connection, connection.transaction():
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('model-pricing', 0))"
+            )
+            for update in updates:
+                parameters = dict(update)
+                parameters["pending_list_price"] = (
+                    Jsonb(update["pending_list_price"])
+                    if update.get("pending_list_price") is not None
+                    else None
+                )
+                parameters["expected_context_price_tiers"] = Jsonb(
+                    update.get("expected_context_price_tiers") or []
+                )
+                parameters["expected_list_prices"] = Jsonb(update.get("expected_list_prices") or {
+                    column: None for column in (
+                        "list_input_cost_per_million", "list_output_cost_per_million",
+                        "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+                    )
+                })
+                parameters["context_price_tiers"] = (
+                    Jsonb(update["context_price_tiers"])
+                    if update.get("context_price_tiers") is not None else None
+                )
+                parameters["pending_context_price_tiers"] = (
+                    Jsonb(update["pending_context_price_tiers"])
+                    if update.get("pending_context_price_tiers") is not None else None
+                )
+                superseded = False
+                if update.get("writes"):
+                    # The charged rates live on managed_model and always have: they are what
+                    # the billing path reads, and this job is only one of the ways they get
+                    # set. Where they came from is the part that is new.
+                    row = connection.execute(
+                        f"""UPDATE managed_model model SET
+                               input_cost_per_million = %(input_cost_per_million)s,
+                               output_cost_per_million = %(output_cost_per_million)s,
+                               cached_cost_per_million = %(cached_cost_per_million)s,
+                               cache_write_cost_per_million =
+                                   %(cache_write_cost_per_million)s,
+                               updated_at = now()
+                           WHERE model.id = %(model_id)s
+                             AND {self._PRICE_CONFIG_STILL_MATCHES}
+                           RETURNING model.id""",
+                        parameters,
+                    ).fetchone()
+                    if row is None:
+                        superseded = True
+                    else:
+                        written += 1
+                else:
+                    current = connection.execute(
+                        f"""SELECT model.id FROM managed_model model
+                            WHERE model.id = %(model_id)s
+                              AND {self._PRICE_CONFIG_STILL_MATCHES}""",
+                        parameters,
+                    ).fetchone()
+                    superseded = current is None
+
+                if superseded:
+                    # Nothing about the rates changed, so nothing about the baseline should
+                    # either. Only the record of what happened, and only if the row is still
+                    # the one that was planned for.
+                    connection.execute(
+                        """UPDATE managed_model_price SET
+                               price_sync_status = 'superseded',
+                               price_sync_message =
+                                   '同步期间该模型的计价配置被改动，本次结果已作废，未写入',
+                               price_synced_at = now(),
+                               updated_at = now()
+                           WHERE model_id = %(model_id)s""",
+                        parameters,
+                    )
+                    continue
+
+                # The outcome is recorded either way. On a skip the rates stay exactly as they
+                # are and only the record changes, so the registry can say why a model was
+                # passed over instead of going quiet. An UPDATE is enough: a model without a
+                # price row is manual, and the planner never selects one.
+                #
+                # list_* moves only when the sync accepted the price. A figure held back for
+                # review goes to pending_list_price, because a baseline that follows the price
+                # it is meant to gate agrees with it on the second run.
+                connection.execute(
+                    """UPDATE managed_model_price SET
+                           context_price_tiers = CASE
+                               WHEN %(writes)s AND %(context_price_tiers)s::jsonb IS NOT NULL
+                               THEN %(context_price_tiers)s::jsonb ELSE context_price_tiers END,
+                           pending_context_price_tiers = CASE
+                               WHEN %(writes)s THEN NULL
+                               WHEN %(pending_context_price_tiers)s::jsonb IS NOT NULL
+                               THEN %(pending_context_price_tiers)s::jsonb
+                               ELSE pending_context_price_tiers END,
+                           list_input_cost_per_million = CASE WHEN %(writes)s
+                               THEN COALESCE(%(list_input_cost_per_million)s,
+                                             list_input_cost_per_million)
+                               ELSE list_input_cost_per_million END,
+                           list_output_cost_per_million = CASE WHEN %(writes)s
+                               THEN COALESCE(%(list_output_cost_per_million)s,
+                                             list_output_cost_per_million)
+                               ELSE list_output_cost_per_million END,
+                           list_cached_cost_per_million = CASE WHEN %(writes)s
+                               THEN COALESCE(%(list_cached_cost_per_million)s,
+                                             list_cached_cost_per_million)
+                               ELSE list_cached_cost_per_million END,
+                           list_cache_write_cost_per_million = CASE WHEN %(writes)s
+                               THEN COALESCE(%(list_cache_write_cost_per_million)s,
+                                             list_cache_write_cost_per_million)
+                               ELSE list_cache_write_cost_per_million END,
+                           -- Accepting the price clears the proposal; proposing one replaces
+                           -- it; a run that could not read the source leaves the standing
+                           -- proposal alone rather than forgetting what is waiting.
+                           --
+                           -- The cast is load-bearing. This parameter appears only inside
+                           -- `IS NOT NULL` and a CASE branch, so when it is NULL -- which is
+                           -- every ordinary sync -- PostgreSQL has nothing to infer a type
+                           -- from and rejects the statement with AmbiguousParameter.
+                           pending_list_price = CASE
+                               WHEN %(writes)s THEN NULL
+                               WHEN %(pending_list_price)s::jsonb IS NOT NULL
+                                   THEN %(pending_list_price)s::jsonb
+                               ELSE pending_list_price END,
+                           price_sync_status = %(status)s,
+                           price_sync_message = %(message)s,
+                           price_synced_at = now(),
+                           updated_at = now()
+                       WHERE model_id = %(model_id)s""",
+                    parameters,
+                )
+        return written
+
     @staticmethod
     def _write_price(
         connection: Any,
@@ -796,25 +894,80 @@ class PostgreSqlRegistryRepositoryMixin:
                 "price_discount_percent",
                 current["price_discount_percent"] if current else None,
             ),
+            "context_price_tiers": values.get(
+                "context_price_tiers", (current.get("context_price_tiers") or []) if current else []
+            ),
         }
         # Going back to manual drops the reference with it. Keeping it would leave a model
         # that reads as "following gpt-4.1 mini" while charging whatever was typed.
         if merged["price_source"] == "manual":
             merged["price_reference"] = None
+            merged["context_price_tiers"] = []
+        identity_changed = current is None or any(
+            merged[field] != current.get(field)
+            for field in ("price_source", "price_reference")
+        )
+        tiers_changed = merged["context_price_tiers"] != (
+            (current.get("context_price_tiers") or []) if current else []
+        )
+        for field in (
+            "list_input_cost_per_million", "list_output_cost_per_million",
+            "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+            "pending_list_price", "pending_context_price_tiers",
+            "price_synced_at", "price_sync_status", "price_sync_message",
+        ):
+            previous = current.get(field) if current and not identity_changed else None
+            merged[field] = values.get(field, previous)
+        if identity_changed or tiers_changed:
+            merged["pending_list_price"] = None
+            merged["pending_context_price_tiers"] = None
+        if tiers_changed:
+            merged["price_sync_status"] = "ok" if merged["context_price_tiers"] else None
+            merged["price_sync_message"] = None
+            merged["price_synced_at"] = values.get("price_synced_at", datetime.now(UTC))
+        if merged["price_source"] == "manual":
+            for field in (
+                "list_input_cost_per_million", "list_output_cost_per_million",
+                "list_cached_cost_per_million", "list_cache_write_cost_per_million",
+                "pending_list_price", "pending_context_price_tiers",
+                "price_synced_at", "price_sync_status", "price_sync_message",
+            ):
+                merged[field] = None
+        parameters = {**merged, "model_id": item_id}
+        parameters["context_price_tiers"] = Jsonb(merged["context_price_tiers"])
+        for field in ("pending_list_price", "pending_context_price_tiers"):
+            parameters[field] = Jsonb(merged[field]) if merged[field] is not None else None
         connection.execute(
             """INSERT INTO managed_model_price (
-                   model_id, price_source, price_reference, price_discount_percent
-               ) VALUES (%s, %s, %s, %s)
+                   model_id, price_source, price_reference, price_discount_percent,
+                   context_price_tiers, list_input_cost_per_million,
+                   list_output_cost_per_million, list_cached_cost_per_million,
+                   list_cache_write_cost_per_million, pending_list_price,
+                   pending_context_price_tiers, price_synced_at,
+                   price_sync_status, price_sync_message
+               ) VALUES (
+                   %(model_id)s, %(price_source)s, %(price_reference)s, %(price_discount_percent)s,
+                   %(context_price_tiers)s, %(list_input_cost_per_million)s,
+                   %(list_output_cost_per_million)s, %(list_cached_cost_per_million)s,
+                   %(list_cache_write_cost_per_million)s, %(pending_list_price)s,
+                   %(pending_context_price_tiers)s, %(price_synced_at)s,
+                   %(price_sync_status)s, %(price_sync_message)s
+               )
                ON CONFLICT (model_id) DO UPDATE SET
                  price_source = EXCLUDED.price_source,
                  price_reference = EXCLUDED.price_reference,
                  price_discount_percent = EXCLUDED.price_discount_percent,
+                 context_price_tiers = EXCLUDED.context_price_tiers,
+                 list_input_cost_per_million = EXCLUDED.list_input_cost_per_million,
+                 list_output_cost_per_million = EXCLUDED.list_output_cost_per_million,
+                 list_cached_cost_per_million = EXCLUDED.list_cached_cost_per_million,
+                 list_cache_write_cost_per_million = EXCLUDED.list_cache_write_cost_per_million,
+                 pending_list_price = EXCLUDED.pending_list_price,
+                 pending_context_price_tiers = EXCLUDED.pending_context_price_tiers,
+                 price_sync_status = EXCLUDED.price_sync_status,
+                 price_sync_message = EXCLUDED.price_sync_message,
+                 price_synced_at = EXCLUDED.price_synced_at,
                  updated_at = now()""",
-            (
-                item_id,
-                merged["price_source"],
-                merged["price_reference"],
-                merged["price_discount_percent"],
-            ),
+            parameters,
         )
         return merged

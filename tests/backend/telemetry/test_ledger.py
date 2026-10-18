@@ -37,6 +37,66 @@ PERIOD_START = datetime(2026, 7, 1, tzinfo=UTC)
 USER = "test.user01@contoso.com"
 
 
+@pytest.mark.parametrize("etag", [None, "", " ", "*", '"unit"\r\nInjected: true', 'W/"unit"'])
+def test_table_versioned_read_requires_exact_response_etag(etag: str | None) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and "RowKey='F'" in str(request.url)
+        return httpx.Response(200, headers={"ETag": etag} if etag is not None else {},
+                              json={"Document": "unit"})
+
+    store = TableStorageLedger(
+        "https://ledger.example.test", "UnitLedger", FakeTokenProvider(),
+        httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    if etag == 'W/"unit"':
+        assert store.read_versioned_entity("unit-partition", "F") == ({"Document": "unit"}, etag)
+    else:
+        with pytest.raises(ValueError, match="Table entity version"):
+            store.read_versioned_entity("unit-partition", "F")
+
+
+@pytest.mark.parametrize("status", [204, 404, 409, 412, 500])
+@pytest.mark.parametrize("etag", [None, 'W/"unit-version"'])
+def test_table_conditional_replace_never_falls_back_to_wildcard(
+    status: int, etag: str | None,
+) -> None:
+    calls = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        assert request.method == ("POST" if etag is None else "PUT")
+        assert request.headers.get("If-Match") == etag
+        assert json.loads(request.content) == {
+            "PartitionKey": "exact-partition", "RowKey": "F", "Document": "retained",
+        }
+        return httpx.Response(status)
+
+    store = TableStorageLedger(
+        "https://ledger.example.test", "UnitLedger", FakeTokenProvider(),
+        httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    if status == 500 or (status == 404 and etag is None):
+        with pytest.raises(httpx.HTTPStatusError):
+            store.replace_if_match("exact-partition", "F", {"Document": "retained"}, etag)
+    else:
+        assert store.replace_if_match("exact-partition", "F", {"Document": "retained"}, etag) \
+            is (status == 204)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("etag", ["", " ", "*", "version\nInjected"])
+def test_table_conditional_replace_rejects_unsafe_tokens_before_request(etag: str) -> None:
+    def reject(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("Invalid ETag reached transport")
+
+    store = TableStorageLedger(
+        "https://ledger.example.test", "UnitLedger", FakeTokenProvider(),
+        httpx.Client(transport=httpx.MockTransport(reject)),
+    )
+    with pytest.raises(ValueError, match="Table entity version"):
+        store.replace_if_match("unit", "F", {}, etag)
+
+
 def _finalization(**overrides: Any) -> BudgetReservationFinalization:
     return BudgetReservationFinalization.model_validate(
         {
@@ -117,7 +177,9 @@ def test_finalization_contract_distinguishes_evidence_strengths() -> None:
 
 @pytest.mark.parametrize("status_code", [400, 429, 500])
 def test_v2_terminal_failure_needs_complete_usage(status_code: int) -> None:
-    row = LedgerReservation(reservation_row_key(PERIOD_START, "attempt"), "attempt", 500)
+    row = LedgerReservation(
+        reservation_row_key(PERIOD_START, "attempt"), "attempt", 500, created_at=PERIOD_START
+    )
     missing = ReservationTerminalEvidence(
         correlation_id="attempt",
         observed_at=PERIOD_START,
@@ -140,7 +202,9 @@ def test_v2_terminal_failure_needs_complete_usage(status_code: int) -> None:
 
 
 def test_v2_platform_reservation_uses_bound_gateway_correlation() -> None:
-    row = LedgerReservation(reservation_row_key(PERIOD_START, "platform"), "platform", 500)
+    row = LedgerReservation(
+        reservation_row_key(PERIOD_START, "platform"), "platform", 500, created_at=PERIOD_START
+    )
     evidence = ReservationTerminalEvidence(
         correlation_id="gateway",
         observed_at=PERIOD_START,
@@ -183,6 +247,7 @@ class FakeLedgerStore:
                 correlation_id=row_key.split("|", 2)[2],
                 reserved_tokens=int(entity["Reserved"]),
                 finalization_kind=entity.get("FinalizationKind"),
+                created_at=PERIOD_START,
             )
             for (row_partition, row_key), entity in sorted(self.entities.items())
             if row_partition == partition and row_key.startswith(RESERVATION_PREFIX)
@@ -423,7 +488,10 @@ def test_application_upper_bound_leaves_pending_but_remains_charged() -> None:
     assert state["pending_reserved_tokens"] == 0
     assert state["pending_reservation_count"] == 0
     assert state["finalized_upper_bound_tokens"] == 900
-    assert state["available_tokens"] == 99_100
+    summary = ApplicationAccessService(repository, sync_available=True)._summaries(
+        repository.gateway_applications, PERIOD_START.date(), date(2026, 8, 1),
+    )[0]
+    assert summary.budget is not None and summary.budget.available_tokens == 99_100
     repository.write_token_usage(_usage("app", PERIOD_START, 120, estimated=False), attribution)
     service.run(now + timedelta(minutes=5))
     state = repository.list_gateway_application_ledger_states(
@@ -431,7 +499,10 @@ def test_application_upper_bound_leaves_pending_but_remains_charged() -> None:
     )[0]
     assert state["finalized_upper_bound_tokens"] == 0
     assert state["confirmed_tokens"] == 120
-    assert state["available_tokens"] == 99_880
+    summary = ApplicationAccessService(repository, sync_available=True)._summaries(
+        repository.gateway_applications, PERIOD_START.date(), date(2026, 8, 1),
+    )[0]
+    assert summary.budget is not None and summary.budget.available_tokens == 99_880
     assert (partition, row_key) not in store.entities
 
 
@@ -469,18 +540,19 @@ def test_person_and_application_recovery_share_evidence_not_balances() -> None:
         )
         == 100
     )
-    assert (
-        repository.gateway_application_usage(
-            PERIOD_START.date(), date(2026, 8, 1), [application_id]
-        )
-        == []
+    usage = repository.gateway_application_usage(
+        PERIOD_START.date(), date(2026, 8, 1), [application_id]
     )
-    assert (
-        repository.gateway_application_usage_activity(
-            application_id, PERIOD_START, PERIOD_START + timedelta(days=2), "day", "UTC"
-        )
-        == []
+    assert len(usage) == 1
+    assert usage[0]["application_id"] == application_id
+    assert usage[0]["input_tokens"] == 70 and usage[0]["output_tokens"] == 30
+    assert usage[0]["unpriced_usage_count"] == 1
+    activity = repository.gateway_application_usage_activity(
+        application_id, PERIOD_START, PERIOD_START + timedelta(days=2), "day", "UTC"
     )
+    assert len(activity) == 1
+    assert activity[0]["totals"]["input_tokens"] == 70
+    assert activity[0]["totals"]["output_tokens"] == 30
     assert repository.usage_records == []
 
 
@@ -530,8 +602,10 @@ def test_upper_bound_mark_failure_retries_after_database_evidence_is_saved() -> 
     assert len(repository.budget_reservation_finalizations) == 1
     outcome = service.run(PERIOD_START + timedelta(days=2, minutes=5))
     assert outcome.person_finalizations_written == 0
-    assert outcome.reservations_finalized_upper_bound == 1
+    assert outcome.reservations_finalized_upper_bound == 0
     assert store.entities[(partition, row_key)]["Reserved"] == 900
+    assert store.entities[(partition, row_key)]["FinalizationKind"] == "unverified_upper_bound"
+    assert store.operations.count(("mark", partition, row_key)) == 1
 
 
 def test_usage_arriving_during_projection_keeps_its_reservation_until_next_run() -> None:
@@ -597,7 +671,7 @@ def test_postgres_finalization_batch_serializes_all_evidence_without_per_row_wri
     connection.execute.assert_called_once()
     query, parameters = connection.execute.call_args.args
     assert "jsonb_to_recordset" in query
-    assert "DO NOTHING RETURNING id" in query
+    assert "DO NOTHING RETURNING id" in " ".join(query.split())
     assert isinstance(parameters[0], Jsonb)
     assert parameters[0].obj == [item.model_dump(mode="json") for item in items]
     json.dumps(parameters[0].obj)
@@ -623,7 +697,7 @@ def test_postgres_ledger_reads_bind_all_scope_and_period_parameters() -> None:
             UUID(int=1), PERIOD_START, PERIOD_START + timedelta(days=1), "day", "UTC"
         )
         repository.token_usage_by_budget_scope(PERIOD_START, PERIOD_START + timedelta(days=1))
-    assert connection.execute.call_count == 6
+    assert connection.execute.call_count == 7
     for call in connection.execute.call_args_list:
         query, parameters = call.args
         assert query % parameters
@@ -632,35 +706,44 @@ def test_postgres_ledger_reads_bind_all_scope_and_period_parameters() -> None:
 def test_postgres_snapshot_writes_one_complete_version_guarded_balance() -> None:
     from unittest.mock import MagicMock, patch
 
-    from psycopg.types.json import Jsonb
-
     from turnstile_core.persistence.repository import PostgreSqlOpsDbProxy
 
     state = GatewayApplicationLedgerState(
         period_start=PERIOD_START.date(), application_id=UUID(int=1), token_limit=1000,
         confirmed_tokens=100, pending_reserved_tokens=200, pending_reservation_count=1,
-        finalized_upper_bound_tokens=300, finalized_upper_bound_count=1,
         stale_reservation_count=1, oldest_reservation_at=PERIOD_START,
-        available_tokens=400, snapshot_at=PERIOD_START + timedelta(days=2),
+        available_tokens=700, snapshot_at=PERIOD_START + timedelta(days=2),
     )
+    sidecar = {
+        "period_start": state.period_start, "application_id": state.application_id,
+        "finalized_upper_bound_tokens": 300, "finalized_upper_bound_count": 1,
+        "snapshot_at": state.snapshot_at,
+    }
     repository = object.__new__(PostgreSqlOpsDbProxy)
     connection = MagicMock()
     with patch.object(repository, "_connection") as connect:
         connect.return_value.__enter__.return_value = connection
-        repository.save_gateway_application_ledger_states([state])
-        repository.save_gateway_application_ledger_states([])
-    connection.execute.assert_called_once()
-    query, parameters = connection.execute.call_args.args
-    assert "WHERE existing.snapshot_at < EXCLUDED.snapshot_at" in query
+        repository.save_gateway_application_ledger_snapshot([state], [sidecar])
+        repository.save_gateway_application_ledger_snapshot([], [])
+    connection.transaction.assert_called_once()
+    cursor = connection.cursor.return_value.__enter__.return_value
+    assert cursor.executemany.call_count == 2
+    sidecar_query, sidecar_parameters = cursor.executemany.call_args_list[0].args
+    query, parameters = cursor.executemany.call_args_list[1].args
     assert "ON CONFLICT (period_start, application_id)" in query
-    assert isinstance(parameters[0], Jsonb)
-    assert parameters[0].obj == [state.model_dump(mode="json")]
-    for field in ("pending_reserved_tokens", "finalized_upper_bound_tokens", "available_tokens"):
+    assert "ON CONFLICT (period_start, application_id)" in sidecar_query
+    assert "<= EXCLUDED.snapshot_at" in query and "<= EXCLUDED.snapshot_at" in sidecar_query
+    assert parameters == [state.model_dump(mode="python")]
+    assert sidecar_parameters == [sidecar]
+    for field in ("pending_reserved_tokens", "available_tokens"):
         assert f"{field} = EXCLUDED.{field}" in query
+    assert "finalized_upper_bound_tokens =" in sidecar_query
 
 
 def test_recovery_clamps_evidence_clock_skew_and_preserves_reservation_identity() -> None:
-    reservation = LedgerReservation(reservation_row_key(PERIOD_START, "attempt"), "attempt", 900)
+    reservation = LedgerReservation(
+        reservation_row_key(PERIOD_START, "attempt"), "attempt", 900, created_at=PERIOD_START
+    )
     evidence = ReservationTerminalEvidence(
         correlation_id="attempt", observed_at=PERIOD_START - timedelta(milliseconds=5),
         status_code=200, prompt_tokens=70, completion_tokens=30, total_tokens=100,
@@ -784,7 +867,9 @@ def test_table_upper_bound_mark_preserves_the_original_reservation() -> None:
         requests.append(request)
         return httpx.Response(204)
 
-    reservation = LedgerReservation(reservation_row_key(PERIOD_START, "attempt"), "attempt", 900)
+    reservation = LedgerReservation(
+        reservation_row_key(PERIOD_START, "attempt"), "attempt", 900, created_at=PERIOD_START
+    )
     with (
         httpx.Client(transport=httpx.MockTransport(respond)) as client,
         TableStorageLedger(
@@ -794,7 +879,9 @@ def test_table_upper_bound_mark_preserves_the_original_reservation() -> None:
         assert store.mark_upper_bounds(partition_key(USER, "2026-07"), [reservation]) == 1
     assert requests[0].method == "MERGE"
     assert requests[0].headers["If-Match"] == "*"
-    assert json.loads(requests[0].content) == {"FinalizationKind": "unverified_upper_bound"}
+    assert json.loads(requests[0].content) == {
+        "Reserved": 900, "FinalizationKind": "unverified_upper_bound",
+    }
 
 
 def test_table_partition_discovery_follows_continuation_and_deduplicates() -> None:
@@ -842,22 +929,33 @@ def test_ledger_snapshot_keeps_upper_bound_balance_and_rejects_stale_updates() -
         confirmed_tokens=100,
         pending_reserved_tokens=200,
         pending_reservation_count=1,
-        finalized_upper_bound_tokens=300,
-        finalized_upper_bound_count=1,
         stale_reservation_count=1,
         oldest_reservation_at=PERIOD_START,
-        available_tokens=400,
+        available_tokens=700,
         snapshot_at=datetime(2026, 7, 3, tzinfo=UTC),
     )
-    repository.save_gateway_application_ledger_states([state])
-    stale = state.model_copy(update={"snapshot_at": PERIOD_START, "confirmed_tokens": 0})
-    repository.save_gateway_application_ledger_states([stale])
+    sidecar = {
+        "period_start": state.period_start, "application_id": state.application_id,
+        "finalized_upper_bound_tokens": 300, "finalized_upper_bound_count": 1,
+        "snapshot_at": state.snapshot_at,
+    }
+    repository.save_gateway_application_ledger_snapshot([state], [sidecar])
+    stale = state.model_copy(update={
+        "snapshot_at": PERIOD_START, "confirmed_tokens": 0, "available_tokens": 800,
+    })
+    repository.save_gateway_application_ledger_snapshot([stale], [{
+        **sidecar, "snapshot_at": PERIOD_START,
+        "finalized_upper_bound_tokens": 0, "finalized_upper_bound_count": 0,
+    }])
     assert repository.list_gateway_application_ledger_states(
         PERIOD_START.date(), [UUID(int=1)]
-    ) == [state.model_dump()]
+    ) == [{
+        **state.model_dump(), "finalized_upper_bound_tokens": 300,
+        "finalized_upper_bound_count": 1,
+    }]
     with pytest.raises(ValueError):
         GatewayApplicationLedgerState.model_validate(
-            {**state.model_dump(), "available_tokens": 700}
+            {**state.model_dump(), "available_tokens": 400}
         )
 
 
@@ -983,6 +1081,10 @@ def test_application_ledger_projects_q_c_m_and_settles_exact_reservation() -> No
         "ApplicationStatus": "active",
         "SubscriptionState": "active",
         "ScopeExists": True,
+        "DepartmentId": "unattributed",
+        "DepartmentName": "unattributed",
+        "OrganizationId": "unattributed",
+        "OrganizationName": "unattributed",
     }
     c_write = store.operations.index(("upsert", partition, "C"))
     reservation_delete = store.operations.index(("delete", partition, reservation))
@@ -1476,3 +1578,25 @@ def test_the_inherited_allowance_is_audited_as_its_own_act() -> None:
     assert actors == {"system-budget-roll-forward"}
     # A machine identity with no `@` can never be listed as a person who owns a budget.
     assert not any("@" in actor for actor in actors)
+
+
+def test_usd_user_budgets_are_skipped_by_legacy_token_ledger_snapshot() -> None:
+    from decimal import Decimal
+
+    repository = InMemoryRepository()
+    period = PERIOD_START.date()
+    repository.upsert_token_budget(
+        period, "organization", "org-contoso-global", None, None, 80, "owner",
+        budget_mode="usd", usd_limit=Decimal("500.00"),
+    )
+    repository.upsert_token_budget(
+        period, "department", "department-platform", "org-contoso-global", None, 80, "owner",
+        budget_mode="usd", usd_limit=Decimal("100.00"),
+    )
+    repository.upsert_token_budget(
+        period, "user", USER, "department-platform", None, 80, "owner",
+        budget_mode="usd", usd_limit=Decimal("20.00"),
+    )
+    store = FakeLedgerStore()
+    service = LedgerSyncService(repository, store)
+    assert service.snapshot(datetime(2026, 7, 27, 12, 0, tzinfo=UTC)) == []

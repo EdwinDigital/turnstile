@@ -84,6 +84,11 @@ param ledgerTableEndpoint string
 @description('Ledger table name.')
 param ledgerTableName string = 'TurnstileLedger'
 
+param ledgerTableResourceId string
+param routeTableResourceId string
+param credentialVaultResourceId string
+param platformGovernanceReaderPrincipalIds string[]
+
 @description('Output ceiling reserved when a caller omits max_tokens. OpenAI allows the field to be omitted, which would otherwise leave the reservation unbounded below the real cost.')
 @minValue(1)
 param defaultMaxOutputTokens int = 4096
@@ -123,6 +128,45 @@ var effectiveEmployeeAudience = employeeTokenEnabled ? trim(employeeAudience) : 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
   name: apimName
 }
+
+resource platformGovernance 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'turnstile-platform-governance'
+  properties: {
+    displayName: 'turnstile-platform-governance'
+    secret: false
+    tags: [
+      'turnstile-platform-configuration'
+    ]
+    value: string({
+      management_tenant_id: tenant().tenantId
+      event_hub_resource_id: '${eventHubNamespaceResourceId}/eventhubs/${eventHubName}'
+      ledger_table_resource_id: ledgerTableResourceId
+      route_table_resource_id: routeTableResourceId
+      credential_vault_resource_id: credentialVaultResourceId
+      employee_tenant_id: employeeTenantId
+      employee_client_id: effectiveEmployeeClientId
+      employee_audience: effectiveEmployeeAudience
+      organization_id: employeeOrgId
+      organization_name: employeeOrgName
+      employee_tokens_per_minute: employeeTokensPerMinute
+      default_max_output_tokens: defaultMaxOutputTokens
+      department_map: employeeDepartmentMap
+      client_map: employeeClientMap
+      surface_map: employeeSurfaceMap
+    })
+  }
+}
+
+resource platformGovernanceReaders 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for principalId in platformGovernanceReaderPrincipalIds: {
+  name: guid(platformGovernance.id, principalId, 'platform-governance-reader')
+  scope: platformGovernance
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')
+    principalId: principalId
+    principalType: 'ServicePrincipal'
+  }
+}]
 
 resource legacyFoundryObserverBackend 'Microsoft.ApiManagement/service/backends@2024-05-01' = if (legacyObserverEnabled) {
   parent: apim
@@ -294,6 +338,24 @@ resource product 'Microsoft.ApiManagement/service/products@2024-05-01' = {
 
 resource productApi 'Microsoft.ApiManagement/service/products/apis@2024-05-01' = {
   parent: product
+  name: api.name
+}
+
+resource applicationProduct 'Microsoft.ApiManagement/service/products@2024-05-01' = if (productId != 'turnstile-ai-consumers') {
+  parent: apim
+  name: 'turnstile-ai-consumers'
+  properties: {
+    displayName: 'turnstile-ai-consumers | Turnstile AI'
+    description: 'Product-scoped access to governed model provider integrations.'
+    approvalRequired: false
+    subscriptionRequired: true
+    state: 'published'
+    subscriptionsLimit: 1000
+  }
+}
+
+resource applicationProductApi 'Microsoft.ApiManagement/service/products/apis@2024-05-01' = if (productId != 'turnstile-ai-consumers') {
+  parent: applicationProduct
   name: api.name
 }
 

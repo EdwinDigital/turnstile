@@ -1,6 +1,31 @@
 from tests.support.paths import FRONTEND_SOURCE, read_frontend_styles
 
 
+def test_release_selection_preserves_matching_current_inventory_deep_link() -> None:
+    page = (FRONTEND_SOURCE / "pages/gateway-releases-page.tsx").read_text(encoding="utf-8")
+    assert "if (selectedId && items.some((release) => release.id === selectedId)) return" in page
+    assert "[items, selectedId]" in page
+
+
+def test_rollback_confirmation_uses_destructive_semantics_and_localized_count() -> None:
+    page = (FRONTEND_SOURCE / "pages/gateway-releases-page.tsx").read_text(encoding="utf-8")
+    styles = read_frontend_styles()
+    assert (
+        '<AlertDialogAction variant="destructive" '
+        'className="gateway-release-rollback-confirm"' in page
+    )
+    assert (
+        '<dd data-no-localize>{changeCount(rollbackPreview.data.changes)'
+        '.toLocaleString(getIntlLocale())}</dd>' in page
+    )
+    assert (
+        '.gateway-release-rollback-dialog [data-slot="alert-dialog-action"]:focus-visible' in styles
+    )
+    assert '.dark .gateway-release-rollback-dialog .gateway-release-rollback-confirm' in styles
+    assert 'height: 32px; border: 1px solid transparent; border-radius: 7px;' in styles
+    assert 'pointer-events: none; opacity: .5; cursor: not-allowed;' in styles
+
+
 def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> None:
     app = (FRONTEND_SOURCE / "app.tsx").read_text(encoding="utf-8")
     page = (FRONTEND_SOURCE / "pages/gateway-releases-page.tsx").read_text(
@@ -16,10 +41,9 @@ def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> Non
     styles = read_frontend_styles()
 
     assert '"gateway-releases"' in source
-    assert '{ label: "网关发布", icon: History, page: "gateway-releases" }' in app
-    assert 'page: "model-router"' not in app
+    assert '{ label: "发布历史", icon: History, page: "gateway-releases" }' in app
     assert 'const [gatewayReleaseDrawerOpen, setGatewayReleaseDrawerOpen]' in app
-    assert 'aria-label="打开网关发布列表"' in app
+    assert 'aria-label="打开发布列表"' in app
     assert "releaseDrawerOpen={gatewayReleaseDrawerOpen}" in app
     assert '"/api/v1/model-management/releases?limit=100"' in api
     assert "/integrity`" in api
@@ -34,14 +58,17 @@ def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> Non
     assert 'query.state.data?.role === "in_progress" ? 2_000 : false' in queries
     assert "gatewayReleaseOperation: (id: string | null) => queryOptions" in queries
     assert "const roleLabels" in page
-    assert 'current: "当前版本"' in page
+    assert 'current: "当前基线"' in page
     assert 'immediate_rollback: "立即回滚版本"' in page
     assert 'pinned: "已固定"' in page
     assert 'expired: "已过期"' in page
     assert "相对基础版本的变更" in page
-    assert "<b>已新增</b>" in page
-    assert "<b>已移除</b>" in page
-    assert "<b>已变更</b>" in page
+    assert 'planned ? "拟新增" : "已新增"' in page
+    assert 'planned ? "拟移除" : "已移除"' in page
+    assert 'planned ? "拟变更" : "已变更"' in page
+    assert 'plannedChanges ? "计划变更" : "相对基础版本的变更"' in page
+    assert 'release.audit.some(event => event.to_status === "active")' in page
+    assert '.gateway-release-changes-card[data-state="planned"]' in styles
     assert ">+ {value}</span>" not in page
     assert ">− {value}</span>" not in page
     assert ">~ {value}</span>" not in page
@@ -67,15 +94,27 @@ def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> Non
     assert 'className="gateway-release-detail-grid"' in page
     assert 'className="gateway-release-detail-main"' in page
     assert 'className="gateway-release-summary-card"' in page
-    assert ".gateway-release-detail-head { min-height: 52px;" in styles
+    assert (
+        ".gateway-release-detail-head, .gateway-release-card-head { min-height: 42px;"
+        in styles
+    )
+    assert (
+        ".gateway-release-identity-line h2, .gateway-release-card h2 { "
+        "margin: 0; font-size: 13px; line-height: 18px; font-weight: 600; }" in styles
+    )
     assert "padding: 10px 16px; border-bottom: 1px solid var(--border);" in styles
     assert 'className="gateway-release-identity-line"' in page
     assert "<span><History size={18} /></span>" not in page
     assert (
-        "<h2>Generation {release.generation}</h2><ReleaseRole "
-        'role={release.role} status={release.status} />' in page
+        '<h2>{publicationKindLabels[release.publication_kind]} '
+        '<span data-no-localize>#{release.generation}</span></h2><ReleaseRole '
+        'role={release.role} status={release.status} hideSuperseded={isModelRelease} />' in page
     )
-    assert "release.gateway_name" not in page
+    assert '!isModelRelease && release.role !== "current"' in page
+    assert 'rollback_blockers.includes("model_release_not_gateway_rollback_target")' in page
+    assert '<RollbackConfirmationHeader preview={rollbackPreview.data} />' in page
+    assert '不修改网关 Policy 或切换 Revision' in page
+    assert "release.gateway_name" in page
     assert 'className="gateway-release-card gateway-release-changes-card"' in page
     assert 'className="gateway-release-card gateway-release-dependency-card"' in page
     assert 'className="gateway-release-detail-rail"' in page
@@ -105,13 +144,27 @@ def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> Non
     assert "useIsMobile" in page
     assert 'if (hideSuperseded && role === "superseded") return null' in page
     assert "gateway-release-list-count" not in page
-    assert "ChevronRight" not in page
+    assert "ChevronRight" in page
+    assert "const releaseGroups = useMemo(() =>" in page
+    assert "groups.get(release.gateway_profile_id)" in page
+    assert 'className="gateway-release-group-trigger"' in page
+    assert "aria-expanded={!collapsed}" in page
+    assert '<i aria-hidden="true" />' in page
+    assert "hidden={collapsed}" in page
     assert "Revision pending" not in page
     assert "releaseIndicatorRoles.has(role)" in page
     assert '"rolled_back"' in page.split("const releaseIndicatorRoles", 1)[1].split("]", 1)[0]
     assert '"expired"' in page.split("const releaseIndicatorRoles", 1)[1].split("]", 1)[0]
     assert '"superseded"' not in page.split("const releaseIndicatorRoles", 1)[1].split("]", 1)[0]
-    assert '<ReleaseStatusDot role={release.role} labelled />' in page
+    assert (
+        "const statusLabel = releaseIndicatorRoles.has(release.role) "
+        "? roleLabels[release.role] : undefined" in page
+    )
+    assert (
+        'className="gateway-release-list-leading" data-role={release.role} '
+        'role={statusLabel ? "img" : undefined} aria-label={statusLabel} '
+        'title={statusLabel}><History size={15} aria-hidden="true" />' in page
+    )
     assert '<ReleaseRole role={release.role} status={release.status} hideSuperseded />' not in page
     assert 'value !== "all" && <ReleaseStatusDot role={value} />' in page
     assert '<ReleaseStatusDot role={value} reserve /><span>{roleLabels[value]}</span>' in page
@@ -145,6 +198,16 @@ def test_gateway_releases_are_a_first_class_guarded_model_platform_page() -> Non
     assert ".gateway-release-mobile-maintenance { display: none; }" in styles
     assert ".gateway-release-mobile-maintenance { min-height: 46px; display: flex;" in styles
     assert ".gateway-release-drawer-list.gateway-release-list-pane" in styles
+    assert ".gateway-release-group + .gateway-release-group { margin-top: 8px; }" in styles
+    assert (
+        ".gateway-release-group-trigger > i { min-width: 12px; "
+        "height: 1px; background: var(--border); }" in styles
+    )
+    assert (
+        '.gateway-release-group-trigger[aria-expanded="true"] '
+        ".gateway-release-group-caret" in styles
+    )
+    assert ".gateway-release-group-content[hidden] { display: none; }" in styles
     assert "grid-template-columns: 28px minmax(0, 1fr);" in styles
     assert ".gateway-release-status-dot.current { background: var(--success); }" in styles
     assert ".gateway-release-status-dot.immediate_rollback { background: var(--brand); }" in styles

@@ -1,17 +1,24 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import {
   AlertTriangle,
+  Check,
   ChevronRight,
+  GitBranch,
   Loader2,
+  Route,
   SendHorizontal,
+  ShieldAlert,
   Sparkles,
 } from "lucide-react"
 
 import type {
   AssistantReply,
+
+
   ChartSpec,
 } from "./types"
 import { ChartCard } from "../charts/chart-card"
+import { FINOPS_NAVIGATE_EVENT } from "../../lib/navigation"
 import { translateForLocale, useLocale } from "../../locales/index"
 import { AssistantMarkdown } from "./markdown"
 import type { AssistantController } from "./use-assistant-controller"
@@ -23,6 +30,8 @@ const STARTERS = [
   { emoji: "📈", text: "过去 7 天每个部门的调用量趋势如何？" },
   { emoji: "💰", text: "哪个模型的成本最高？" },
 ]
+
+
 
 const COPILOT_STARTERS = [
   { emoji: "👥", text: "哪些 Copilot 成员最近最活跃？" },
@@ -55,6 +64,29 @@ function ToolSteps({ reply }: { reply: AssistantReply }) {
   </div>
 }
 
+
+
+const OPERATOR_LABELS = {
+  equals: "等于",
+  not_equals: "不等于",
+  contains: "包含",
+  greater_than: "大于",
+  greater_than_or_equal: "大于或等于",
+  less_than: "小于",
+  less_than_or_equal: "小于或等于",
+  exists: "存在",
+} as const
+
+
+
+
+
+
+
+
+
+
+
 /**
  * The transcript and the composer, shared verbatim by the floating panel and the full
  * page so an answer cannot render one way in one surface and another way in the other.
@@ -68,7 +100,9 @@ export function AssistantConversation({ controller, onPin }: {
   const { exchanges, question, setQuestion, asking, submit, inputRef } = controller
   const { locale } = useLocale()
   const isCopilot = controller.source === "github-copilot"
-  const starters = isCopilot ? COPILOT_STARTERS : STARTERS
+  const starters = isCopilot
+    ? COPILOT_STARTERS
+    : STARTERS
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -119,37 +153,7 @@ export function AssistantConversation({ controller, onPin }: {
         </div>
       </div>}
 
-      {exchanges.map((exchange) => <div className="assistant-exchange" key={exchange.id}>
-        {/* Both the question and the answer are content, not product copy: one is typed
-            by a person and the other is written by the model in the language it was
-            asked to use. Running either through the phrase dictionary rewrites
-            recognised fragments and leaves the rest, which reads as corruption. */}
-        <div className="assistant-question" data-no-localize>{exchange.question}</div>
-        {!exchange.reply && !exchange.error && <div className="assistant-thinking">
-          <Loader2 size={13} className="assistant-spin" />
-          <span>正在查询…</span>
-        </div>}
-        {exchange.error && <div className="assistant-error">
-          <AlertTriangle size={13} />
-          <span>{exchange.error}</span>
-        </div>}
-        {exchange.reply && <div className="assistant-answer">
-          <ToolSteps reply={exchange.reply} />
-          {/* The question is not rendered this way: it is typed into a plain textarea,
-              not authored as markdown, so a person asking about `**` or a cost of
-              `$5 * 3` would have their own words silently reformatted. */}
-          {exchange.reply.message && <AssistantMarkdown>{exchange.reply.message}</AssistantMarkdown>}
-          {exchange.reply.charts.map((chart) => <ChartCard
-            key={chart.id}
-            chart={chart}
-            onPin={onPin ? () => onPin({ chart, question: exchange.question }) : undefined}
-          />)}
-          <div className="assistant-meta">
-            {exchange.reply.model} · {exchange.reply.total_tokens.toLocaleString()} Token ·
-            {" "}{(exchange.reply.latency_ms / 1000).toFixed(1)} s
-          </div>
-        </div>}
-      </div>)}
+
     </div>
 
     <div className="assistant-composer">

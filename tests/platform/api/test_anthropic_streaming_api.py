@@ -75,7 +75,8 @@ def test_invocation_console_can_stream_claude_on_the_shared_foundry_runtime(erro
         assert response.headers["content-type"].startswith("application/json")
         body = response.json()
         assert body["content"] == "CLAUDE_STREAM_OK"
-        assert body["correlation_id"] == "claude-api-stream"
+        assert body["correlation_id"] is None
+        assert body["upstream_request_id"] == "claude-api-stream"
         assert body["usage"]["input_tokens"] == 10
         assert body["usage"]["cached_tokens"] == 25
         assert body["usage"]["cache_write_tokens"] == 5

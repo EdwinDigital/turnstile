@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   Activity,
   AlertTriangle,
@@ -85,7 +85,8 @@ import {
 } from "../../../components/ui/dropdown-menu"
 import { usageWindow } from "../api"
 import { getIntlLocale, useLocale, type LocalePreference } from "../../../locales/index"
-import { priceRequests } from "../../../lib/pricing"
+import { estimateRequestCost, hasModelPrices, priceRequests, requestCostCalculation } from "../../../lib/pricing"
+import { useAuth } from "../../../providers/auth-provider"
 import { finopsKeys, finopsQueries, trendDimensionForFilters } from "../queries"
 import type {
   AnomalyRule,
@@ -158,7 +159,7 @@ export function FinOpsDashboard({
   const registryQuery = useQuery(finopsQueries.registry())
   const filters = useMemo<UsageFilters>(() => ({ ...usageWindow(days), ...scope }), [days, scope])
   const entities = entityQuery.data
-  const unpricedModels = registryQuery.data?.models.filter((model) => model.enabled && (model.input_cost_per_million == null || model.output_cost_per_million == null)) ?? []
+  const unpricedModels = registryQuery.data?.models.filter(model => model.enabled && !hasModelPrices(model)) ?? []
   const costAvailable = registryQuery.data != null && unpricedModels.length === 0
   const agents = entities?.agents ?? []
   const users = entities?.users.filter((item) => !scope.department_id || item.parent_id === scope.department_id) ?? []
@@ -205,7 +206,7 @@ export function FinOpsDashboard({
         {entities && registryQuery.data && tab === "analytics" && <ModelUsage filters={filters} costAvailable={costAvailable} />}
         {entities && tab === "trends" && <UsageTrends filters={filters} />}
         {entities && registryQuery.data && tab === "governance" && <Governance filters={filters} entities={entities} models={registryQuery.data.models} onOpenRequest={onOpenRequest} />}
-        {entities && registryQuery.data && tab === "requests" && <RequestTrace filters={filters} costAvailable={costAvailable} models={registryQuery.data.models} />}
+        {entities && registryQuery.data && tab === "requests" && <RequestTrace filters={filters} models={registryQuery.data.models} />}
         {entities && tab === "invoke" && <AgentInvocation entities={entities} />}
       </div>
     </div>
@@ -226,7 +227,7 @@ function PricingCoverageNotice({ modelKeys }: { modelKeys: string[] }) {
   </div>
 }
 
-function ExecutiveOverview({ filters, costAvailable }: { filters: UsageFilters; costAvailable: boolean }) {
+function ExecutiveOverview({ filters, costAvailable: configuredCostAvailable }: { filters: UsageFilters; costAvailable: boolean }) {
   const overview = useQuery(finopsQueries.executiveOverview(filters))
   // The server rule engine evaluates over the complete filtered data set. Evaluating the
   // client-side rules here instead only ever saw the capped request page, so a threshold
@@ -247,6 +248,7 @@ function ExecutiveOverview({ filters, costAvailable }: { filters: UsageFilters; 
   // Missing half the rows is a far larger error than the unpriced rows the client-side
   // registry fallback used to patch, and the pricing warning card already surfaces those.
   const estimatedCost = totals.estimated_cost
+  const costAvailable = configuredCostAvailable || estimatedCost > 0
   const signals = (anomalies.data ?? []).slice(0, 5)
   return <div className="finops-grid">
     <section className="finops-kpis span-3">
@@ -1074,7 +1076,7 @@ function GovernanceSignalDialog({ signal, rule, requests, onClose, onOpenRequest
 }) {
   const scopedRequests = signalScopeRequests(rule, requests)
   const linkedRequest = signal?.request_id ? requests.find((request) => request.request_id === signal.request_id) : undefined
-  const failedRequests = scopedRequests.filter((request) => request.status_code >= 400).length
+  const failedRequests = scopedRequests.filter(requestTraceFailed).length
   return <Dialog open={signal != null} onOpenChange={(open) => { if (!open) onClose() }}>
     {signal && <DialogContent className="registry-editor-dialog governance-signal-dialog" finalFocus={false}>
       <div className="registry-editor">
@@ -1124,63 +1126,78 @@ function GovernanceSignalDialog({ signal, rule, requests, onClose, onOpenRequest
   </Dialog>
 }
 
+export function requestTraceId(request: UsageRequestSummary): string {
+  return request.trace_id ?? request.correlation_id ?? request.request_id;
+}
+
+export function requestTraceFailed(request: UsageRequestSummary): boolean {
+  return request.platform_outcome === "failed"
+    || (request.status_code != null && request.status_code >= 400);
+}
+
 function RequestTrace({
   filters,
-  costAvailable,
   models,
 }: {
   filters: UsageFilters;
-  costAvailable: boolean;
   models: ManagedModel[];
 }) {
   const initialRequestId = new URLSearchParams(window.location.search).get("request")
   const [selected, setSelected] = useState<string | null>(initialRequestId);
   const [searchText, setSearchText] = useState(initialRequestId ?? "");
   const [statusFilter, setStatusFilter] = useState<"all" | "success" | "error">("all");
-  const query = useQuery(finopsQueries.requests(filters))
+  const query = useInfiniteQuery(finopsQueries.requestPages(filters))
+  const requestRows = query.data?.pages.flatMap((page) => page.items) ?? []
+  const loadingNextPageRef = useRef(false)
   // The header describes the whole window, so it reads the server aggregate. The list below
   // is a page of recent requests and legitimately uses the rows.
   const overview = useQuery(finopsQueries.executiveOverview(filters))
   const volumeTrend = useQuery(finopsQueries.trends(filters, "none", "day"))
   const detail = useQuery(finopsQueries.requestDetail(selected ?? ""))
-  const firstRequestId = query.data?.[0]?.correlation_id ?? null
-  const selectedCorrelationId = detail.data?.correlation_id ?? selected
+  const firstRequestId = requestRows[0] ? requestTraceId(requestRows[0]) : null
   useEffect(() => {
     if (!selected && firstRequestId) setSelected(firstRequestId)
   }, [firstRequestId, selected])
+  const loadNextPage = () => {
+    if (!query.hasNextPage || query.isFetchingNextPage || loadingNextPageRef.current) return
+    loadingNextPageRef.current = true
+    void query.fetchNextPage().finally(() => { loadingNextPageRef.current = false })
+  }
   if (query.isLoading || overview.isLoading || volumeTrend.isLoading) return <LoadingState />;
   if (query.error || overview.error || volumeTrend.error) return <ErrorState error={query.error ?? overview.error ?? volumeTrend.error} />;
-  if (!query.data?.length)
+  if (!requestRows.length)
     return (
       <EmptyState
         title="暂无请求记录"
         detail="调用完成后可在此按 requestId 查询。"
       />
     );
-  const requestRows = priceRequests(query.data, models);
+  const pricedRows = priceRequests(requestRows, models);
   const attemptsByRequest = new Map<string, UsageRequestSummary[]>();
-  for (const item of requestRows) {
+  for (const item of pricedRows) {
     const attempts = attemptsByRequest.get(item.request_id) ?? [];
     attempts.push(item);
     attemptsByRequest.set(item.request_id, attempts);
   }
   const attemptPositions = new Map<string, { index: number; total: number }>();
   for (const attempts of attemptsByRequest.values()) {
-    attempts.sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp)
-      || left.correlation_id.localeCompare(right.correlation_id));
+    attempts.sort((left, right) => left.timestamp.localeCompare(right.timestamp));
     attempts.forEach((item, index) => {
-      attemptPositions.set(item.correlation_id, { index: index + 1, total: attempts.length });
+      attemptPositions.set(requestTraceId(item), { index: index + 1, total: attempts.length });
     });
   }
   const normalizedSearch = searchText.trim().toLocaleLowerCase();
-  const visibleRows = requestRows.filter((item) => {
+  const visibleRows = pricedRows.filter((item) => {
     const matchesStatus = statusFilter === "all"
-      || (statusFilter === "success" ? item.status_code < 400 : item.status_code >= 400);
+      || (item.status_code !== null && (statusFilter === "success" ? !requestTraceFailed(item) : requestTraceFailed(item)));
     const matchesSearch = !normalizedSearch || [
       item.request_id,
       item.correlation_id,
+      item.trace_id,
+      item.upstream_request_id,
       item.agent_name,
       item.model_name,
+      item.selected_model_name,
       item.user_name,
       item.project_name,
     ].some((value) => value?.toLocaleLowerCase().includes(normalizedSearch));
@@ -1191,6 +1208,9 @@ function RequestTrace({
   const clientErrors = totals?.client_error_requests ?? 0;
   const serverErrors = totals?.server_error_requests ?? 0;
   const failedRequests = clientErrors + serverErrors;
+  const statusTotal = statusFilter === "all"
+    ? windowRequests
+    : statusFilter === "success" ? totals?.success_requests ?? 0 : failedRequests;
   const slowRequests = totals?.latency_over_5s ?? 0;
   const slowRequestPercent = windowRequests ? (slowRequests / windowRequests) * 100 : 0;
   const volumeRows = (volumeTrend.data?.points ?? []).map((point) => ({
@@ -1217,8 +1237,12 @@ function RequestTrace({
         <RequestLatencyChart totals={totals} percentage />
       </section>
       <div className="trace-layout span-3">
-        <section className="finops-panel trace-list">
-          <PanelTitle title="请求记录" meta={`${visibleRows.length} / ${requestRows.length} 条`} />
+        <section className="finops-panel trace-list" onScroll={(event) => {
+          if (searchText.trim() || statusFilter !== "all") return
+          const list = event.currentTarget
+          if (list.scrollHeight - list.scrollTop - list.clientHeight <= 160) loadNextPage()
+        }}>
+          <PanelTitle title="请求记录" meta={`${visibleRows.length} / ${statusTotal} 条`} />
           <div className="trace-list-tools">
             <label>
               <Search size={14} />
@@ -1245,15 +1269,19 @@ function RequestTrace({
           </div>
           {visibleRows.map((item) => (
             <TraceRow
-              key={item.correlation_id}
+              key={requestTraceId(item)}
               item={item}
-              active={selectedCorrelationId === item.correlation_id}
-              onClick={() => setSelected(item.correlation_id)}
-              costAvailable={costAvailable}
-              attempt={attemptPositions.get(item.correlation_id)}
+              active={selected === requestTraceId(item)}
+              onClick={() => setSelected(requestTraceId(item))}
+              costAvailable={estimateRequestCost(item, models) !== null}
+              attempt={attemptPositions.get(requestTraceId(item))}
             />
           ))}
           {!visibleRows.length && <div className="trace-no-results">没有符合条件的请求</div>}
+          {query.hasNextPage && (searchText.trim() || statusFilter !== "all")
+            ? <button type="button" className="trace-load-more" disabled={query.isFetchingNextPage} onClick={loadNextPage}>{query.isFetchingNextPage ? <><RefreshCw className="spin" size={12} />正在加载更多请求</> : "加载更多请求"}</button>
+            : query.hasNextPage && <div className="trace-load-sentinel" aria-hidden="true" />}
+          {query.isFetchingNextPage && <div className="trace-load-status" role="status"><RefreshCw className="spin" size={12} />正在加载更多请求</div>}
         </section>
         <section className="finops-panel trace-detail">
           <PanelTitle title="请求详情" />
@@ -1268,7 +1296,7 @@ function RequestTrace({
             <ErrorState error={detail.error} />
           ) : (
             pricedDetail && (
-              <RequestTraceDetail request={pricedDetail} costAvailable={costAvailable} />
+              <RequestTraceDetail request={pricedDetail} costAvailable={estimateRequestCost(pricedDetail, models) !== null} />
             )
           )}
         </section>
@@ -1319,6 +1347,29 @@ const budgetAdmissionWarnings: Record<string, { title: string; detail: string; t
   },
 };
 
+const routerDecisionLabels: Record<string, string> = {
+  model_based_fallback: "安全回退",
+  interaction_sticky: "复用首轮模型",
+  fallback_success: "Fallback 命中",
+};
+
+const routerStrategyLabels: Record<string, string> = {
+  priority: "优先级顺序",
+  weighted: "加权选择",
+  model_based: "模型判路由",
+};
+
+const conditionOperatorLabels: Record<string, string> = {
+  equals: "=",
+  not_equals: "≠",
+  contains: "contains",
+  greater_than: ">",
+  greater_than_or_equal: "≥",
+  less_than: "<",
+  less_than_or_equal: "≤",
+  exists: "exists",
+};
+
 function RequestTraceDetail({
   request,
   costAvailable,
@@ -1326,6 +1377,13 @@ function RequestTraceDetail({
   request: UsageRequestDetail;
   costAvailable: boolean;
 }) {
+  const { user: sessionUser } = useAuth();
+  const selectedModelId = request.selected_model_id ?? request.model_id;
+  const backendPool = useQuery({
+    ...finopsQueries.modelBackendPool(selectedModelId),
+    enabled: Boolean(selectedModelId),
+  });
+
   const errorMessage = request.ingest_source === "policy"
     ? request.error_message === "API policy denied: Model is not assigned to this user"
       ? "该人员无权使用此模型"
@@ -1355,9 +1413,8 @@ function RequestTraceDetail({
     ];
   // Gateway-log reconciliation measures input/output but cannot measure streamed cache usage.
   // Keep those known buckets visible without presenting the legacy numeric cache zero as fact.
-  const inputOutputMeasured = !request.estimated
-    || Boolean(request.reconciled_at)
-    || request.status_code >= 400;
+  const inputOutputMeasured = request.usage_available
+    ?? (!request.estimated || Boolean(request.reconciled_at));
   const cacheUsageUnmeasured = request.ingest_error === "stream_cache_usage_unavailable";
   const state = usageState(!inputOutputMeasured, request.timestamp);
   const usagePlaceholder = state === "pending" ? "待对账" : "不可用";
@@ -1375,15 +1432,48 @@ function RequestTraceDetail({
   // identical to one that was actually checked against a budget.
   const admissionWarning = budgetAdmissionWarnings[request.budget_admission ?? ""];
   const modelWarning = modelAdmissionWarnings[request.model_admission ?? ""];
+
+
+
+
+
+
+
+
+  const poolMembers = backendPool.data?.members ?? [];
+  const poolPriorities = new Set(poolMembers.map((member) => member.priority));
+  const poolWeights = new Set(poolMembers.map((member) => member.weight));
+  const poolMode = poolMembers.length < 2
+    ? null
+    : poolWeights.size === 1 && poolPriorities.size === 1
+      ? "均衡分流"
+      : poolWeights.size === 1 && poolPriorities.size === 2
+        ? "主备切换"
+        : "自定义分组";
+  const selectedPoolMember = poolMembers.find(
+    (member) => member.runtime_name === request.runtime,
+  );
+  const primaryPoolPriority = poolMembers.length
+    ? Math.min(...poolMembers.map((member) => member.priority))
+    : null;
+  const selectedPoolRole = selectedPoolMember && primaryPoolPriority != null
+    ? selectedPoolMember.priority === primaryPoolPriority ? "主 Runtime" : "备用 Runtime"
+    : null;
   return <div className="trace-detail-content">
     <div className="trace-detail-hero">
-      <span className={request.status_code >= 400 ? "failed" : "success"}>{request.status_code}</span>
+      <span className={request.status_code == null ? "" : requestTraceFailed(request) ? "failed" : "success"}>{request.status_code ?? "未知"}</span>
+
       <div><b>{request.model_name}</b><small>{new Date(request.timestamp).toLocaleString(getIntlLocale())}</small></div>
       <strong>{formatLatency(request.latency_ms)}</strong>
     </div>
     {errorMessage && <div className="trace-error"><CircleAlert size={15} /><div><b>{request.ingest_source === "policy" ? "策略拒绝" : "请求失败"}</b><span>{errorMessage}</span></div></div>}
     {admissionWarning && <div className="trace-error" data-tone={admissionWarning.tone}><CircleAlert size={15} /><div><b>{admissionWarning.title}</b><span>{admissionWarning.detail}</span></div></div>}
     {modelWarning && <div className="trace-error" data-tone={modelWarning.tone}><CircleAlert size={15} /><div><b>{modelWarning.title}</b><span>{modelWarning.detail}</span></div></div>}
+    {request.platform_outcome && <TraceFacts title="调用结果" facts={[
+      ["Turnstile", request.platform_outcome === "failed" ? "失败" : request.platform_outcome === "succeeded" ? "成功" : "未知"],
+      ["Gateway", request.gateway_status_code == null ? request.ingest_source === "platform" ? "网关记录未匹配" : "未知" : String(request.gateway_status_code)],
+    ]} />}
+
     <section className="trace-detail-section">
       <h3>处理链路</h3>
       <div className="trace-path">
@@ -1397,7 +1487,11 @@ function RequestTraceDetail({
       </div>
       <dl className={`trace-token-facts columns-${tokenSegments.length}`}>
         {tokenSegments.map((item) => <div className={`trace-token-fact ${item.className}`} key={item.label}><dt>{item.label}</dt><dd>{tokenValue(item)}</dd></div>)}
-        <div className="trace-token-cost"><dt>估算费用</dt><dd>{!inputOutputMeasured ? usagePlaceholder : costAvailable ? `${cacheUsageUnmeasured ? "≥ " : ""}${currency.format(request.estimated_cost)}` : "未计价"}</dd></div>
+        <div className="trace-token-cost">
+          <dt>估算费用</dt>
+          <dd>{!inputOutputMeasured ? usagePlaceholder : costAvailable ? `${cacheUsageUnmeasured ? "≥ " : ""}${currency.format(request.estimated_cost)}` : "未计价"}</dd>
+          {inputOutputMeasured && costAvailable && <dd className="trace-cost-calculation"><RequestCostCalculation request={request} /></dd>}
+        </div>
       </dl>
       {cacheUsageUnmeasured && <p className="trace-token-note"><CircleAlert size={13} />流式缓存用量未实测；当前 Token 总量与费用均为下限。</p>}
     </section>
@@ -1412,13 +1506,47 @@ function RequestTraceDetail({
     <TraceFacts title="追踪标识" mono facts={[
       ["Request ID", request.request_id],
       ["Correlation ID", request.correlation_id],
+      ["Upstream Request ID", request.upstream_request_id],
       ["Run ID", request.run_id],
       ["Turn", String(request.turn_index)],
     ]} />
   </div>
 }
 
-function TraceFacts({ title, facts, mono = false }: { title: string; facts: Array<[string, string]>; mono?: boolean }) {
+export function RequestCostCalculation({ request }: { request: UsageRequestDetail }) {
+  const calculation = requestCostCalculation(request);
+  if (!calculation) return <span className="trace-cost-unavailable"></span>;
+  const number = (value: number) => value.toLocaleString(getIntlLocale(), { maximumFractionDigits: 0 });
+  const rate = (value: number) => value.toLocaleString(getIntlLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 20 });
+  const amount = (value: number) => value.toLocaleString(getIntlLocale(), { minimumFractionDigits: 8, maximumFractionDigits: 8 });
+  const labels: Record<string, string> = { input: "未缓存输入", cached: "缓存读取", write: "缓存写入", output: "输出" };
+  const tier = calculation.contextTier;
+  const range = tier == null ? null : tier.max_input_tokens == null
+    ? `${number(calculation.inputTokens)} > ${number(tier.min_input_tokens - 1)}`
+    : `${tier.min_input_tokens ? `${number(tier.min_input_tokens)} ≤ ` : ""}${number(calculation.inputTokens)} ≤ ${number(tier.max_input_tokens)}`;
+  return <div className="trace-cost-formula">
+    {tier && <div className="trace-cost-tier">
+      <strong>{tier.key === "short" ? "短上下文" : tier.key === "long" ? "长上下文" : tier.key}</strong>
+      <span>{range} Tokens</span>
+      {tier.input_range_source?.origin === "custom" && <span>管理员自定义</span>}
+    </div>}
+    <span className="trace-cost-unit">单价：USD / 百万 Tokens</span>
+    <div className="trace-cost-expression" role="math" aria-label={`${calculation.lowerBound ? "C ≥ " : ""}(${calculation.terms.map(term => `${labels[term.bucket]} ${number(term.tokens)} × ${rate(term.rate)}`).join(" + ")}) ÷ 1,000,000 = ${amount(calculation.calculatedCost)} USD`}>
+      {calculation.lowerBound && <span>C ≥</span>}
+      <span className="trace-cost-fraction">
+        <span className="trace-cost-numerator">{calculation.terms.map((term, index) => <span className="trace-cost-summand" key={term.bucket}>
+          {index > 0 && <span aria-hidden="true">+</span>}
+          <span className="trace-cost-term"><small>{labels[term.bucket]}</small><span>{number(term.tokens)} × {rate(term.rate)}</span></span>
+        </span>)}</span>
+        <span className="trace-cost-denominator">{number(1_000_000)}</span>
+      </span>
+      <strong className="trace-cost-result">= ${amount(calculation.calculatedCost)}</strong>
+    </div>
+    {!calculation.matchesRecordedCost && <span className="trace-cost-mismatch" role="alert"><span>费用与价格快照不一致</span> · ${amount(calculation.recordedCost)}</span>}
+  </div>;
+}
+
+function TraceFacts({ title, facts, mono = false }: { title: string; facts: Array<[string, string | null | undefined]>; mono?: boolean }) {
   return <section className="trace-detail-section">
     <h3>{title}</h3>
     <dl className={`trace-facts ${mono ? "mono" : ""}`}>
@@ -1427,7 +1555,7 @@ function TraceFacts({ title, facts, mono = false }: { title: string; facts: Arra
   </section>
 }
 
-function TraceRow({
+export function TraceRow({
   item,
   active,
   onClick,
@@ -1442,16 +1570,16 @@ function TraceRow({
 }) {
   // The list contract carries no `estimated` flag, but a successful call never truly consumes zero
   // tokens: those zeros identify a row that is still waiting for reconciliation.
-  const state = usageState(item.status_code < 400 && item.total_tokens === 0, item.timestamp);
+  const state = usageState(!(item.usage_available ?? item.total_tokens > 0), item.timestamp);
   const placeholder = state === "pending" ? "待对账" : "不可用";
   return (
     <button className={`trace-row ${active ? "active" : ""}`} onClick={onClick}>
-      <span className={`trace-row-status ${item.status_code >= 400 ? "failed" : "success"}`}>
-        {item.status_code}
+      <span className={`trace-row-status ${item.status_code == null ? "" : requestTraceFailed(item) ? "failed" : "success"}`}>
+        {item.status_code ?? "未知"}
       </span>
       <div>
-        <b>{item.model_name}</b>
-        <code title={`Correlation ID: ${item.correlation_id}`}>{attempt && attempt.total > 1 ? `#${attempt.index}/${attempt.total} · ${item.request_id}` : item.request_id}</code>
+        <b></b>
+        <code title={`Correlation ID: ${item.correlation_id ?? "未知"}`}>{attempt && attempt.total > 1 ? `#${attempt.index}/${attempt.total} · ${item.request_id}` : item.request_id}</code>
       </div>
       <small>{state === "measured" ? `${compact.format(item.total_tokens)} tokens` : placeholder}</small>
       <strong>

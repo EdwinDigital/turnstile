@@ -8,7 +8,7 @@ Copy `.env.example` to `.env` for the API and `frontend/.env.example` to `fronte
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL 16+ connection string. Require TLS outside a developer machine. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Encrypts provider and integration credentials at rest. |
-| `MANAGEMENT_API_KEY` | Protects management automation where session authentication is unavailable. |
+| `MANAGEMENT_API_KEY` | Additional bearer credential for management writes that require it; session and role checks still apply. |
 
 ## Authentication
 
@@ -30,9 +30,253 @@ Delegated invocation does not change the authenticated session. A Member remains
 
 ## APIM and control plane
 
+### Versioned model availability
+
+Model enablement is a dedicated Owner command, not a general model edit or a connection-health
+flag. The model row and editor use `PUT /api/v1/model-management/models/{item_id}/availability`
+with strict `enabled`, `expected_revision` and UUID `idempotency_key` values. A `202` response
+means accepted, not effective. The status view shows desired state separately from the last
+verified state, revision, operation and per-target results. Concurrent changes return `409`;
+an uncertain response must reuse the same intent rather than create a second command.
+
+Apply `016_model_availability` and install compatible policies on every retained Revision before
+using the switch. The Control Plane requires `CONTROL_PLANE_ENABLED`, `LEDGER_TABLE_ENDPOINT`,
+`LEDGER_TABLE_NAME`, registered APIM identities and target-scoped probe credentials. The storage
+endpoint must be the primary Table origin. The worker synchronizes state every two seconds and
+refreshes full coverage at seconds 10 and 40 of each minute. Missing migration, incomplete
+inventory, expired coverage or missing node enrollment keeps commands unavailable; the in-memory
+repository cannot claim real Gateway enforcement.
+
+Gateway admission reads the exact model UUID and revision from the Table without a cache.
+Disabled models return `403 model_disabled`; invalid or unreadable state returns
+`503 model_availability_unavailable`. Model catalogs are filtered from the same state and use
+`Cache-Control: no-store`. A successful operation requires exact evidence from every retained
+Revision and every enrolled self-hosted instance, not just the current managed Gateway.
+Self-hosted node leases are bound to target, API, Revision, native Gateway, instance and policy
+capability, and expire within 120 seconds. Dedicated HEAD diagnostics do not dispatch inference.
+
+Ordinary model updates cannot change `enabled`, even when other fields are saved concurrently.
+Availability commands leave prices, default selection, assignments and budgets unchanged.
+An explicitly selected or default disabled model is not silently replaced by another model in
+the invocation page or assistant. The assistant retains an unavailable configured model while
+allowing unrelated settings to be edited. Previously admitted in-flight requests are not cancelled.
+
+See [availability installation](deployment.md#model-availability-installation) for the separate
+operator workflow and the self-hosted admission prerequisites.
+
 Set `AZURE_SUBSCRIPTION_ID`, `APIM_RESOURCE_GROUP`, `APIM_SERVICE_NAME`, `APIM_PRINCIPAL_ID`, `APIM_GATEWAY_URL`, and `APIM_DASHBOARD_SUBSCRIPTION_KEY` to the deployed resources. The dashboard key is server-side only and must never be compiled into the frontend. Keep all control-plane feature flags false until the corresponding managed identities and roles exist.
 
 `APIM_REGRESSION_MODEL_KEY` has no default. Set it only after onboarding a model that can be used for publication probes.
+
+### Registered APIM targets
+
+Apply migration `011_gateway_targets` before upgrading the API and Control-plane packages.
+It is additive and does not register an Azure resource, activate a protocol or rewrite usage.
+Keep `APIM_TARGET_REGISTRY_ENABLED=false` until target-specific identity, permissions and
+connection checks are ready. With the flag off, the existing single-target publisher remains
+unchanged. Registration does not create APIM instances, Gateway containers or role assignments.
+
+When enabled, an Owner can register an existing APIM through
+`POST /api/v1/model-management/apim-targets`; the Owner session and write-origin
+check still apply. The request carries a matching ARM endpoint, tenant/subscription/resource-group/
+service/API identity, Gateway endpoint and subscription identifiers, not key values. The backend
+discovers ARM inventory, obtains or reuses the encrypted dashboard credential and requires a
+non-inference `GET /v1/models` connection check before registration succeeds.
+
+With topology support enabled, Model Management has four tabs: Models, Connections, Gateways,
+and APIM instances. Gateways lists active Self-hosted deployments, including those with unknown
+connection state or no endpoint. APIM instances shows each instance with its Managed and
+Self-hosted children. Older backends without the topology capability retain the three-tab view.
+
+APIM registration, initialization preview/start/retry and Self-hosted connection validation use
+the existing Owner session and write-origin checks. They do not prompt for `MANAGEMENT_API_KEY`
+or require an additional management bearer header. Other management endpoints that require
+that credential retain their existing authorization contract.
+
+APIM removal first previews Self-hosted Gateway, runtime and model dependencies, then rechecks
+them before disabling the profile and retiring its deployments. It preserves target metadata and
+history and never deletes or modifies Azure resources, Gateway containers or hosting environments.
+Self-hosted attachment controls follow `SELF_HOSTED_GATEWAY_ENABLED`; existing records retain
+their name and lifecycle operations, subject to Owner, target and dependency checks.
+
+`APIM_GATEWAY_PROFILE_ID` explicitly binds the legacy global configuration to one registered
+profile. When that ID is absent, a complete global APIM resource identity must match exactly one
+registered target before a global Observer or explicit legacy compatibility mode can be used.
+`APIM_LEGACY_TARGET_COMPATIBILITY_ENABLED` defaults to false; enable it only for the exact legacy
+target whose subscription, service, API, principal and Gateway URL still match. New target
+publications capture an identity fingerprint and refuse changed identities during retries.
+
+Use `APIM_USAGE_OBSERVERS` for a JSON object keyed by registered profile UUID. Each value has
+`url` (an HTTPS origin) and `key_named_value` (the existing APIM Named Value name). Global
+`APIM_USAGE_OBSERVER_URL` and `APIM_USAGE_OBSERVER_KEY_NAMED_VALUE` apply only to the bound legacy
+profile. Neither Observer credentials nor probe subscription keys are inherited by other targets.
+
+Inventory synchronization requires the target-registry and Release Worker flags in the API and
+the corresponding worker configuration in the Function. The Owner synchronization endpoint
+returns `202` with the existing release-operation status URL. It performs read-only ARM discovery
+and persists whitelisted API associations, hostnames and CA metadata. A declared deployment is
+not necessarily reachable or observed; missing evidence stays unknown. Retired deployments and
+confirmed names survive later inventory refreshes.
+
+### Create a Self-hosted Gateway from Turnstile
+
+The default **Add Gateway** flow creates a new APIM Gateway configuration; it does not require
+an existing native Gateway ID or any Azure Portal operation. An Owner selects a registered,
+synchronized APIM instance with verified Self-hosted support, supplies a display name and the
+server's HTTPS endpoint, and explicitly confirms control of that endpoint. Turnstile generates
+the native ID, queues the creation, associates the target API, verifies the result and displays
+progress. The server must already have Docker; Turnstile does not create or access the server.
+
+Apply migration `014_self_hosted_gateway_provisioning`, install the separately reviewed
+[Gateway management permissions](deployment.md#self-hosted-gateway-management), and deploy
+matching API and Control-plane packages first. Set `SELF_HOSTED_GATEWAY_PROVISIONING_ENABLED=true`
+on both applications, in addition to `SELF_HOSTED_GATEWAY_ENABLED`, `APIM_TARGET_REGISTRY_ENABLED`
+and the existing release-worker prerequisites. Creation is disabled by default. Only classic
+Developer and Premium APIM services are accepted; unsupported or unverified targets cannot create.
+
+The UUID `Idempotency-Key` is generated by the client, not entered by the user. Identical retries
+reuse the original task and native ID. Changed requests conflict. The worker checks ownership
+before writing and does not take over foreign Gateway configurations. A failed task retains its
+audit and can be retried from Turnstile after its prerequisites are corrected.
+
+Creation success means **Awaiting container**, not verified connectivity. Open **Startup
+configuration**, choose the token validity, then download the environment file and copy the Docker
+command. The file uses a short-lived Gateway-specific token, never a model subscription key.
+Validity defaults to 24 hours and cannot exceed 720 hours. `SELF_HOSTED_GATEWAY_IMAGE` defaults to
+the official `mcr.microsoft.com/azure-api-management/gateway:2.12.1` image and accepts only an
+explicit version or SHA-256 digest, not `latest`.
+
+Run the command on the user's server. Provide a valid HTTPS certificate or reverse proxy for the
+configured endpoint; port mapping alone does not configure TLS. Then run **Validate connection**
+in Turnstile. Tokens can be regenerated from the same dialog; the renewal command recreates only
+the named container and explicitly interrupts its connections. Keep custom volumes, certificates
+and other local runtime options when adapting commands for an existing installation.
+
+Startup responses are Owner-only and `no-store`. The token stays only in the download and temporary
+component memory, which is cleared on close; it is not stored in tasks, audits or query caches.
+The Owner-confirmed endpoint is trusted only while its successful creation task, deployment,
+APIM identity and exact URL still match. Existing external Gateway associations retain the separate
+inventory/operator-allowlist rules below. Removing a platform entry still does not delete the
+Azure configuration or the user's container.
+
+### Self-hosted Gateway metadata lifecycle
+
+`SELF_HOSTED_GATEWAY_ENABLED` defaults to false and requires `APIM_TARGET_REGISTRY_ENABLED`.
+When enabled, an Owner can add customer-managed Gateway metadata beneath an existing APIM,
+rename it, synchronize inventory, validate its endpoint, retire it or change its APIM association.
+The separate **Associate existing Gateway** path records metadata only; it does not create, delete,
+move or reconfigure Azure Gateways, containers or tokens.
+An APIM capability of `unsupported` blocks addition. Unknown capabilities remain unknown and
+cannot satisfy publication readiness.
+
+Addition records the exact native Gateway ID, display name, HTTPS endpoint, optional location,
+hosting mode and required/optional release gate. An inventory-discovered unconfigured row can
+be completed; a live configured association cannot be overwritten. Retirement retains its stable
+ID and history. Re-addition reuses the ID but resets connection evidence. Name updates change
+only the trimmed nonblank display name and return `204`.
+
+Validation first requires a present ARM declaration and association with the target API. Before
+sending the encrypted target credential, the endpoint hostname must appear in that Gateway's
+persisted APIM hostname inventory. Alternatively, `SELF_HOSTED_GATEWAY_TRUSTED_ENDPOINTS` may
+explicitly map that deployment UUID to its exact credential-free HTTPS endpoint, including path.
+Treat this mapping as a security-sensitive operator allowlist, not a connectivity workaround.
+The request is a non-inference `GET /v1/models` with no redirects and normal management
+authorization; its timestamp proves a past probe, not current runtime health.
+
+Retirement and reassociation are blocked by serving models and in-flight publications. Reassociation
+requires a different enabled registered destination, preserves the old record as retired, and
+creates or reuses the destination in one persistence transaction. New evidence is required after
+reassociation. A metadata change alone does not revoke an Azure subscription, reconfigure a
+container or prove budget-protocol membership. Synchronize inventory and verify protocol readiness
+before allowing the changed Gateway to serve traffic.
+
+For an explicitly enabled budget-execution target, inventory synchronization also reconciles
+the existing F document's `gateways` membership. It adds only configured, present, API-associated
+Self-hosted Gateways and removes only explicitly retired members. Other members, revision lists,
+model contracts, epoch and document extensions are preserved. It verifies the current canonical
+budget policy, target identity and latest inventory, then rechecks the API revision, target,
+deployment records and worker lease before every exact-ETag replacement. Conditional conflicts
+have a bounded retry count; an uncertain transport outcome permits readback but no blind replay
+within that attempt. A missing or changed fence is not recreated. Successful tasks include
+`protocol_enrolled_gateways` in their checkpoint. ARM discovery remains read-only; the Table
+membership update is a distinct mutation.
+
+### Initialize an existing APIM
+
+Initialization is a separate Owner workflow under `/api/v1/model-management/apim-onboarding`.
+It prepares an existing APIM service; it does not create an APIM instance, a resource group or
+a Self-hosted container. Apply `012_apim_onboarding` and upgrade the API and Control-plane
+packages together before use. Availability requires `APIM_TARGET_REGISTRY_ENABLED`,
+`GATEWAY_RELEASE_WORKER_ENABLED`, `BUDGET_EXECUTION_ENABLED`, PostgreSQL, credential encryption,
+the configured Table ledger, a complete legacy APIM identity and the public parent-policy template.
+The Function also requires `CONTROL_PLANE_ENABLED`. These switches remain disabled by default.
+`CONTROL_PLANE_PARENT_POLICY_PATH` defaults to `policies/foundry-finops-policy.xml` in the package;
+local initialization can resolve the same template under `infra/policies`.
+
+The existing platform APIM must already contain the non-secret Named Value
+`turnstile-platform-governance`, with the same display name and tag
+`turnstile-platform-configuration`. Its JSON value follows `ApimOnboardingConfiguration`:
+`management_tenant_id`, exact `event_hub_resource_id` and `ledger_table_resource_id`,
+`employee_tenant_id`, `employee_client_id`, `employee_audience`, `organization_id`,
+`organization_name`, positive `employee_tokens_per_minute` and `default_max_output_tokens`,
+and optional `department_map`, `client_map`, `surface_map`. Surface entries have `name` and
+nonempty `tokens`. No keys or connection strings belong in this value. Its Table account and
+table must exactly match the platform's `LEDGER_TABLE_ENDPOINT` and `LEDGER_TABLE_NAME`.
+Provision this configuration and approve resource-specific permissions separately; upgrading
+the application does not create them or grant its identity additional privileges.
+
+An Owner supplies the management tenant and the exact APIM service ARM ID, previews the derived
+API path, system subscription IDs, blockers and steps, then submits the returned confirmation hash.
+Configured management authorization and normal write-origin checks still apply. The worker checks
+APIM API/operation/policy/Logger/subscription permissions and role-assignment access at the exact
+Event Hub and Table scopes. If system identity must be enabled, it requires a concrete service
+ETag and preserves existing user-assigned identities. The two data roles are Event Hubs Data
+Sender and Storage Table Data Contributor at those resources only. Logger reference readback
+accepts a Named Value only after resolving and verifying its system-assigned identity value.
+
+Initialization creates an owned API and fixed protocol operations with default-deny policies,
+stages dashboard/probe subscriptions as suspended, projects access and the current budget epoch,
+then activates subscriptions with exact ETags. Authenticated catalog checks for both keys and
+anonymous/invalid-key denial must pass before the target is enabled. No inference is used.
+Ordinary model publication still cannot create missing protocol operations.
+
+The latest operation per target remains visible across reloads. Repeating the same start is
+idempotent; retry creates a linked attempt using the original encrypted credentials and plan.
+Changed previews, ownership, configuration, credentials or leases stop the operation. Successful
+activation clears temporary initialization credentials; failed history is retained. Initialization
+neither reopens networking nor overwrites an existing foreign API, policy or budget fence. Real
+Azure readiness and PostgreSQL transaction acceptance require separately authorized validation.
+
+### Multi-target model publication
+
+Apply `013_multi_target_rollout` and upgrade API and Control-plane code together before enabling
+`MULTI_APIM_TARGET_ROLLOUT_ENABLED` with the target registry. The flag defaults to false. The
+Owner API is `POST /api/v1/model-management/rollouts`; GET the same path for recent intents or
+append its returned rollout UUID for current status. This version exposes API/client support,
+not a multi-target selection dialog. Existing Add Model remains a single-target workflow.
+
+The request contains two to twenty `children`, each with a normal `publication` and optional
+`required` metadata. Targets must be distinct, registered and individually ready. All plans are
+validated before one transaction inserts the parent and all child publications/outboxes. The
+request's stable identity excludes credential values and child order. Repeating it returns the
+same rollout, not a new set of inference probes. Each child uses its own encrypted temporary
+credential and target-specific runtime, policy and probe configuration.
+
+The canonical child is the first child with an explicit model identity in target-UUID order,
+or the first child in that order when all aliases are derived. Multiple explicit model identities
+must agree. Its alias, display metadata, capabilities, access rules and complete price snapshot
+are used for all children. This includes source, reference, discount, all four charged/list prices
+and every context tier/range/provenance field. Upstream model IDs and target runtime bindings
+remain target-specific. The first successful activation establishes the logical model; later
+activations must match its full price identity and cannot silently reprice it.
+
+Targets execute independently; queue atomicity is not cross-APIM promotion atomicity. All queued
+children report `queued`; any active work reports `in_progress`; mixed terminal success and
+failure reports `partial`, including failure of an optional child. A failed child uses the existing
+publication retry or authorization-resume endpoint. Successful targets are not automatically
+replayed or rolled back. Removing one target route preserves the model, prices and user access
+while another enabled route remains, transferring the default serving runtime when necessary.
+Removing the last route uses the normal model-removal lifecycle and preserves request history.
 
 ### OpenAI-compatible connections
 
@@ -42,13 +286,35 @@ Connection registration does not accept an API key or publish a model. Add the f
 
 Compatible Chat Completions connections use `max_tokens`; Foundry keeps its configured `max_completion_tokens` behavior. Measured cache usage prefers `prompt_tokens_details.cached_tokens`, including explicit zero, and falls back to top-level `cached_tokens` only when the nested measurement is absent. Provider display metadata does not change routing, credentials, or pricing. Configure actual model rates explicitly.
 
+Add model supports manual rates or an explicit Azure retail / Anthropic list-price selection before publication. Choose the catalog model, deployment mode and applicable region; the server validates the selected entry and calculates the charged rates. A model discount overrides the connection discount; leaving it blank inherits the connection, or charges list price when the connection has no discount. The percentage is the amount charged (90 means a 10% discount), must be greater than zero and cannot exceed 100. Incomplete or unavailable catalog prices block publication without queueing a release. Activation saves the selected reference, discount and accepted list-price baseline together with the model. Image generation continues to require three explicit manual prices.
+
+### Context-tier pricing
+
+Context pricing is represented as a list of tiers, not a model-name allowlist or a global token threshold. Catalog models may supply `context_tier` metadata containing `group_key`, `model_label`, `service_tier`, `key`, `label`, `order`, and `input_range`. The range has inclusive `min_input_tokens` and `max_input_tokens` bounds for the request's total input, including cached input; a null maximum is unbounded. A null range means the source has not supplied a threshold, not that a default threshold applies.
+
+The preview keeps providers, products, service tiers, deployment types, and regions separate. It pairs all available tiers using the same deployment and region, reads every published rate independently, and applies one discount to every tier. Overlapping or incomplete declared ranges and conflicting regional prices are rejected. Unknown ranges remain visibly unknown. Providers may describe more than two tiers and use different boundaries without frontend changes.
+
+For legacy catalog responses, explicit `ShortCo` / `LongCo` or `short context` / `long context` name markers can identify a preview group without identifying the model or inventing a threshold. Other naming conventions remain separate until their source adapter supplies explicit metadata. In particular, a priority meter's presence is not evidence that a model supports priority processing for every context length.
+
+Context boundaries come from explicit catalog metadata, an administrator-defined rule, or an already accepted price snapshot. Turnstile does not fill missing thresholds by scraping model documentation or consulting a bundled model-name rule table. Azure Retail provides price meters but not verified per-request context thresholds, so its ShortCo/LongCo labels alone leave the ranges unknown. Maximum context windows, consumption-volume tiers, price multiples and another provider's pricing are not substitutes.
+
+For an exact short/long pair, Add/Edit Model offers a custom rule inside the price area. Enter a positive integer short-context input limit; the short range is inclusive and the long range starts one token above it. This is explicitly an administrator-defined estimate, not an assertion of the provider's billing threshold. No rationale or source URL is required. The request uses `context_price_rule.short_context_max_tokens`; optional `note` and `source_url` carry reference information only and no URL is fetched. The server owns the rule revision and configuration time, verifies both catalog references, and derives all charged rates from the catalog and discount. New writes require `context_price_rules_supported=true` as well as tiered-pricing support.
+
+On a compatible backend, save or publish a complete `context_price_references` selection. The server resolves every referenced entry, verifies matching provider/product/model/service tier/deployment/region and contiguous input ranges, and stores authoritative list and discounted rates together. The scalar model prices are null for tiered models. `context_price_refresh: true` explicitly accepts freshly retrieved prices during a model edit; ordinary metadata changes retain the stored schedule and work without a price-source request. Reopening a model restores its accepted rule and schedule. Missing thresholds without a valid explicit rule, reference-only catalog guidance, or an incomplete schedule block new pricing writes. Clients connected to an older backend remain read-only rather than sending an unsupported tier configuration.
+
+Each measured request selects one tier using uncached input plus all cached input; cache writes are already a subset of cached input and are not added twice. Output tokens do not affect the selected tier. All four token categories use the selected tier's rates for the whole request. The selected tier, applied rates, and complete schedule are snapshotted with usage. Delayed formal telemetry and reconciliation select from that original schedule, not current registry prices. Unknown input/cache measurements leave the request unpriced until usable evidence arrives. Price sync updates schedules atomically, preserves accepted prices when the source is unavailable, and holds threshold changes or large price movements for explicit review. API, Control Plane, Telemetry and migration `009_context_tier_pricing` must be upgraded together before enabling this capability in an environment.
+
+Synchronization preserves custom rule versions and configuration times. Every result is checked against the original mapping, effective discount, accepted list prices and complete schedule before it is written. New or removed price buckets and previously free buckets require review. Request Trace uses the recorded `cost_available` flag to distinguish a known zero cost from an unpriced request. Its calculation uses the request's four saved unit prices and `price_context_snapshot`, including the original custom-rule provenance; it does not reprice historical requests with current model settings. All strict JSON-snapshot readers, including API, Publisher and Telemetry, must support the new provenance fields before custom rules are enabled. No additional migration is required beyond the existing context-price schema.
+
 ### FinOps Assistant API protocol
 
 Apply migration `009_assistant_api_format` before deploying the updated API. The assistant
 setting `api_format` accepts `openai_chat`, `openai_responses`, `anthropic_messages`, or
 `null` for automatic selection. Settings advertise the compatible protocols per model and
 the effective public API path. Invalid overrides are rejected before provider dispatch;
-an override that later becomes unavailable visibly falls back to automatic selection.
+an override that later becomes unavailable visibly falls back on the same eligible model.
+An unavailable pinned or default model stops analysis and preserves the saved selection.
+Changing the title setting must not silently choose another model.
 
 Foundry Claude uses the Messages route even when its shared Connection declares OpenAI
 Chat. GPT-6 tool calls use Responses. Claude content blocks, including signed thinking,
@@ -63,9 +329,7 @@ Chat connections are not assumed to support Responses. Local mocks do not verify
 
 ### Governed image generation
 
-`IMAGE_GENERATION_ENABLED` defaults to `false`. Enable it only after the API, Control-plane package, required migrations and image-ready APIM parent policy have been deployed and verified together. The Registry advertises `image_generation_supported` and `image_configuration_schema_version: 4`; an older backend must not be treated as image-capable.
-
-The Bicep `imageGenerationEnabled` parameter defaults to `false` and supplies the same flag to the API and Control-plane. After verifying the prerequisites, preserve an explicit opt-in in the public deployment parameters. Enabling the flag does not publish models or authorize paid probes; keep it false during package and migration upgrades.
+Image generation is a standard capability and requires no enablement setting. Deploy and verify the API, Control-plane package, required migrations and image-ready APIM parent policy together. The Registry advertises `image_generation_supported: true` and `image_configuration_schema_version: 4`; an older backend must not be treated as image-capable. Publication still rejects missing or incompatible APIM image infrastructure, and invocation still requires a published model, authorization and available budget.
 
 `IMAGE_GENERATION_DEFAULTS` is a JSON object containing `max_request_bytes` (24576), `max_response_bytes` (16777216), `output_reservation_tokens` (8192), and `timeout_seconds` (180). Request/response limits cannot exceed 16 MiB, timeout cannot exceed 240 seconds, and request bytes plus output reservation must fit a signed 32-bit counter. The parent policy burst cap must cover that sum. These are transport and accounting limits, not provider size, quality or format defaults.
 
@@ -89,7 +353,153 @@ In Bicep, `gatewayApplicationProvisioningEnabled` preserves the requested capabi
 
 New operations snapshot the gateway, product and positive `GATEWAY_APPLICATION_DEFAULT_MONTHLY_TOKEN_LIMIT` / `GATEWAY_APPLICATION_DEFAULT_TOKENS_PER_MINUTE` values. They create a suspended APIM subscription, materialize the Application, prepare and read back its quota, model access, confirmed balance and subscription mapping, then activate using an ETag and verify the result. Retries never reset an existing confirmed balance or modify reservations. Historical version-1 queued operations retain their original behavior.
 
+Text requests use the associated Application's `tokens_per_minute` after its mapping, quota and model admission are verified. The value must be positive and fit a signed 32-bit integer; absent, invalid or unavailable application configuration retains the gateway's existing default burst limit. Counters remain subscription-scoped. Employee and image burst limits, monthly budgets and prompt-token estimation are unchanged.
+
+Existing gateways adopt this behavior through a normal reviewed Control Plane publication. The compiler preserves each installed default limit and rejects partial or unrecognized rate-limit changes; uploading the package alone does not update the live APIM policy.
+
 The initial key is returned once with `Cache-Control: no-store`. The browser keeps it only in memory for copying, never in the DOM, URL or query cache. Terminal operation state and temporary ciphertext deletion commit together. Failed operations retain their resource and checkpoint evidence; they do not automatically delete subscriptions or regenerate credentials. Inspect an interrupted activation's live state before taking further action.
+
+Application discovery and key management use the selected APIM target, not the first or default
+instance. Creation progress can be refreshed without resubmitting the operation; successful
+creation opens the exact Application detail while the initial key remains confined to its dialog.
+
+Saving an Application budget also attempts to project its TPM to the current month's existing
+admission `Q` row. The update is conditional on the row's ETag, preserves unrelated fields and
+does not recreate missing admission state. It does not reset confirmed usage, reservations or
+model access. A failed projection does not undo the saved budget: the response remains pending
+or unavailable until readback proves that `projected_tokens_per_minute` matches the saved value.
+The detail API exposes this distinction as `tpm_sync_status` rather than inferring success from
+the database save. Routine ledger synchronization remains the recovery path.
+
+Application details retain the execution epoch and exact available balance, confirmed usage,
+pending reservations and conservative finalization evidence. Unavailable or disabled execution
+state is shown explicitly; historical usage and configured limits are not substitutes for a
+verified current balance.
+
+## Connection diagnostics
+
+Registry capability `runtime_diagnostics_supported` enables Owner-only connection checks.
+The plan and execution endpoints are `GET` and `POST`
+`/api/v1/model-management/runtimes/{runtime_id}/check`. A check requires an explicit enabled
+text model and eligible Gateway deployment on a registered, synchronized APIM target.
+It uses that target's active system-managed probe Application, never a user's subscription.
+
+The plan reports the API identity, exact subscription scope and missing permissions without
+making an inference request. The API identity needs the probe subscription read and
+`Microsoft.ApiManagement/service/subscriptions/listSecrets/action` permissions. An operator must
+review and grant missing permissions separately; checking or refreshing the plan does not change
+RBAC. Publication and initialization also check their required management permissions before
+writing. The public publisher does not gain operation-creation permission through this feature.
+
+Each confirmed check sends at most one nonstreaming request with a 64-token output limit and
+provider-default sampling. A 60-second per-Runtime cooldown prevents duplicate checks; an unknown
+outcome never authorizes an automatic replay. Normal system-probe billing still applies.
+The result stores bounded status and identity evidence, not the prompt, response or credentials.
+
+Historical outcomes do not expire into an online/offline claim. Their server-owned configuration
+fingerprint determines whether the last check still applies, configuration changed, or applicability
+cannot be verified. A permission or budget block is distinct from an upstream failure.
+Applicability compares recorded configuration only; it does not detect unobserved upstream changes
+or establish current availability without a new, explicitly requested check.
+
+## Platform invocation trace
+
+Apply `015_platform_invocation_trace` before updating the API. Every platform text invocation
+records a nonbilling identity snapshot before dispatch and a conditional immutable outcome after
+the response. Failure to record the initial snapshot prevents dispatch. A missing completion
+remains pending; it never authorizes an automatic replay.
+
+Request Trace merges an attempt with formal telemetry only when the real Gateway correlation ID
+and caller request ID identify exactly one matching user, model, Runtime and optional Application.
+The public schema does not infer Gateway attribution from a caller ID alone. Without sufficient
+evidence, the platform trace remains separate and its usage and cost are unavailable, not zero.
+Platform outcomes do not modify formal usage, historical prices, budgets or settlement records.
+
+Registry capability `explicit_gateway_selection_supported` enables an APIM and Gateway selector
+for an explicitly chosen model. Text and image requests accept `gateway_profile_id` and
+`gateway_deployment_id` only as a pair. An unavailable selection is rejected rather than replaced
+by the default route. The console omits `runtime_id` for explicit Gateway selection so the model's
+binding on that target determines the connection. Image routing fields never enter the provider
+payload; image calls retain their existing budget reservation and settlement lifecycle.
+
+Request Trace uses a stable `platform:<request_id>` identity even before telemetry arrives.
+Actual Gateway correlation and upstream request IDs remain separate and may be unknown.
+`usage_available: false` means token and cost placeholders are unavailable measurements, not zero.
+Once uniquely matched, a platform timeout and the formal Gateway status remain independently
+visible; valid measured zero is still displayed as zero.
+
+## Atomic budget execution
+
+The execution protocol is opt-in and separate from legacy ledger projection. Migration
+`010_budget_execution_protocol` adds default-off rollout/scope records, immutable admission and
+evidence, and a leased settlement outbox. It does not activate scopes or rewrite historical usage.
+Existing migrations and the evidence-v2 cutoff remain unchanged.
+
+| Variable | Purpose |
+| --- | --- |
+| `BUDGET_EXECUTION_ENABLED` | Enables the compatible event reader and execution-budget reads; default false. |
+| `BUDGET_EXECUTION_TARGET_IDS` | Explicit gateway-profile UUID array for reviewed execution parents; default empty. |
+| `BUDGET_SETTLEMENT_ENABLED` | Enables Telemetry's post-commit settlement and recovery timer; default false, requires PostgreSQL, the execution reader and Table endpoint. |
+| `BUDGET_DELEGATION_TRUST` | Optional per-target Entra tenant, audience, client and object identity allowlists; default empty. |
+| `BUDGET_DELEGATION_TARGETS` | Optional per-target audience and HTTPS origins; default empty and limited to enabled targets. |
+| `BUDGET_COMPLETION_ENABLED` | Observer-only direct completion writer; default false, requires the exact existing ledger endpoint/table and its own managed-identity access. |
+
+Do not enable these settings before the controlled procedure in [Deployment](deployment.md#budget-execution-cutover).
+API, Control Plane, Telemetry and Observer must agree on the same existing ledger. Permission and
+TPM projection still use legacy Q/M rows; the new S/A/D records live in separate `budget2` partitions.
+Changing limits or permissions never resets confirmed, pending or conservatively charged tokens.
+The in-memory demonstration repository deliberately rejects execution receipts.
+
+### Budget verification
+
+The Gateway Releases page offers two Owner-only, no-store operations under
+`/api/v1/model-management/gateways/{gateway_profile_id}`:
+
+- `POST /budget-readiness` checks delegation or fencing through catalog reads, without inference.
+- `POST /budget-execution-verification` sends one fixed, nonstreaming verification request with
+	a 32-token output limit and an eight-second dispatch timeout. Its body accepts only
+	`application_id` and `model_id`; the signed-in Owner determines the person identity.
+
+These operations require the selected registered target to be configured in both the execution
+target allowlist and delegation targets, with a trusted HTTPS origin and the existing Table
+ledger. They do not enable execution, grant permissions, change budgets or prepare candidates.
+The readiness result reports expected and actual status/error evidence, never a fabricated pass.
+
+Joint verification requires an exact paused protocol fence naming the validation person,
+Application, subscription and isolated Revision. All configured execution targets must be paused
+in the same epoch, and both Person and Application scopes must already be active and match that
+epoch. The Application must be active, non-system and bound to the selected APIM. Model access is
+checked for both scopes. The target fence is read again immediately before dispatch.
+
+The request uses the normal platform dispatch and nonbilling Trace recording. Delegation tokens
+are sent only to APIM and never returned in the response. Only matching settled receipts for both
+scopes, with exact measured usage, establish settlement. A timeout, missing receipt, mismatched
+identity or delayed settlement remains unconfirmed and never authorizes automatic replay.
+Each explicit verification can incur normal model charges; operational isolation and real
+accounting acceptance require separate authorization.
+
+Before reservation, request analysis walks only protocol-defined message, content and tool-result
+positions. Tool schemas, arguments, metadata and text containing JSON are business data, not new
+envelopes to scan recursively. The entire original body still contributes to a legacy byte estimate.
+Chat Completions, Responses, Messages, compact Responses and Images have distinct rules. Unknown
+structures produce incomplete analysis: verified-bound contracts reject them, while an explicitly
+labelled legacy estimate remains an estimate. Analysis never logs user values in error paths.
+
+Native counting must belong to the selected route's HTTPS origin, operation and existing auth.
+Only a verified upper bound can reduce a reservation; an estimate or failed count cannot do so.
+Native-count payload projection does not mutate the provider request. Images and compact Responses
+retain their operation-specific counting contracts. No model name or client version bypass exists.
+
+Invalid requests return `budget_request_invalid` (400); analysis and plan faults return
+`budget_request_analysis_failed` or `budget_plan_failed` (500); invalid configuration or unavailable
+identity returns `budget_configuration_invalid` or `budget_identity_unavailable` (503). A real ledger
+failure retains `budget_ledger_unavailable`; it is not the fallback label for parser errors.
+
+Complete APIM/Observer evidence requires exact, consistent counters and immutable receipt identity.
+Interrupted or incomplete streams keep their reservation. Observer completion uses a bounded
+conditional Table transaction; a failed direct write still emits the event for durable recovery.
+Equal-rank conflicts remain recorded; weaker evidence cannot overwrite completion or release an
+unknown attempt. Retries of a receipted Pool request are disabled to preserve one attempt per charge.
 
 ## Budget ledger recovery
 

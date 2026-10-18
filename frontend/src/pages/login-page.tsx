@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react"
 import { Eye, EyeOff, KeyRound, LoaderCircle } from "lucide-react"
 
+import { ApiError } from "../api/client"
 import { Button } from "../components/ui/button"
 import {
   Card,
@@ -48,8 +49,16 @@ export function LoginPage() {
     setPending("password")
     try {
       await signInWithPassword(email.trim(), password)
-    } catch {
-      setError("邮箱或密码不正确，请重新输入。")
+    } catch (failure) {
+      setError(failure instanceof ApiError
+        ? failure.status === 401
+          ? "邮箱或密码不正确，请重新输入。"
+          : failure.status >= 500
+            ? "登录服务暂时不可用，请稍后重试。"
+            : failure.message
+        : failure instanceof TypeError
+          ? "无法连接登录服务，请检查网络后重试。"
+          : "登录失败，请重试。")
       setPending(null)
     }
   }

@@ -144,7 +144,8 @@ def test_anthropic_native_stream_assembles_text_and_cumulative_usage(
         )
     assert result.content == "Hello \u4e16\u754c"
     assert result.tool_calls == ()
-    assert result.correlation_id == "claude-stream-1"
+    assert result.correlation_id == (None if kind is GatewayKind.APIM else "claude-stream-1")
+    assert result.upstream_request_id == "claude-stream-1"
     assert result.usage is not None
     assert result.usage.input_tokens == 10
     assert result.usage.cached_tokens == 25
@@ -554,7 +555,9 @@ def test_multiline_sse_and_final_event_without_blank_line_are_supported(
             invocation,
             _anthropic_route(route),
         )
-    assert result.content == "OK" and result.correlation_id == "msg-stream-1"
+    assert result.content == "OK"
+    assert result.correlation_id is None
+    assert result.upstream_request_id is None
 
 
 def test_malformed_sse_json_becomes_a_safe_gateway_error(

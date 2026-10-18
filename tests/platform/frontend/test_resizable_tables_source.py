@@ -28,7 +28,9 @@ def test_product_tables_use_shared_resizable_wrappers() -> None:
             if 'role="table"' in line and "<ResizableGridTable" not in line:
                 raw_grid_tables.append(f"{relative}:{line_number}")
 
-    assert raw_native_tables == []
+    assert raw_native_tables == ["data-sources/apim/pages/budget-page.tsx"]
+    budget = (FRONTEND_SOURCE / raw_native_tables[0]).read_text(encoding="utf-8")
+    assert '<table><thead><tr><th>部门</th><th>预算额度</th><th>未分配余额</th>' in budget
     assert raw_grid_tables == []
 
 
@@ -46,7 +48,9 @@ def test_resizable_table_primitive_keeps_interaction_and_accessibility_contract(
     assert "aria-valuemin" in source
     assert "aria-valuemax" in source
     assert "aria-valuenow" in source
-    assert "headerSignatureRef" in source
+    assert "headerSignatureRef" not in source
+    assert "cellsChanged && headerCells.length > 0" in source
+    assert "container.parentElement !== cell" in source
     assert 'window.addEventListener("resize", update)' in source
     assert '["resizable-grid-table", className]' in source
     assert '<span\n        className="table-column-resizer"' in source
@@ -76,7 +80,10 @@ def test_column_width_behavior_and_narrow_model_tracks() -> None:
     assert "[180, 120, 160, 80, 48]" in page
     assert "minmax(180px, var(--resizable-column-1, 1fr))" in styles
     assert "minmax(80px, var(--resizable-column-4, 90px))" in styles
-    assert "minmax(48px, var(--resizable-column-5, 76px))" in styles
+    assert (
+        "minmax(var(--model-table-compact-actions-min, 48px), "
+        "var(--resizable-column-5, 76px))" in styles
+    )
 
 
 def test_visual_disclosure_and_action_tables_are_included() -> None:

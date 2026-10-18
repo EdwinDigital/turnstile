@@ -620,7 +620,7 @@ def test_monthly_token_budgets_track_usage_and_enforce_parent_limit() -> None:
             json={"token_limit": 5_000, "warning_threshold_percent": 80},
         )
         assert lowered.status_code == 409
-        assert "allocated child tokens" in lowered.json()["detail"]
+        assert "allocated child budgets" in lowered.json()["detail"]
 
         client.cookies.set("turnstile_session", MEMBER_SESSION)
         member_view = client.get(
@@ -731,6 +731,8 @@ def test_people_budgets_support_server_paging_and_bulk_allocation() -> None:
             "token_limit_per_user": 1_500,
             "total_allocated": 6_000,
             "model_policy_updated_count": 0,
+            "usd_limit_per_user": None,
+            "total_usd_allocated": None,
         }
 
         assigned = client.get(
@@ -791,6 +793,8 @@ def test_people_budgets_support_server_paging_and_bulk_allocation() -> None:
             "token_limit_per_user": None,
             "total_allocated": None,
             "model_policy_updated_count": 2,
+            "usd_limit_per_user": None,
+            "total_usd_allocated": None,
         }
         configured = client.get(
             "/api/v1/budgets/users",

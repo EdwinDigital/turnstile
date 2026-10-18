@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+from uuid import UUID
+
 from pydantic import SecretStr
 
-from backend.bootstrap import bootstrap_initial_owner
+from backend.bootstrap import bootstrap_initial_apim_target, bootstrap_initial_owner
 from backend.services.auth_service import hash_password, verify_password
+from backend.services.gateway_targets import DEFAULT_SEEDED_APIM_GATEWAY_ID
 from turnstile_core.config import Settings
+from turnstile_core.persistence.in_memory import InMemoryRepository
 
 
 class CapturingInitialOwnerStore:
@@ -46,3 +51,27 @@ def test_bootstrap_configuration_must_be_paired() -> None:
         assert "must be configured together" in str(error)
     else:
         raise AssertionError("one-sided bootstrap configuration was accepted")
+
+
+def test_bootstrap_initial_apim_target_registers_seeded_profile_when_empty() -> None:
+    repository = InMemoryRepository()
+    settings = Settings(
+        azure_subscription_id="00000000-0000-4000-8000-000000000010",
+        apim_resource_group="unit-group",
+        apim_service_name="unit-apim",
+        apim_api_id="turnstile-llm",
+        apim_gateway_url="https://unit-apim.azure-api.net/turnstile/llm",
+    )
+    with patch("backend.bootstrap.register_existing_apim_target") as register:
+        created = bootstrap_initial_apim_target(
+            repository,
+            settings,
+            tenant_id="00000000-0000-4000-8000-000000000020",
+        )
+    assert created is True
+    register.assert_called_once()
+    registration = register.call_args.args[0]
+    assert registration.gateway_profile_id == DEFAULT_SEEDED_APIM_GATEWAY_ID
+    assert registration.name == "unit-apim"
+    assert registration.tenant_id == UUID("00000000-0000-4000-8000-000000000020")
+    assert str(registration.gateway_endpoint) == "https://unit-apim.azure-api.net/turnstile/llm"
