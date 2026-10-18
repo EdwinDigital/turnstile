@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -53,6 +56,32 @@ def test_budget_operations_runbook_references_maintained_sources_and_tests() -> 
     assert tests
     for test in tests:
         assert (ROOT / test).is_file(), f"Runbook references an absent test: {test}"
+
+
+def test_budget_operations_keeps_one_section_per_topic() -> None:
+    source = (ROOT / "plan/aigateway-proxy-client/operations.md").read_text()
+    headings = re.findall(r"^## (.+)$", source, re.MULTILINE)
+    topics = [heading.casefold() for heading in headings]
+    assert len(topics) == len(set(topics)), "Merge repeated topics instead of appending snapshots"
+
+
+@pytest.mark.parametrize(("module", "argument"), [
+    ("scripts.prepare_budget_execution", "--configuration"),
+    ("scripts.budget_execution_upgrade", "--current-parent"),
+    ("scripts.install_budget_execution", "--plan"),
+])
+def test_documented_budget_cli_works_without_a_pythonpath_override(
+    module: str, argument: str,
+) -> None:
+    source = (ROOT / "plan/aigateway-proxy-client/operations.md").read_text()
+    assert f"uv run python -m {module} --help" in source
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    result = subprocess.run(
+        [sys.executable, "-m", module, "--help"], cwd=ROOT, env=environment,
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "usage:" in result.stdout and argument in result.stdout
 
 
 def test_directory_deployment_guard_points_to_the_migrated_runbook() -> None:
