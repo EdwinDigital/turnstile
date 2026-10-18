@@ -582,11 +582,8 @@ def test_observer_context_contains_only_runtime_and_shared_stdlib_modules(
     from decimal import Decimal
     from uuid import UUID
 
-    from tests.platform.infrastructure.test_envoy_cache_adapter import (
-        EPOCH,
-        execution_row,
-        identity,
-    )
+    from tests.backend.telemetry.test_atomic_ledger import EPOCH, identity
+    from tests.platform.infrastructure.test_envoy_cache_adapter import execution_row
     from turnstile_core.domain.ledger import BudgetPriceProjection, LedgerAdmissionReceipt
     from turnstile_core.domain.models import ModelPrice
 
