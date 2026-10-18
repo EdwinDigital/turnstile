@@ -55,7 +55,7 @@ ENTERPRISE_SCREENSHOTS = {
     "magpie-installed.png", "magpie-provider.png", "magpie-usage.png",
     "magpie-workbuddy.png", "workbuddy-model.png", "platform-downloads.png",
     "platform-budgets.png", "platform-permissions.png", "platform-request-trace.png",
-    "platform-request-detail.png",
+    "platform-request-detail.png", "magpie-routing.png",
 }
 ENTERPRISE_DOC_FILES = {
     *(f"docs/enterprise-plugin/{name}" for name in ENTERPRISE_GUIDES),
