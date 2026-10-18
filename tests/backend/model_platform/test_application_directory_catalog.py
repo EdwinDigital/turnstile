@@ -29,6 +29,7 @@ from turnstile_core.persistence.in_memory import InMemoryRepository
 from turnstile_core.persistence.repository_applications import PostgreSqlApplicationRepositoryMixin
 from turnstile_core.services.application_access import ApplicationAccessService
 from turnstile_core.services.application_provisioning_ledger import prepare_application_ledger
+from turnstile_core.services.budget_settlement import BudgetScopeRepository, BudgetScopeService
 
 
 @pytest.fixture
@@ -49,9 +50,28 @@ def custom_catalog(monkeypatch: pytest.MonkeyPatch) -> EnterpriseEntityCatalog:
         "turnstile_core.services.application_access",
         "turnstile_core.services.application_provisioning_ledger",
         "turnstile_core.persistence.directory_catalog",
+        "turnstile_core.services.budget_settlement",
     ):
         monkeypatch.setattr(module + ".catalog_for", lambda *args, **kwargs: catalog)
     return catalog
+
+
+def test_budget_period_preparation_reads_people_from_the_authoritative_directory(
+    custom_catalog: EnterpriseEntityCatalog,
+) -> None:
+    repository, ledger = MagicMock(), MagicMock()
+    epoch = uuid4()
+    now = datetime(2026, 10, 18, tzinfo=UTC)
+    repository.active_budget_execution_rollout.return_value = {
+        "epoch": epoch, "gateway_profile_ids": [], "prepared_period": None,
+    }
+    repository.budget_scope_seed_candidates.return_value = []
+    assert BudgetScopeService(cast(BudgetScopeRepository, repository), ledger).prepare(now=now) == 0
+    repository.prepare_budget_execution_period.assert_called_once_with(
+        epoch, now.date().replace(day=1), [person.id for person in custom_catalog.users],
+    )
+    assert "custom@example.test" in repository.prepare_budget_execution_period.call_args.args[2]
+    assert ledger.mock_calls == []
 
 
 def assigned_application() -> tuple[InMemoryRepository, ApplicationAccessService]:
