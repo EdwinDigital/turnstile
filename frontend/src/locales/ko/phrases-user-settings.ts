@@ -1,4 +1,5 @@
 export const USER_SETTINGS_PHRASES: Record<string, string> = {
+  "未核实": "미확인",
   "用户设置": "사용자 설정",
   "数据时间": "데이터 기준 시각",
   "显示上次数据": "이전 데이터 표시",

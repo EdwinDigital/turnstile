@@ -170,68 +170,71 @@ schemas:
     - updated_at
     title: PersonalAvatar
   PersonalBudget:
-    additionalProperties: false
     properties:
       period:
-        title: Period
         type: string
+        title: Period
       period_start:
+        type: string
         format: date
         title: Period Start
-        type: string
       period_end:
+        type: string
         format: date
         title: Period End
-        type: string
       min_period:
+        type: string
         title: Min Period
-        type: string
       max_period:
-        title: Max Period
         type: string
+        title: Max Period
       budget_mode:
-        default: tokens
+        type: string
         enum:
         - tokens
         - usd
         title: Budget Mode
-        type: string
+        default: tokens
       usd_limit:
         anyOf:
-        - pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
-          type: string
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
         - type: 'null'
-        default: null
         title: Usd Limit
       used_usd:
         anyOf:
-        - pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
-          type: string
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
         - type: 'null'
-        default: null
         title: Used Usd
       remaining_usd:
         anyOf:
-        - pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
-          type: string
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
         - type: 'null'
-        default: null
         title: Remaining Usd
       forecast_usd:
         anyOf:
-        - pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
-          type: string
+        - type: string
+          pattern: ^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$
         - type: 'null'
-        default: null
         title: Forecast Usd
+      usd_cost_available:
+        type: boolean
+        title: Usd Cost Available
+        default: true
+      unpriced_usage_count:
+        type: integer
+        title: Unpriced Usage Count
+        default: 0
       token_limit:
         anyOf:
         - type: integer
         - type: 'null'
         title: Token Limit
       used_tokens:
-        title: Used Tokens
         type: integer
+        title: Used Tokens
       remaining_tokens:
         anyOf:
         - type: integer
@@ -248,14 +251,15 @@ schemas:
         - type: 'null'
         title: Usage Percent
       forecast_tokens:
-        title: Forecast Tokens
         type: integer
+        title: Forecast Tokens
       forecast_percent:
         anyOf:
         - type: number
         - type: 'null'
         title: Forecast Percent
       status:
+        type: string
         enum:
         - unallocated
         - healthy
@@ -263,13 +267,12 @@ schemas:
         - exceeded
         - unverified
         title: Status
-        type: string
       enforcement_mode:
         anyOf:
-        - enum:
-          - block
+        - type: string
+          enum:
           - audit
-          type: string
+          - block
         - type: 'null'
         title: Enforcement Mode
       enforcement_department_id:
@@ -278,14 +281,16 @@ schemas:
         - type: 'null'
         title: Enforcement Department Id
       basis:
-        const: budget_evidence
-        default: budget_evidence
-        title: Basis
         type: string
+        const: budget_evidence
+        title: Basis
+        default: budget_evidence
       generated_at:
+        type: string
         format: date-time
         title: Generated At
-        type: string
+    additionalProperties: false
+    type: object
     required:
     - period
     - period_start
@@ -304,7 +309,6 @@ schemas:
     - enforcement_department_id
     - generated_at
     title: PersonalBudget
-    type: object
   PersonalModel:
     properties:
       id:

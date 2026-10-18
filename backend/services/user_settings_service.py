@@ -130,16 +130,26 @@ class UserSettingsService:
             Literal["tokens", "usd"],
             allocation.get("budget_mode", "tokens") if allocation else "tokens",
         )
-        limit = int(allocation["token_limit"]) if allocation and mode == "tokens" else None
-        usd_limit = Decimal(str(allocation["usd_limit"])) if allocation and mode == "usd" else None
+        limit = (
+            int(allocation["token_limit"])
+            if allocation and mode == "tokens" and allocation["token_limit"] is not None else None
+        )
+        usd_limit = (
+            Decimal(str(allocation["usd_limit"]))
+            if allocation and mode == "usd" and allocation.get("usd_limit") is not None else None
+        )
         personal_usage = [
             row for row in usage if row["scope_type"] == "user" and row["scope_id"] == person
         ]
-        priced = not any(row.get("unpriced_usage_count") for row in personal_usage)
-        used_usd = (
-            sum((Decimal(str(row.get("used_usd") or 0)) for row in personal_usage), Decimal(0))
-            if priced else None
+        unpriced_count = sum(int(row.get("unpriced_usage_count") or 0) for row in personal_usage)
+        priced = unpriced_count == 0 and all(
+            row.get("used_usd") is not None or int(row["used_tokens"]) == 0
+            for row in personal_usage
         )
+        known_usd = sum(
+            (Decimal(str(row.get("used_usd") or 0)) for row in personal_usage), Decimal(0)
+        )
+        used_usd = known_usd if priced else None
         forecast_usd = (
             TokenBudgetService._forecast_usd(used_usd, start, end, datetime.now(UTC))
             if used_usd is not None else None
@@ -165,11 +175,13 @@ class UserSettingsService:
                 if forecast_usd is not None else None
             )
             status = (
-                "unverified" if used_usd is None
-                else "exceeded" if used_usd >= usd_limit
+                "exceeded" if known_usd >= usd_limit
+                else "unverified" if used_usd is None
                 else "warning" if max(percent or 0, forecast_percent or 0) >= (threshold or 80)
                 else "healthy"
             )
+        elif allocation is not None and mode == "usd":
+            status = "unverified"
         department_id = allocation["parent_scope_id"] if allocation else None
         if not department_id:
             department = self.account(identity).department
@@ -195,6 +207,8 @@ class UserSettingsService:
                 usd_limit - used_usd if usd_limit is not None and used_usd is not None else None
             ),
             forecast_usd=forecast_usd,
+            usd_cost_available=priced,
+            unpriced_usage_count=unpriced_count,
             token_limit=limit,
             used_tokens=used,
             remaining_tokens=limit - used if limit is not None else None,

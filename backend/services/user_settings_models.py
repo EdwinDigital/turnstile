@@ -87,6 +87,8 @@ class PersonalBudget(StrictModel):
     used_usd: Decimal | None = None
     remaining_usd: Decimal | None = None
     forecast_usd: Decimal | None = None
+    usd_cost_available: bool = True
+    unpriced_usage_count: int = 0
     token_limit: int | None
     used_tokens: int
     remaining_tokens: int | None

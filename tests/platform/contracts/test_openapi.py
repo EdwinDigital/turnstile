@@ -100,6 +100,9 @@ def _schema_contract(value: object) -> object:
     types = result.get("type")
     if isinstance(types, list):
         result = {"anyOf": [{**result, "type": kind} for kind in types]}
+    choices = result.get("enum")
+    if isinstance(choices, list):
+        result["enum"] = sorted(choices, key=lambda item: json.dumps(item, sort_keys=True))
     variants = result.get("anyOf")
     if isinstance(variants, list):
         result["anyOf"] = sorted(variants, key=lambda item: json.dumps(item, sort_keys=True))
@@ -188,6 +191,14 @@ def test_user_settings_contract_matches_served_self_service_routes() -> None:
     assert schemas["PasswordUpdate"]["additionalProperties"] is False
     passwords = cast(dict[str, dict[str, object]], schemas["PasswordUpdate"]["properties"])
     assert all(value["writeOnly"] for value in passwords.values())
+    actual = app.openapi()["components"]["schemas"]
+    for name in ("PersonalBudget", "AccountInformation", "PersonalUsage"):
+        fields = cast(dict[str, object], schemas[name]["properties"])
+        for field, documented in fields.items():
+            assert _schema_contract(documented) == _schema_contract(
+                actual[name]["properties"].get(field)
+            ), (name, field)
+        assert _schema_contract(schemas[name]) == _schema_contract(actual[name]), name
 
 
 def test_usage_query_contract_exposes_multiselect_and_distinct_directory_states() -> None:

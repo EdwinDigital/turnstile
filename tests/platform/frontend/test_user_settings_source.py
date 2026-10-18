@@ -57,7 +57,9 @@ def test_personal_budget_renders_usd_and_preserves_unknown_cost() -> None:
     page = source("pages/user-settings-page.tsx")
     assert 'budget.budget_mode === "usd"' in page
     for field in ("usd_limit", "used_usd", "remaining_usd", "forecast_usd"):
-        assert f"amount(budget.{field})" in page
-    assert 'value == null ? "--" : cost(Number(value))' in page
-    assert 'unverified: "金额待核实"' in page
+        assert f"money(budget.{field})" in page
+    assert 'cost(value == null ? null : Number(value))' in page
+    assert 'unverified: "未核实"' in page
+    assert 'budget.usd_cost_available ? money(budget.used_usd) : "--"' in page
+    assert 'usd && !budget.usd_cost_available' in page
     assert 'limit != null && budget.usage_percent != null' in page

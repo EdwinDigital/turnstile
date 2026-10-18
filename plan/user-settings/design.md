@@ -689,3 +689,14 @@ deployment script creates the first password Owner only when the user table is e
 Password users can change their own display name, avatar, and password from User settings.
 Microsoft sessions show read-only profiles. Operators can still use `python -m backend.accounts`
 for account maintenance; application restarts never reset the bootstrap account.
+
+## 2026-10-18 上游 v1.2 兼容同步（2026-10-18）
+
+- 将上游 `main` 的 `e59177d` 合入 `codex/user-info-management`，保留现有用户设置功能和上游新增的模型、路由、预算、认证及开发代理行为。本次仅更新 PR #32，不推送用户 repo `main`，不部署云资源或应用包。
+- 个人预算适配 Token/USD 双模式，复用上游预测与组件计价语义，精确金额通过 Decimal 聚合；本人过滤覆盖原始用量、预算证据、恢复记录和 USD 查询，管理员不带过滤的既有查询保持原行为。
+- 计价缺失时 USD 剩余、预测与百分比保持未知，页面显示“未核实”且不画零使用进度；已知费用已达上限则保留超额状态。使用统计优先使用正式金额，非零缓存读/写组件缺少费率时不能视为已计价。移除对上游已删除图片功能开关的访问。
+- 已应用 `011_user_settings_profile` 的文件名与 SHA-256 保持不变；上游 `011_gateway_targets` 与其按完整文件名分别记账。新装执行上游 `001-028` 加本功能迁移，共 29 项；已有安装仍由 `backend.migrate` 应用待执行文件，无新建表脚本或历史迁移改写。
+- 真实 PostgreSQL 回归覆盖完整链新装、升级前数据保留、重跑/校验和、失败回滚、Owner 改名改密后重启，以及双用户 USD/组件价格/本人隔离查询。前端浏览器使用本地 API 夹具验证正常 USD、未知计价、改名与侧栏同步/刷新、Microsoft 只读、Copilot 来源；1440x1000 和 390x844 截图及无横向溢出检查通过，不宣称真实 OAuth/Graph 验收。
+- Ruff、Mypy（236 文件）、前端生产构建、OpenAPI 校验、APIM XML 和 Bicep 本地编译通过。复用本机现有 .NET 8 SDK 后，策略执行与文档相关 158 项检查通过；最终完整 Python 回归为 3,873 passed、3 failed、11 warnings，无跳过或夹具启动错误。剩余失败均为下述纯上游已复现问题，详情记录在 PR 验证证据中。
+- 已知上游缺陷：纯 `e59177d` 临时副本同样出现 `test_publication_activation_persists_catalog_pricing_in_postgres` 的 manual/azure_retail/anthropic 三项失败。`019_runtime_display_name` 已移除名称唯一约束，激活 SQL 仍使用 `ON CONFLICT (name)`；首项异常导致后两项留下进行中发布冲突。本 PR 未改动该迁移或激活模块，不将此上游模型发布问题混入用户设置修复，也不把全量测试描述为全部通过。
+- 补充全部 Node 前端测试，当前候选与纯上游同为 276 passed、33 failed，失败用例列表逐项相同。涉及 3 个文件级 TypeScript 导入/旧导出问题、7 项缺少 `useAuth` mock 的可用性组件夹具及 23 项缺少 `gatewayProgramUpgradePreview` mock 的发布对话框夹具；沙箱外复验已排除代理端口权限问题。不通过修改无关模型模块或删减测试扩大本 PR 范围。

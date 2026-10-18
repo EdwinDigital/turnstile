@@ -81,6 +81,8 @@ def test_usage_complete_model_totals_cache_split_and_timezone() -> None:
                 "cache_write_tokens": 2,
                 "input_price_per_million": 1,
                 "output_price_per_million": 1,
+                "cached_price_per_million": 1,
+                "cache_write_price_per_million": 1,
             }
         )
         for index in range(105)
@@ -158,3 +160,74 @@ def test_personal_usage_rejects_unknown_timezone() -> None:
     service = UserSettingsService(InMemoryRepository(), Settings())
     with pytest.raises(ValueError, match="时区"):
         service.usage(reader(), None, "day", "Not/A-Timezone")
+
+
+@pytest.mark.parametrize("priced", [True, False])
+def test_usd_budget_uses_own_cost_and_keeps_unpriced_balance_unknown(priced: bool) -> None:
+    repository = InMemoryRepository()
+    now = datetime.now(UTC)
+    person = reader().email
+    repository.token_budgets[(now.date().replace(day=1), "user", person)] = {
+        "scope_type": "user", "scope_id": person, "parent_scope_id": "department-platform",
+        "budget_mode": "usd", "token_limit": None, "usd_limit": Decimal("1000.00"),
+        "warning_threshold_percent": 80,
+    }
+    repository.usage_records = [
+        _usage_record("mine", "Foundry", 42).model_copy(update={
+            "ts": now, "usd_cost": Decimal("12.50") if priced else None,
+        }),
+        _usage_record("foreign", "Foundry", 999).model_copy(update={
+            "ts": now, "user_id": "other@example.com", "usd_cost": Decimal("999"),
+        }),
+    ]
+    budget = UserSettingsService(repository, Settings()).budget(reader(), now.strftime("%Y-%m"))
+    assert budget.budget_mode == "usd" and budget.token_limit is None
+    assert budget.usd_limit == Decimal("1000.00") and budget.used_tokens == 42
+    assert budget.usd_cost_available is priced
+    if priced:
+        assert budget.used_usd == Decimal("12.50")
+        assert budget.remaining_usd == Decimal("987.50")
+        assert budget.status == "healthy"
+    else:
+        assert budget.status == "unverified" and budget.unpriced_usage_count == 1
+        assert budget.remaining_usd is None and budget.usage_percent is None
+        assert budget.forecast_usd is None
+
+
+def test_personal_usage_prefers_formal_usd_and_rejects_missing_cache_prices() -> None:
+    repository = InMemoryRepository()
+    now = datetime.now(UTC)
+    repository.usage_records = [
+        _usage_record("formal", "Foundry", 10).model_copy(update={
+            "ts": now, "usd_cost": Decimal("0.01234567890123"), "estimated_cost": 50,
+        }),
+        _usage_record("cache-price-missing", "Foundry", 10).model_copy(update={
+            "ts": now, "cached_tokens": 5,
+            "input_price_per_million": 1, "output_price_per_million": 1,
+        }),
+    ]
+    usage = UserSettingsService(repository, Settings()).usage(
+        reader(), now.strftime("%Y-%m"), "day", "UTC",
+    )
+    assert usage.totals.cost_state == "partial"
+    assert usage.totals.estimated_cost_usd == pytest.approx(0.01234567890123)
+
+
+def test_usd_budget_does_not_infer_zero_cost_from_token_only_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = InMemoryRepository()
+    now = datetime.now(UTC)
+    person = reader().email
+    repository.token_budgets[(now.date().replace(day=1), "user", person)] = {
+        "scope_type": "user", "scope_id": person, "parent_scope_id": None,
+        "budget_mode": "usd", "token_limit": None, "usd_limit": Decimal("100.00"),
+        "warning_threshold_percent": 80,
+    }
+    monkeypatch.setattr(repository, "token_usage_by_budget_scope", lambda *args, **kwargs: [{
+        "scope_type": "user", "scope_id": person, "used_tokens": 42,
+    }])
+    budget = UserSettingsService(repository, Settings()).budget(reader(), now.strftime("%Y-%m"))
+    assert budget.status == "unverified" and not budget.usd_cost_available
+    assert budget.remaining_usd is None and budget.forecast_usd is None
+    assert budget.usage_percent is None and budget.forecast_percent is None
