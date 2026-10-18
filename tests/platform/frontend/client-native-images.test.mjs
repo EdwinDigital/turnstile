@@ -7,14 +7,15 @@ import { imageFileLock, removeNativeImages, syncNativeImages } from "../../../ba
 
 const model = "gpt-image-2-foundry-d8c6686a";
 
-async function fixture(t) {
+async function fixture(t, kind) {
   const root = await mkdtemp(join(tmpdir(), "ts-native-images-")), directory = join(root, "magpie");
   await mkdir(directory);
-  const cfg = { providerId: "aigateway-user-native-fixture", userId: "fixture-user", installationId: "fixture-install" };
+  const cfg = { providerId: `aigateway-${kind}-native-fixture`, installationId: "fixture-install",
+    ...(kind === "subscription" ? { kind, subscriptionId: "fixture-subscription" } : { userId: "fixture-user" }) };
   const picture = { id: cfg.providerId + "-images", name: "AIGateway User Images", chat: "http://127.0.0.1:12345/v1",
     key: "fixture-local-nonce", models: [model, "gpt-image-2.5-flare-foundry-d8c6686a"] };
   const input = { directory, project: { id: "magpie" } }, path = join(directory, "providers.json");
-  const managed = join(directory, "aigateway-proxy-user", cfg.providerId);
+  const managed = join(directory, kind === "subscription" ? "aigateway-proxy-subscription" : "aigateway-proxy-user", cfg.providerId);
   const unrelated = { id: "untouched", name: "Keep provider", key: "other-provider-secret", off: true, models: ["keep"] };
   const original = { providers: [unrelated], groups: [{ id: "keep-group", name: "Keep group", models: ["untouched/keep"] }] };
   await writeFile(path, JSON.stringify(original));
@@ -53,15 +54,17 @@ async function fixture(t) {
   return { root, directory, cfg, picture, input, path, managed, original, read, save, calls, warnings, options };
 }
 
-test("native registration preserves original gateway image IDs and skips unchanged updates", async t => {
-  const f = await fixture(t);
+for (const kind of ["user", "subscription"]) {
+
+test(`${kind}: native registration preserves original gateway image IDs and skips unchanged updates`, async t => {
+  const f = await fixture(t, kind);
   let status = await syncNativeImages(f.input, f.cfg, f.picture, f.options);
   assert.equal(status.state, "applied");
   assert.equal(status.reason, "created");
   assert.deepEqual((await f.read()).providers.at(-1).models, f.picture.models);
   assert.equal(f.calls.length, 1);
   const record = JSON.parse(await readFile(join(f.managed, "native-images-managed.json"), "utf8"));
-  assert.equal(record.userId, f.cfg.userId);
+  assert.equal(record[kind === "subscription" ? "subscriptionId" : "userId"], f.cfg[kind === "subscription" ? "subscriptionId" : "userId"]);
   assert.equal(record.installationId, f.cfg.installationId);
   status = await syncNativeImages(f.input, f.cfg, f.picture, f.options);
   assert.equal(status.state, "applied");
@@ -70,8 +73,8 @@ test("native registration preserves original gateway image IDs and skips unchang
   assert.equal(f.calls.length, 1);
 });
 
-test("owned registration updates endpoint, nonce and catalog without re-enabling a disabled card", async t => {
-  const f = await fixture(t);
+test(`${kind}: owned registration updates endpoint, nonce and catalog without re-enabling a disabled card`, async t => {
+  const f = await fixture(t, kind);
   await syncNativeImages(f.input, f.cfg, f.picture, f.options);
   const document = await f.read();
   document.providers.at(-1).off = true;
@@ -85,8 +88,8 @@ test("owned registration updates endpoint, nonce and catalog without re-enabling
   assert.equal((await removeNativeImages(f.input, f.cfg, f.options)).state, "preserved_manual");
 });
 
-test("existing IDs and legacy ID-only markers cannot grant ownership", async t => {
-  const f = await fixture(t);
+test(`${kind}: existing IDs and legacy ID-only markers cannot grant ownership`, async t => {
+  const f = await fixture(t, kind);
   const document = await f.read();
   document.providers.push({ ...f.picture });
   await f.save(document);
@@ -99,8 +102,8 @@ test("existing IDs and legacy ID-only markers cannot grant ownership", async t =
   assert.equal(f.calls.length, 0);
 });
 
-test("manual native settings and foreign installation manifests are preserved", async t => {
-  const f = await fixture(t);
+test(`${kind}: manual native settings and foreign installation manifests are preserved`, async t => {
+  const f = await fixture(t, kind);
   await syncNativeImages(f.input, f.cfg, f.picture, f.options);
   const document = await f.read();
   document.providers.at(-1).headers = { "X-Manual": "keep" };
@@ -111,8 +114,8 @@ test("manual native settings and foreign installation manifests are preserved", 
   assert.equal(f.calls.length, 1);
 });
 
-test("only a matching, unmodified owned provider is removed", async t => {
-  const f = await fixture(t);
+test(`${kind}: only a matching, unmodified owned provider is removed`, async t => {
+  const f = await fixture(t, kind);
   await syncNativeImages(f.input, f.cfg, f.picture, f.options);
   const status = await removeNativeImages(f.input, f.cfg, f.options);
   assert.equal(status.state, "removed");
@@ -122,8 +125,8 @@ test("only a matching, unmodified owned provider is removed", async t => {
   assert.equal(f.calls.length, 2);
 });
 
-test("unavailable CLI, failures and mismatched readback are reported without credentials", async t => {
-  const f = await fixture(t);
+test(`${kind}: unavailable CLI, failures and mismatched readback are reported without credentials`, async t => {
+  const f = await fixture(t, kind);
   const missing = await syncNativeImages(f.input, f.cfg, f.picture, { ...f.options, resolveExecutable: async () => null });
   assert.equal(missing.reason, "cli-unavailable");
   const broken = await syncNativeImages(f.input, f.cfg, f.picture, { ...f.options,
@@ -137,8 +140,8 @@ test("unavailable CLI, failures and mismatched readback are reported without cre
   assert.deepEqual(await f.read(), f.original);
 });
 
-test("image descriptors reject external URLs, renamed IDs and ambiguous model lists", async t => {
-  const f = await fixture(t);
+test(`${kind}: image descriptors reject external URLs, renamed IDs and ambiguous model lists`, async t => {
+  const f = await fixture(t, kind);
   for (const change of [{ chat: "https://external.example/v1" }, { id: "other-provider" },
     { models: ["gpt-image-2,other"] }, { models: [model, model] }]) {
     assert.equal((await syncNativeImages(f.input, f.cfg, { ...f.picture, ...change }, f.options)).state, "pending");
@@ -146,8 +149,8 @@ test("image descriptors reject external URLs, renamed IDs and ambiguous model li
   assert.equal(f.calls.length, 0);
 });
 
-test("a CLI timeout after saving is recovered through verified readback", async t => {
-  const f = await fixture(t);
+test(`${kind}: a CLI timeout after saving is recovered through verified readback`, async t => {
+  const f = await fixture(t, kind);
   const options = { ...f.options, execute: async (...args) => {
     await f.options.execute(...args);
     throw new Error("discovery timed out after save");
@@ -157,8 +160,8 @@ test("a CLI timeout after saving is recovered through verified readback", async 
   assert.deepEqual(await f.read(), f.original);
 });
 
-test("registration locks coalesce work, reject active owners and recover a dead owner", async t => {
-  const f = await fixture(t);
+test(`${kind}: registration locks coalesce work, reject active owners and recover a dead owner`, async t => {
+  const f = await fixture(t, kind);
   await mkdir(f.managed, { recursive: true });
   const path = join(f.managed, "native-images.lock"), release = await imageFileLock(path);
   try { assert.equal((await syncNativeImages(f.input, f.cfg, f.picture, f.options)).state, "busy"); }
@@ -167,8 +170,8 @@ test("registration locks coalesce work, reject active owners and recover a dead 
   assert.equal((await syncNativeImages(f.input, f.cfg, f.picture, f.options)).state, "applied");
 });
 
-test("maintenance workers do not register providers or write registration state", async t => {
-  const f = await fixture(t), previous = process.env.AIGATEWAY_NATIVE_IMAGE_WORKER;
+test(`${kind}: maintenance workers do not register providers or write registration state`, async t => {
+  const f = await fixture(t, kind), previous = process.env.AIGATEWAY_NATIVE_IMAGE_WORKER;
   process.env.AIGATEWAY_NATIVE_IMAGE_WORKER = "1";
   try { assert.equal((await syncNativeImages(f.input, f.cfg, f.picture, f.options)).state, "worker"); }
   finally {
@@ -178,3 +181,5 @@ test("maintenance workers do not register providers or write registration state"
   assert.equal(f.calls.length, 0);
   await assert.rejects(readFile(join(f.managed, "native-images-status.json")), { code: "ENOENT" });
 });
+
+}

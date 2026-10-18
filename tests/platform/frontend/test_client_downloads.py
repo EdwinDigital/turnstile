@@ -17,6 +17,8 @@ def test_client_download_navigation_and_private_transfer() -> None:
     assert "localStorage" not in page
     assert 'aria-describedby="client-secret-warning"' in page
     assert 'className="finops-scroll-region"' in page
+    assert "该订阅没有已发布且获授权的模型。" in page
+    assert 'query.data?.plugin_version ?? "0.1.4"' not in page
 
 
 def test_plugin_hooks_and_dispatch() -> None:

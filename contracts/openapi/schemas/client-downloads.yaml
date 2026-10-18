@@ -95,6 +95,20 @@ schemas:
     title: ClientSubscription
   ClientModel:
     properties:
+      cost:
+        anyOf:
+        - additionalProperties:
+            type: number
+          type: object
+        - type: 'null'
+        title: Cost
+        default: null
+      upstream_model_id:
+        anyOf:
+        - type: string
+        - type: 'null'
+        title: Upstream Model Id
+        default: null
       id:
         type: string
         title: Id

@@ -181,7 +181,7 @@ def test_personal_package_has_bound_authorization_and_distinct_identity(name: st
         assert "images.mjs" in {name.rsplit("/", 1)[-1] for name in archive.namelist()}
         package = json.loads(archive.read(f"{archive_root}/package.json"))
         assert package["name"].startswith("opencode-aigateway-user-")
-        assert package["version"] == "0.5.0"
+        assert package["version"] == "0.5.1"
         assert f"{archive_root}/native-images.mjs" in archive.namelist()
         image_source = archive.read(f"{archive_root}/images.mjs").decode()
         assert "isAbsolute(entry.spec)" in image_source

@@ -89,6 +89,57 @@ def test_subscription_download_includes_full_platform_prices(
         assert "aigateway-proxy-Cc-Switch/pricing.mjs" in archive.namelist()
 
 
+@pytest.mark.parametrize("image_only", [False, True])
+def test_subscription_images_aliases_and_shared_runtime_are_exported(
+    service: ClientDownloadService, image_only: bool,
+) -> None:
+    repo = service.repository
+    assert isinstance(repo, InMemoryRepository)
+    image = next(model for model in repo.models if model["enabled"])
+    image.update(capabilities=["image_generation"], upstream_model_id="original-image-id",
+                 input_cost_per_million=5.0, output_cost_per_million=30.0,
+                 cached_cost_per_million=0.0, cache_write_cost_per_million=0.0)
+    option = service.options(identity()).items[0]
+    if image_only:
+        service.applications.update_application_model_access(
+            option.application_id,
+            GatewayApplicationModelAccessUpdate(mode="restricted", model_ids=[image["id"]]),
+            "test",
+        )
+    request = ClientDownloadRequest(
+        application_id=option.application_id, subscription_id=option.subscription_id,
+        gateway_id=option.gateway_id,
+    )
+    with ZipFile(BytesIO(service.download(identity(), request).content)) as archive:
+        root = "aigateway-proxy-Cc-Switch/"
+        cfg = json.loads(archive.read(root + "aigateway.config.json"))
+        assert image["model_key"] not in cfg["models"]
+        assert len(cfg["images"]) == 1
+        assert cfg["images"][0]["id"] == image["model_key"]
+        assert cfg["images"][0]["protocol"] == "openai_images"
+        assert cfg["images"][0]["cost"] == {
+            "input": 5.0, "output": 30.0, "cache_read": 0.0, "cache_write": 0.0,
+        }
+        assert cfg["aliases"][image["model_key"]] == "original-image-id"
+        assert bool(cfg["models"]) is not image_only
+        shared = Path(__file__).parents[3] / "backend/services/client_user_plugin"
+        for name in ("helpers.mjs", "images.mjs", "native-images.mjs", "quota.mjs"):
+            assert archive.read(root + name) == (shared / name).read_bytes()
+
+
+def test_subscription_accepts_published_binding_and_does_not_mutate_model_metadata(
+    service: ClientDownloadService,
+) -> None:
+    repo = service.repository
+    assert isinstance(repo, InMemoryRepository)
+    model = next(row for row in repo.models if row["enabled"])
+    publication = repo.gateway_publications[0]
+    publication["desired_spec"] = {"bindings": [{"model": {"model_key": model["model_key"]}}]}
+    models = service.options(identity()).items[0].models
+    assert [m.id for m in models] == [model["model_key"]]
+    assert "cost" not in model
+
+
 def test_options_filter_system_subscriptions_and_never_read_keys(
     service: ClientDownloadService,
 ) -> None:
@@ -154,7 +205,9 @@ def test_download_is_private_complete_zip(service: ClientDownloadService) -> Non
         assert set(archive.namelist()) == {
             f"aigateway-proxy-Cc-Switch/{name}"
             for name in (
-                "index.mjs", "pricing.mjs", "package.json", "README.md", "aigateway.config.json",
+                "index.mjs", "pricing.mjs", "image-sync.mjs", "helpers.mjs", "images.mjs",
+                "native-images.mjs", "quota.mjs", "package.json", "README.md",
+                "aigateway.config.json",
                 "icons/icon.svg", "icons/icon-light.svg", "icons/icon-dark.svg",
                 "icons/manifest.json",
             )
@@ -167,7 +220,7 @@ def test_download_is_private_complete_zip(service: ClientDownloadService) -> Non
         assert config["name"] == f"AIGateway Subscription · {selected.subscription_name}"
         assert config["accountId"] == selected.subscription_name
         package = json.loads(archive.read("aigateway-proxy-Cc-Switch/package.json"))
-        assert package["version"] == "0.1.4"
+        assert package["version"] == "0.2.0"
         assert package["magpie"]["icon"] == config["icon"]
         template = archive.read("aigateway-proxy-Cc-Switch/index.mjs").decode()
         assert "primary-secret" not in template and "secondary-secret" not in template

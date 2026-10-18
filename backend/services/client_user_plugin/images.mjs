@@ -18,8 +18,17 @@ export async function ownLogin(settingsDirectory, providerId, userId) {
     && value?.type === "oauth" && value.uid === userId && value.access);
 }
 
+async function subscriptionAccount(state) {
+  if (typeof state.accountSlot !== "string" || !(state.accountSlot === state.providerId
+      || state.accountSlot.startsWith(state.providerId + "#"))) return null;
+  const accounts = JSON.parse(await readFile(join(state.settingsDirectory, "plugin-auth.json"), "utf8"));
+  const auth = accounts[state.accountSlot];
+  return auth?.type === "api" && typeof auth.key === "string" && auth.key ? auth : null;
+}
+
 export async function imagePluginEnabled(state) {
-  if (!await ownLogin(state.settingsDirectory, state.providerId, state.userId)) return false;
+  if (state.kind === "subscription" ? !await subscriptionAccount(state)
+    : !await ownLogin(state.settingsDirectory, state.providerId, state.userId)) return false;
   const plugins = JSON.parse(await readFile(join(state.settingsDirectory, "plugins.json"), "utf8"));
   const canonical = await realpath(state.spec);
   for (const entry of plugins.plugins ?? []) {
@@ -56,6 +65,20 @@ export function imageQuotaGuard() {
 
 async function descriptor(path) {
   const data = JSON.parse(await readFile(path, "utf8"));
+  if (data.kind === "subscription") {
+    if (!/^aigateway-subscription-[a-z0-9-]+$/.test(data.providerId) || !data.subscriptionId
+        || !Array.isArray(data.images) || !data.nonce || !data.settingsDirectory)
+      throw new Error("Invalid subscription picture bridge state");
+    const bootstrap = JSON.parse(await readFile(join(data.spec, "aigateway.config.json"), "utf8"));
+    const origin = new URL(data.baseURL);
+    if (origin.protocol !== "https:" || origin.username || origin.password || origin.search || origin.hash
+        || bootstrap.providerId !== data.providerId || bootstrap.subscriptionId !== data.subscriptionId
+        || bootstrap.baseURL !== data.baseURL || !Array.isArray(bootstrap.images)
+        || data.images.some(m => !bootstrap.images.some(b => b.id === m.id)))
+      throw new Error("Picture gateway and models must match the installed subscription plugin");
+    return data;
+  }
+  if (data.kind !== undefined) throw new Error("Invalid picture authorization mode");
   if (!/^aigateway-user-[\p{L}\p{N}-]+$/u.test(data.providerId) || !Array.isArray(data.images)
       || !data.capability?.startsWith("tsci_") || !data.nonce || !data.settingsDirectory)
     throw new Error("Invalid private picture bridge state");
@@ -71,6 +94,20 @@ async function descriptor(path) {
 export async function pictureBridge(statePath, readyPath) {
   const quotaGuard = imageQuotaGuard();
   const initial = await descriptor(statePath);
+  const subscription = initial.kind === "subscription";
+  const generate = async (state, body, signal) => {
+    if ((state.kind === "subscription") !== subscription) throw new Error("Picture authorization mode changed");
+    const auth = subscription ? await subscriptionAccount(state) : null;
+    if (subscription && !auth) throw new Error("Subscription signed out");
+    return fetch(subscription ? state.baseURL.replace(/\/$/, "") + "/images/generations"
+      : state.platformOrigin + "/api/v1/client-runtime/images/generations", {
+      method: "POST", redirect: "manual", signal,
+      headers: { "Content-Type": "application/json", ...(subscription
+        ? { "Ocp-Apim-Subscription-Key": auth.key } : { Authorization: "Bearer " + state.capability }) },
+      body: JSON.stringify(body),
+    });
+  };
+  const checkQuota = state => subscription ? null : quotaGuard(state);
   localMagpieURL(initial.magpieAddress);
   const nonce = initial.nonce;
   const matchNonce = (value) => {
@@ -89,18 +126,20 @@ export async function pictureBridge(statePath, readyPath) {
       catch { return Response.json({ error: "The user plugin is disabled or signed out" }, { status: 403 }); }
       if (request.method === "POST" && path === "/mcp") {
         const rpc = await request.json().catch(() => null);
-        if (!rpc || rpc.jsonrpc !== "2.0") return Response.json({ error: "Invalid JSON-RPC" }, { status: 400 });
+        if (!rpc || rpc.jsonrpc !== "2.0" || typeof rpc.method !== "string") return Response.json({ error: "Invalid JSON-RPC" }, { status: 400 });
         if (rpc.method.startsWith("notifications/")) return new Response(null, { status: 202 });
         const reply = (result) => Response.json({ jsonrpc: "2.0", id: rpc.id, result });
-        if (rpc.method === "initialize") return reply({ protocolVersion: "2025-03-26", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "aigateway-user-images", version: "0.2.0" } });
-        if (rpc.method === "tools/list") return reply({ tools: [{ name: "generate_image", description: "Generate an image through the current AIGateway user subscription.", inputSchema: { type: "object", properties: { model: { type: "string", enum: state.images.map((m) => m.id) }, prompt: { type: "string" }, size: { type: "string" }, quality: { type: "string" } }, required: ["model", "prompt"], additionalProperties: false } }] });
+        if (rpc.method === "initialize") return reply({ protocolVersion: "2025-03-26", capabilities: { tools: { listChanged: false } }, serverInfo: { name: subscription ? "aigateway-subscription-images" : "aigateway-user-images", version: "0.2.0" } });
+        if (rpc.method === "tools/list") return reply({ tools: [{ name: "generate_image", description: subscription ? "Generate an image through the configured AIGateway subscription." : "Generate an image through the current AIGateway user subscription.", inputSchema: { type: "object", properties: { model: { type: "string", enum: state.images.map((m) => m.id) }, prompt: { type: "string" }, size: { type: "string" }, quality: { type: "string" } }, required: ["model", "prompt"], additionalProperties: false } }] });
         if (rpc.method !== "tools/call" || rpc.params?.name !== "generate_image") return Response.json({ jsonrpc: "2.0", id: rpc.id, error: { code: -32601, message: "Method not found" } });
         const args = rpc.params.arguments;
         if (!state.images.some((m) => m.id === args?.model) || typeof args?.prompt !== "string") return reply({ isError: true, content: [{ type: "text", text: "Image model and prompt are required" }] });
         try {
-          if (await quotaGuard(state)) return reply({ isError: true, content: [{ type: "text", text: "个人月度额度已用尽，插件已在本地阻断图片调用。" }] });
+          if (await checkQuota(state)) return reply({ isError: true, content: [{ type: "text", text: "个人月度额度已用尽，插件已在本地阻断图片调用。" }] });
         } catch { return reply({ isError: true, content: [{ type: "text", text: "额度读取失败，请刷新模型或重新登录。" }] }); }
-        const response = await fetch(state.platformOrigin + "/api/v1/client-runtime/images/generations", { method: "POST", redirect: "manual", headers: { Authorization: "Bearer " + state.capability, "Content-Type": "application/json" }, body: JSON.stringify(args), signal: request.signal });
+        let response;
+        try { response = await generate(state, args, request.signal); }
+        catch { return reply({ isError: true, content: [{ type: "text", text: "The image gateway is unavailable" }] }); }
         const data = await response.json().catch(() => null);
         if (!response.ok || !data?.data?.length) return reply({ isError: true, content: [{ type: "text", text: "Image generation failed; check platform access and quota" }] });
         return reply({ content: data.data.map((image) => image.b64_json ? { type: "image", data: image.b64_json, mimeType: "image/png" } : { type: "text", text: image.url ?? "Image data was unavailable" }), isError: false });
@@ -111,12 +150,9 @@ export async function pictureBridge(statePath, readyPath) {
       try { body = await request.json(); } catch { return Response.json({ error: "JSON required" }, { status: 400 }); }
       if (!state.images.some((m) => m.id === body?.model)) return Response.json({ error: "Image model not authorized" }, { status: 403 });
       try {
-        const refusal = await quotaGuard(state);
+        const refusal = await checkQuota(state);
         if (refusal) return refusal;
-        const response = await fetch(state.platformOrigin + "/api/v1/client-runtime/images/generations", {
-          method: "POST", redirect: "manual", headers: { Authorization: "Bearer " + state.capability, "Content-Type": "application/json" },
-          body: JSON.stringify(body), signal: request.signal,
-        });
+        const response = await generate(state, body, request.signal);
         return new Response(response.body, { status: response.status, headers: { "content-type": response.headers.get("content-type") ?? "application/json", "cache-control": "no-store" } });
       } catch { return Response.json({ error: "The image gateway is unavailable" }, { status: 502 }); }
     },
@@ -127,9 +163,9 @@ export async function pictureBridge(statePath, readyPath) {
     if (stopping) return; stopping = true;
     let state;
     try { state = await descriptor(statePath); } catch { state = initial; }
-    try {
+    try { if (!subscription) {
       await fetch(state.platformOrigin + "/api/v1/client-auth/revoke", { method: "POST", headers: { Authorization: "Bearer " + state.capability }, signal: AbortSignal.timeout(2000) });
-    } catch { /* Never log private bridge state or credentials. */ }
+    } } catch { /* Never log private bridge state or credentials. */ }
     await removeNativeImages({ directory: state.settingsDirectory, project: { id: "magpie" } }, state,
       { resolveExecutable: () => resolveNativeMagpie(state.nativeCli) }).catch(() => {});
     await unlink(readyPath).catch(() => {});

@@ -54,6 +54,15 @@ command to import complete prices for this provider alone. Manual per-model,
 provider-wide and global model price preferences take precedence. Pricing workers
 cannot bootstrap accounts, rename profiles or start image companions.
 
+From 0.5.1, image catalog entries include the same accounting rates. After successful
+native image registration, prices are imported under the separate `-images` provider,
+not the text provider. Refreshing models updates these prices without renaming model
+IDs or changing the selected image model. Manually modified, conflicting or disabled
+image providers are not priced automatically. Unknown rates remain unknown, not zero.
+Magpie can reprice recorded image tokens at the imported rates; this local estimate
+does not rewrite the platform's historical bills. Existing installations must replace
+their plugin files with the new download; a catalog refresh alone cannot upgrade code.
+
 The normal magpie data directory and a native CLI are required for automatic
 price import (`magpie` on PATH, or the standard macOS app installation).
 `AIGATEWAY_MAGPIE_EXECUTABLE` can explicitly name the installed magpie executable.

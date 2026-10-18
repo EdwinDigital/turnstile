@@ -169,6 +169,9 @@ export default async function AIGatewayUserPlugin(input) {
         if (!await imagePluginEnabled(scope)) { await removeNativeImages(input, owner); return; }
         const registered = await syncNativeImages(input, owner, picture);
         if (!await imagePluginEnabled(scope)) { await removeNativeImages(input, owner); return; }
+        if (registered.state === "applied" && !registered.disabled)
+          await syncPricing(input, { providerId: imageId }, Object.fromEntries(images.map(m => [m.id, m])),
+            registered.cli ? { executable: registered.cli } : {});
         if (registered.cli && registered.cli !== state.nativeCli)
           await privateJSON(statePath, { ...state, nativeCli: registered.cli });
         await privateJSON(join(directory, "image-sync-status.json"), { state: "applied", modelCount: images.length });

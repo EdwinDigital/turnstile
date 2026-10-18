@@ -27,7 +27,7 @@ from .client_namespace import plugin_namespace
 from .client_pricing import plugin_model_cost
 from .download_filename import plugin_filename
 
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.2.0"
 RESERVED = {"master", "turnstile-dashboard", "turnstile-publisher-probe"}
 SDK = {
     "openai_chat": "@ai-sdk/openai-compatible",
@@ -43,6 +43,7 @@ class ClientModel(StrictModel):
     context_window: int | None
     capabilities: list[str]
     cost: dict[str, float] | None = None
+    upstream_model_id: str | None = None
 
 
 class ClientSubscription(StrictModel):
@@ -122,6 +123,10 @@ class ClientDownloadService:
             if not isinstance(spec, dict):
                 spec = spec.model_dump(mode="json")
             published = {str(model["id"]) for model in spec.get("discovery_models", [])}
+            published.update(
+                str(binding.get("model", {}).get("model_key", ""))
+                for binding in spec.get("bindings", []) if isinstance(binding, dict)
+            )
             models: list[ClientModel] = []
             for row in rows["models"]:
                 runtime = runtimes.get(str(row["runtime_id"]))
@@ -130,7 +135,8 @@ class ClientDownloadService:
                     not row["enabled"] or not runtime or not runtime["enabled"]
                     or not provider or not provider["enabled"]
                     or str(runtime.get("gateway_profile_id")) != str(application.gateway_profile_id)
-                    or row["model_key"] not in published or "chat" not in row["capabilities"]
+                    or row["model_key"] not in published
+                    or not {"chat", "image_generation"}.intersection(row["capabilities"])
                     or (application.model_policy_configured
                         and UUID(str(row["id"])) not in application.allowed_model_ids)
                 ):
@@ -145,18 +151,23 @@ class ClientDownloadService:
                     "runtime_config": runtime["config"],
                     "gateway_implementation": "apim",
                 }
-                paths = invocation_api_paths(route, tools="tools" in row["capabilities"])
-                if not paths:
-                    continue
-                protocol = (
-                    InvocationApiFormat.OPENAI_RESPONSES
-                    if InvocationApiFormat.OPENAI_RESPONSES in paths else next(iter(paths))
-                )
+                if "image_generation" in row["capabilities"]:
+                    protocol_name = "openai_images"
+                else:
+                    paths = invocation_api_paths(route, tools="tools" in row["capabilities"])
+                    if not paths:
+                        continue
+                    protocol = (
+                        InvocationApiFormat.OPENAI_RESPONSES
+                        if InvocationApiFormat.OPENAI_RESPONSES in paths else next(iter(paths))
+                    )
+                    protocol_name = protocol.value
                 models.append(ClientModel(
                     id=str(row["model_key"]), name=str(row["display_name"]),
-                    protocol=protocol.value, context_window=row.get("context_window"),
+                    protocol=protocol_name, context_window=row.get("context_window"),
                     capabilities=list(row["capabilities"]),
                     cost=plugin_model_cost(prices.get(str(row["id"]))),
+                    upstream_model_id=row.get("upstream_model_id") or str(row["model_key"]),
                 ))
             for subscription in self.repository.list_gateway_application_subscriptions(
                 [application.id]
@@ -196,7 +207,7 @@ class ClientDownloadService:
         if option is None:
             raise HTTPException(404, "没有可导出的应用订阅或网关。")
         if not option.models:
-            raise HTTPException(409, "该订阅没有已发布且获授权的对话模型。")
+            raise HTTPException(409, "该订阅没有已发布且获授权的模型。")
         key = self.applications.reveal_application_subscription_key(
             request.application_id, request.subscription_id,
             "primary" if request.key_kind == "primary" else "secondary",
@@ -224,11 +235,17 @@ class ClientDownloadService:
                 "reasoning": "reasoning" in model.capabilities,
                 "modalities": {"input": ["text", "image"]
                                if "vision" in model.capabilities else ["text"]},
-            } for model in option.models},
+            } for model in option.models if model.protocol != "openai_images"},
+            "images": [model.model_dump(mode="json") for model in option.models
+                       if model.protocol == "openai_images"],
+            "aliases": {model.id: model.upstream_model_id for model in option.models},
         }
         root = Path(__file__).resolve().parent / "client_plugin"
         files = {name: (root / name).read_bytes()
-                 for name in ("index.mjs", "pricing.mjs", "README.md")}
+                 for name in ("index.mjs", "pricing.mjs", "image-sync.mjs", "README.md")}
+        shared = root.parent / "client_user_plugin"
+        files.update({name: (shared / name).read_bytes()
+                      for name in ("helpers.mjs", "images.mjs", "native-images.mjs", "quota.mjs")})
         files.update(icons.package_files())
         files["aigateway.config.json"] = json.dumps(config, ensure_ascii=False, indent=2).encode()
         files["package.json"] = json.dumps({

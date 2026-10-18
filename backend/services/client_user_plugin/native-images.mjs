@@ -78,12 +78,16 @@ export async function resolveNativeMagpie(explicit = process.env.AIGATEWAY_MAGPI
 
 function context(input, cfg) {
   if (input?.project?.id !== "magpie" || !isAbsolute(input.directory ?? "") || basename(input.directory) !== "magpie") return null;
-  if (!namespace.test(cfg.providerId) || typeof cfg.userId !== "string" || !cfg.userId
+  const subscription = cfg.kind === "subscription";
+  const subject = subscription ? cfg.subscriptionId : cfg.userId;
+  if (!(subscription ? /^aigateway-subscription-[a-z0-9-]+$/ : namespace).test(cfg.providerId)
+      || typeof subject !== "string" || !subject
       || typeof cfg.installationId !== "string" || !cfg.installationId) throw new Error("Invalid image registration owner");
-  const directory = join(input.directory, "aigateway-proxy-user", cfg.providerId);
+  const directory = join(input.directory, subscription ? "aigateway-proxy-subscription" : "aigateway-proxy-user", cfg.providerId);
   return { directory, providers: join(input.directory, "providers.json"),
     manifest: join(directory, "native-images-managed.json"), status: join(directory, "native-images-status.json"),
-    owner: { schema: 1, providerId: cfg.providerId + "-images", userId: cfg.userId, installationId: cfg.installationId } };
+    owner: { schema: 1, providerId: cfg.providerId + "-images", installationId: cfg.installationId,
+      ...(subscription ? { kind: "subscription", subscriptionId: subject } : { userId: subject }) } };
 }
 
 async function snapshot(path, id) {

@@ -17,10 +17,12 @@ test("prices preserve explicit zero and unknown values, including cache read and
   assert.deepEqual(costForHost({ project: { id: "opencode" } }, "aigateway-user-edwin", "m", raw, { resolved: [] }), tokenCost(raw));
 });
 
-test("supported CLI imports only plugin-owned prices, refreshes them and preserves manual overrides", async () => {
+for (const providerId of ["aigateway-user-edwin-test", "aigateway-user-edwin-test-images",
+  "aigateway-subscription-edwin-test", "aigateway-subscription-edwin-test-images"])
+test(`${providerId}: CLI imports only owned prices, refreshes them and preserves manual overrides`, async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-native-pricing-")), directory = join(root, "magpie");
   await mkdir(directory);
-  const settings = join(directory, "settings.json"), cfg = { providerId: "aigateway-user-edwin-test", authorization: "DO_NOT_EXPORT" };
+  const settings = join(directory, "settings.json"), cfg = { providerId, authorization: "DO_NOT_EXPORT" };
   const input = { directory, project: { id: "magpie" } };
   const unrelated = { input: 1, output: 3, cache_read: .1, cache_write: .2 };
   let calls = 0;
@@ -69,6 +71,14 @@ test("supported CLI imports only plugin-owned prices, refreshes them and preserv
     data = JSON.parse(await readFile(settings, "utf8"));
     delete data.modelPrices[cfg.providerId + "/m"];
     data.modelPrices[cfg.providerId + "/*"] = unrelated;
+    await writeFile(settings, JSON.stringify(data));
+    status = await syncPricing(input, cfg, models, { executable: "/fixture/magpie", execute });
+    assert.equal(status.state, "preserved_manual");
+    assert.equal(calls, 2);
+    assert.equal(JSON.parse(await readFile(settings, "utf8")).modelPrices[cfg.providerId + "/m"], undefined);
+    data = JSON.parse(await readFile(settings, "utf8"));
+    delete data.modelPrices[cfg.providerId + "/*"];
+    data.modelPrices["*/m"] = unrelated;
     await writeFile(settings, JSON.stringify(data));
     status = await syncPricing(input, cfg, models, { executable: "/fixture/magpie", execute });
     assert.equal(status.state, "preserved_manual");

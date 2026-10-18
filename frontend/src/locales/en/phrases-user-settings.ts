@@ -65,7 +65,7 @@ export const USER_SETTINGS_PHRASES: Record<string, string> = {
   "主密钥": "Primary key",
   "备用密钥": "Secondary key",
   "可用模型": "Available models",
-  "该订阅没有已发布且获授权的对话模型。": "No published, authorized chat models for this subscription.",
+  "该订阅没有已发布且获授权的模型。": "No published, authorized models for this subscription.",
   "下载包包含订阅密钥。请妥善保管，不要上传到公共仓库或分享给他人。": "This download contains a subscription key. Keep it private; do not upload it to public repositories or share it.",
   "我已了解下载包包含密钥": "I understand this download contains a key",
   "暂时无法读取订阅密钥，请联系管理员。": "Subscription keys are unavailable. Contact your administrator.",

@@ -126,7 +126,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
         </div>}
       </section>}
       {canDownloadSubscription && <section className="client-downloads-card">
-        <div className="client-downloads-heading"><span className="client-downloads-edition-icon"><Download size={18} aria-hidden="true" /></span><div><h2>AIGateway-Proxy 订阅版</h2><p>使用指定应用订阅与密钥，导入已授权模型。</p></div><Badge variant="outline" data-no-localize>v{query.data?.plugin_version ?? "0.1.4"}</Badge></div>
+        <div className="client-downloads-heading"><span className="client-downloads-edition-icon"><Download size={18} aria-hidden="true" /></span><div><h2>AIGateway-Proxy 订阅版</h2><p>使用指定应用订阅与密钥，导入已授权模型。</p></div><Badge variant="outline" data-no-localize>v{query.data?.plugin_version ?? "..."}</Badge></div>
         {query.isPending ? <p role="status">正在加载</p> : query.isError ? <div role="alert"><p>{query.error.message}</p><Button variant="outline" onClick={() => void query.refetch()}><RefreshCw size={16} />重试</Button></div>
           : !items.length ? <p role="status">没有可下载的应用订阅。请联系管理员配置本人应用订阅。</p>
           : <form className="client-downloads-form" action="/api/v1/client-downloads/magpie" method="post" onSubmit={(event) => void download(event)}>
@@ -142,7 +142,7 @@ export function ClientDownloadsPage({ onToggleSidebar }: { onToggleSidebar: () =
             </div>
             <p className="client-downloads-endpoint" data-no-localize>{selected?.base_url}</p>
             <section className="client-downloads-section"><h3>可用模型</h3>
-            {selected?.models.length ? <ul className="client-downloads-models">{selected.models.map((model) => <li key={model.id}><span data-no-localize>{model.name}</span><small data-no-localize>{model.protocol}</small></li>)}</ul> : <p role="status">该订阅没有已发布且获授权的对话模型。</p>}
+            {selected?.models.length ? <ul className="client-downloads-models">{selected.models.map((model) => <li key={model.id}><span data-no-localize>{model.name}</span><small data-no-localize>{model.protocol}</small></li>)}</ul> : <p role="status">该订阅没有已发布且获授权的模型。</p>}
             </section>
             </div>
             <div className="client-downloads-footer">

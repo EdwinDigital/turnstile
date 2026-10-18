@@ -60,7 +60,7 @@ from .client_user_store import ClientUserStore
 from .download_filename import plugin_filename
 from .gateway_credentials import with_platform_gateway_credential
 
-USER_PLUGIN_VERSION = "0.5.0"
+USER_PLUGIN_VERSION = "0.5.1"
 CLIENT_ISSUER = "urn:turnstile:client-runtime"
 CLIENT_AUDIENCE = "turnstile-client-runtime"
 PERSONAL_BUDGET_REQUIRED = "暂未开通预算，请联系部门管理员。"
@@ -720,7 +720,7 @@ class ClientUserService:
         images = []
         for m in selected["models"]:
             if m["protocol"] == "openai_images":
-                images.append(m)
+                images.append({**m, "cost": plugin_model_cost(prices.get(m["model_id"]))})
                 continue
             models[m["id"]] = {
                 "id": m["id"],
