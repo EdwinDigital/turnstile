@@ -137,13 +137,13 @@ function AssistantSection({ editor, canEdit }: {
           <SelectValue>
             {!value && settings.isPending
               ? <span className="settings-inline-loading"><RefreshCw className="spin" size={13} />正在加载模型</span>
-              : chosen ? chosen.display_name : value?.model_id ? "指定模型不可用" : automaticLabel}
+              : chosen ? chosen.display_name : form?.model_id ? "指定模型不可用" : automaticLabel}
           </SelectValue>
         </SelectTrigger>
         <SelectContent align="start" alignItemWithTrigger={false}>
           <SelectGroup>
           <SelectItem value={AUTOMATIC}>{automaticLabel}</SelectItem>
-          {value?.model_id && !chosen && <SelectItem value={value.model_id} disabled>指定模型不可用</SelectItem>}
+          {form?.model_id && !chosen && <SelectItem value={form.model_id} disabled>指定模型不可用</SelectItem>}
           {(value?.available_models ?? []).map((model) => <SelectItem key={model.id} value={model.id}>
             <span className="settings-model-option">
               <b>{model.display_name}</b>

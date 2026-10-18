@@ -1337,7 +1337,7 @@ components:
     ProfileUpdate:
       $ref: ./openapi/schemas/user-settings.yaml#/schemas/ProfileUpdate
     InvocationApiFormat:
-      $ref: ./openapi/schemas/assistant.yaml#/schemas/InvocationApiFormat
+      $ref: ./openapi/schemas/common.yaml#/schemas/InvocationApiFormat
     MenuAdministratorScope:
       $ref: ./openapi/schemas/authentication.yaml#/schemas/MenuAdministratorScope
     PermissionPolicyWrite:

@@ -546,3 +546,375 @@ def test_native_apim_pool_contract_is_bounded_and_model_scoped() -> None:
     assert "existing compatible managed Runtimes" in str(
         cast(dict[str, object], pool_path["put"])["description"]
     )
+
+
+def test_assistant_protocol_settings_match_runtime_schemas() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    for name in (
+        "AssistantSettingsWrite", "AssistantSettings", "AssistantModelChoice",
+        "InvocationApiFormat",
+    ):
+        assert _schema_contract(documented[name]) == _schema_contract(actual[name]), name
+
+
+def test_model_availability_contract_matches_runtime_constraints_and_owner_routes() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+
+    def normalize(value: object) -> object:
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        return {
+            key: {name: normalize(schema) for name, schema in item.items()}
+            if key == "properties" and isinstance(item, dict) else normalize(item)
+            for key, item in value.items() if key not in {"title", "description"}
+        }
+
+    names = {name for name in actual if name.startswith("ModelAvailability")}
+    assert len(names) == 9
+    for name in names:
+        assert normalize(documented[name]) == normalize(actual[name]), name
+    for path, methods in (
+        ("/api/v1/model-management/model-availability", ("get",)),
+        ("/api/v1/model-management/models/{item_id}/availability", ("get", "put")),
+        ("/api/v1/model-management/model-availability/operations/{operation_id}", ("get",)),
+        ("/api/v1/model-management/model-availability/operations/{operation_id}/retry", ("post",)),
+    ):
+        for method in methods:
+            operation = cast(dict[str, object], _documented_paths()[path][method])
+            assert operation["security"] == [{"sessionCookie": []}]
+            responses = cast(dict[str, dict[str, object]], operation["responses"])
+            accepted = responses["200" if method == "get" else "202"]
+            headers = cast(dict[str, dict[str, object]], accepted["headers"])
+            assert headers["Cache-Control"]["schema"] == {"type": "string", "const": "no-store"}
+
+
+def test_budget_diagnostics_contract_matches_public_fields_and_owner_routes() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    for name in (
+        "BudgetDelegationCheck", "BudgetDelegationReadiness", "BudgetExecutionVerificationOptions",
+        "BudgetExecutionVerificationRequest", "BudgetExecutionVerification",
+        "BudgetExecutionScopeReadback",
+        "LedgerScope", "LedgerSummary", "LedgerAttemptIdentity", "LedgerAttempt",
+    ):
+        assert set(cast(dict[str, object], documented[name]["properties"])) == set(
+            actual[name]["properties"],
+        )
+        assert documented[name]["additionalProperties"] is False
+    for suffix in ("budget-readiness", "budget-execution-verification"):
+        path = f"/api/v1/model-management/gateways/{{gateway_profile_id}}/{suffix}"
+        route = _documented_paths()[path]
+        assert cast(dict[str, object], route["post"])["security"] == [{"sessionCookie": []}]
+
+
+def test_invocation_contract_matches_runtime_identity_tools_and_usage() -> None:
+    document = _yaml_document((CONTRACT.parent / "model-gateway.openapi.yaml").resolve())
+    components = cast(dict[str, object], document["components"])
+    documented = cast(dict[str, dict[str, object]], components["schemas"])
+    actual = app.openapi()["components"]["schemas"]
+
+    def normalize(value: object) -> object:
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "properties" and isinstance(item, dict):
+                result[key] = {name: normalize(schema) for name, schema in item.items()}
+            elif key not in {"title", "description"}:
+                result[key] = normalize(item)
+        declared_types = result.get("type")
+        if isinstance(declared_types, list):
+            nullable_variants = [
+                {"type": "null"} if kind == "null" else {**result, "type": kind}
+                for kind in declared_types
+            ]
+            return {"anyOf": sorted(
+                nullable_variants, key=lambda item: json.dumps(item, sort_keys=True),
+            )}
+        if "oneOf" in result:
+            result["anyOf"] = result.pop("oneOf")
+        variants = result.get("anyOf")
+        if isinstance(variants, list):
+            result["anyOf"] = sorted(variants, key=lambda item: json.dumps(item, sort_keys=True))
+        return result
+
+    for name in (
+        "InvocationMetadata", "ToolFunctionDefinition", "ToolDefinition", "ToolFunctionCall",
+        "ToolCall", "ChatMessage", "ModelInvocationRequest", "InvocationUsage",
+        "ModelInvocationResponse",
+    ):
+        described = dict(documented[name])
+        described.pop("allOf", None)
+        assert normalize(described) == normalize(actual[name]), name
+
+
+def test_platform_invocation_trace_contract_preserves_unknown_and_explicit_identity() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    fields = cast(dict[str, dict[str, object]], documented["UsageRequestSummary"]["properties"])
+    assert set(fields) == set(actual["UsageRequestSummary"]["properties"])
+    assert fields["correlation_id"]["type"] == ["string", "null"]
+    assert fields["status_code"]["type"] == ["integer", "null"]
+    assert fields["usage_available"]["default"] is True
+    for path in ("/api/v1/observability/requests", "/api/v1/observability/requests/{request_id}"):
+        assert "get" in _documented_paths()[path]
+
+
+def test_image_invocation_contract_requires_a_complete_gateway_selection() -> None:
+    schema = _documented_schemas()["ImageInvocationRequest"]
+    conditions = cast(list[dict[str, object]], schema["allOf"])
+    selections = (
+        ("gateway_profile_id", "gateway_deployment_id"),
+        ("gateway_deployment_id", "gateway_profile_id"),
+    )
+    for (selected, counterpart), condition in zip(selections, conditions, strict=True):
+        assert condition["if"] == {
+            "required": [selected], "properties": {selected: {"type": "string"}},
+        }
+        assert condition["then"] == {
+            "required": [counterpart],
+            "properties": {counterpart: {"type": "string", "format": "uuid"}},
+        }
+    fields = cast(dict[str, dict[str, object]], schema["properties"])
+    assert fields["n"]["const"] == 1
+    assert fields["stream"]["const"] is False
+
+
+def test_runtime_diagnostic_contract_has_explicit_selection_and_owner_routes() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    for name in ("RuntimeCheckSelection", "RuntimeCheckOption", "RuntimeCheckPlan",
+                 "RuntimeDiagnosticAccess", "RuntimeHealth"):
+        assert set(cast(dict[str, object], documented[name]["properties"])) == set(
+            actual[name]["properties"],
+        )
+        assert documented[name]["additionalProperties"] is False
+    plan = cast(dict[str, dict[str, object]], documented["RuntimeCheckPlan"]["properties"])
+    assert plan["max_output_tokens"]["const"] == 64
+    assert plan["request_limit"]["const"] == 1
+    path = _documented_paths()["/api/v1/model-management/runtimes/{runtime_id}/check"]
+    for method in ("get", "post"):
+        operation = cast(dict[str, object], path[method])
+        assert operation["security"] == [{"sessionCookie": []}]
+        assert method in app.openapi()["paths"][
+            "/api/v1/model-management/runtimes/{runtime_id}/check"
+        ]
+
+
+def test_publication_failure_contract_matches_safe_response_fields() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]["GatewayPublicationFailure"]
+    failure = documented["GatewayPublicationFailure"]
+    properties = cast(dict[str, dict[str, object]], failure["properties"])
+    assert set(properties) == set(actual["properties"])
+    assert properties["code"]["enum"] == actual["properties"]["code"]["enum"]
+    assert failure["additionalProperties"] is False
+    for name in ("GatewayPublication", "GatewayReleaseSummary"):
+        assert "failure" in cast(dict[str, object], documented[name]["properties"])
+
+
+def test_gateway_target_contract_matches_actual_structures_and_owner_operations() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    generated = _yaml_document(CONTRACT.parent / "openapi/schemas/gateway-targets.yaml")
+    for name in cast(dict[str, object], generated["schemas"]):
+        assert _schema_contract(documented[name]) == _schema_contract(actual[name]), name
+    write = documented["ApimTargetWrite"]
+    assert write["additionalProperties"] is False
+    publication = documented["GatewayPublicationCreate"]
+    assert "deployment_scope" not in cast(list[str], publication["required"])
+    publication_properties = cast(dict[str, object], publication["properties"])
+    assert publication_properties["deployment_scope"] == {
+        "$ref": "#/components/schemas/GatewayDeploymentScope",
+    }
+    paths = _documented_paths()
+    registration = paths["/api/v1/model-management/apim-targets"]["post"]
+    assert cast(dict[str, object], registration)["security"] == [{"sessionCookie": []}]
+    sync = paths["/api/v1/model-management/apim-targets/{gateway_profile_id}/inventory-syncs"]
+    operation = cast(dict[str, object], sync["post"])
+    assert "202" in cast(dict[str, object], operation["responses"])
+
+
+def test_onboarding_contract_has_exact_models_and_durable_owner_operations() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    for name in ("ApimOnboardingRequest", "ApimOnboardingPlan", "ApimOnboardingStart",
+                 "ApimOnboardingOperations"):
+        assert _schema_contract(documented[name]) == _schema_contract(actual[name]), name
+    paths = _documented_paths()
+    root = "/api/v1/model-management/apim-onboarding"
+    for path, method, response in (
+        (root, "get", "200"), (root, "post", "202"),
+        (root + "/preview", "post", "200"), (root + "/{operation_id}/retry", "post", "202"),
+    ):
+        operation = cast(dict[str, object], paths[path][method])
+        assert operation["security"] == [{"sessionCookie": []}]
+        assert "Owner" in str(operation["description"])
+        assert response in cast(dict[str, object], operation["responses"])
+    properties = cast(
+        dict[str, dict[str, object]], documented["GatewayReleaseOperation"]["properties"],
+    )
+    operation_kind = properties["operation_kind"]
+    if "$ref" in operation_kind:
+        operation_kind = documented[cast(str, operation_kind["$ref"]).rsplit("/", 1)[-1]]
+    assert "apim_onboarding" in cast(list[str], operation_kind["enum"])
+
+
+def test_apim_workspace_contract_preserves_owner_lifecycle_and_capabilities() -> None:
+    paths = _documented_paths()
+    root = "/api/v1/model-management/apim-targets/{gateway_profile_id}"
+    for path, method in ((root, "delete"), (root + "/removal-preview", "get")):
+        operation = cast(dict[str, object], paths[path][method])
+        assert operation["security"] == [{"sessionCookie": []}]
+        assert "Owner" in str(operation["description"])
+        assert "200" in cast(dict[str, object], operation["responses"])
+    removal = cast(dict[str, object], paths[root]["delete"])
+    assert "No Azure resource or container is deleted or modified" in str(removal["description"])
+    for path, method in (
+        ("/api/v1/model-management/apim-targets", "post"),
+        ("/api/v1/model-management/apim-onboarding", "post"),
+        ("/api/v1/model-management/apim-onboarding/preview", "post"),
+        ("/api/v1/model-management/apim-onboarding/{operation_id}/retry", "post"),
+        ("/api/v1/model-management/self-hosted-gateways/{deployment_id}/validations", "post"),
+    ):
+        operation = cast(dict[str, object], paths[path][method])
+        assert operation["security"] == [{"sessionCookie": []}]
+        assert "configured management authorization" not in str(operation["description"])
+    properties = cast(
+        dict[str, dict[str, object]], _documented_schemas()["ModelRegistry"]["properties"],
+    )
+    for name in ("apim_target_topology_available", "self_hosted_gateway_enabled"):
+        assert properties[name]["type"] == "boolean"
+        assert properties[name]["default"] is False
+
+
+def test_self_hosted_lifecycle_contract_preserves_minimal_names_and_metadata_boundaries() -> None:
+    paths = _documented_paths()
+    lifecycle = [(path, item) for path, item in paths.items() if "self-hosted-gateways" in path]
+    assert len(lifecycle) == 8
+    for _, item in lifecycle:
+        for operation in item.values():
+            values = cast(dict[str, object], operation)
+            assert values["security"] == [{"sessionCookie": []}]
+            assert "Owner" in str(values["description"])
+    root = "/api/v1/model-management/self-hosted-gateways/{deployment_id}"
+    rename = cast(dict[str, object], paths[root + "/name"]["patch"])
+    responses = cast(dict[str, dict[str, object]], rename["responses"])
+    assert "content" not in responses["204"]
+    removal = cast(dict[str, object], paths[root]["delete"])
+    assert "No Azure resource or container is deleted" in str(removal["description"])
+
+
+def test_gateway_creation_contract_requires_idempotency_and_protects_bootstrap() -> None:
+    paths = _documented_paths()
+    schemas = _documented_schemas()
+    root = "/api/v1/model-management"
+    create = cast(dict[str, object], paths[
+        root + "/apim-targets/{gateway_profile_id}/self-hosted-gateway-provisions"
+    ]["post"])
+    parameters = cast(list[dict[str, object]], create["parameters"])
+    key = next(item for item in parameters if item["name"] == "Idempotency-Key")
+    assert key["required"] is True and key["in"] == "header"
+    assert create["security"] == [{"sessionCookie": []}]
+    properties = cast(dict[str, object], schemas["SelfHostedGatewayCreate"]["properties"])
+    assert "native_gateway_id" not in properties
+    assert properties["endpoint_control_confirmed"] == {
+        "type": "boolean", "const": True, "title": "Endpoint Control Confirmed",
+    }
+    bootstrap = cast(dict[str, object], paths[
+        root + "/self-hosted-gateways/{deployment_id}/bootstrap"
+    ]["post"])
+    responses = cast(dict[str, dict[str, object]], bootstrap["responses"])
+    headers = cast(dict[str, dict[str, object]], responses["200"]["headers"])
+    assert headers["Cache-Control"]["schema"] == {"type": "string", "const": "no-store"}
+    assert bootstrap["security"] == [{"sessionCookie": []}]
+
+
+def test_multi_target_contract_matches_runtime_and_never_exposes_child_secrets() -> None:
+    documented = _documented_schemas()
+    actual = app.openapi()["components"]["schemas"]
+    for name in ("MultiTargetPublicationCreate", "MultiTargetPublicationChildCreate"):
+        assert documented[name] == actual[name]
+    accepted = actual["MultiTargetPublicationRequestAccepted"]
+    assert _schema_contract(documented["MultiTargetPublicationRequestAccepted"]) == (
+        _schema_contract(accepted)
+    )
+    publication_view = documented["GatewayPublicationView"]
+    assert not {"credential_ciphertext", "api_key", "desired_spec"} & set(
+        cast(dict[str, object], publication_view["properties"]),
+    )
+    paths = _documented_paths()
+    root = "/api/v1/model-management/rollouts"
+    assert set(paths[root]) == {"get", "post"}
+    for route in (root, root + "/{rollout_id}"):
+        for operation in paths[route].values():
+            values = cast(dict[str, object], operation)
+            assert values["security"] == [{"sessionCookie": []}]
+            assert "Owner" in str(values["description"])
+
+
+def test_gateway_name_contract_preserves_owner_only_name_write_and_minimal_response() -> None:
+    schema = _documented_schemas()["GatewayProfileNameWrite"]
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["name"]
+    properties = cast(dict[str, dict[str, object]], schema["properties"])
+    assert set(properties) == {"name"} and properties["name"]["maxLength"] == 120
+    operation = cast(dict[str, object], _documented_paths()[
+        "/api/v1/model-management/gateways/{item_id}/name"
+    ]["patch"])
+    assert operation["security"] == [{"sessionCookie": []}]
+    responses = cast(dict[str, dict[str, object]], operation["responses"])
+    assert {"200", "204", "401", "403", "404", "422"} <= set(responses)
+    assert "content" not in responses["204"]
+    actual = app.openapi()["components"]["schemas"]
+    assert actual["GatewayProfileNameWrite"]["additionalProperties"] is False
+    assert "gateway_name_edit_supported" in actual["RegistryResponse"]["properties"]
+
+
+def test_publication_contract_describes_catalog_prices_and_discounts() -> None:
+    schema = _documented_schemas()["GatewayModelTarget"]
+    properties = cast(dict[str, dict[str, object]], schema["properties"])
+    assert properties["price_source"]["enum"] == ["manual", "azure_retail", "anthropic"]
+    assert properties["price_source"]["default"] == "manual"
+    assert properties["price_reference"]["maxLength"] == 1500
+    assert properties["price_discount_percent"]["exclusiveMinimum"] == 0
+    assert properties["price_discount_percent"]["maximum"] == 100
+    assert properties["price_discount_percent"]["type"] == ["number", "null"]
+    conditions = cast(list[dict[str, dict[str, object]]], schema["allOf"])
+    image = cast(dict[str, dict[str, object]], conditions[0]["then"]["properties"])
+    assert image["price_source"]["const"] == "manual"
+    for condition, source in zip(conditions[1:3], ("azure_retail", "anthropic"), strict=True):
+        assert condition["if"]["required"] == ["price_source"]
+        alternatives = cast(list[dict[str, object]], condition["then"]["anyOf"])
+        assert alternatives[0]["required"] == ["price_reference"]
+        assert alternatives[1]["required"] == ["context_price_references"]
+        fields = cast(dict[str, dict[str, object]], alternatives[0]["properties"])
+        assert fields["price_reference"] == {"type": "string", "pattern": f"^{source}:"}
+
+
+def test_custom_context_rule_contract_matches_strict_runtime_fields() -> None:
+    from turnstile_core.domain.models import UsageRequestDetail, UsageRequestSummary
+    from turnstile_core.domain.runtime_models import ContextPriceRule
+
+    schemas = _documented_schemas()
+    rule = schemas["ContextPriceRule"]
+    actual = ContextPriceRule.model_json_schema()
+    assert rule["additionalProperties"] is False
+    assert rule["required"] == actual["required"] == ["short_context_max_tokens"]
+    fields = cast(dict[str, dict[str, object]], rule["properties"])
+    assert fields["short_context_max_tokens"]["maximum"] == (
+        actual["properties"]["short_context_max_tokens"]["maximum"]
+    )
+    assert set(fields) == set(actual["properties"])
+    registry = cast(dict[str, dict[str, object]], schemas["ModelRegistry"]["properties"])
+    assert registry["context_price_rules_supported"]["default"] is False
+    assert "cost_available" in UsageRequestSummary.model_fields
+    assert {"input_price_per_million", "cached_price_per_million",
+            "cache_write_price_per_million", "output_price_per_million",
+            "price_context_tier", "price_context_snapshot"} <= set(UsageRequestDetail.model_fields)

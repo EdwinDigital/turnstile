@@ -42,12 +42,23 @@ test("automatic model selection retains a compatible explicit protocol", () => {
   })
 })
 
-test("unavailable stored choices are never re-saved", () => {
+test("a title toggle retains an unavailable pinned model without selecting another", () => {
   assert.deepEqual(assistantSettingsUpdate({
     ...settings, model_available: false, api_available: false,
   }, { auto_title: false }), {
-    model_id: null, auto_title: false, api_format: null,
+    model_id: "gpt", auto_title: false, api_format: null,
   })
+})
+
+test("unavailable model drafts do not borrow protocols from another model", () => {
+  const unavailable = { ...settings, model_id: "retired", model_available: false }
+  const draft = assistantSettingsUpdate(unavailable, {})
+  assert.equal(draft.model_id, "retired")
+  assert.equal(assistantSettingsChanged(unavailable, draft), false)
+  assert.equal(assistantSettingsModel(unavailable, draft), undefined)
+  assert.equal(assistantSettingsModel(
+    { ...unavailable, model_id: null }, { ...draft, model_id: null },
+  ), undefined)
 })
 
 test("unknown legacy protocol metadata cannot enable an override", () => {

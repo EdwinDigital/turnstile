@@ -292,14 +292,7 @@ class AssistantService:
         )
 
     def _select_model(self) -> tuple[UUID, UUID, str]:
-        """Resolve the model to call: the configured one, or the registry's own order.
-
-        A configured model is re-checked against the eligibility rule on every call
-        rather than trusted because it was valid when it was saved. Disabling it in Model
-        Management, or moving it to a CLI runtime, would otherwise turn every question
-        into a 409. Falling back keeps the assistant answering; the settings page reads
-        `model_available` so the fallback is visible rather than silent.
-        """
+        """Resolve a compatible protocol without bypassing model availability."""
         runtime_id, model_id, model_key, _ = self._select_invocation()
         return runtime_id, model_id, model_key
 
@@ -316,7 +309,6 @@ class AssistantService:
         stored = self._repository.assistant_settings()
         configured = stored.get("model_id")
         candidates = self._eligible_model_routes()
-        pinned = next((model for model, _ in candidates if model.id == configured), None)
         effective, route, api_available = self._resolve_selection(candidates, stored)
         return AssistantSettings(
             model_id=configured,
@@ -324,9 +316,7 @@ class AssistantService:
             api_format=stored.get("api_format"),
             effective_model_id=effective.id if effective else None,
             effective_model_name=effective.display_name if effective else None,
-            # True when nothing is pinned, because automatic selection cannot be
-            # unavailable -- the empty-registry case is reported by a null effective model.
-            model_available=effective is not None and (configured is None or pinned is not None),
+            model_available=effective is not None,
             api_available=api_available,
             effective_api_format=route["runtime_config"]["api_format"] if route else None,
             effective_api_path=route["runtime_config"]["path"] if route else None,
@@ -355,25 +345,30 @@ class AssistantService:
         )
 
     def save_settings(self, write: AssistantSettingsWrite, updated_by: str) -> AssistantSettings:
-        # Validated on write as well as on read. Read-time fallback exists for a model
-        # that stopped qualifying later; it is not a licence to store one that never did.
+        stored = self._repository.assistant_settings()
         candidates = self._eligible_model_routes()
         if write.model_id is not None:
             candidates = [item for item in candidates if item[0].id == write.model_id]
-        if write.model_id is not None and not candidates:
-            stored = self._repository.assistant_settings()
-            if stored.get("model_id") != write.model_id or "api_format" in write.model_fields_set:
-                raise HTTPException(
-                    status_code=409,
-                    detail="That model is not enabled, or its runtime cannot carry tool calls",
-                )
+        if (
+            write.model_id is not None
+            and not candidates
+            and write.model_id != stored.get("model_id")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="That model is not enabled, or its runtime cannot carry tool calls",
+            )
         requested = write.api_format
-        if "api_format" not in write.model_fields_set:
-            stored = self._repository.assistant_settings()
-            if stored.get("model_id") == write.model_id and stored.get("api_format"):
-                requested = InvocationApiFormat(stored["api_format"])
-        if requested is not None and not any(
-            requested in invocation_api_paths(route) for _, route in candidates
+        if (
+            "api_format" not in write.model_fields_set
+            and stored.get("model_id") == write.model_id
+            and stored.get("api_format")
+        ):
+            requested = InvocationApiFormat(stored["api_format"])
+        if (
+            requested is not None
+            and (candidates or "api_format" in write.model_fields_set)
+            and not any(requested in invocation_api_paths(route) for _, route in candidates)
         ):
             raise HTTPException(
                 status_code=409,

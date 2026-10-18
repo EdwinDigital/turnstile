@@ -750,6 +750,17 @@ button.model-availability-status { cursor: pointer; }
 	.model-edit-dialog .simple-model-form { max-height: calc(100vh - 20px); }
 	.model-editor-checkbox-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+.infrastructure-workspace { min-width: 0; }
+.infrastructure-resource-table { --model-table-actions-width: 136px; }
+@media (min-width: 761px) {
+	.infrastructure-resource-table.apim .model-table-head,
+	.infrastructure-resource-table.apim .connection-provider-heading,
+	.infrastructure-resource-table.apim .model-list-row {
+		--apim-table-extra-width: calc(100% - var(--model-table-min-width) + 2 * var(--model-table-padding));
+		grid-template-columns: var(--resizable-table-columns, minmax(0, calc(var(--model-table-primary-min) + var(--apim-table-extra-width) * .2)) minmax(0, calc(var(--model-table-secondary-min) + var(--apim-table-extra-width) * .6)) minmax(0, calc(var(--model-table-tertiary-min) + var(--apim-table-extra-width) * .2)) var(--model-table-status-width) var(--model-table-actions-width));
+	}
+}
 .infrastructure-workspace .model-toolbar > .model-search-control { margin-left: auto; }
 .infrastructure-resource-table .model-status-cell:not(.infrastructure-skeleton-cell) { align-self: stretch; display: flex; align-items: center; }
 .infrastructure-resource-table .gateway-readiness > span { font-size: 12px; line-height: 17px; }

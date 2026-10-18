@@ -25,6 +25,7 @@ def registry_model_route(registry: RegistryResponse, model: ManagedModel) -> dic
         "model_key": model.model_key,
         "upstream_model_id": model.upstream_model_id,
         "model_family_key": model.family_key,
+        "model_capabilities": model.capabilities,
         "provider_kind": provider.provider_kind,
         "provider_endpoint_url": provider.endpoint_url,
         "runtime_kind": runtime.runtime_kind,
@@ -59,6 +60,8 @@ def invocation_api_paths(
         return {}
     config = _native_config(route)
     native = config.get("api_format", InvocationApiFormat.OPENAI_CHAT.value)
+    if native == "microsoft_decision" or "decision" in (route.get("model_capabilities") or []):
+        return {}
     if native == InvocationApiFormat.ANTHROPIC_MESSAGES:
         return {InvocationApiFormat.ANTHROPIC_MESSAGES: str(config.get("path", "/v1/messages"))}
     if native == InvocationApiFormat.OPENAI_RESPONSES:

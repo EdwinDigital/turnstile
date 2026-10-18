@@ -275,7 +275,9 @@ def _responses_message(payload: Any) -> tuple[str, tuple[ToolCall, ...], list[di
         if not isinstance(payload, dict) or not isinstance(payload["output"], list):
             raise ValueError("Expected a Responses output array")
         if payload.get("status") in {"failed", "incomplete", "cancelled", "in_progress", "queued"}:
-            raise GatewayInvocationError("Gateway returned an unfinished Responses result")
+            raise GatewayInvocationError(
+                "Gateway returned an unfinished Responses result", failure_kind="invalid_response",
+            )
         content: list[str] = []
         calls: list[ToolCall] = []
         output: list[dict[str, Any]] = payload["output"]
@@ -293,10 +295,14 @@ def _responses_message(payload: Any) -> tuple[str, tuple[ToolCall, ...], list[di
                 ))
         text = "".join(content)
         if not text and not calls:
-            raise GatewayInvocationError("Gateway returned neither content nor a tool call")
+            raise GatewayInvocationError(
+                "Gateway returned neither content nor a tool call", failure_kind="invalid_response",
+            )
         return text, tuple(calls), output
     except (KeyError, IndexError, TypeError, ValueError) as error:
-        raise GatewayInvocationError("Gateway returned an unsupported response schema") from error
+        raise GatewayInvocationError(
+            "Gateway returned an unsupported response schema", failure_kind="invalid_response",
+        ) from error
 
 
 def _anthropic_messages(request: ModelInvocationRequest) -> list[dict[str, Any]]:
@@ -413,14 +419,7 @@ def _sse_json_events(response: httpx.Response) -> list[dict[str, Any]]:
 
 
 def _anthropic_error_headers(response: httpx.Response) -> dict[str, str]:
-    return {
-        name: response.headers[name]
-        for name in (
-            "x-request-id", "x-correlation-id", "request-id", "retry-after",
-            "x-ratelimit-remaining-tokens", "x-quota-remaining-tokens",
-        )
-        if name in response.headers
-    }
+    return _response_headers(response.headers)
 
 
 def _anthropic_usage(raw: Any) -> InvocationUsage | None:
@@ -455,7 +454,9 @@ def _anthropic_stream_message(response: httpx.Response) -> dict[str, Any]:
     usage: dict[str, Any] = {}
     stopped = False
 
-    def failure(detail: str, status_code: int = 502) -> GatewayInvocationError:
+    def failure(
+        detail: str, status_code: int = 502, *, failure_kind: str = "invalid_response",
+    ) -> GatewayInvocationError:
         try:
             partial_usage = _anthropic_usage(usage)
         except ValueError:
@@ -463,6 +464,7 @@ def _anthropic_stream_message(response: httpx.Response) -> dict[str, Any]:
         return GatewayInvocationError(
             detail, status_code=status_code,
             headers=_anthropic_error_headers(response), usage=partial_usage,
+            failure_kind=failure_kind,
         )
 
     try:
@@ -478,7 +480,7 @@ def _anthropic_stream_message(response: httpx.Response) -> dict[str, Any]:
                     "rate_limit_error": 429, "api_error": 500, "overloaded_error": 529,
                 }.get(str(error.get("type") or ""), 502)
                 detail = _http_error_detail(httpx.Response(status, json=event))
-                raise failure(f"Gateway stream failed: {detail}", status)
+                raise failure(f"Gateway stream failed: {detail}", status, failure_kind="http_error")
             if kind == "message_start":
                 start = event["message"]
                 if (
@@ -570,9 +572,9 @@ def _anthropic_stream_message(response: httpx.Response) -> dict[str, Any]:
                 stopped = True
                 break
     except httpx.TimeoutException as error:
-        raise failure("Gateway stream timed out", 504) from error
+        raise failure("Gateway stream timed out", 504, failure_kind="timeout") from error
     except httpx.HTTPError as error:
-        raise failure("Gateway stream connection failed") from error
+        raise failure("Gateway stream connection failed", failure_kind="transport_error") from error
     except (KeyError, TypeError, ValueError) as error:
         raise failure("Gateway returned an unsupported Anthropic stream schema") from error
     if not stopped or message is None:
@@ -804,7 +806,8 @@ class OpenAICompatibleGatewayAdapter:
                     status_code=400,
                 )
             body = _responses_body(request, upstream_model)
-        try:
+        response_headers: dict[str, str] = {}
+        with _gateway_response_errors(response_headers):
             if request.stream:
                 with self._client.stream(
                     "POST",
@@ -812,11 +815,12 @@ class OpenAICompatibleGatewayAdapter:
                     headers=self._headers(request, route),
                     json=body,
                     timeout=float(runtime_config.get("timeout_seconds", 120)),
+                    follow_redirects=False,
                 ) as response:
+                    response_headers.update(_response_headers(response.headers))
                     if response.is_error:
                         response.read()
                     response.raise_for_status()
-                    response_headers = dict(response.headers)
                     events = _sse_json_events(response)
                 content = "".join(
                     str(delta.get("content") or "")
@@ -849,77 +853,48 @@ class OpenAICompatibleGatewayAdapter:
                     correlation_id=correlation_id,
                     upstream_request_id=_upstream_request_id(response_headers),
                 )
-            response = self._client.post(
-                f"{self._base_url(route)}{path}",
+            with self._client.stream(
+                "POST", f"{self._base_url(route)}{path}",
                 headers=self._headers(request, route),
                 json=body,
                 timeout=float(runtime_config.get("timeout_seconds", 120)),
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as error:
-            response = error.response
-            propagated_headers = {
-                name: response.headers[name]
-                for name in (
-                    "x-request-id",
-                    "x-correlation-id",
-                    "retry-after",
-                    "x-ratelimit-remaining-tokens",
-                    "x-quota-remaining-tokens",
-                )
-                if name in response.headers
-            }
-            raise GatewayInvocationError(
-                f"Gateway request failed ({response.status_code}): "
-                f"{_http_error_detail(response)}",
-                status_code=response.status_code,
-                headers=propagated_headers,
-                failure_kind="http_error",
-            ) from error
-        except httpx.TimeoutException as error:
-            raise GatewayInvocationError(
-                "Gateway request timed out", status_code=504
-            ) from error
-        except httpx.HTTPError as error:
-            raise GatewayInvocationError(f"Gateway request failed: {error}") from error
-        try:
-            payload = response.json()
-        except ValueError as error:
-            raise GatewayInvocationError(
-                "Gateway returned an unsupported response schema", failure_kind="invalid_response",
-                headers=response.headers,
-            ) from error
-        responses_output = None
-        try:
+                follow_redirects=False,
+            ) as response:
+                response_headers.update(_response_headers(response.headers))
+                response.read()
+                response.raise_for_status()
+                payload = response.json()
+            responses_output = None
             if use_responses:
                 content, tool_calls, responses_output = _responses_message(payload)
             else:
                 message = payload["choices"][0]["message"]
-                # A turn that only calls tools has content null, which is not a schema error.
+                if not isinstance(message, Mapping):
+                    raise GatewayInvocationError(
+                        "Gateway returned an unsupported response schema",
+                        failure_kind="invalid_response",
+                    )
                 content = str(message.get("content") or "")
                 tool_calls = tuple(
                     ToolCall.model_validate(call) for call in (message.get("tool_calls") or [])
                 )
-        except (KeyError, IndexError, TypeError, ValueError) as error:
-            raise GatewayInvocationError(
-                "Gateway returned an unsupported response schema", failure_kind="invalid_response",
-            ) from error
-        if not content and not tool_calls:
-            raise GatewayInvocationError(
-                "Gateway returned neither content nor a tool call", failure_kind="invalid_response",
-            )
-        raw_usage = payload.get("usage")
-        usage = None
-        if isinstance(raw_usage, dict):
-            usage = _openai_usage({
-                "prompt_tokens": raw_usage.get("input_tokens"),
-                "completion_tokens": raw_usage.get("output_tokens"),
-                "prompt_tokens_details": raw_usage.get("input_tokens_details"),
-            }) if use_responses else _openai_usage(raw_usage)
-        if usage is None:
-            prompt = _prompt([message.model_dump() for message in request.messages])
-            usage = _estimate_usage(prompt, content)
-        correlation_id = _response_correlation(response.headers, self._implementation)
+            if not content and not tool_calls:
+                raise GatewayInvocationError(
+                    "Gateway returned neither content nor a tool call",
+                    failure_kind="invalid_response",
+                )
+            raw_usage = payload.get("usage")
+            usage = None
+            if isinstance(raw_usage, dict):
+                usage = _openai_usage({
+                    "prompt_tokens": raw_usage.get("input_tokens"),
+                    "completion_tokens": raw_usage.get("output_tokens"),
+                    "prompt_tokens_details": raw_usage.get("input_tokens_details"),
+                }) if use_responses else _openai_usage(raw_usage)
+            if usage is None:
+                prompt = _prompt([message.model_dump() for message in request.messages])
+                usage = _estimate_usage(prompt, content)
+        correlation_id = _response_correlation(response_headers, self._implementation)
         return GatewayResult(
             content=content,
             usage=usage,
@@ -927,7 +902,7 @@ class OpenAICompatibleGatewayAdapter:
             correlation_id=correlation_id,
             tool_calls=tool_calls,
             responses_output=responses_output,
-            upstream_request_id=_upstream_request_id(response.headers),
+            upstream_request_id=_upstream_request_id(response_headers),
         )
 
     def check(self, route: dict[str, Any]) -> RuntimeHealth:
@@ -1045,57 +1020,34 @@ class AnthropicMessagesGatewayAdapter(OpenAICompatibleGatewayAdapter):
         headers["anthropic-version"] = str(
             runtime_config.get("anthropic_version", "2023-06-01")
         )
-        try:
-            if request.stream:
-                with self._client.stream(
-                    "POST", f"{self._base_url(route)}{path}", headers=headers, json=body,
-                    timeout=float(runtime_config.get("timeout_seconds", 120)),
-                ) as response:
-                    if response.is_error:
-                        response.read()
-                    response.raise_for_status()
-                    payload = _anthropic_stream_message(response)
-            else:
-                response = self._client.post(
-                    f"{self._base_url(route)}{path}",
-                    headers=headers,
-                    json=body,
-                    timeout=float(runtime_config.get("timeout_seconds", 120)),
-                )
+        response_headers: dict[str, str] = {}
+        with _gateway_response_errors(response_headers):
+            with self._client.stream(
+                "POST", f"{self._base_url(route)}{path}",
+                headers=headers,
+                json=body,
+                timeout=float(runtime_config.get("timeout_seconds", 120)),
+                follow_redirects=False,
+            ) as response:
+                response_headers.update(_response_headers(response.headers))
+                if not request.stream or response.is_error:
+                    response.read()
                 response.raise_for_status()
-                payload = response.json()
-        except httpx.HTTPStatusError as error:
-            response = error.response
-            raise GatewayInvocationError(
-                f"Gateway request failed ({response.status_code}): "
-                f"{_http_error_detail(response)}",
-                status_code=response.status_code,
-                headers=_anthropic_error_headers(response),
-                failure_kind="http_error",
-            ) from error
-        except httpx.TimeoutException as error:
-            raise GatewayInvocationError(
-                "Gateway request timed out", status_code=504
-            ) from error
-        except httpx.HTTPError as error:
-            raise GatewayInvocationError(f"Gateway request failed: {error}") from error
-        except ValueError as error:
-            raise GatewayInvocationError(
-                "Gateway returned an unsupported response schema",
-                failure_kind="invalid_response", headers=_anthropic_error_headers(response),
-            ) from error
-
-        try:
-            usage = _anthropic_usage(payload.get("usage") if isinstance(payload, dict) else None)
-        except (TypeError, ValueError) as error:
-            raise GatewayInvocationError("Gateway returned an unsupported usage schema") from error
-        try:
-            content, tool_calls, raw_content = _anthropic_message(payload)
-        except GatewayInvocationError as error:
-            error.usage = usage
-            error.headers = _anthropic_error_headers(response)
-            raise
-        correlation_id = _response_correlation(response.headers, self._implementation)
+                payload = (
+                    _anthropic_stream_message(response) if request.stream else response.json()
+                )
+            if not isinstance(payload, Mapping):
+                raise GatewayInvocationError(
+                    "Gateway returned an unsupported response schema",
+                    failure_kind="invalid_response",
+                )
+            usage = _anthropic_usage(payload.get("usage"))
+            try:
+                content, tool_calls, raw_content = _anthropic_message(payload)
+            except GatewayInvocationError as error:
+                error.usage = usage
+                raise
+        correlation_id = _response_correlation(response_headers, self._implementation)
         return GatewayResult(
             content=content,
             usage=usage,
@@ -1146,8 +1098,11 @@ class GatewayRouter:
 
 
 def supports_tool_calling(runtime_kind: str, runtime_config: Mapping[str, Any] | None) -> bool:
-    """CLI runtimes have no tool protocol; both HTTP adapters carry function calls."""
-    return RuntimeKind(runtime_kind) is not RuntimeKind.COPILOT_CLI
+    """HTTP chat protocols carry tools; CLI and Decision runtimes do not."""
+    return (
+        RuntimeKind(runtime_kind) is not RuntimeKind.COPILOT_CLI
+        and dict(runtime_config or {}).get("api_format") != "microsoft_decision"
+    )
 
 
 def elapsed_ms(started: float) -> int:

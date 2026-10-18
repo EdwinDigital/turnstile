@@ -193,9 +193,6 @@ param gatewayApplicationKeyManagementEnabled bool = false
 @description('Allow governed Application creation after ledger and APIM dependencies are ready.')
 param gatewayApplicationProvisioningEnabled bool = false
 
-@description('Enable governed images only after matching packages, migrations and the APIM parent policy are verified.')
-param imageGenerationEnabled bool = false
-
 @description('Enable Databricks OAuth M2M connection support and its scoped Publisher permissions.')
 param databricksOAuthEnabled bool = false
 
@@ -293,7 +290,6 @@ module dataPlane 'modules/data-plane.bicep' = {
     gatewayReleaseWorkerEnabled: provisionControlPlane && gatewayReleaseWorkerEnabled && apimUsageObserver.mode == 'enabled'
     gatewayApplicationKeyManagementEnabled: gatewayApplicationKeyManagementEnabled
     gatewayApplicationProvisioningEnabled: provisionControlPlane && gatewayApplicationProvisioningEnabled
-    imageGenerationEnabled: provisionControlPlane && imageGenerationEnabled
     databricksOAuthEnabled: provisionControlPlane && databricksOAuthEnabled
     gatewayApplicationDefaultMonthlyTokenLimit: gatewayApplicationDefaultMonthlyTokenLimit
     gatewayApplicationDefaultTokensPerMinute: gatewayApplicationDefaultTokensPerMinute
@@ -380,7 +376,6 @@ module controlPlane 'modules/control-plane-function.bicep' = if (provisionContro
     publicationWorkerEnabled: controlPlaneEnabled
     releaseWorkerEnabled: gatewayReleaseWorkerEnabled
     applicationProvisioningEnabled: gatewayApplicationProvisioningEnabled
-    imageGenerationEnabled: imageGenerationEnabled
     databricksOAuthEnabled: databricksOAuthEnabled
     applicationDefaultMonthlyTokenLimit: gatewayApplicationDefaultMonthlyTokenLimit
     applicationDefaultTokensPerMinute: gatewayApplicationDefaultTokensPerMinute
