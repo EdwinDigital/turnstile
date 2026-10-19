@@ -389,6 +389,18 @@ module applicationKeyManagementRbac 'modules/application-key-management-rbac.bic
   }
 }
 
+module runtimeDiagnosticRbac 'modules/runtime-diagnostic-rbac.bicep' = {
+  name: 'turnstile-runtime-diagnostic-rbac-${take(suffix, 13)}'
+  scope: resourceGroup(effectiveApimResourceGroupName)
+  params: {
+    apimName: effectiveApimName
+    probeSubscriptionId: apimIntegration.outputs.probeSubscriptionId
+    apiPrincipalIds: concat([
+      dataPlane.outputs.apiPrincipalId
+    ], provisionControlPlane ? [controlPlane!.outputs.principalId] : [])
+  }
+}
+
 var apimServiceContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '312a565d-c81f-4fd8-895a-4e21e48d571c')
 
 resource apiSubscriptionApimContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -415,6 +427,9 @@ output apimResourceGroupName string = effectiveApimResourceGroupName
 output apimPrincipalId string = effectiveApimPrincipalId
 output apimApiId string = apimApiId
 output apimProbeSubscriptionId string = apimProbeSubscriptionId
+output apiPrincipalId string = dataPlane.outputs.apiPrincipalId
+output runtimeDiagnosticScope string = runtimeDiagnosticRbac.outputs.probeScope
+output publisherProbeScope string = provisionControlPlane ? runtimeDiagnosticRbac.outputs.probeScope : ''
 output observerAdapterKeyNamedValueName string = observerAdapterKeyNamedValueName
 output postgresServerName string = dataPlane.outputs.postgresServerName
 output eventHubNamespaceName string = dataPlane.outputs.eventHubNamespaceName

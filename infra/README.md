@@ -53,3 +53,37 @@ az deployment sub what-if \
 Review the preview before using `az deployment sub create` with the same arguments. Initial deployment leaves publication and key-management workers disabled.
 
 After deploying application packages, onboard an existing provider project and model through Turnstile. Only then configure a publication probe model and enable the control-plane workers.
+
+## Connection diagnostic deployment access
+
+The standard `main.bicep` deployment wires the generated API and control-plane managed identities to the designated APIM system probe subscription through `modules/runtime-diagnostic-rbac.bicep`. This is independent of `gatewayApplicationKeyManagementEnabled`: enabling connection diagnostics does not grant permission to reveal or rotate application subscription keys.
+
+To grant or repair connection diagnostic access on an existing or separately onboarded APIM target without rerunning `main.bicep`, pass the parameters shown under **Deployment access details** in the Connection Diagnostic dialog:
+
+```json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "apimName": { "value": "<existing-apim-name>" },
+    "probeSubscriptionId": { "value": "<existing-system-probe-id>" },
+    "apiPrincipalIds": { "value": ["<api-managed-identity-object-id>"] }
+  }
+}
+```
+
+Preview and apply against the APIM service's Azure subscription and resource group:
+
+```bash
+az deployment group what-if \
+  --subscription "$APIM_AZURE_SUBSCRIPTION_ID" \
+  --resource-group "$APIM_RESOURCE_GROUP" \
+  --template-file infra/modules/runtime-diagnostic-rbac.bicep \
+  --parameters @diagnostic-access.parameters.json
+
+az deployment group create \
+  --subscription "$APIM_AZURE_SUBSCRIPTION_ID" \
+  --resource-group "$APIM_RESOURCE_GROUP" \
+  --template-file infra/modules/runtime-diagnostic-rbac.bicep \
+  --parameters @diagnostic-access.parameters.json
+```

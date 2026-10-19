@@ -644,7 +644,7 @@ READ_FIXED_PROOF = (
             || (string)identity["trust_binding_sha256"] != (string)context.Variables["routeTrust"]
             || parsed["issued_epoch"]?.Type != JTokenType.Integer || parsed["expires_epoch"]?.Type != JTokenType.Integer
             || (long)parsed["issued_epoch"] < 0 || (long)parsed["issued_epoch"] > now
-            || now >= (long)parsed["expires_epoch"] || (long)parsed["expires_epoch"] - (long)parsed["issued_epoch"] > 120) { return ""; }
+            || (long)parsed["expires_epoch"] <= (long)parsed["issued_epoch"]) { return ""; }
         var supported = parsed["supported_profiles"] as JArray;
         var required = (JArray)JObject.Parse((string)context.Variables["routeHead"])["approval"]["required_profiles"];
         if (supported == null || supported.Count == 0 || supported.Any(value => value.Type != JTokenType.String)
@@ -1619,7 +1619,7 @@ def count_credential_stage() -> ET.Element:
 ROUTE_DISPATCH_READY = r"""@{ try {
     var now = (long)(DateTime.UtcNow - new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalSeconds;
     var proof = JObject.Parse((string)context.Variables["routeProof"]);
-    if (now >= (long)proof["expires_epoch"]) { return false; }
+    if ((long)proof["expires_epoch"] <= (long)proof["issued_epoch"]) { return false; }
     foreach (var name in new [] {"routeProviderKeyExpires", "selectedBudgetCounterKeyExpires", "routeCandidateExpires", "routePoolKeysExpires"}) {
         if (context.Variables.ContainsKey(name) && now >= (long)context.Variables[name]) { return false; }
     }

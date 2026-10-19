@@ -758,3 +758,4 @@ resource probeSubscription 'Microsoft.ApiManagement/service/subscriptions@2024-0
 
 output gatewayUrl string = apim.properties.gatewayUrl
 output gatewayApiPath string = '${apim.properties.gatewayUrl}/${api.properties.path}'
+output probeSubscriptionId string = probeSubscription.name

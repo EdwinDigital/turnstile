@@ -142,7 +142,7 @@ def test_shared_apim_resources_are_environment_isolated() -> None:
     assert "displayName: '${productId} | Turnstile AI'" in APIM_INTEGRATION
     assert "param existingApimResourceGroupName string = ''" in MAIN
     assert "resource effectiveApimResourceGroup" not in MAIN
-    assert MAIN.count("scope: resourceGroup(effectiveApimResourceGroupName)") == 3
+    assert MAIN.count("scope: resourceGroup(effectiveApimResourceGroupName)") == 4
 
 
 def test_fresh_apim_creates_its_azure_monitor_logger() -> None:
@@ -718,3 +718,48 @@ def test_platform_identities_can_delegate_scoped_apim_dependency_roles() -> None
     assert "312a565d-c81f-4fd8-895a-4e21e48d571c" in MAIN
     assert "eventHubNamespaceName: dataPlane.outputs.eventHubNamespaceName" in MAIN
     assert "eventHubName: dataPlane.outputs.eventHubName" in MAIN
+
+
+def test_runtime_diagnostic_access_is_generic_probe_scoped_and_not_key_management() -> None:
+    from turnstile_core.domain.runtime_models import RuntimeDiagnosticAccess
+
+    template_rel_path = RuntimeDiagnosticAccess.model_fields["template_path"].default
+    assert template_rel_path == "infra/modules/runtime-diagnostic-rbac.bicep"
+    source = (ROOT / template_rel_path).read_text(encoding="utf-8")
+    integration = (ROOT / "infra/modules/apim-integration.bicep").read_text(encoding="utf-8")
+    contract = json.loads(
+        (ROOT / "turnstile_core/domain/apim_publication_permissions.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "output probeSubscriptionId string = probeSubscription.name" in integration
+    assert (
+        "loadJsonContent('../../turnstile_core/domain/apim_publication_permissions.json').probe"
+        in source
+    )
+    assert "actions: probePermissions" in source
+    assert set(contract["probe"]) == {
+        "Microsoft.Authorization/permissions/read",
+        "Microsoft.ApiManagement/service/subscriptions/read",
+        "Microsoft.ApiManagement/service/subscriptions/listSecrets/action",
+    }
+    assert "param apimName string\n" in source
+    assert "param probeSubscriptionId string\n" in source
+    assert "param apiPrincipalIds string[]" in source
+    assert "scope: probe" in source
+    assert "scope: apim" not in source
+    assert "principalType: 'ServicePrincipal'" in source
+    assert "union(apiPrincipalIds, [])" in source
+    assert "guid(probe.id, principalId, diagnosticReader.id)" in source
+    assert "resourceGroup().id" in source
+    assert "existing = {" in source
+    assert all(value not in source for value in ("xle-", "contoso", "regenerate", "Contributor"))
+    assert "module publisherProbeAccess 'runtime-diagnostic-rbac.bicep'" in CONTROL_PLANE_APIM_RBAC
+    assert "module runtimeDiagnosticRbac 'modules/runtime-diagnostic-rbac.bicep'" in MAIN
+    assert "probeSubscriptionId: apimIntegration.outputs.probeSubscriptionId" in MAIN
+    assert "output runtimeDiagnosticScope string = runtimeDiagnosticRbac.outputs.probeScope" in MAIN
+    assert (
+        "output publisherProbeScope string = provisionControlPlane ? runtimeDiagnosticRbac"
+        in MAIN
+    )
+

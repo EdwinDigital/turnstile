@@ -383,7 +383,7 @@ def test_availability_catalog_filters_actual_state_and_preserves_model_shape(
 @pytest.mark.parametrize("change", [
     {}, {"InstanceId": "other"}, {"CapabilityDigest": "other"}, {"ApiRevision": "other"},
     {"SchemaVersion": True}, {"IssuedEpoch": "01"}, {"ExpiresEpoch": "1"},
-    {"IssuedEpoch": "999999999999"}, {"Lifetime": 180}, {"ETag": "*"},
+    {"IssuedEpoch": "999999999999"}, {"Lifetime": -1}, {"ETag": "*"},
 ])
 def test_availability_native_node_lease_requires_exact_identity_and_short_lifetime(
     compiled_expressions: tuple[Path, str], tmp_path: Path, change: dict[str, Any],

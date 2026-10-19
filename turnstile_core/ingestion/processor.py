@@ -488,6 +488,15 @@ class UsageProcessor:
         if record is None:
             return False
         event = UsageEvent.model_validate(raw_event)
+        if (
+            record.ingest_error == "budget_pre_dispatch_denial"
+            and record.budget_admission == "budget_protocol_fenced"
+            and record.user_id == "unattributed"
+            and record.model_id == "unattributed"
+            and record.request_source == "unattributed"
+            and not event.budget_execution
+        ):
+            return False
         try:
             gateway = self._gateway_attribution(event)
         except ValueError as error:

@@ -783,6 +783,14 @@ class InMemoryRepository(
     def _matches(self, record: TokenUsageRecord, filters: UsageFilters) -> bool:
         if record.usage_domain != "apim":
             return False
+        if (
+            record.ingest_error == "budget_pre_dispatch_denial"
+            and record.budget_admission == "budget_protocol_fenced"
+            and record.user_id == "unattributed"
+            and record.model_id == "unattributed"
+            and record.request_source == "unattributed"
+        ):
+            return False
         for field, value in (
             ("organization_id", filters.organization_id),
             ("department_id", filters.department_id),
