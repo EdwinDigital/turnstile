@@ -1302,6 +1302,10 @@ def test_coordinator_refresh_bounds_parallel_targets_and_holds_exact_proof_guard
     assert maximum == 3 and not held
     assert guard_modes == [not renew] * 6
     assert repository.save_model_availability_coverage.call_count == 5
+    if renew:
+        repository.get_model_availability_inventory.return_value = {UUID(int=13): "a" * 64}
+        assert coordinator.refresh(renew=True) == 0
+        assert len(guard_modes) == 6
     assert "error=ModelAvailabilityUnavailable" in caplog.text
     assert "locations=" in caplog.text and "test_model_availability.py:" in caplog.text
     assert ":check" in caplog.text

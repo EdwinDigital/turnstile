@@ -1125,6 +1125,83 @@ def test_exact_adapter_event_upgrades_only_the_estimated_placeholder() -> None:
     assert matching[0].model_admission == "ok"
 
 
+def test_unattributed_budget_protocol_fenced_probe_is_skipped_and_filtered() -> None:
+    from turnstile_core.persistence.repository import UsageFilters
+
+    repository = InMemoryRepository()
+    processor = UsageProcessor(repository, CoefficientResolver({"default": 1.0}))
+    fenced_probe = event(
+        id="fenced-probe-1",
+        request_id="fenced-probe-1",
+        correlation_id="fenced-probe-1",
+        team="unattributed",
+        organization="unattributed",
+        organization_id="unattributed",
+        department="unattributed",
+        department_id="unattributed",
+        project="unattributed",
+        project_id="unattributed",
+        user="unattributed",
+        user_id="unattributed",
+        agent="unattributed",
+        agent_id="unattributed",
+        workflow="unattributed",
+        run_id="unattributed",
+        provider="unattributed",
+        model="unattributed",
+        model_id="unattributed",
+        runtime="unattributed",
+        request_source="unattributed",
+        input_tokens=None,
+        cached_tokens=None,
+        output_tokens=None,
+        status="503",
+        status_code=503,
+        estimated=True,
+        ingest_source="eventhub",
+        ingest_error="budget_pre_dispatch_denial",
+        budget_admission="budget_protocol_fenced",
+    )
+    assert processor.process(fenced_probe) is False
+    assert repository.usage_records == []
+
+    # Even if a historical row already exists in storage, observability queries exclude it.
+    historical = processor.normalize(fenced_probe)
+    assert historical is not None
+    repository.usage_records.append(historical)
+    attributed_denial = processor.normalize(
+        {
+            **fenced_probe,
+            "id": "attributed-denial-1",
+            "request_id": "attributed-denial-1",
+            "correlation_id": "attributed-denial-1",
+            "user_id": "user@example.com",
+            "user": "user@example.com",
+        }
+    )
+    assert attributed_denial is not None
+    assert processor.process(
+        {
+            **fenced_probe,
+            "id": "attributed-denial-1",
+            "request_id": "attributed-denial-1",
+            "correlation_id": "attributed-denial-1",
+            "user_id": "user@example.com",
+            "user": "user@example.com",
+        }
+    ) is True
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = datetime(2026, 8, 1, tzinfo=UTC)
+    listed = repository.list_usage_requests(start, end, UsageFilters(), 50)
+    assert [row["request_id"] for row in listed] == ["attributed-denial-1"]
+    overview = repository.executive_overview(start, end, UsageFilters())
+    assert overview["totals"]["total_requests"] == 1
+    sql, params = PostgreSqlOpsDbProxy._filter_sql(UsageFilters())
+    assert "budget_pre_dispatch_denial" in sql
+    assert "budget_protocol_fenced" in sql
+    assert params == []
+
+
 def test_later_apim_exact_event_adds_admission_without_replacing_observer_usage() -> None:
     repository = InMemoryRepository()
     processor = UsageProcessor(repository, CoefficientResolver({"default": 1.0}))

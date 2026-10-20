@@ -45,6 +45,14 @@ class ApimTargetClientConfig:
     enforce_identity_snapshot: bool
     settings: Settings = field(repr=False)
     route_target_identity_sha256: str | None = None
+    legacy_route_target_identity_sha256: str | None = None
+
+
+def route_target_identity_matches(config: object, expected: str) -> bool:
+    legacy = getattr(config, "legacy_route_target_identity_sha256", None)
+    return getattr(config, "route_target_identity_sha256", None) == expected or (
+        isinstance(legacy, str) and legacy == expected
+    )
 
 
 class ApimTargetClientConfigResolver(Protocol):
@@ -346,6 +354,33 @@ class RepositoryApimTargetClientConfigResolver:
                 "apim_usage_observers": {},
             }
         )
+        legacy_identity = {
+            "gateway_profile_id": str(target.gateway_profile_id),
+            "arm_resource_id": target.arm_resource_id.casefold(),
+            "tenant_id": str(target.tenant_id),
+            "subscription_id": str(target.subscription_id),
+            "resource_group": target.resource_group.casefold(),
+            "service_name": target.service_name.casefold(),
+            "api_id": target.api_id.casefold(),
+            "api_path": target.api_path,
+            "apim_principal_id": (
+                str(target.principal_id) if target.principal_id is not None else None
+            ),
+            "management_auth_profile_ref": target.management_auth_profile_ref,
+            "probe_subscription_id": probe_subscription_id,
+            "probe_secret_ref": (
+                str(target.probe_secret_ref) if target.probe_secret_ref is not None else None
+            ),
+            "managed_gateway_id": deployment.native_gateway_id.casefold(),
+            "managed_gateway_url": str(deployment.endpoint_url).rstrip("/"),
+        }
+        legacy_target_sha256 = _identity_sha256(legacy_identity)
+        if observer_url is not None:
+            legacy_target_sha256 = _identity_sha256({
+                "target_identity_sha256": legacy_target_sha256,
+                "usage_observer_url": observer_url,
+                "usage_observer_key_named_value": observer_key,
+            })
         return ApimTargetClientConfig(
             gateway_profile_id,
             _identity_sha256(identity),
@@ -353,6 +388,11 @@ class RepositoryApimTargetClientConfigResolver:
             scoped,
             route_target_identity_sha256=_identity_sha256({
                 "target_identity_sha256": _identity_sha256(identity),
+                "ledger_table_endpoint": settings.ledger_table_endpoint,
+                "ledger_table_name": settings.ledger_table_name,
+            }),
+            legacy_route_target_identity_sha256=_identity_sha256({
+                "target_identity_sha256": legacy_target_sha256,
                 "ledger_table_endpoint": settings.ledger_table_endpoint,
                 "ledger_table_name": settings.ledger_table_name,
             }),

@@ -985,7 +985,13 @@ class PostgreSqlOpsDbProxy(
     def _filter_sql(
         filters: UsageFilters, *, alias: str = "usage", trace: bool = False,
     ) -> tuple[str, list[Any]]:
-        clauses = [f"{alias}.usage_domain = 'apim'"]
+        clauses = [
+            f"{alias}.usage_domain = 'apim'",
+            f"NOT ({alias}.ingest_error IS NOT DISTINCT FROM 'budget_pre_dispatch_denial' "
+            f"AND {alias}.budget_admission IS NOT DISTINCT FROM 'budget_protocol_fenced' "
+            f"AND {alias}.user_id = 'unattributed' AND {alias}.model_id = 'unattributed' "
+            f"AND {alias}.request_source = 'unattributed')",
+        ]
         parameters: list[Any] = []
         if filters.allowed_department_ids is not None:
             clauses.append(f"{alias}.department_id = ANY(%s)")

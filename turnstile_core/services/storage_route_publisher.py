@@ -9,7 +9,8 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from functools import partial
 from hmac import compare_digest
-from time import time
+from threading import Lock
+from time import monotonic, time
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from urllib.parse import quote, urlsplit
 from uuid import UUID, uuid5
@@ -95,6 +96,7 @@ from ..integrations.apim_storage_routes import (
 from ..integrations.apim_target_client_factory import (
     ApimTargetClientConfig,
     ApimTargetClientConfigResolver,
+    route_target_identity_matches,
 )
 from ..integrations.gateway import _decision_usage, _openai_usage
 from ..integrations.image_generation import generated_image, image_usage
@@ -376,7 +378,7 @@ def register_verified_managed_program(
         config = configurations.resolve(target_id, include_probe_credentials=True)
         if (
             config.gateway_profile_id != target_id
-            or config.route_target_identity_sha256 != installed.target_identity_sha256
+            or not route_target_identity_matches(config, installed.target_identity_sha256)
             or config.settings.apim_api_id != installed.program.scope.api_id
             or str(config.settings.apim_gateway_url or "").rstrip("/") != installed.gateway_endpoint
             or config.settings.apim_probe_subscription_id != installed.publisher_subscription_id
@@ -528,7 +530,7 @@ def register_verified_program_upgrade(
         config = configurations.resolve(target_id, include_probe_credentials=True)
         if (
             config.gateway_profile_id != target_id
-            or config.route_target_identity_sha256 != installed.target_identity_sha256
+            or not route_target_identity_matches(config, installed.target_identity_sha256)
             or config.settings.apim_api_id != installed.program.scope.api_id
             or str(config.settings.apim_gateway_url or "").rstrip("/") != installed.gateway_endpoint
             or config.settings.apim_probe_subscription_id != installed.publisher_subscription_id
@@ -678,12 +680,21 @@ def register_verified_program_upgrade(
             )
 
 
+def _default_route_clock() -> int:
+    return int(time())
+
+
+_PROGRAM_RENEW_BACKOFF_SECONDS = 300.0
+_PROGRAM_RENEW_BACKOFF_LOCK = Lock()
+_PROGRAM_RENEW_BACKOFF_UNTIL: dict[tuple[UUID, str], float] = {}
+
+
 class FixedRoutePublisherFactory:
     def __init__(
         self, repository: QueryRepository, configurations: ApimTargetClientConfigResolver,
         *, active_fence: Callable[[UUID], Mapping[str, Any]],
         availability_projector: Callable[[UUID], ModelAvailabilityState],
-        clock: Callable[[], int] = lambda: int(time()),
+        clock: Callable[[], int] = _default_route_clock,
         cipher: CredentialCipher | None = None,
         client: httpx.Client | None = None,
     ) -> None:
@@ -743,7 +754,7 @@ class FixedRoutePublisherFactory:
         if (
             installation.program.scope.target_id != str(target_id)
             or config.gateway_profile_id != target_id
-            or config.route_target_identity_sha256 != installation.target_identity_sha256
+            or not route_target_identity_matches(config, installation.target_identity_sha256)
             or config.settings.apim_api_id != installation.program.scope.api_id
             or str(config.settings.apim_gateway_url or "").rstrip("/")
             != installation.gateway_endpoint
@@ -1474,6 +1485,9 @@ class FixedRoutePublisherFactory:
             raise PolicyCompilationError("Fixed route proof renewal target batch exceeds its bound")
         repository = cast("ModelAvailabilityRepository", self._repository)
         network_error: httpx.HTTPError | None = None
+        last_error: Exception | None = None
+        use_backoff = self._clock is _default_route_clock
+        now_mono = monotonic()
         for target in targets:
             target_id = UUID(str(target["gateway_profile_id"]))
             gateways = self._repository.get_gateway_profiles([target_id])
@@ -1487,6 +1501,11 @@ class FixedRoutePublisherFactory:
                 current = _managed_program_publication(current, gateways[0].get("config") or {})
             if current is None or "fixed_route_program" not in current.get("resource_manifest", {}):
                 continue
+            backoff_key = (target_id, str(current["id"]))
+            if use_backoff:
+                with _PROGRAM_RENEW_BACKOFF_LOCK:
+                    if _PROGRAM_RENEW_BACKOFF_UNTIL.get(backoff_key, 0.0) > now_mono:
+                        continue
             try:
                 with repository.model_availability_proof_guard(target_id, wait=False):
                     installed, config = self.installed(target_id, UUID(str(current["id"])))
@@ -1500,18 +1519,46 @@ class FixedRoutePublisherFactory:
                             )
                     if installed.native_gateway_scope:
                         self._renew_native_gateway_programs(installed, config)
+                if use_backoff:
+                    with _PROGRAM_RENEW_BACKOFF_LOCK:
+                        _PROGRAM_RENEW_BACKOFF_UNTIL.pop(backoff_key, None)
             except ModelAvailabilityUnavailable as error:
                 if str(error) != "Availability proof writer is busy":
+                    if use_backoff:
+                        with _PROGRAM_RENEW_BACKOFF_LOCK:
+                            _PROGRAM_RENEW_BACKOFF_UNTIL[backoff_key] = (
+                                monotonic() + _PROGRAM_RENEW_BACKOFF_SECONDS
+                            )
                     raise
                 logging.getLogger(__name__).warning(
                     "Fixed route proof renewal deferred target=%s reason=writer_busy", target_id,
                 )
             except httpx.HTTPError as error:
+                if use_backoff:
+                    with _PROGRAM_RENEW_BACKOFF_LOCK:
+                        _PROGRAM_RENEW_BACKOFF_UNTIL[backoff_key] = (
+                            monotonic() + _PROGRAM_RENEW_BACKOFF_SECONDS
+                        )
                 network_error = error
                 logging.getLogger(__name__).warning(
                     "Fixed route proof renewal failed target=%s error_type=%s",
                     target_id, type(error).__name__,
                 )
+            except Exception as error:
+                if use_backoff:
+                    with _PROGRAM_RENEW_BACKOFF_LOCK:
+                        _PROGRAM_RENEW_BACKOFF_UNTIL[backoff_key] = (
+                            monotonic() + _PROGRAM_RENEW_BACKOFF_SECONDS
+                        )
+                    last_error = error
+                    logging.getLogger(__name__).warning(
+                        "Fixed route proof renewal failed target=%s error_type=%s",
+                        target_id, type(error).__name__,
+                    )
+                else:
+                    raise
+        if last_error is not None:
+            raise last_error
         if network_error is not None:
             raise network_error
 
@@ -3847,8 +3894,9 @@ class FixedRoutePublisherFactory:
                     if (
                         pool_config.gateway_profile_id != publication.gateway_profile_id
                         or pool_config.settings.apim_api_id != installation.program.scope.api_id
-                        or pool_config.route_target_identity_sha256
-                        != installation.target_identity_sha256
+                        or not route_target_identity_matches(
+                            pool_config, installation.target_identity_sha256
+                        )
                     ):
                         raise PolicyCompilationError("Fixed route Pool target binding changed")
                 expected_pool, _ = self._new_pool_connection(

@@ -2,6 +2,8 @@ targetScope = 'resourceGroup'
 
 param apimName string
 param controlPlanePrincipalId string
+@description('Existing system probe subscription. Omit only before automatic initialization creates it, then apply again with the actual ID. Never substitute a Dashboard subscription.')
+param probeSubscriptionId string = ''
 param databricksOAuthEnabled bool = false
 
 var roleNameSuffix = uniqueString(resourceGroup().id)
@@ -78,3 +80,14 @@ resource functionApimPublisher 'Microsoft.Authorization/roleAssignments@2022-04-
     roleDefinitionId: publisherRole.id
   }
 }
+
+module publisherProbeAccess 'runtime-diagnostic-rbac.bicep' = if (!empty(probeSubscriptionId)) {
+  name: 'publisher-probe-${uniqueString(apim.id, controlPlanePrincipalId, probeSubscriptionId)}'
+  params: {
+    apimName: apimName
+    probeSubscriptionId: probeSubscriptionId
+    apiPrincipalIds: [controlPlanePrincipalId]
+  }
+}
+
+output probeScope string = !empty(probeSubscriptionId) ? publisherProbeAccess!.outputs.probeScope : ''

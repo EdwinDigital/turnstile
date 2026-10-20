@@ -1611,7 +1611,7 @@ export function TraceRow({
         {item.status_code ?? "未知"}
       </span>
       <div>
-        <b></b>
+        <b>{item.model_name}</b>
         <code title={`Correlation ID: ${item.correlation_id ?? "未知"}`}>{attempt && attempt.total > 1 ? `#${attempt.index}/${attempt.total} · ${item.request_id}` : item.request_id}</code>
       </div>
       <small>{state === "measured" ? `${compact.format(item.total_tokens)} tokens` : placeholder}</small>

@@ -13,6 +13,8 @@ from contextlib import AbstractContextManager, ExitStack
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4, uuid5
 
@@ -44,7 +46,10 @@ from ..integrations.apim_control_plane_contract import (
 )
 from ..integrations.apim_publisher_client import AzureApimPublisherClient
 from ..integrations.apim_storage_routes import FixedProgramVerifier
-from ..integrations.apim_target_client_factory import apim_target_client_config_resolver
+from ..integrations.apim_target_client_factory import (
+    apim_target_client_config_resolver,
+    route_target_identity_matches,
+)
 from ..integrations.ledger import TableStorageLedger
 from ..integrations.reconciliation import ManagedIdentityTokenProvider
 from ..persistence.repository_contract import QueryRepository
@@ -52,6 +57,9 @@ from .worker_lease import WorkerLease
 
 logger = logging.getLogger(__name__)
 _MAX_CONCURRENT_TARGETS = 3
+_TARGET_RENEW_BACKOFF_SECONDS = 300.0
+_TARGET_RENEW_BACKOFF_LOCK = Lock()
+_TARGET_RENEW_BACKOFF_UNTIL: dict[tuple[UUID, str], float] = {}
 
 
 def require_controlled_gateway_token_authority(
@@ -348,7 +356,7 @@ def build_controlled_gateway_enroller(
         config = configs.resolve(target_id, include_probe_credentials=True)
         if (installed.native_gateway_scope is not True
             or config.settings.apim_probe_subscription_key is None
-                or installed.target_identity_sha256 != config.route_target_identity_sha256
+                or not route_target_identity_matches(config, installed.target_identity_sha256)
                 or str(deployment.get("endpoint_url", "")).rstrip("/")
                 not in {str(host.endpoint_url).rstrip("/") for host in fleet.hosts}):
             raise ModelAvailabilityUnavailable("Controlled Gateway program or endpoint changed")
@@ -827,6 +835,18 @@ class ModelAvailabilityCoordinator:
         inventory = self._availability.get_model_availability_inventory()
         if not inventory:
             return 0
+        now_mono = monotonic()
+        if renew:
+            with _TARGET_RENEW_BACKOFF_LOCK:
+                items = [
+                    (target_id, digest)
+                    for target_id, digest in inventory.items()
+                    if _TARGET_RENEW_BACKOFF_UNTIL.get((target_id, digest), 0.0) <= now_mono
+                ]
+            if not items:
+                return 0
+        else:
+            items = list(inventory.items())
 
         def refresh_target(entry: tuple[UUID, str]) -> Exception | None:
             target_id, digest = entry
@@ -840,15 +860,25 @@ class ModelAvailabilityCoordinator:
             return None
 
         with ThreadPoolExecutor(
-            max_workers=min(_MAX_CONCURRENT_TARGETS, len(inventory)),
+            max_workers=min(_MAX_CONCURRENT_TARGETS, len(items)),
         ) as executor:
             completed = 0
-            for target_id, error in zip(
-                inventory, executor.map(refresh_target, inventory.items()), strict=True,
+            for (target_id, digest), error in zip(
+                items, executor.map(refresh_target, items), strict=True,
             ):
                 if error is None:
+                    with _TARGET_RENEW_BACKOFF_LOCK:
+                        _TARGET_RENEW_BACKOFF_UNTIL.pop((target_id, digest), None)
                     completed += 1
                 else:
+                    if renew and not (
+                        isinstance(error, ModelAvailabilityUnavailable)
+                        and str(error) == "Availability proof writer is busy"
+                    ):
+                        with _TARGET_RENEW_BACKOFF_LOCK:
+                            _TARGET_RENEW_BACKOFF_UNTIL[(target_id, digest)] = (
+                                monotonic() + _TARGET_RENEW_BACKOFF_SECONDS
+                            )
                     _log_verification_failure(target_id, error)
             return completed
 

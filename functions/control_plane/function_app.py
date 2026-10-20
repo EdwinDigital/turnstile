@@ -135,7 +135,7 @@ def _project_model_availability(
 
 
 @app.timer_trigger(
-    arg_name="timer", schedule="*/2 * * * * *", run_on_startup=False, use_monitor=True,
+    arg_name="timer", schedule="*/10 * * * * *", run_on_startup=False, use_monitor=True,
 )
 def synchronize_model_availability(timer: func.TimerRequest) -> None:
     del timer
@@ -151,7 +151,7 @@ def refresh_model_availability_coverage(timer: func.TimerRequest) -> None:
 
 
 @app.timer_trigger(
-    arg_name="timer", schedule="5,20,35,50 * * * * *", run_on_startup=False, use_monitor=True,
+    arg_name="timer", schedule="20,50 * * * * *", run_on_startup=False, use_monitor=True,
 )
 def renew_model_availability_proofs(timer: func.TimerRequest) -> None:
     del timer
@@ -159,7 +159,7 @@ def renew_model_availability_proofs(timer: func.TimerRequest) -> None:
 
 
 @app.timer_trigger(
-    arg_name="timer", schedule="7,22,37,52 * * * * *", run_on_startup=False, use_monitor=True,
+    arg_name="timer", schedule="7,37 * * * * *", run_on_startup=False, use_monitor=True,
 )
 def renew_storage_route_program_proofs(timer: func.TimerRequest) -> None:
     del timer

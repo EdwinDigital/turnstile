@@ -242,6 +242,20 @@ def test_disabled_directory_timers_do_not_build_dependencies(monkeypatch: Any) -
     function_app.project_directory_identities(None)
 
 
+def test_upstream_timer_changes_preserve_directory_workers_and_publication_interval() -> None:
+    schedules = {
+        function.get_function_name(): binding.get_dict_repr()["schedule"]
+        for function in function_app.app.get_functions()
+        for binding in function.get_bindings()
+        if binding.type == "timerTrigger"
+    }
+    assert schedules["project_directory_identities"] == "25 * * * * *"
+    assert schedules["synchronize_directory"] == "5 * * * * *"
+    assert schedules["publish_gateway_changes"] == "*/30 * * * * *"
+    assert schedules["synchronize_model_availability"] == "*/10 * * * * *"
+    assert schedules["renew_model_availability_proofs"] == "20,50 * * * * *"
+
+
 @pytest.mark.parametrize("provisioning_enabled", (False, True))
 @pytest.mark.parametrize("fails", (False, True))
 @pytest.mark.parametrize("gateway_creation_enabled", (False, True))

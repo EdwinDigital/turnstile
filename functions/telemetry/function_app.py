@@ -76,7 +76,7 @@ def _processor() -> UsageProcessor:
 
 
 @app.timer_trigger(
-    arg_name="timer", schedule="*/5 * * * * *", run_on_startup=False, use_monitor=True,
+    arg_name="timer", schedule="*/15 * * * * *", run_on_startup=False, use_monitor=True,
 )
 def settle_budget_requests(timer: func.TimerRequest) -> None:
     del timer
